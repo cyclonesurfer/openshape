@@ -1,0 +1,321 @@
+//! Sketch edits through the op log (ADR 0011): id resolution, atomic
+//! batches, cascading deletes, undo, merging, and serialization.
+
+use openshape_core_model::sketch::{Constraint, ConstraintEntry, Entity, Geometry};
+use openshape_core_model::{
+    DVec2, Feature, FeatureId, InsertAt, ModelOp, PlaneRef, ReplicaId, Session, SketchData,
+    SketchDef, SketchEdit, SketchId,
+};
+
+fn point(index: u32, x: f64, y: f64) -> SketchEdit {
+    SketchEdit::AddEntity(Entity {
+        id: SketchId::new_in_batch(index),
+        geometry: Geometry::Point {
+            at: DVec2::new(x, y),
+        },
+        construction: false,
+    })
+}
+
+fn line(index: u32, a: SketchId, b: SketchId) -> SketchEdit {
+    SketchEdit::AddEntity(Entity {
+        id: SketchId::new_in_batch(index),
+        geometry: Geometry::Line { start: a, end: b },
+        construction: false,
+    })
+}
+
+fn constraint(index: u32, c: Constraint<SketchId>) -> SketchEdit {
+    SketchEdit::AddConstraint(ConstraintEntry {
+        id: SketchId::new_in_batch(index),
+        constraint: c,
+    })
+}
+
+fn new_sketch(s: &mut Session) -> FeatureId {
+    let element = s.first_studio().unwrap();
+    FeatureId(s.apply(ModelOp::InsertFeature {
+        element,
+        at: InsertAt::End,
+        name: "Sketch 1".into(),
+        feature: Feature::Sketch(SketchDef {
+            plane: PlaneRef::Top,
+            sketch: SketchData::default(),
+        }),
+    }))
+}
+
+fn edit(s: &mut Session, feature: FeatureId, edits: Vec<SketchEdit>) -> openshape_core_model::OpId {
+    let element = s.first_studio().unwrap();
+    s.apply(ModelOp::EditSketch {
+        element,
+        feature,
+        edits,
+    })
+}
+
+fn sketch(s: &Session, feature: FeatureId) -> SketchDef {
+    let el = s.document().element(s.first_studio().unwrap()).unwrap();
+    let f = el.studio.features.iter().find(|f| f.id == feature).unwrap();
+    match &f.feature {
+        Feature::Sketch(d) => d.clone(),
+        _ => panic!("not a sketch"),
+    }
+}
+
+/// A line with a horizontal constraint and a length, in one batch.
+fn draw_line(s: &mut Session, f: FeatureId) -> openshape_core_model::OpId {
+    let n = SketchId::new_in_batch;
+    edit(
+        s,
+        f,
+        vec![
+            point(0, 0.0, 0.0),
+            point(1, 0.01, 0.0),
+            line(2, n(0), n(1)),
+            constraint(3, Constraint::Horizontal { line: n(2) }),
+            constraint(
+                4,
+                Constraint::Length {
+                    line: n(2),
+                    value: 0.01,
+                },
+            ),
+        ],
+    )
+}
+
+#[test]
+fn batch_ids_resolve_to_the_applying_op() {
+    let mut s = Session::new_document(ReplicaId(1));
+    let f = new_sketch(&mut s);
+    let op = draw_line(&mut s, f);
+    let d = sketch(&s, f);
+    assert!(s.document().conflicts.is_empty());
+    assert_eq!(d.sketch.entities.len(), 3);
+    assert_eq!(d.sketch.constraints.len(), 2);
+    let id = |index| SketchId { op, index };
+    assert_eq!(
+        d.sketch.entity(id(2)).unwrap().geometry,
+        Geometry::Line {
+            start: id(0),
+            end: id(1)
+        }
+    );
+    assert_eq!(
+        d.sketch.constraint(id(3)).unwrap().constraint,
+        Constraint::Horizontal { line: id(2) }
+    );
+    assert!(d
+        .sketch
+        .entities
+        .iter()
+        .chain(std::iter::empty())
+        .all(|e| !e.id.is_new_in_batch()));
+}
+
+#[test]
+fn a_failing_edit_leaves_the_sketch_unchanged() {
+    let mut s = Session::new_document(ReplicaId(1));
+    let f = new_sketch(&mut s);
+    draw_line(&mut s, f);
+    let before = sketch(&s, f);
+    let n = SketchId::new_in_batch;
+    // The second edit references a point that doesn't exist.
+    let bad = edit(
+        &mut s,
+        f,
+        vec![
+            point(0, 1.0, 1.0),
+            line(
+                1,
+                n(0),
+                SketchId {
+                    op: openshape_core_model::OpId::NULL,
+                    index: 99,
+                },
+            ),
+        ],
+    );
+    assert_eq!(sketch(&s, f), before);
+    let conflicts = &s.document().conflicts;
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].op, bad);
+    assert!(conflicts[0].reason.contains("sketch edit 2"));
+}
+
+#[test]
+fn invalid_values_are_rejected() {
+    let mut s = Session::new_document(ReplicaId(1));
+    let f = new_sketch(&mut s);
+    let op = draw_line(&mut s, f);
+    let len = SketchId { op, index: 4 };
+    let p0 = SketchId { op, index: 0 };
+    let ln = SketchId { op, index: 2 };
+    for e in [
+        SketchEdit::SetValue {
+            constraint: len,
+            value: f64::NAN,
+        },
+        SketchEdit::SetValue {
+            constraint: SketchId { op, index: 3 },
+            value: 1.0,
+        },
+        SketchEdit::MovePoints {
+            points: vec![(p0, DVec2::new(f64::INFINITY, 0.0))],
+        },
+        SketchEdit::MovePoints {
+            points: vec![(ln, DVec2::ZERO)],
+        },
+        SketchEdit::SetRadius {
+            entity: ln,
+            radius: 1.0,
+        },
+        point(0, f64::NAN, 0.0),
+        line(0, p0, p0),
+    ] {
+        let before = sketch(&s, f);
+        let n_conflicts = s.document().conflicts.len();
+        edit(&mut s, f, vec![e.clone()]);
+        assert_eq!(sketch(&s, f), before, "{e:?}");
+        assert_eq!(s.document().conflicts.len(), n_conflicts + 1, "{e:?}");
+    }
+}
+
+#[test]
+fn deleting_a_point_cascades_to_curves_and_constraints() {
+    let mut s = Session::new_document(ReplicaId(1));
+    let f = new_sketch(&mut s);
+    let op = draw_line(&mut s, f);
+    edit(
+        &mut s,
+        f,
+        vec![SketchEdit::Delete {
+            items: vec![SketchId { op, index: 1 }],
+        }],
+    );
+    let d = sketch(&s, f);
+    // The line used the point; its constraints referenced the line.
+    assert_eq!(d.sketch.entities.len(), 1);
+    assert!(d.sketch.constraints.is_empty());
+    // Deleting again (as a concurrent replica might) is harmless.
+    edit(
+        &mut s,
+        f,
+        vec![SketchEdit::Delete {
+            items: vec![SketchId { op, index: 1 }],
+        }],
+    );
+    assert!(s.document().conflicts.is_empty());
+}
+
+#[test]
+fn a_batch_is_one_undo_step() {
+    let mut s = Session::new_document(ReplicaId(1));
+    let f = new_sketch(&mut s);
+    let empty = sketch(&s, f);
+    draw_line(&mut s, f);
+    let drawn = sketch(&s, f);
+    assert!(s.undo());
+    assert_eq!(sketch(&s, f), empty);
+    assert!(s.redo());
+    assert_eq!(sketch(&s, f), drawn);
+}
+
+#[test]
+fn concurrent_edits_to_different_items_merge() {
+    let mut a = Session::new_document(ReplicaId(1));
+    let f = new_sketch(&mut a);
+    let op = draw_line(&mut a, f);
+    let mut b = Session::open(&a.save().unwrap(), ReplicaId(2)).unwrap();
+    let len = SketchId { op, index: 4 };
+    let p1 = SketchId { op, index: 1 };
+    // A changes the length; B makes the line construction and moves a point.
+    edit(
+        &mut a,
+        f,
+        vec![SketchEdit::SetValue {
+            constraint: len,
+            value: 0.02,
+        }],
+    );
+    edit(
+        &mut b,
+        f,
+        vec![
+            SketchEdit::SetConstruction {
+                entity: SketchId { op, index: 2 },
+                construction: true,
+            },
+            SketchEdit::MovePoints {
+                points: vec![(p1, DVec2::new(0.02, 0.0))],
+            },
+        ],
+    );
+    let to_b = a.log().missing_for(&b.log().heads());
+    let to_a = b.log().missing_for(&a.log().heads());
+    b.integrate(to_b).unwrap();
+    a.integrate(to_a).unwrap();
+    assert_eq!(sketch(&a, f), sketch(&b, f));
+    let d = sketch(&a, f);
+    assert_eq!(
+        d.sketch.constraint(len).unwrap().constraint.value(),
+        Some(0.02)
+    );
+    assert!(
+        d.sketch
+            .entity(SketchId { op, index: 2 })
+            .unwrap()
+            .construction
+    );
+    assert_eq!(d.sketch.point(p1), Some(DVec2::new(0.02, 0.0)));
+}
+
+#[test]
+fn a_constraint_on_a_concurrently_deleted_entity_fails_visibly() {
+    let mut a = Session::new_document(ReplicaId(1));
+    let f = new_sketch(&mut a);
+    let op = draw_line(&mut a, f);
+    let mut b = Session::open(&a.save().unwrap(), ReplicaId(2)).unwrap();
+    let ln = SketchId { op, index: 2 };
+    let deleted = edit(&mut a, f, vec![SketchEdit::Delete { items: vec![ln] }]);
+    let added = edit(
+        &mut b,
+        f,
+        vec![constraint(0, Constraint::Vertical { line: ln })],
+    );
+    let to_b = a.log().missing_for(&b.log().heads());
+    let to_a = b.log().missing_for(&a.log().heads());
+    b.integrate(to_b).unwrap();
+    a.integrate(to_a).unwrap();
+    assert_eq!(sketch(&a, f), sketch(&b, f));
+    // Whichever order the ops replay in, the line is gone and the
+    // constraint is either rejected (recorded, if it replays after the
+    // delete) or removed with the line; it never dangles.
+    let d = sketch(&a, f);
+    assert!(d.sketch.entity(ln).is_none());
+    assert!(d.sketch.constraints.iter().all(|c| c
+        .constraint
+        .referenced()
+        .iter()
+        .all(|e| d.sketch.entity(*e).is_some())));
+    let rejected = a.document().conflicts.iter().any(|c| c.op == added);
+    let present = d
+        .sketch
+        .constraint(SketchId {
+            op: added,
+            index: 0,
+        })
+        .is_some();
+    assert!(!present);
+    assert_eq!(rejected, added > deleted);
+}
+
+#[test]
+fn sketch_ops_round_trip_through_save_and_open() {
+    let mut s = Session::new_document(ReplicaId(1));
+    let f = new_sketch(&mut s);
+    draw_line(&mut s, f);
+    let reopened = Session::open(&s.save().unwrap(), ReplicaId(3)).unwrap();
+    assert_eq!(sketch(&reopened, f), sketch(&s, f));
+}

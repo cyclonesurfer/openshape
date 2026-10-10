@@ -211,3 +211,59 @@ proptest! {
         prop_assert_eq!(payloads(&a), payloads(&b));
     }
 }
+
+#[test]
+fn rejects_null_ids_and_drops_invalid_buffered_ops() {
+    use openshape_oplog::{Op, OpId};
+    let mut a = OpLog::new(ReplicaId(1));
+    let x = a.append(1);
+    let y = a.append(2);
+    let mut b: OpLog<u32> = OpLog::new(ReplicaId(2));
+    let null = Op {
+        id: OpId::NULL,
+        deps: vec![],
+        kind: OpKind::Apply(7),
+    };
+    assert_eq!(b.integrate(null), Err(OpLogError::NullId));
+    // A self-inconsistent op is rejected even while its deps are missing.
+    let early = Op {
+        id: OpId {
+            lamport: 1,
+            replica: ReplicaId(5),
+        },
+        deps: vec![x],
+        kind: OpKind::Apply(3),
+    };
+    assert!(matches!(
+        b.integrate(early),
+        Err(OpLogError::CausalityViolation(_))
+    ));
+    // An undo waiting for `y` whose target is not in its causal past is
+    // dropped when `y` arrives; integrating `y` itself still succeeds.
+    let stray = Op {
+        id: OpId {
+            lamport: 9,
+            replica: ReplicaId(5),
+        },
+        deps: vec![y],
+        kind: OpKind::Undo {
+            target: OpId {
+                lamport: 8,
+                replica: ReplicaId(6),
+            },
+        },
+    };
+    assert_eq!(
+        b.integrate(stray.clone()),
+        Ok(openshape_oplog::Integrated::Pending)
+    );
+    b.integrate(a.get(x).unwrap().clone()).unwrap();
+    assert_eq!(
+        b.integrate(a.get(y).unwrap().clone()),
+        Ok(openshape_oplog::Integrated::Added)
+    );
+    assert_eq!(b.pending_len(), 0);
+    assert_eq!(b.rejected().len(), 1);
+    assert_eq!(b.rejected()[0].0, stray.id);
+    assert!(b.get(stray.id).is_none());
+}

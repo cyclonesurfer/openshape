@@ -1,0 +1,186 @@
+# Design note 0005 — Sketch constraint solver
+
+Crate: `crates/sketch-solver` (`openshape-sketch-solver`), using
+`crates/linalg` (ADR 0010). The data types (entities, constraints) are the
+contract shared with `core-model` (ADR 0011) and are defined in
+`src/model.rs`.
+
+## 1. Requirements
+
+* Solve 2D sketches of points, lines, circles, arcs and B-splines under
+  geometric constraints and dimensions, to 1e-12 of the sketch size.
+* Prefer the solution nearest the current geometry: changing a dimension or
+  dragging a point moves as little as possible, and never jumps to another
+  branch (a flipped arc, a mirrored triangle) when a nearby solution exists.
+* Report, per sketch: degrees of freedom left; which entities are still free
+  (under-constrained); which constraints are redundant (implied by others) or
+  conflicting (unsatisfiable together); and a clear failure when the solver
+  cannot converge. Never return geometry that violates a constraint while
+  claiming success.
+* Deterministic: the same input gives bit-identical output (ADR 0010).
+* Interactive: a 50-entity sketch solves (and re-solves while dragging) well
+  within a 60 Hz frame; a 300-entity sketch within 50 ms.
+
+## 2. Literature
+
+* Geometric constraint solving surveys: Bouma, Fudos, Hoffmann, Cai & Paige,
+  "Geometric constraint solver", *CAD* 27(6), 1995; Hoffmann & Joan-Arinyo,
+  "A brief on constraint solving", *CAD&A* 2(5), 2005; Jermann, Trombettoni,
+  Neveu & Mathis, "Decomposition of geometric constraint systems: a survey",
+  *IJCGA* 16, 2006.
+* Graph decomposition: Owen, "Algebraic solution for geometry from
+  dimensional constraints", ACM SMA 1991; Hoffmann, Lomonosov & Sitharam,
+  "Decomposition plans for geometric constraint systems", *J. Symbolic
+  Computation* 31, 2001.
+* Numerical method: Madsen, Nielsen & Tingleff, *Methods for Non-Linear
+  Least Squares Problems*, DTU 2004 (Levenberg–Marquardt, damping updates);
+  Nocedal & Wright, *Numerical Optimization*, 2nd ed., ch. 10–11
+  (Gauss–Newton, minimum-norm steps for underdetermined systems,
+  line search); Golub & Van Loan §5.4–5.5 (rank-deficient least squares).
+* Rank and redundancy: the numerical-rank approach of Kramer's and
+  SolveSpace's solvers (Westhues, SolveSpace, `system.cpp`, GPL-3.0: studied
+  as prior art for behaviour only; no code is copied).
+* B-splines: Piegl & Tiller, *The NURBS Book*, A2.2, A2.3, A9.1.
+
+## 3. Unknowns
+
+Every point entity contributes (x, y); every circle its radius. Lines and
+arcs reference point entities and add no unknowns. A control-point spline
+references its control points. An interpolated spline references its
+through-points and owns hidden control points (one per through-point, cubic,
+knots by averaging the stored parameters, P&T eq. 9.8), determined by
+interpolation equations C(tᵢ) = Pᵢ; these are linear in all unknowns and
+remove exactly the hidden freedoms, so DOF counts are unaffected. A
+point-on-spline constraint owns one hidden curve parameter t, clamped to the
+domain after each step.
+
+The arc's radius is |start − centre|; the solver adds the implicit equation
+|end − centre| = |start − centre|.
+
+**Scaling.** Let L be the larger of the diagonal of the sketch's bounding
+box and the largest length dimension (and 1e-6 m if both are zero).
+Unknowns are expressed in units of L; length residuals are divided by L,
+angle residuals are dimensionless (sines or radians). This makes
+tolerances, rank decisions and convergence independent of the model's
+scale (golden tests run the same sketches at 1e-4 and 1e3 scale).
+
+## 4. Equations
+
+All residuals are smooth near their solutions. For lines, d = end − start.
+
+| constraint | residuals |
+|---|---|
+| Coincident(p, q) | pₓ − qₓ, p_y − q_y |
+| PointOnCurve(p, line) | cross(d, p − start) / ‖d‖ |
+| PointOnCurve(p, circle or arc) | ‖p − c‖ − r |
+| PointOnCurve(p, spline) | C(t) − p (2 rows, hidden t) |
+| Horizontal(line) / Vertical(line) | start_y − end_y / startₓ − endₓ |
+| HorizontalPoints / VerticalPoints | p_y − q_y / pₓ − qₓ |
+| Parallel(a, b) | cross(d_a, d_b) / (‖d_a‖ ‖d_b‖) |
+| Perpendicular(a, b) | dot(d_a, d_b) / (‖d_a‖ ‖d_b‖) |
+| Equal(line, line) | ‖d_a‖ − ‖d_b‖ |
+| Equal(circular, circular) | r_a − r_b |
+| Midpoint(p, line) | p − (start + end)/2 (2 rows) |
+| Concentric(a, b) | c_a − c_b (2 rows) |
+| Symmetric(p, q, axis) | cross(d, (p+q)/2 − start)/‖d‖, dot(d, q − p)/‖d‖ |
+| Tangent line–circle | cross(d, c − start)/‖d‖ − s·r, s = +1 if the centre is on the left |
+| Tangent circle–circle | ‖c_a − c_b‖ − (r_a + r_b) (external) or ‖c_a − c_b‖ − \|r_a − r_b\| (internal) |
+| Tangent at shared point p | line–circular: dot(d, p − c)/(‖d‖ r); circular–circular: cross(p − c_a, p − c_b)/(r_a r_b); spline end: cross(C′(end), other tangent) normalized |
+| Normal(line, circular) | the centre lies on the line (as PointOnCurve) |
+| Fix(p, at) | p − at (2 rows) |
+| Distance(p, q) aligned | ‖p − q‖ − v |
+| Distance(p, q) horizontal / vertical | \|qₓ − pₓ\| − v / \|q_y − p_y\| − v |
+| Distance(p, line) | \|cross(d, p − start)\|/‖d‖ − v |
+| Distance(line, line) (parallel) | distance from a's start to b, as above |
+| Length(line) | ‖d‖ − v |
+| Angle(a, b) | sin(θ − v) where θ is the signed angle from d_a to d_b; after convergence cos(θ − v) > 0 is checked, so the antipodal branch is rejected |
+| Radius / Diameter | r − v / 2r − v |
+
+Dimension values must be positive (lengths, radii) or in (−π, π]
+(angles); zero lengths are rejected with "use a coincident constraint".
+Entities referenced by the wrong kind (a radius on a line) are rejected
+before solving with an error naming the constraint.
+
+Degenerate geometry (a zero-length line under a parallel constraint, a
+zero-radius circle) is reported as `Degenerate` instead of producing NaN.
+
+## 5. Algorithm
+
+1. **Validate** references and values.
+2. **Decompose** the equation–unknown incidence graph into connected
+   components; each is solved independently (Hoffmann et al. decompose
+   further into rigid clusters; that refinement is future work and does not
+   change results, only speed).
+3. **Solve each component** by damped Gauss–Newton with minimum-norm steps:
+   * J Δ = −r is solved in the weighted minimum-norm least-squares sense:
+     minimize ‖W^{1/2} Δ‖ among the least-squares solutions, using QR with
+     column pivoting of J W^{−1/2} and a complete orthogonal decomposition.
+     Weights are 1, except for dragged points (§7).
+   * Step acceptance by backtracking line search on ½‖r‖² (Armijo, c = 1e-4,
+     halving down to 2⁻²⁰); if the line search fails, Levenberg–Marquardt
+     damping (Madsen et al. §3.1 update rule) takes over for that iteration.
+   * Converged when ‖r‖∞ ≤ 1e-12 (scaled), checked again after unscaling
+     against the model tolerance. Limit: 100 iterations.
+   * Hidden spline parameters are clamped to the curve domain after each step.
+4. **Diagnose** at the final point with the scaled Jacobian:
+   * Numerical rank ρ from the pivoted QR (|R_kk| ≤ 1e-10 · |R_11| is zero),
+     confirmed by Jacobi SVD for components of up to 200 unknowns.
+   * DOF = unknowns − ρ − (hidden unknowns); summed over components.
+   * Free unknowns: unknown i is free if its row of an orthonormal null-space
+     basis N of J has norm > 1e-8. An entity is *free* if any of its unknowns
+     is; otherwise *constrained*. (Points of a fully constrained rectangle are
+     constrained; a lone line's points are free.)
+   * Redundancy: if equations > ρ, QR with column pivoting of Jᵀ picks a
+     maximal independent set of equations in priority order (earlier
+     constraints first, implicit equations first of all); the constraints
+     owning the remaining equations are *redundant*.
+   * Conflict: if the solve did not converge, compute the least-squares
+     residual r*; the constraints whose equations carry |r*ᵢ| > 1e-9 form the
+     *conflicting* set. Geometry is then left at the input (the seed), and the
+     status is `Conflicting`.
+5. **Write back** solved positions (in metres) into a copy of the sketch.
+
+Redundant but consistent constraints (e.g. a horizontal line between two
+points already constrained to equal y) solve, but the status is
+`Redundant` and the UI shows them as over-defined. Users can delete them.
+
+## 6. Branch stability
+
+Minimum-norm steps from the current geometry pick the nearest solution. A
+dimension change that fails to converge from the seed is retried by
+continuation: the change is applied in 2, 4, … 64 equal steps, each solved
+from the previous result. Orientation-sensitive constraints (tangent sides,
+angle signs) store their branch in the constraint, so regeneration cannot
+silently flip them.
+
+## 7. Dragging
+
+`SolveOptions::drag` lists points and target positions. The solver moves
+those points to their targets in the starting state, then projects onto the
+constraints with weight 1e6 on the dragged unknowns (they move last). A free
+point ends exactly on the cursor; a constrained one ends at the nearest
+feasible position. The UI calls `solve` per pointer move from the last
+solved state and commits the final state as one edit.
+
+## 8. Tests
+
+* Unit tests for each equation's Jacobian against central finite
+  differences at random configurations.
+* Known DOF counts: lone point 2, line 4, circle 3, arc 5, triangle with
+  coincident corners 6, constrained rectangle (H/V + coincident) 4, with
+  two dimensions and a fixed corner 0.
+* Constructive property tests (the fuzzing strategy): generate random
+  geometry, derive constraints that the geometry satisfies (dimensions
+  measured from it), perturb the positions, solve, and require every
+  constraint satisfied to tolerance; the same at scales 1e-4 to 1e3.
+* Redundancy: append a constraint implied by others; it is reported and the
+  others are not. Conflict: append an inconsistent dimension; status is
+  `Conflicting`, the set contains it, and the geometry is unchanged.
+* Branch stability: change a triangle's side length by ±20% repeatedly; the
+  triangle never flips orientation. Dimension changes return to the start
+  exactly when undone.
+* Dragging: a free point lands on the target; a point on a fixed circle
+  lands on the circle nearest the target.
+* Determinism: solving twice gives bit-identical output.
+* Timing smoke tests for 50- and 300-entity sketches (reported, with
+  generous limits in debug builds).

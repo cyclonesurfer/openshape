@@ -2,8 +2,8 @@
 //! undo change the produced bodies.
 
 use openshape_core_model::{
-    CurveDef, DVec2, DVec3, Feature, FeatureId, InsertAt, ModelOp, PlaneRef, ProfileDef, ReplicaId,
-    Session,
+    CurveDef, DVec2, DVec3, Feature, FeatureId, InsertAt, ModelOp, PlaneRef, ProfileDef,
+    ProfileSource, ReplicaId, RevolveAxis, Session,
 };
 use openshape_features::{regenerate, FeatureStatus};
 use openshape_kernel::{Kernel, OsKernel};
@@ -34,13 +34,13 @@ fn failed_feature_does_not_stop_later_features() {
         &mut s,
         "Open profile",
         Feature::Extrude {
-            profile: ProfileDef {
+            profile: ProfileSource::Inline(ProfileDef {
                 plane: PlaneRef::Top,
                 curves: vec![CurveDef::Line {
                     start: DVec2::ZERO,
                     end: DVec2::X,
                 }],
-            },
+            }),
             distance: 0.01,
             symmetric: false,
         },
@@ -49,15 +49,17 @@ fn failed_feature_does_not_stop_later_features() {
         &mut s,
         "Revolve",
         Feature::Revolve {
-            profile: ProfileDef {
+            profile: ProfileSource::Inline(ProfileDef {
                 plane: PlaneRef::Front,
                 curves: vec![CurveDef::Circle {
                     center: DVec2::new(0.05, 0.0),
                     radius: 0.01,
                 }],
+            }),
+            axis: RevolveAxis::Inline {
+                origin: DVec2::ZERO,
+                dir: DVec2::Y,
             },
-            axis_origin: DVec2::ZERO,
-            axis_dir: DVec2::Y,
             angle: std::f64::consts::TAU,
         },
     );

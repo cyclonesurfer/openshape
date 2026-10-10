@@ -1,0 +1,425 @@
+//! Shared helpers for the solver's integration tests: a sketch builder and
+//! an independent checker that measures every constraint's violation from
+//! the geometry with its own formulas (not the solver's equations).
+
+#![allow(dead_code)]
+
+pub mod gen;
+
+use openshape_sketch_solver::{
+    resolve_curves, Constraint, ConstraintEntry, DVec2, DistanceKind, Entity, Geometry,
+    ResolvedCurve, Sketch, TangentKind,
+};
+
+/// Builds sketches with `u32` keys; entities and constraints share one
+/// counter so keys never collide.
+#[derive(Default, Clone)]
+pub struct B {
+    pub sketch: Sketch<u32>,
+    next: u32,
+}
+
+impl B {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn key(&mut self) -> u32 {
+        self.next += 1;
+        self.next
+    }
+
+    pub fn entity(&mut self, geometry: Geometry<u32>) -> u32 {
+        let id = self.key();
+        self.sketch.entities.push(Entity {
+            id,
+            geometry,
+            construction: false,
+        });
+        id
+    }
+
+    pub fn point(&mut self, x: f64, y: f64) -> u32 {
+        self.entity(Geometry::Point {
+            at: DVec2::new(x, y),
+        })
+    }
+
+    /// A line with its own two end points: (line, start, end).
+    pub fn line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) -> (u32, u32, u32) {
+        let s = self.point(x0, y0);
+        let e = self.point(x1, y1);
+        let l = self.entity(Geometry::Line { start: s, end: e });
+        (l, s, e)
+    }
+
+    pub fn line_between(&mut self, s: u32, e: u32) -> u32 {
+        self.entity(Geometry::Line { start: s, end: e })
+    }
+
+    /// A circle with its own centre: (circle, centre).
+    pub fn circle(&mut self, x: f64, y: f64, r: f64) -> (u32, u32) {
+        let c = self.point(x, y);
+        let k = self.entity(Geometry::Circle {
+            center: c,
+            radius: r,
+        });
+        (k, c)
+    }
+
+    /// An arc with its own points: (arc, centre, start, end).
+    pub fn arc(&mut self, c: DVec2, r: f64, a0: f64, a1: f64) -> (u32, u32, u32, u32) {
+        let cc = self.point(c.x, c.y);
+        let s = self.point(c.x + r * a0.cos(), c.y + r * a0.sin());
+        let e = self.point(c.x + r * a1.cos(), c.y + r * a1.sin());
+        let a = self.entity(Geometry::Arc {
+            center: cc,
+            start: s,
+            end: e,
+        });
+        (a, cc, s, e)
+    }
+
+    pub fn c(&mut self, constraint: Constraint<u32>) -> u32 {
+        let id = self.key();
+        self.sketch.constraints.push(ConstraintEntry { id, constraint });
+        id
+    }
+
+    pub fn coincident(&mut self, a: u32, b: u32) -> u32 {
+        self.c(Constraint::Coincident { a, b })
+    }
+
+    pub fn fix(&mut self, p: u32) -> u32 {
+        let at = self.sketch.point(p).unwrap();
+        self.c(Constraint::Fix { point: p, at })
+    }
+
+    pub fn build(&self) -> Sketch<u32> {
+        self.sketch.clone()
+    }
+}
+
+pub fn pos(s: &Sketch<u32>, p: u32) -> DVec2 {
+    s.point(p).expect("point")
+}
+
+/// (centre, radius) of a circle or arc.
+pub fn circ(s: &Sketch<u32>, k: u32) -> (DVec2, f64) {
+    match s.entity(k).unwrap().geometry {
+        Geometry::Circle { center, radius } => (pos(s, center), radius),
+        Geometry::Arc { center, start, .. } => {
+            let c = pos(s, center);
+            (c, (pos(s, start) - c).length())
+        }
+        _ => panic!("not circular"),
+    }
+}
+
+/// (start, end) of a line.
+pub fn line(s: &Sketch<u32>, k: u32) -> (DVec2, DVec2) {
+    match s.entity(k).unwrap().geometry {
+        Geometry::Line { start, end } => (pos(s, start), pos(s, end)),
+        _ => panic!("not a line"),
+    }
+}
+
+fn wrap(a: f64) -> f64 {
+    let mut a = a % std::f64::consts::TAU;
+    if a > std::f64::consts::PI {
+        a -= std::f64::consts::TAU;
+    } else if a <= -std::f64::consts::PI {
+        a += std::f64::consts::TAU;
+    }
+    a
+}
+
+fn dist_to_line(p: DVec2, (s, e): (DVec2, DVec2)) -> f64 {
+    let d = e - s;
+    d.perp_dot(p - s).abs() / d.length()
+}
+
+/// Evaluates a clamped B-spline (de Boor's algorithm, P&T A3.1 in its
+/// recursive form) — written independently of the solver's basis code.
+pub fn de_boor(degree: usize, knots: &[f64], pts: &[DVec2], t: f64) -> DVec2 {
+    let n = pts.len() - 1;
+    let t = t.clamp(knots[degree], knots[n + 1]);
+    let mut k = degree;
+    while k < n && t >= knots[k + 1] {
+        k += 1;
+    }
+    let mut d: Vec<DVec2> = (0..=degree).map(|j| pts[j + k - degree]).collect();
+    for r in 1..=degree {
+        for j in (r..=degree).rev() {
+            let i = j + k - degree;
+            let den = knots[i + degree + 1 - r] - knots[i];
+            let alpha = if den > 0.0 { (t - knots[i]) / den } else { 0.0 };
+            d[j] = d[j - 1] * (1.0 - alpha) + d[j] * alpha;
+        }
+    }
+    d[degree]
+}
+
+fn resolved(s: &Sketch<u32>, k: u32) -> ResolvedCurve {
+    resolve_curves(s)
+        .expect("resolvable")
+        .into_iter()
+        .find(|(id, _, _)| *id == k)
+        .expect("curve")
+        .2
+}
+
+/// Distance from `p` to a spline curve: dense sampling plus golden-section
+/// refinement around the best sample.
+fn dist_to_spline(s: &Sketch<u32>, k: u32, p: DVec2) -> f64 {
+    let ResolvedCurve::Spline {
+        degree,
+        knots,
+        points,
+    } = resolved(s, k)
+    else {
+        panic!("not a spline")
+    };
+    let f = |t: f64| (de_boor(degree, &knots, &points, t) - p).length();
+    let n = 4000;
+    let mut best = (0.0, f(0.0));
+    for i in 1..=n {
+        let t = i as f64 / n as f64;
+        let d = f(t);
+        if d < best.1 {
+            best = (t, d);
+        }
+    }
+    let (mut a, mut b) = ((best.0 - 1.0 / n as f64).max(0.0), (best.0 + 1.0 / n as f64).min(1.0));
+    let g = 0.5 * (5f64.sqrt() - 1.0);
+    for _ in 0..200 {
+        let c = b - g * (b - a);
+        let d = a + g * (b - a);
+        if f(c) < f(d) {
+            b = d;
+        } else {
+            a = c;
+        }
+    }
+    f(0.5 * (a + b)).min(best.1)
+}
+
+/// Unit tangent direction of a curve at its end `p` (lines: direction;
+/// arcs: perpendicular to the radius at `p`; splines: first or last
+/// control leg).
+fn end_tangent(s: &Sketch<u32>, k: u32, p: DVec2) -> DVec2 {
+    match s.entity(k).unwrap().geometry.clone() {
+        Geometry::Line { .. } => {
+            let (a, b) = line(s, k);
+            (b - a).normalize()
+        }
+        Geometry::Arc { center, .. } => (p - pos(s, center)).perp().normalize(),
+        Geometry::ControlSpline { .. } | Geometry::InterpolatedSpline { .. } => {
+            let ResolvedCurve::Spline { points, .. } = resolved(s, k) else {
+                unreachable!()
+            };
+            let n = points.len();
+            if (points[0] - p).length() <= (points[n - 1] - p).length() {
+                (points[1] - points[0]).normalize()
+            } else {
+                (points[n - 1] - points[n - 2]).normalize()
+            }
+        }
+        _ => panic!("no tangent"),
+    }
+}
+
+/// The violation of one constraint, measured from the geometry:
+/// `(value, is_angle)`, metres or radians.
+pub fn violation(s: &Sketch<u32>, c: &Constraint<u32>) -> (f64, bool) {
+    let p = |k: u32| pos(s, k);
+    match c {
+        Constraint::Coincident { a, b } => ((p(*a) - p(*b)).length(), false),
+        Constraint::PointOnCurve { point, curve } => {
+            let q = p(*point);
+            match s.entity(*curve).unwrap().geometry {
+                Geometry::Line { .. } => (dist_to_line(q, line(s, *curve)), false),
+                Geometry::Circle { .. } | Geometry::Arc { .. } => {
+                    let (cc, r) = circ(s, *curve);
+                    (((q - cc).length() - r).abs(), false)
+                }
+                _ => (dist_to_spline(s, *curve, q), false),
+            }
+        }
+        Constraint::Horizontal { line: l } => {
+            let (a, b) = line(s, *l);
+            ((a.y - b.y).abs(), false)
+        }
+        Constraint::Vertical { line: l } => {
+            let (a, b) = line(s, *l);
+            ((a.x - b.x).abs(), false)
+        }
+        Constraint::HorizontalPoints { a, b } => ((p(*a).y - p(*b).y).abs(), false),
+        Constraint::VerticalPoints { a, b } => ((p(*a).x - p(*b).x).abs(), false),
+        Constraint::Parallel { a, b } => {
+            let (a0, a1) = line(s, *a);
+            let (b0, b1) = line(s, *b);
+            let (da, db) = ((a1 - a0).normalize(), (b1 - b0).normalize());
+            (da.perp_dot(db).abs(), true)
+        }
+        Constraint::Perpendicular { a, b } => {
+            let (a0, a1) = line(s, *a);
+            let (b0, b1) = line(s, *b);
+            let (da, db) = ((a1 - a0).normalize(), (b1 - b0).normalize());
+            (da.dot(db).abs(), true)
+        }
+        Constraint::Equal { a, b } => match s.entity(*a).unwrap().geometry {
+            Geometry::Line { .. } => {
+                let (a0, a1) = line(s, *a);
+                let (b0, b1) = line(s, *b);
+                (((a1 - a0).length() - (b1 - b0).length()).abs(), false)
+            }
+            _ => ((circ(s, *a).1 - circ(s, *b).1).abs(), false),
+        },
+        Constraint::Midpoint { point, line: l } => {
+            let (a, b) = line(s, *l);
+            ((p(*point) - (a + b) * 0.5).length(), false)
+        }
+        Constraint::Concentric { a, b } => ((circ(s, *a).0 - circ(s, *b).0).length(), false),
+        Constraint::Symmetric { a, b, axis } => {
+            let (s0, s1) = line(s, *axis);
+            let d = (s1 - s0).normalize();
+            let q = p(*a) - s0;
+            let refl = s0 + d * (2.0 * q.dot(d)) - q;
+            ((refl - p(*b)).length(), false)
+        }
+        Constraint::Tangent { a, b, kind } => match kind {
+            TangentKind::AtPoint { point } => {
+                let q = p(*point);
+                let ta = end_tangent(s, *a, q);
+                let tb = end_tangent(s, *b, q);
+                (ta.perp_dot(tb).abs(), true)
+            }
+            TangentKind::LineCircle { center_left } => {
+                let (l, k) = if matches!(s.entity(*a).unwrap().geometry, Geometry::Line { .. }) {
+                    (*a, *b)
+                } else {
+                    (*b, *a)
+                };
+                let (s0, s1) = line(s, l);
+                let (cc, r) = circ(s, k);
+                let d = s1 - s0;
+                let signed = d.perp_dot(cc - s0) / d.length();
+                let want = if *center_left { r } else { -r };
+                ((signed - want).abs(), false)
+            }
+            TangentKind::CircleCircle { internal } => {
+                let (ca, ra) = circ(s, *a);
+                let (cb, rb) = circ(s, *b);
+                let dist = (ca - cb).length();
+                let want = if *internal { (ra - rb).abs() } else { ra + rb };
+                ((dist - want).abs(), false)
+            }
+        },
+        Constraint::Normal { line: l, curve } => (dist_to_line(circ(s, *curve).0, line(s, *l)), false),
+        Constraint::Fix { point, at } => ((p(*point) - *at).length(), false),
+        Constraint::Distance { a, b, kind, value } => {
+            let ea = &s.entity(*a).unwrap().geometry;
+            let eb = &s.entity(*b).unwrap().geometry;
+            let m = match (ea, eb) {
+                (Geometry::Point { .. }, Geometry::Point { .. }) => {
+                    let d = p(*b) - p(*a);
+                    match kind {
+                        DistanceKind::Aligned => d.length(),
+                        DistanceKind::Horizontal => d.x.abs(),
+                        DistanceKind::Vertical => d.y.abs(),
+                    }
+                }
+                (Geometry::Point { .. }, Geometry::Line { .. }) => dist_to_line(p(*a), line(s, *b)),
+                (Geometry::Line { .. }, Geometry::Point { .. }) => dist_to_line(p(*b), line(s, *a)),
+                _ => dist_to_line(line(s, *a).0, line(s, *b)),
+            };
+            ((m - value).abs(), false)
+        }
+        Constraint::Length { line: l, value } => {
+            let (a, b) = line(s, *l);
+            (((b - a).length() - value).abs(), false)
+        }
+        Constraint::Angle { a, b, value } => {
+            let (a0, a1) = line(s, *a);
+            let (b0, b1) = line(s, *b);
+            let (da, db) = (a1 - a0, b1 - b0);
+            let th = da.perp_dot(db).atan2(da.dot(db));
+            (wrap(th - value).abs(), true)
+        }
+        Constraint::Radius { curve, value } => ((circ(s, *curve).1 - value).abs(), false),
+        Constraint::Diameter { curve, value } => ((2.0 * circ(s, *curve).1 - value).abs(), false),
+    }
+}
+
+/// Bounding-box diagonal of the sketch's points and circles.
+pub fn size(s: &Sketch<u32>) -> f64 {
+    let mut lo = DVec2::splat(f64::INFINITY);
+    let mut hi = DVec2::splat(f64::NEG_INFINITY);
+    for e in &s.entities {
+        match e.geometry {
+            Geometry::Point { at } => {
+                lo = lo.min(at);
+                hi = hi.max(at);
+            }
+            Geometry::Circle { center, radius } => {
+                let c = pos(s, center);
+                lo = lo.min(c - DVec2::splat(radius));
+                hi = hi.max(c + DVec2::splat(radius));
+            }
+            _ => {}
+        }
+    }
+    if lo.x > hi.x {
+        0.0
+    } else {
+        (hi - lo).length()
+    }
+}
+
+/// The largest violation, scaled: lengths relative to `scale`, angles in
+/// radians. Arcs' implicit equal-radius condition is included.
+pub fn worst(s: &Sketch<u32>, scale: f64) -> (f64, String) {
+    let mut w = (0.0f64, String::new());
+    for c in &s.constraints {
+        let (v, ang) = violation(s, &c.constraint);
+        let rel = if ang { v } else { v / scale };
+        if !(rel <= w.0) {
+            w = (rel, format!("{:?} {:?}", c.id, c.constraint));
+        }
+    }
+    for e in &s.entities {
+        if let Geometry::Arc { center, start, end } = e.geometry {
+            let c = pos(s, center);
+            let v = ((pos(s, end) - c).length() - (pos(s, start) - c).length()).abs() / scale;
+            if !(v <= w.0) {
+                w = (v, format!("arc {:?} radius mismatch", e.id));
+            }
+        }
+    }
+    w
+}
+
+/// Asserts every constraint holds: lengths within `1e-9` of the sketch
+/// size, angles within `1e-9` rad.
+pub fn assert_satisfied(s: &Sketch<u32>) {
+    let scale = size(s).max(1e-300);
+    let (w, what) = worst(s, scale);
+    assert!(w <= 1e-9, "violation {w:e} (relative) at {what}");
+}
+
+/// Bits of every coordinate and radius, for determinism checks.
+pub fn bits(s: &Sketch<u32>) -> Vec<u64> {
+    let mut out = Vec::new();
+    for e in &s.entities {
+        match e.geometry {
+            Geometry::Point { at } => {
+                out.push(at.x.to_bits());
+                out.push(at.y.to_bits());
+            }
+            Geometry::Circle { radius, .. } => out.push(radius.to_bits()),
+            _ => {}
+        }
+    }
+    out
+}

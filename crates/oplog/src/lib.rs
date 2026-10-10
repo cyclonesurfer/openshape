@@ -66,6 +66,16 @@ pub struct OpId {
     pub replica: ReplicaId,
 }
 
+impl OpId {
+    /// A reserved id no real operation has (Lamport times start at 1). The
+    /// document model uses it to mean "the operation being applied" inside
+    /// an op's payload.
+    pub const NULL: OpId = OpId {
+        lamport: 0,
+        replica: ReplicaId(0),
+    };
+}
+
 impl std::fmt::Display for OpId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}@{:016x}", self.lamport, self.replica.0)
@@ -96,7 +106,7 @@ pub struct Op<P> {
 }
 
 /// Errors produced by the log.
-#[derive(Debug, thiserror::Error, PartialEq)]
+#[derive(Clone, Debug, thiserror::Error, PartialEq)]
 pub enum OpLogError {
     /// An operation's Lamport time is not greater than one of its dependencies.
     #[error("operation {0} violates causal ordering")]
@@ -104,6 +114,9 @@ pub enum OpLogError {
     /// An undo targets an operation that is not in its causal past.
     #[error("undo {0} targets an operation outside its causal past")]
     BadUndoTarget(OpId),
+    /// An operation uses the reserved [`OpId::NULL`] id.
+    #[error("operation uses the reserved null id")]
+    NullId,
     /// An operation with this id already exists with different content.
     #[error("conflicting duplicate operation {0}")]
     ConflictingDuplicate(OpId),
@@ -137,6 +150,7 @@ pub struct OpLog<P> {
     ops: BTreeMap<OpId, Op<P>>,
     heads: BTreeSet<OpId>,
     pending: Vec<Op<P>>,
+    rejected: Vec<(OpId, OpLogError)>,
     undo_stack: Vec<OpId>,
     redo_stack: Vec<OpId>,
 }
@@ -161,6 +175,7 @@ impl<P: Clone + PartialEq> OpLog<P> {
             ops: BTreeMap::new(),
             heads: BTreeSet::new(),
             pending: Vec::new(),
+            rejected: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -199,6 +214,14 @@ impl<P: Clone + PartialEq> OpLog<P> {
     /// Operations received but not yet integrated (missing dependencies).
     pub fn pending_len(&self) -> usize {
         self.pending.len()
+    }
+
+    /// Buffered operations that turned out to be invalid once their
+    /// dependencies arrived (e.g. an undo whose target is not in its causal
+    /// past). They are dropped and recorded here; the integration that
+    /// unblocked them still succeeds.
+    pub fn rejected(&self) -> &[(OpId, OpLogError)] {
+        &self.rejected
     }
 
     fn next_id(&mut self) -> OpId {
@@ -362,12 +385,21 @@ impl<P: Clone + PartialEq> OpLog<P> {
             .collect()
     }
 
-    fn check(&self, op: &Op<P>) -> Result<(), OpLogError> {
+    /// Checks that need nothing but the op itself.
+    fn check_self(op: &Op<P>) -> Result<(), OpLogError> {
+        if op.id.lamport == 0 {
+            return Err(OpLogError::NullId);
+        }
         for d in &op.deps {
             if d.lamport >= op.id.lamport {
                 return Err(OpLogError::CausalityViolation(op.id));
             }
         }
+        Ok(())
+    }
+
+    fn check(&self, op: &Op<P>) -> Result<(), OpLogError> {
+        Self::check_self(op)?;
         if let OpKind::Undo { target } = op.kind {
             if !self.causal_closure(&op.deps).contains(&target) {
                 return Err(OpLogError::BadUndoTarget(op.id));
@@ -399,6 +431,7 @@ impl<P: Clone + PartialEq> OpLog<P> {
                 Err(OpLogError::ConflictingDuplicate(op.id))
             };
         }
+        Self::check_self(&op)?;
         if op.deps.iter().any(|d| !self.ops.contains_key(d)) {
             if !self.pending.iter().any(|p| p.id == op.id) {
                 self.pending.push(op);
@@ -416,7 +449,10 @@ impl<P: Clone + PartialEq> OpLog<P> {
                 Some(i) => {
                     let p = self.pending.swap_remove(i);
                     if !self.ops.contains_key(&p.id) {
-                        self.try_insert(p)?;
+                        let id = p.id;
+                        if let Err(e) = self.try_insert(p) {
+                            self.rejected.push((id, e));
+                        }
                     }
                 }
                 None => break,

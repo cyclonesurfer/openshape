@@ -1,0 +1,2475 @@
+//! Sketch mode: drawing, constraining, dimensioning and dragging sketch
+//! geometry.
+//!
+//! Nothing here uses egui's widgets or painter, only its plain geometry
+//! types: [`SketchEditor`] receives pointer and key events in screen points,
+//! maps them to the sketch plane with a [`ScreenMap`], and edits the document
+//! through [`Model::edit_sketch`]. `app.rs` routes egui input here and paints
+//! the [`SketchDisplay`] and its [`Annotation`]s; `tests/sketch_mode.rs`
+//! drives the same editor headlessly.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::f64::consts::{PI, TAU};
+
+use egui::{Pos2, Rect, Vec2};
+use glam::DMat4;
+use openshape_core_model::sketch::{
+    Constraint, ConstraintEntry, DistanceKind, Entity, Geometry, TangentKind,
+};
+use openshape_core_model::units::{LengthUnit, Quantity};
+use openshape_core_model::{DVec2, DVec3, FeatureId, OpId, SketchData, SketchEdit, SketchId};
+use openshape_features::{kernel_curve, EntityState, SketchResult, Solution};
+use openshape_kernel::{Frame, ProfileCurve};
+use openshape_render::{Camera, Projection};
+use openshape_sketch_solver::{
+    measure, resolve_curves, solve, ResolvedCurve, SolveError, SolveOptions, SolveStatus,
+};
+
+use crate::{geometry_edits, Model};
+
+/// Pick radius for points, in screen points.
+pub const POINT_PICK: f32 = 7.0;
+/// Pick radius for curves, in screen points.
+pub const CURVE_PICK: f32 = 5.0;
+/// Snap radius for the sketch origin, in screen points.
+pub const ORIGIN_PICK: f32 = 8.0;
+/// Pointer travel (screen points) that turns a press into a drag.
+pub const DRAG_THRESHOLD: f32 = 4.0;
+/// A new line within this angle of horizontal or vertical is made so.
+const INFER_ANGLE: f64 = 3.0 * PI / 180.0;
+/// Positions closer than this are the same click (metres).
+const SAME_POINT: f64 = 1e-7;
+
+// ---------------------------------------------------------------------------
+// Screen mapping
+// ---------------------------------------------------------------------------
+
+/// Maps between a plane and screen points for one frame of the viewport.
+#[derive(Clone, Debug)]
+pub struct ScreenMap {
+    camera: Camera,
+    frame: Frame,
+    rect: Rect,
+    view_proj: DMat4,
+}
+
+impl ScreenMap {
+    /// The map for `camera` drawing into `rect` (screen points), with plane
+    /// coordinates in `frame`.
+    pub fn new(camera: &Camera, frame: Frame, rect: Rect) -> ScreenMap {
+        let aspect = rect.width() / rect.height().max(1.0);
+        // Screen x and y do not depend on the clip planes, so the scene
+        // bounds the renderer uses for them are not needed here.
+        let view_proj = camera.proj_matrix_f64(aspect, None) * camera.view_matrix_f64();
+        ScreenMap {
+            camera: camera.clone(),
+            frame,
+            rect,
+            view_proj,
+        }
+    }
+
+    /// The same view with another plane.
+    pub fn with_frame(&self, frame: Frame) -> ScreenMap {
+        ScreenMap {
+            frame,
+            ..self.clone()
+        }
+    }
+
+    /// The plane.
+    pub fn frame(&self) -> &Frame {
+        &self.frame
+    }
+
+    /// The viewport rectangle.
+    pub fn rect(&self) -> Rect {
+        self.rect
+    }
+
+    /// Projects a world point; `None` behind the eye.
+    pub fn world_to_screen(&self, p: DVec3) -> Option<Pos2> {
+        let c = self.view_proj * p.extend(1.0);
+        if !(c.w > 1e-12 && c.is_finite()) {
+            return None;
+        }
+        let (x, y) = (c.x / c.w, c.y / c.w);
+        Some(Pos2::new(
+            self.rect.min.x + ((x + 1.0) * 0.5 * self.rect.width() as f64) as f32,
+            self.rect.min.y + ((1.0 - y) * 0.5 * self.rect.height() as f64) as f32,
+        ))
+    }
+
+    /// Projects a plane point.
+    pub fn to_screen(&self, p: DVec2) -> Option<Pos2> {
+        self.world_to_screen(self.frame.point2(p))
+    }
+
+    /// The plane point under screen point `s` and its distance along the
+    /// view ray; `None` when the plane is seen edge-on or lies behind the
+    /// eye.
+    pub fn hit(&self, s: Pos2) -> Option<(DVec2, f64)> {
+        let (o, d) = self.camera.pixel_ray(
+            s.x - self.rect.min.x,
+            s.y - self.rect.min.y,
+            self.rect.width(),
+            self.rect.height(),
+        );
+        let n = self.frame.z;
+        let denom = d.dot(n);
+        if denom.abs() < 1e-6 {
+            return None;
+        }
+        let t = (self.frame.origin - o).dot(n) / denom;
+        if matches!(self.camera.projection, Projection::Perspective { .. }) && t <= 0.0 {
+            return None;
+        }
+        let l = self.frame.to_local(o + d * t);
+        let p = DVec2::new(l.x, l.y);
+        p.is_finite().then_some((p, t))
+    }
+
+    /// The plane point under screen point `s`.
+    pub fn to_plane(&self, s: Pos2) -> Option<DVec2> {
+        self.hit(s).map(|h| h.0)
+    }
+
+    /// Plane length of one screen point near `s` (0 if unknown).
+    pub fn plane_per_point(&self, s: Pos2) -> f64 {
+        match (
+            self.to_plane(s),
+            self.to_plane(s + Vec2::new(1.0, 0.0)),
+            self.to_plane(s + Vec2::new(0.0, 1.0)),
+        ) {
+            (Some(a), Some(b), Some(c)) => (b - a).length().max((c - a).length()),
+            _ => 0.0,
+        }
+    }
+
+    /// A plane polyline projected to the screen, split where it passes
+    /// behind the eye.
+    pub fn polyline(&self, points: &[DVec2]) -> Vec<Vec<Pos2>> {
+        let mut out = Vec::new();
+        let mut run = Vec::new();
+        for p in points {
+            match self.to_screen(*p) {
+                Some(s) => run.push(s),
+                None => {
+                    if run.len() > 1 {
+                        out.push(std::mem::take(&mut run));
+                    }
+                    run.clear();
+                }
+            }
+        }
+        if run.len() > 1 {
+            out.push(run);
+        }
+        out
+    }
+}
+
+/// Camera yaw and pitch that look straight at a plane, with the plane's x
+/// axis to the right where possible.
+pub fn normal_view(frame: &Frame) -> (f64, f64) {
+    let z = frame.z;
+    let pitch = z.z.clamp(-1.0, 1.0).asin();
+    let yaw = if z.x.hypot(z.y) < 1e-9 {
+        // Looking straight down or up: choose the yaw that keeps the
+        // plane's x axis pointing right.
+        frame.x.y.atan2(frame.x.x)
+    } else {
+        z.x.atan2(-z.y)
+    };
+    (yaw, pitch)
+}
+
+// ---------------------------------------------------------------------------
+// Display geometry
+// ---------------------------------------------------------------------------
+
+/// Number of segments used to draw a curve.
+fn segments(c: &ProfileCurve) -> usize {
+    match c {
+        ProfileCurve::Line { .. } => 1,
+        ProfileCurve::Circle { .. } => 96,
+        ProfileCurve::Arc { sweep_angle, .. } => {
+            ((sweep_angle.abs() / (3.75f64).to_radians()).ceil() as usize).clamp(4, 96)
+        }
+        ProfileCurve::Spline { points, .. } => (points.len() * 16).clamp(32, 1024),
+    }
+}
+
+/// Points along a curve for drawing and picking (empty if the curve is
+/// invalid).
+pub fn sample_curve(c: &ProfileCurve) -> Vec<DVec2> {
+    c.sample(segments(c)).unwrap_or_default()
+}
+
+/// One sketch curve as drawn.
+#[derive(Clone, Debug)]
+pub struct DisplayCurve {
+    /// The entity.
+    pub id: SketchId,
+    /// Construction geometry.
+    pub construction: bool,
+    /// Explicit geometry.
+    pub curve: ResolvedCurve,
+    /// Points along the curve, in plane coordinates.
+    pub polyline: Vec<DVec2>,
+}
+
+/// A sketch's geometry and diagnostics, ready to draw and pick.
+#[derive(Clone, Debug)]
+pub struct SketchDisplay {
+    /// The sketch feature.
+    pub feature: FeatureId,
+    /// The sketch plane.
+    pub frame: Frame,
+    /// The geometry shown (solved, or the solver's input when it failed).
+    pub sketch: SketchData,
+    /// Curves.
+    pub curves: Vec<DisplayCurve>,
+    /// Free or constrained, per entity.
+    pub states: BTreeMap<SketchId, EntityState>,
+    /// Constraints that cannot be satisfied together.
+    pub conflicting: BTreeSet<SketchId>,
+    /// Entities referenced by conflicting constraints.
+    pub conflicted: BTreeSet<SketchId>,
+    /// Constraints implied by others.
+    pub redundant: BTreeSet<SketchId>,
+    /// Solver outcome.
+    pub status: SolveStatus,
+    /// Remaining degrees of freedom.
+    pub dof: usize,
+}
+
+impl SketchDisplay {
+    /// The display of a regenerated sketch.
+    pub fn from_result(r: &SketchResult) -> SketchDisplay {
+        Self::build(r.feature, r.frame, &r.solution, Some(&r.curves))
+    }
+
+    /// The display of a solution (a drag preview).
+    pub fn from_solution(
+        feature: FeatureId,
+        frame: Frame,
+        solution: &Solution<SketchId>,
+    ) -> SketchDisplay {
+        Self::build(feature, frame, solution, None)
+    }
+
+    fn build(
+        feature: FeatureId,
+        frame: Frame,
+        solution: &Solution<SketchId>,
+        curves: Option<&[(SketchId, bool, ResolvedCurve)]>,
+    ) -> SketchDisplay {
+        let resolved;
+        let curves = match curves {
+            Some(c) => c,
+            None => {
+                resolved = resolve_curves(&solution.sketch).unwrap_or_default();
+                &resolved
+            }
+        };
+        let curves = curves
+            .iter()
+            .map(|(id, construction, c)| DisplayCurve {
+                id: *id,
+                construction: *construction,
+                polyline: sample_curve(&kernel_curve(c)),
+                curve: c.clone(),
+            })
+            .collect();
+        let conflicting: BTreeSet<SketchId> = solution.conflicting.iter().copied().collect();
+        let conflicted = solution
+            .sketch
+            .constraints
+            .iter()
+            .filter(|c| conflicting.contains(&c.id))
+            .flat_map(|c| c.constraint.referenced())
+            .collect();
+        SketchDisplay {
+            feature,
+            frame,
+            sketch: solution.sketch.clone(),
+            curves,
+            states: solution.entities.clone(),
+            conflicting,
+            conflicted,
+            redundant: solution.redundant.iter().copied().collect(),
+            status: solution.status.clone(),
+            dof: solution.dof,
+        }
+    }
+
+    /// Point entities and their positions.
+    pub fn points(&self) -> impl Iterator<Item = (SketchId, DVec2)> + '_ {
+        self.sketch.entities.iter().filter_map(|e| match e.geometry {
+            Geometry::Point { at } => Some((e.id, at)),
+            _ => None,
+        })
+    }
+
+    /// The drawn curve of an entity.
+    pub fn curve(&self, id: SketchId) -> Option<&DisplayCurve> {
+        self.curves.iter().find(|c| c.id == id)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Constraint glyphs and dimension labels
+// ---------------------------------------------------------------------------
+
+/// A constraint glyph or dimension label, in screen space.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Annotation {
+    /// The constraint.
+    pub constraint: SketchId,
+    /// Text.
+    pub text: String,
+    /// Where the text box is.
+    pub rect: Rect,
+    /// Dimension and leader lines.
+    pub lines: Vec<[Pos2; 2]>,
+    /// True for dimensions.
+    pub dimension: bool,
+}
+
+/// The glyph drawn for a (non-dimension) constraint.
+pub fn glyph(c: &Constraint<SketchId>) -> &'static str {
+    match c {
+        Constraint::Coincident { .. } => "•",
+        Constraint::PointOnCurve { .. } => "○",
+        Constraint::Horizontal { .. } | Constraint::HorizontalPoints { .. } => "H",
+        Constraint::Vertical { .. } | Constraint::VerticalPoints { .. } => "V",
+        Constraint::Parallel { .. } => "∥",
+        Constraint::Perpendicular { .. } => "⊥",
+        Constraint::Equal { .. } => "=",
+        Constraint::Midpoint { .. } => "M",
+        Constraint::Concentric { .. } => "◎",
+        Constraint::Symmetric { .. } => "S",
+        Constraint::Tangent { .. } => "T",
+        Constraint::Normal { .. } => "N",
+        Constraint::Fix { .. } => "F",
+        Constraint::Distance { .. }
+        | Constraint::Length { .. }
+        | Constraint::Angle { .. }
+        | Constraint::Radius { .. }
+        | Constraint::Diameter { .. } => "",
+    }
+}
+
+/// Entities a glyph is drawn next to.
+fn glyph_anchors(c: &Constraint<SketchId>) -> Vec<SketchId> {
+    match c {
+        Constraint::Coincident { a, .. }
+        | Constraint::HorizontalPoints { a, .. }
+        | Constraint::VerticalPoints { a, .. } => vec![*a],
+        Constraint::PointOnCurve { point, .. } | Constraint::Midpoint { point, .. } => {
+            vec![*point]
+        }
+        Constraint::Fix { point, .. } => vec![*point],
+        Constraint::Horizontal { line } | Constraint::Vertical { line } => vec![*line],
+        Constraint::Normal { line, .. } => vec![*line],
+        Constraint::Parallel { a, b }
+        | Constraint::Perpendicular { a, b }
+        | Constraint::Equal { a, b }
+        | Constraint::Concentric { a, b }
+        | Constraint::Symmetric { a, b, .. }
+        | Constraint::Tangent { a, b, .. } => vec![*a, *b],
+        _ => Vec::new(),
+    }
+}
+
+/// Approximate size of a label (screen points), matching the 13-point font
+/// `app.rs` draws with.
+pub fn label_size(text: &str) -> Vec2 {
+    Vec2::new(7.5 * text.chars().count() as f32 + 8.0, 17.0)
+}
+
+/// Formats a length for display.
+pub fn format_length(metres: f64) -> String {
+    LengthUnit::Millimetre.format(metres)
+}
+
+/// Formats an angle (shown unsigned, in degrees).
+pub fn format_angle(radians: f64) -> String {
+    format!("{}°", trim_number(radians.abs().to_degrees()))
+}
+
+fn trim_number(x: f64) -> String {
+    let s = format!("{x:.4}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" {
+        "0".into()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Text of a dimension.
+pub fn dimension_text(c: &Constraint<SketchId>) -> String {
+    match c {
+        Constraint::Distance { value, .. } | Constraint::Length { value, .. } => {
+            format_length(*value)
+        }
+        Constraint::Radius { value, .. } => format!("R {}", format_length(*value)),
+        Constraint::Diameter { value, .. } => format!("Ø {}", format_length(*value)),
+        Constraint::Angle { value, .. } => format_angle(*value),
+        _ => String::new(),
+    }
+}
+
+fn perp(v: DVec2) -> DVec2 {
+    DVec2::new(-v.y, v.x)
+}
+
+/// Screen midpoint (by length) of a projected polyline, with its unit
+/// direction there.
+fn screen_midpoint(runs: &[Vec<Pos2>]) -> Option<(Pos2, Vec2)> {
+    let run = runs.iter().max_by(|a, b| a.len().cmp(&b.len()))?;
+    let total: f32 = run.windows(2).map(|w| w[0].distance(w[1])).sum();
+    let mut acc = 0.0;
+    for w in run.windows(2) {
+        let l = w[0].distance(w[1]);
+        if acc + l >= total * 0.5 && l > 0.0 {
+            let f = (total * 0.5 - acc) / l;
+            return Some((w[0] + (w[1] - w[0]) * f, (w[1] - w[0]) / l));
+        }
+        acc += l;
+    }
+    Some((run[0], Vec2::X))
+}
+
+/// Constraint glyphs and dimension labels of a sketch.
+pub fn annotations(d: &SketchDisplay, map: &ScreenMap) -> Vec<Annotation> {
+    let mut slots: BTreeMap<SketchId, usize> = BTreeMap::new();
+    let points: BTreeMap<SketchId, DVec2> = d.points().collect();
+    let mut out = Vec::new();
+    for c in &d.sketch.constraints {
+        if c.constraint.value().is_some() {
+            out.extend(dimension_annotation(d, &points, map, c));
+            continue;
+        }
+        let text = glyph(&c.constraint);
+        for anchor in glyph_anchors(&c.constraint) {
+            let slot = slots.entry(anchor).or_default();
+            let k = *slot as f32;
+            *slot += 1;
+            let center = if let Some(p) = points.get(&anchor) {
+                map.to_screen(*p)
+                    .map(|s| s + Vec2::new(12.0 + 15.0 * k, -12.0))
+            } else if let Some(curve) = d.curve(anchor) {
+                screen_midpoint(&map.polyline(&curve.polyline)).map(|(m, t)| {
+                    let mut n = Vec2::new(-t.y, t.x);
+                    if n.y > 0.0 {
+                        n = -n;
+                    }
+                    m + n * 13.0 + t * (15.0 * k)
+                })
+            } else {
+                None
+            };
+            if let Some(center) = center {
+                out.push(Annotation {
+                    constraint: c.id,
+                    text: text.to_string(),
+                    rect: Rect::from_center_size(center, label_size(text)),
+                    lines: Vec::new(),
+                    dimension: false,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn line_ends(
+    sketch: &SketchData,
+    points: &BTreeMap<SketchId, DVec2>,
+    id: SketchId,
+) -> Option<(DVec2, DVec2)> {
+    match sketch.entity(id)?.geometry {
+        Geometry::Line { start, end } => Some((*points.get(&start)?, *points.get(&end)?)),
+        _ => None,
+    }
+}
+
+/// Centre, radius and a direction to put a radial label at.
+fn circular(
+    sketch: &SketchData,
+    points: &BTreeMap<SketchId, DVec2>,
+    id: SketchId,
+) -> Option<(DVec2, f64, DVec2)> {
+    match sketch.entity(id)?.geometry {
+        Geometry::Circle { center, radius } => Some((
+            *points.get(&center)?,
+            radius,
+            DVec2::new(1.0, 1.0).normalize(),
+        )),
+        Geometry::Arc { center, start, end } => {
+            let (c, s, e) = (
+                *points.get(&center)?,
+                *points.get(&start)?,
+                *points.get(&end)?,
+            );
+            let a0 = (s - c).to_angle();
+            let sweep = ((e - c).to_angle() - a0).rem_euclid(TAU);
+            let mid = a0 + sweep * 0.5;
+            Some((c, (s - c).length(), DVec2::from_angle(mid)))
+        }
+        _ => None,
+    }
+}
+
+fn dimension_annotation(
+    d: &SketchDisplay,
+    points: &BTreeMap<SketchId, DVec2>,
+    map: &ScreenMap,
+    c: &ConstraintEntry<SketchId>,
+) -> Option<Annotation> {
+    let sketch = &d.sketch;
+    let anchor = c
+        .constraint
+        .referenced()
+        .iter()
+        .find_map(|e| {
+            points
+                .get(e)
+                .copied()
+                .or_else(|| line_ends(sketch, points, *e).map(|(a, _)| a))
+                .or_else(|| circular(sketch, points, *e).map(|(c, _, _)| c))
+        })?;
+    let ppp = map.plane_per_point(map.to_screen(anchor)?);
+    let off = 24.0 * ppp;
+    let aligned = |a: DVec2, b: DVec2| -> (Vec<[DVec2; 2]>, DVec2) {
+        let mut n = perp((b - a).normalize_or_zero());
+        // Labels go above or to the left in the plane, consistently.
+        if n.y < 0.0 || (n.y == 0.0 && n.x > 0.0) {
+            n = -n;
+        }
+        let (a2, b2) = (a + n * off, b + n * off);
+        (
+            vec![[a, a + n * off * 1.25], [b, b + n * off * 1.25], [a2, b2]],
+            (a2 + b2) * 0.5 + n * off * 0.55,
+        )
+    };
+    let (lines, at) = match &c.constraint {
+        Constraint::Length { line, .. } => {
+            let (a, b) = line_ends(sketch, points, *line)?;
+            aligned(a, b)
+        }
+        Constraint::Distance { a, b, kind, .. } => {
+            match (points.get(a).copied(), points.get(b).copied()) {
+                (Some(pa), Some(pb)) => match kind {
+                    DistanceKind::Aligned => aligned(pa, pb),
+                    DistanceKind::Horizontal => {
+                        let y = pa.y.max(pb.y) + off;
+                        let (a2, b2) = (DVec2::new(pa.x, y), DVec2::new(pb.x, y));
+                        let up = DVec2::new(0.0, off * 0.25);
+                        (
+                            vec![[pa, a2 + up], [pb, b2 + up], [a2, b2]],
+                            (a2 + b2) * 0.5 + DVec2::new(0.0, off * 0.55),
+                        )
+                    }
+                    DistanceKind::Vertical => {
+                        let x = pa.x.max(pb.x) + off;
+                        let (a2, b2) = (DVec2::new(x, pa.y), DVec2::new(x, pb.y));
+                        let right = DVec2::new(off * 0.25, 0.0);
+                        (
+                            vec![[pa, a2 + right], [pb, b2 + right], [a2, b2]],
+                            (a2 + b2) * 0.5 + DVec2::new(off * 1.2, 0.0),
+                        )
+                    }
+                },
+                _ => {
+                    // Point to line, or line to line: from a point (or the
+                    // first line's midpoint) to its foot on the other line.
+                    let (p, line) = match (points.get(a), points.get(b)) {
+                        (Some(p), None) => (*p, *b),
+                        (None, Some(p)) => (*p, *a),
+                        _ => {
+                            let (a0, a1) = line_ends(sketch, points, *a)?;
+                            ((a0 + a1) * 0.5, *b)
+                        }
+                    };
+                    let (l0, l1) = line_ends(sketch, points, line)?;
+                    let dir = (l1 - l0).normalize_or_zero();
+                    let foot = l0 + dir * (p - l0).dot(dir);
+                    let near = if (foot - l0).length() < (foot - l1).length() {
+                        l0
+                    } else {
+                        l1
+                    };
+                    let n = perp((foot - p).normalize_or_zero());
+                    (vec![[p, foot], [foot, near]], (p + foot) * 0.5 + n * off * 0.6)
+                }
+            }
+        }
+        Constraint::Radius { curve, .. } => {
+            let (center, r, dir) = circular(sketch, points, *curve)?;
+            (
+                vec![[center, center + dir * (r + off)]],
+                center + dir * (r + off * 1.7),
+            )
+        }
+        Constraint::Diameter { curve, .. } => {
+            let (center, r, dir) = circular(sketch, points, *curve)?;
+            (
+                vec![[center - dir * r, center + dir * (r + off)]],
+                center + dir * (r + off * 1.7),
+            )
+        }
+        Constraint::Angle { a, b, value } => {
+            let (a0, a1) = line_ends(sketch, points, *a)?;
+            let (b0, b1) = line_ends(sketch, points, *b)?;
+            let (da, db) = (a1 - a0, b1 - b0);
+            let cross = da.perp_dot(db);
+            let x = if cross.abs() > 1e-12 * da.length() * db.length() {
+                a0 + da * ((b0 - a0).perp_dot(db) / cross)
+            } else {
+                (a0 + a1) * 0.5
+            };
+            let r = off * 1.6;
+            let start = da.to_angle();
+            let n = 24;
+            let arc: Vec<DVec2> = (0..=n)
+                .map(|i| x + DVec2::from_angle(start + value * i as f64 / n as f64) * r)
+                .collect();
+            let lines = arc.windows(2).map(|w| [w[0], w[1]]).collect();
+            (lines, x + DVec2::from_angle(start + value * 0.5) * (r + off * 0.9))
+        }
+        _ => return None,
+    };
+    let text = dimension_text(&c.constraint);
+    let center = map.to_screen(at)?;
+    let lines = lines
+        .into_iter()
+        .filter_map(|[a, b]| Some([map.to_screen(a)?, map.to_screen(b)?]))
+        .collect();
+    Some(Annotation {
+        constraint: c.id,
+        rect: Rect::from_center_size(center, label_size(&text)),
+        text,
+        lines,
+        dimension: true,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Picking and snapping
+// ---------------------------------------------------------------------------
+
+/// Something under the pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick {
+    /// A point or curve.
+    Entity(SketchId),
+    /// A constraint glyph or dimension label.
+    Constraint(SketchId),
+}
+
+impl Pick {
+    /// The picked item.
+    pub fn id(self) -> SketchId {
+        match self {
+            Pick::Entity(id) | Pick::Constraint(id) => id,
+        }
+    }
+}
+
+/// Distance from `p` to segment `ab`, and the closest point.
+fn segment_distance(p: Pos2, a: Pos2, b: Pos2) -> (f32, Pos2) {
+    let ab = b - a;
+    let l2 = ab.length_sq();
+    let t = if l2 > 0.0 {
+        ((p - a).dot(ab) / l2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let q = a + ab * t;
+    (p.distance(q), q)
+}
+
+/// The nearest point entity within `radius` of `pos`.
+fn nearest_point(
+    d: &SketchDisplay,
+    map: &ScreenMap,
+    pos: Pos2,
+    radius: f32,
+    exclude: &[SketchId],
+) -> Option<(SketchId, DVec2)> {
+    d.points()
+        .filter(|(id, _)| !exclude.contains(id))
+        .filter_map(|(id, at)| Some((id, at, map.to_screen(at)?.distance(pos))))
+        .filter(|(_, _, dist)| *dist <= radius)
+        .min_by(|a, b| a.2.total_cmp(&b.2))
+        .map(|(id, at, _)| (id, at))
+}
+
+/// The nearest curve within `radius` of `pos`, with the closest screen
+/// point on it.
+fn nearest_curve(
+    d: &SketchDisplay,
+    map: &ScreenMap,
+    pos: Pos2,
+    radius: f32,
+) -> Option<(SketchId, Pos2)> {
+    let mut best: Option<(SketchId, Pos2, f32)> = None;
+    for c in &d.curves {
+        for run in map.polyline(&c.polyline) {
+            for w in run.windows(2) {
+                let (dist, q) = segment_distance(pos, w[0], w[1]);
+                if dist <= radius && best.is_none_or(|b| dist < b.2) {
+                    best = Some((c.id, q, dist));
+                }
+            }
+        }
+    }
+    best.map(|(id, q, _)| (id, q))
+}
+
+/// What is under `pos`: labels first, then points, then curves.
+pub fn pick(
+    d: &SketchDisplay,
+    annotations: &[Annotation],
+    map: &ScreenMap,
+    pos: Pos2,
+) -> Option<Pick> {
+    if let Some(a) = annotations.iter().rev().find(|a| a.rect.contains(pos)) {
+        return Some(Pick::Constraint(a.constraint));
+    }
+    if let Some((id, _)) = nearest_point(d, map, pos, POINT_PICK, &[]) {
+        return Some(Pick::Entity(id));
+    }
+    nearest_curve(d, map, pos, CURVE_PICK).map(|(id, _)| Pick::Entity(id))
+}
+
+/// What a click snapped to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapTarget {
+    /// Nothing: a free position.
+    Free,
+    /// An existing point (the new point is made coincident with it).
+    Point(SketchId),
+    /// An existing curve (the new point is constrained onto it).
+    Curve(SketchId),
+    /// The sketch origin (the new point is fixed there).
+    Origin,
+}
+
+/// A snapped pointer position.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Snap {
+    /// Position in plane coordinates.
+    pub at: DVec2,
+    /// What it snapped to.
+    pub target: SnapTarget,
+}
+
+/// The exact point of a curve nearest `p` for lines and circulars, else `p`.
+fn onto_curve(d: &SketchDisplay, id: SketchId, p: DVec2) -> DVec2 {
+    match d.curve(id).map(|c| &c.curve) {
+        Some(ResolvedCurve::Line { start, end }) => {
+            let dir = (*end - *start).normalize_or_zero();
+            *start + dir * (p - *start).dot(dir)
+        }
+        Some(ResolvedCurve::Circle { center, radius })
+        | Some(ResolvedCurve::Arc { center, radius, .. }) => {
+            let v = p - *center;
+            if v.length() > 0.0 {
+                *center + v.normalize() * *radius
+            } else {
+                p
+            }
+        }
+        _ => p,
+    }
+}
+
+/// Snaps `pos` to a point, the origin or a curve of `d`.
+pub fn snap(d: &SketchDisplay, map: &ScreenMap, pos: Pos2, exclude: &[SketchId]) -> Option<Snap> {
+    let free = map.to_plane(pos)?;
+    if let Some((id, at)) = nearest_point(d, map, pos, POINT_PICK, exclude) {
+        return Some(Snap {
+            at,
+            target: SnapTarget::Point(id),
+        });
+    }
+    if map
+        .to_screen(DVec2::ZERO)
+        .is_some_and(|o| o.distance(pos) <= ORIGIN_PICK)
+    {
+        return Some(Snap {
+            at: DVec2::ZERO,
+            target: SnapTarget::Origin,
+        });
+    }
+    if let Some((id, q)) = nearest_curve(d, map, pos, CURVE_PICK) {
+        let at = onto_curve(d, id, map.to_plane(q).unwrap_or(free));
+        return Some(Snap {
+            at,
+            target: SnapTarget::Curve(id),
+        });
+    }
+    Some(Snap {
+        at: free,
+        target: SnapTarget::Free,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Building edit batches
+// ---------------------------------------------------------------------------
+
+/// Builds one sketch edit batch with batch-local ids.
+#[derive(Default)]
+struct Batch {
+    edits: Vec<SketchEdit>,
+    next: u32,
+}
+
+impl Batch {
+    fn entity(&mut self, geometry: Geometry<SketchId>, construction: bool) -> SketchId {
+        let id = SketchId::new_in_batch(self.next);
+        self.next += 1;
+        self.edits.push(SketchEdit::AddEntity(Entity {
+            id,
+            geometry,
+            construction,
+        }));
+        id
+    }
+
+    fn point(&mut self, at: DVec2) -> SketchId {
+        self.entity(Geometry::Point { at }, false)
+    }
+
+    fn constraint(&mut self, constraint: Constraint<SketchId>) -> SketchId {
+        let id = SketchId::new_in_batch(self.next);
+        self.next += 1;
+        self.edits
+            .push(SketchEdit::AddConstraint(ConstraintEntry { id, constraint }));
+        id
+    }
+
+    /// A new point at a snap, constrained to what it snapped to.
+    fn snapped_point(&mut self, s: &Snap) -> SketchId {
+        let p = self.point(s.at);
+        self.attach(p, s);
+        p
+    }
+
+    /// Constrains an existing new point to what `s` snapped to.
+    fn attach(&mut self, p: SketchId, s: &Snap) {
+        match s.target {
+            SnapTarget::Free => {}
+            SnapTarget::Point(q) => {
+                self.constraint(Constraint::Coincident { a: q, b: p });
+            }
+            SnapTarget::Curve(c) => {
+                self.constraint(Constraint::PointOnCurve { point: p, curve: c });
+            }
+            SnapTarget::Origin => {
+                self.constraint(Constraint::Fix {
+                    point: p,
+                    at: DVec2::ZERO,
+                });
+            }
+        }
+    }
+}
+
+/// Centre and radius of the circle through three points.
+pub fn circumcircle(a: DVec2, b: DVec2, c: DVec2) -> Option<(DVec2, f64)> {
+    let (b, c) = (b - a, c - a);
+    let d = 2.0 * b.perp_dot(c);
+    // Reject (nearly) collinear points: the circle would be enormous.
+    if d.abs() <= 2e-4 * b.length() * c.length() || d == 0.0 {
+        return None;
+    }
+    let u = DVec2::new(
+        c.y * b.length_squared() - b.y * c.length_squared(),
+        b.x * c.length_squared() - c.x * b.length_squared(),
+    ) / d;
+    Some((a + u, u.length()))
+}
+
+/// Points of an arc, `sweep` signed.
+fn arc_points(center: DVec2, radius: f64, start: f64, sweep: f64) -> Vec<DVec2> {
+    let n = ((sweep.abs() / (3.75f64).to_radians()).ceil() as usize).clamp(4, 96);
+    (0..=n)
+        .map(|i| center + DVec2::from_angle(start + sweep * i as f64 / n as f64) * radius)
+        .collect()
+}
+
+/// Counter-clockwise sweep from angle `a` to angle `b`, in [0, 2π).
+fn ccw(a: f64, b: f64) -> f64 {
+    (b - a).rem_euclid(TAU)
+}
+
+// ---------------------------------------------------------------------------
+// Tools
+// ---------------------------------------------------------------------------
+
+/// A sketch tool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tool {
+    /// Select, drag, delete.
+    Select,
+    /// Lines, chained end to end.
+    Line,
+    /// Axis-aligned rectangle from two corners.
+    Rectangle,
+    /// Circle from its centre and a point on it.
+    Circle,
+    /// Arc through three points (start, end, a point on the arc).
+    Arc,
+    /// Arc from its centre, start and end.
+    CenterArc,
+    /// A point.
+    Point,
+    /// Spline through clicked points (finish with Enter or a double-click).
+    Spline,
+}
+
+impl Tool {
+    /// Every tool, in toolbar order.
+    pub const ALL: [Tool; 8] = [
+        Tool::Select,
+        Tool::Line,
+        Tool::Rectangle,
+        Tool::Circle,
+        Tool::Arc,
+        Tool::CenterArc,
+        Tool::Point,
+        Tool::Spline,
+    ];
+
+    /// Toolbar label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Tool::Select => "Select",
+            Tool::Line => "Line",
+            Tool::Rectangle => "Rectangle",
+            Tool::Circle => "Circle",
+            Tool::Arc => "3-point arc",
+            Tool::CenterArc => "Centre arc",
+            Tool::Point => "Point",
+            Tool::Spline => "Spline",
+        }
+    }
+
+    /// Keyboard shortcut.
+    pub fn key(self) -> Option<egui::Key> {
+        Some(match self {
+            Tool::Select => return None,
+            Tool::Line => egui::Key::L,
+            Tool::Rectangle => egui::Key::R,
+            Tool::Circle => egui::Key::C,
+            Tool::Arc => egui::Key::A,
+            Tool::CenterArc => return None,
+            Tool::Point => egui::Key::P,
+            Tool::Spline => egui::Key::S,
+        })
+    }
+
+    /// What to do next, given the clicks so far.
+    pub fn hint(self, clicks: usize) -> &'static str {
+        match (self, clicks) {
+            (Tool::Select, _) => {
+                "Click to select (Shift adds), drag to move or box-select, Delete removes"
+            }
+            (Tool::Line, 0) => "Click the start point",
+            (Tool::Line, _) => "Click the end point (double-click or Esc ends the chain)",
+            (Tool::Rectangle, 0) => "Click the first corner",
+            (Tool::Rectangle, _) => "Click the opposite corner",
+            (Tool::Circle, 0) => "Click the centre",
+            (Tool::Circle, _) => "Click a point on the circle",
+            (Tool::Arc, 0) => "Click the start point",
+            (Tool::Arc, 1) => "Click the end point",
+            (Tool::Arc, _) => "Click a point on the arc",
+            (Tool::CenterArc, 0) => "Click the centre",
+            (Tool::CenterArc, 1) => "Click the start point",
+            (Tool::CenterArc, _) => "Move around the centre and click the end point",
+            (Tool::Point, _) => "Click to place a point",
+            (Tool::Spline, 0) => "Click the first point",
+            (Tool::Spline, _) => "Click more points; Enter or double-click finishes",
+        }
+    }
+}
+
+/// A geometric constraint applied to the selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstraintTool {
+    /// Two points coincide, or a point lies on a curve.
+    Coincident,
+    /// Lines horizontal, or two points level.
+    Horizontal,
+    /// Lines vertical, or two points aligned vertically.
+    Vertical,
+    /// Lines parallel.
+    Parallel,
+    /// Two lines perpendicular.
+    Perpendicular,
+    /// Two curves tangent.
+    Tangent,
+    /// Equal lengths or radii.
+    Equal,
+    /// A point at a line's midpoint.
+    Midpoint,
+    /// Two circles or arcs share a centre.
+    Concentric,
+    /// Two points mirror each other about a line.
+    Symmetric,
+    /// A line through a circle's centre.
+    Normal,
+    /// Points fixed where they are.
+    Fix,
+}
+
+impl ConstraintTool {
+    /// Every constraint tool, in toolbar order.
+    pub const ALL: [ConstraintTool; 12] = [
+        ConstraintTool::Coincident,
+        ConstraintTool::Horizontal,
+        ConstraintTool::Vertical,
+        ConstraintTool::Parallel,
+        ConstraintTool::Perpendicular,
+        ConstraintTool::Tangent,
+        ConstraintTool::Equal,
+        ConstraintTool::Midpoint,
+        ConstraintTool::Concentric,
+        ConstraintTool::Symmetric,
+        ConstraintTool::Normal,
+        ConstraintTool::Fix,
+    ];
+
+    /// Toolbar label.
+    pub fn label(self) -> &'static str {
+        match self {
+            ConstraintTool::Coincident => "Coincident",
+            ConstraintTool::Horizontal => "Horizontal",
+            ConstraintTool::Vertical => "Vertical",
+            ConstraintTool::Parallel => "Parallel",
+            ConstraintTool::Perpendicular => "Perpendicular",
+            ConstraintTool::Tangent => "Tangent",
+            ConstraintTool::Equal => "Equal",
+            ConstraintTool::Midpoint => "Midpoint",
+            ConstraintTool::Concentric => "Concentric",
+            ConstraintTool::Symmetric => "Symmetric",
+            ConstraintTool::Normal => "Normal",
+            ConstraintTool::Fix => "Fix",
+        }
+    }
+
+    /// What the tool needs selected.
+    pub fn needs(self) -> &'static str {
+        match self {
+            ConstraintTool::Coincident => "two points, or a point and a curve",
+            ConstraintTool::Horizontal | ConstraintTool::Vertical => {
+                "one or more lines, or two points"
+            }
+            ConstraintTool::Parallel => "two or more lines",
+            ConstraintTool::Perpendicular => "two lines",
+            ConstraintTool::Tangent => "two curves (not two lines)",
+            ConstraintTool::Equal => "two or more lines, or two or more circles and arcs",
+            ConstraintTool::Midpoint => "a point and a line",
+            ConstraintTool::Concentric => "two circles or arcs",
+            ConstraintTool::Symmetric => "two points and a line",
+            ConstraintTool::Normal => "a line and a circle or arc",
+            ConstraintTool::Fix => "one or more points",
+        }
+    }
+}
+
+/// What kind of entity an id is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Point,
+    Line,
+    Circle,
+    Arc,
+    Spline,
+}
+
+impl Kind {
+    fn circular(self) -> bool {
+        matches!(self, Kind::Circle | Kind::Arc)
+    }
+}
+
+fn kind(sketch: &SketchData, id: SketchId) -> Option<Kind> {
+    Some(match sketch.entity(id)?.geometry {
+        Geometry::Point { .. } => Kind::Point,
+        Geometry::Line { .. } => Kind::Line,
+        Geometry::Circle { .. } => Kind::Circle,
+        Geometry::Arc { .. } => Kind::Arc,
+        Geometry::ControlSpline { .. } | Geometry::InterpolatedSpline { .. } => Kind::Spline,
+    })
+}
+
+/// The end points of a curve (none for a circle).
+fn end_points(sketch: &SketchData, id: SketchId) -> Vec<SketchId> {
+    match &sketch.entity(id).map(|e| &e.geometry) {
+        Some(Geometry::Line { start, end }) | Some(Geometry::Arc { start, end, .. }) => {
+            vec![*start, *end]
+        }
+        Some(Geometry::ControlSpline { control: p, .. })
+        | Some(Geometry::InterpolatedSpline { through: p, .. }) => {
+            p.first().into_iter().chain(p.last()).copied().collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// An end point of `a` that `b` shares: the same point, a coincident one,
+/// or one at the same position.
+fn shared_end(sketch: &SketchData, a: SketchId, b: SketchId) -> Option<SketchId> {
+    let (ea, eb) = (end_points(sketch, a), end_points(sketch, b));
+    let coincident = |p: SketchId, q: SketchId| {
+        p == q
+            || sketch.constraints.iter().any(|c| {
+                matches!(c.constraint, Constraint::Coincident { a, b }
+                    if (a == p && b == q) || (a == q && b == p))
+            })
+            || matches!((sketch.point(p), sketch.point(q)),
+                (Some(x), Some(y)) if (x - y).length() <= SAME_POINT)
+    };
+    ea.iter()
+        .find(|p| eb.iter().any(|q| coincident(**p, *q)))
+        .copied()
+}
+
+fn center_radius(sketch: &SketchData, id: SketchId) -> Option<(DVec2, f64)> {
+    match sketch.entity(id)?.geometry {
+        Geometry::Circle { center, radius } => Some((sketch.point(center)?, radius)),
+        Geometry::Arc { center, start, .. } => {
+            let c = sketch.point(center)?;
+            Some((c, (sketch.point(start)? - c).length()))
+        }
+        _ => None,
+    }
+}
+
+/// The constraints a tool adds for a selection (entities in selection
+/// order), or why it does not apply.
+pub fn constraints_for(
+    tool: ConstraintTool,
+    selection: &[SketchId],
+    sketch: &SketchData,
+) -> Result<Vec<Constraint<SketchId>>, String> {
+    let items: Vec<(SketchId, Kind)> = selection
+        .iter()
+        .filter_map(|id| Some((*id, kind(sketch, *id)?)))
+        .collect();
+    let kinds: Vec<Kind> = items.iter().map(|(_, k)| *k).collect();
+    let ids: Vec<SketchId> = items.iter().map(|(id, _)| *id).collect();
+    let all = |k: Kind| !kinds.is_empty() && kinds.iter().all(|x| *x == k);
+    let find = |want: Kind| items.iter().find(|(_, k)| *k == want).map(|(id, _)| *id);
+    let need = || Err(format!("{} needs {}", tool.label(), tool.needs()));
+    use Constraint as C;
+    Ok(match tool {
+        ConstraintTool::Coincident => match kinds.as_slice() {
+            [Kind::Point, Kind::Point] => vec![C::Coincident {
+                a: ids[0],
+                b: ids[1],
+            }],
+            [Kind::Point, _] => vec![C::PointOnCurve {
+                point: ids[0],
+                curve: ids[1],
+            }],
+            [_, Kind::Point] => vec![C::PointOnCurve {
+                point: ids[1],
+                curve: ids[0],
+            }],
+            _ => return need(),
+        },
+        ConstraintTool::Horizontal | ConstraintTool::Vertical => {
+            let h = tool == ConstraintTool::Horizontal;
+            if all(Kind::Line) {
+                ids.iter()
+                    .map(|&line| {
+                        if h {
+                            C::Horizontal { line }
+                        } else {
+                            C::Vertical { line }
+                        }
+                    })
+                    .collect()
+            } else if kinds == [Kind::Point, Kind::Point] {
+                let (a, b) = (ids[0], ids[1]);
+                vec![if h {
+                    C::HorizontalPoints { a, b }
+                } else {
+                    C::VerticalPoints { a, b }
+                }]
+            } else {
+                return need();
+            }
+        }
+        ConstraintTool::Parallel if all(Kind::Line) && ids.len() >= 2 => ids[1..]
+            .iter()
+            .map(|&b| C::Parallel { a: ids[0], b })
+            .collect(),
+        ConstraintTool::Perpendicular if kinds == [Kind::Line, Kind::Line] => {
+            vec![C::Perpendicular {
+                a: ids[0],
+                b: ids[1],
+            }]
+        }
+        ConstraintTool::Equal
+            if ids.len() >= 2 && (all(Kind::Line) || kinds.iter().all(|k| k.circular())) =>
+        {
+            ids[1..]
+                .iter()
+                .map(|&b| C::Equal { a: ids[0], b })
+                .collect()
+        }
+        ConstraintTool::Midpoint if ids.len() == 2 => match (find(Kind::Point), find(Kind::Line))
+        {
+            (Some(point), Some(line)) => vec![C::Midpoint { point, line }],
+            _ => return need(),
+        },
+        ConstraintTool::Concentric
+            if ids.len() == 2 && kinds.iter().all(|k| k.circular()) =>
+        {
+            vec![C::Concentric {
+                a: ids[0],
+                b: ids[1],
+            }]
+        }
+        ConstraintTool::Symmetric if ids.len() == 3 => {
+            let pts: Vec<SketchId> = items
+                .iter()
+                .filter(|(_, k)| *k == Kind::Point)
+                .map(|(id, _)| *id)
+                .collect();
+            match (pts.as_slice(), find(Kind::Line)) {
+                ([a, b], Some(axis)) => vec![C::Symmetric {
+                    a: *a,
+                    b: *b,
+                    axis,
+                }],
+                _ => return need(),
+            }
+        }
+        ConstraintTool::Normal if ids.len() == 2 => {
+            let curve = items.iter().find(|(_, k)| k.circular()).map(|(id, _)| *id);
+            match (find(Kind::Line), curve) {
+                (Some(line), Some(curve)) => vec![C::Normal { line, curve }],
+                _ => return need(),
+            }
+        }
+        ConstraintTool::Fix if all(Kind::Point) => ids
+            .iter()
+            .filter_map(|&point| {
+                Some(C::Fix {
+                    point,
+                    at: sketch.point(point)?,
+                })
+            })
+            .collect(),
+        ConstraintTool::Tangent if ids.len() == 2 && !kinds.contains(&Kind::Point) => {
+            let (a, b) = (ids[0], ids[1]);
+            if kinds == [Kind::Line, Kind::Line] {
+                return Err("Two lines can't be tangent; use Parallel".into());
+            }
+            let kind = if let Some(point) = shared_end(sketch, a, b) {
+                TangentKind::AtPoint { point }
+            } else if kinds.contains(&Kind::Spline) {
+                return Err("Tangency with a spline needs a shared end point".into());
+            } else if kinds.contains(&Kind::Line) {
+                let (line, circ) = if kinds[0] == Kind::Line { (a, b) } else { (b, a) };
+                let ends = end_points(sketch, line);
+                let (s, e) = (
+                    sketch.point(ends[0]).ok_or("missing point")?,
+                    sketch.point(ends[1]).ok_or("missing point")?,
+                );
+                let (c, _) = center_radius(sketch, circ).ok_or("missing centre")?;
+                TangentKind::LineCircle {
+                    center_left: (e - s).perp_dot(c - s) > 0.0,
+                }
+            } else {
+                let (c1, r1) = center_radius(sketch, a).ok_or("missing centre")?;
+                let (c2, r2) = center_radius(sketch, b).ok_or("missing centre")?;
+                TangentKind::CircleCircle {
+                    internal: (c1 - c2).length() < r1.max(r2),
+                }
+            };
+            vec![C::Tangent { a, b, kind }]
+        }
+        _ => return need(),
+    })
+}
+
+/// The dimension a selection gets (value not yet measured), or why none.
+pub fn dimension_for(
+    selection: &[SketchId],
+    sketch: &SketchData,
+) -> Result<Constraint<SketchId>, String> {
+    let items: Vec<(SketchId, Kind)> = selection
+        .iter()
+        .filter_map(|id| Some((*id, kind(sketch, *id)?)))
+        .collect();
+    use Constraint as C;
+    Ok(match items.as_slice() {
+        [(line, Kind::Line)] => C::Length {
+            line: *line,
+            value: 0.0,
+        },
+        [(curve, Kind::Circle)] => C::Diameter {
+            curve: *curve,
+            value: 0.0,
+        },
+        [(curve, Kind::Arc)] => C::Radius {
+            curve: *curve,
+            value: 0.0,
+        },
+        [(a, Kind::Point), (b, Kind::Point)] => C::Distance {
+            a: *a,
+            b: *b,
+            kind: DistanceKind::Aligned,
+            value: 0.0,
+        },
+        [(a, Kind::Point), (b, Kind::Line)] | [(b, Kind::Line), (a, Kind::Point)] => {
+            C::Distance {
+                a: *a,
+                b: *b,
+                kind: DistanceKind::Aligned,
+                value: 0.0,
+            }
+        }
+        [(a, Kind::Line), (b, Kind::Line)] => {
+            let dir = |l: SketchId| -> Option<DVec2> {
+                let e = end_points(sketch, l);
+                Some(sketch.point(e[1])? - sketch.point(e[0])?)
+            };
+            let (da, db) = (
+                dir(*a).ok_or("missing point")?,
+                dir(*b).ok_or("missing point")?,
+            );
+            if da.perp_dot(db).abs() <= 1e-9 * da.length() * db.length() {
+                C::Distance {
+                    a: *a,
+                    b: *b,
+                    kind: DistanceKind::Aligned,
+                    value: 0.0,
+                }
+            } else {
+                C::Angle {
+                    a: *a,
+                    b: *b,
+                    value: 0.0,
+                }
+            }
+        }
+        _ => {
+            return Err("Dimension needs a line, a circle or arc, two points, a point and a \
+                        line, or two lines"
+                .into())
+        }
+    })
+}
+
+/// A dimension value being entered.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DimensionPrompt {
+    /// The dimension: new (not yet added) or existing.
+    pub constraint: Constraint<SketchId>,
+    /// The existing dimension being changed, if any.
+    pub existing: Option<SketchId>,
+    /// The value as typed (bare numbers are millimetres or degrees).
+    pub text: String,
+    /// Where to show the prompt.
+    pub at: Pos2,
+    /// Why the last entry was refused.
+    pub error: Option<String>,
+}
+
+impl DimensionPrompt {
+    /// True for angles.
+    pub fn is_angle(&self) -> bool {
+        matches!(self.constraint, Constraint::Angle { .. })
+    }
+
+    /// How a point-to-point distance is measured, if it is one.
+    pub fn distance_kind(&self) -> Option<DistanceKind> {
+        match self.constraint {
+            Constraint::Distance { kind, .. } if self.existing.is_none() => Some(kind),
+            _ => None,
+        }
+    }
+
+    /// Parses the typed value into SI units, keeping an angle's sign.
+    fn value(&self) -> Result<f64, String> {
+        let current = self.constraint.value().unwrap_or(0.0);
+        if self.is_angle() {
+            let v = Quantity::parse_angle(&self.text).map_err(|e| e.to_string())?;
+            let v = v.abs() * if current < 0.0 { -1.0 } else { 1.0 };
+            if v.abs() > PI {
+                return Err("an angle between lines is at most 180°".into());
+            }
+            Ok(v)
+        } else {
+            let v = Quantity::parse_length(&self.text, LengthUnit::Millimetre)
+                .map_err(|e| e.to_string())?;
+            if v <= 0.0 {
+                return Err("a length must be positive".into());
+            }
+            Ok(v)
+        }
+    }
+}
+
+/// Text a prompt starts with for a value (millimetres or degrees, no unit).
+fn prompt_text(c: &Constraint<SketchId>) -> String {
+    let v = c.value().unwrap_or(0.0);
+    match c {
+        Constraint::Angle { .. } => trim_number(v.abs().to_degrees()),
+        _ => trim_number(v / LengthUnit::Millimetre.metres()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The editor
+// ---------------------------------------------------------------------------
+
+/// An in-progress pointer drag.
+#[derive(Clone, Debug)]
+enum Drag {
+    /// Moving points; `points` are where they started.
+    Move {
+        grab: DVec2,
+        points: Vec<(SketchId, DVec2)>,
+    },
+    /// Changing a circle's radius.
+    Radius { circle: SketchId },
+    /// Box selection.
+    Box { from: Pos2, to: Pos2 },
+    /// A drawing tool's press-drag-release (a click at each end).
+    Draw { from: Pos2 },
+}
+
+/// The state of sketch mode for one sketch.
+#[derive(Clone, Debug)]
+pub struct SketchEditor {
+    /// The sketch being edited.
+    pub feature: FeatureId,
+    /// Current tool.
+    pub tool: Tool,
+    /// New geometry is construction geometry.
+    pub construction: bool,
+    /// Selected entities and constraints, in selection order.
+    pub selection: Vec<SketchId>,
+    /// What is under the pointer (Select tool).
+    pub hover: Option<Pick>,
+    /// Where the pointer snaps (drawing tools).
+    pub cursor: Option<Snap>,
+    /// Horizontal (true) or vertical (false) inferred for the line being
+    /// drawn.
+    pub inferred: Option<bool>,
+    /// Clicks of the drawing tool so far.
+    pub clicks: Vec<Snap>,
+    /// Signed angle the pointer has turned around a centre-point arc's
+    /// centre since its start point.
+    turn: f64,
+    last_angle: Option<f64>,
+    drag: Option<Drag>,
+    preview: Option<Solution<SketchId>>,
+    /// A dimension value being entered.
+    pub prompt: Option<DimensionPrompt>,
+    /// Feedback for the status bar.
+    pub message: Option<String>,
+}
+
+impl SketchEditor {
+    /// Starts editing `feature` with the Select tool.
+    pub fn new(feature: FeatureId) -> SketchEditor {
+        SketchEditor {
+            feature,
+            tool: Tool::Select,
+            construction: false,
+            selection: Vec::new(),
+            hover: None,
+            cursor: None,
+            inferred: None,
+            clicks: Vec::new(),
+            turn: 0.0,
+            last_angle: None,
+            drag: None,
+            preview: None,
+            prompt: None,
+            message: None,
+        }
+    }
+
+    /// The geometry to draw: the drag preview, or the regenerated sketch.
+    pub fn display(&self, model: &Model) -> Option<SketchDisplay> {
+        let r = model.sketch_result(self.feature)?;
+        Some(match &self.preview {
+            Some(p) => SketchDisplay::from_solution(self.feature, r.frame, p),
+            None => SketchDisplay::from_result(r),
+        })
+    }
+
+    /// The sketch plane.
+    pub fn frame(&self, model: &Model) -> Option<Frame> {
+        model.sketch_result(self.feature).map(|r| r.frame)
+    }
+
+    /// Switches tool, abandoning any clicks of the previous one.
+    pub fn set_tool(&mut self, tool: Tool) {
+        self.tool = tool;
+        self.reset_tool();
+        self.hover = None;
+    }
+
+    fn reset_tool(&mut self) {
+        self.clicks.clear();
+        self.inferred = None;
+        self.turn = 0.0;
+        self.last_angle = None;
+    }
+
+    /// Escape: abandons the current clicks, else returns to Select, else
+    /// clears the selection.
+    pub fn escape(&mut self) {
+        if self.prompt.take().is_some() {
+            return;
+        }
+        if self.drag.take().is_some() {
+            self.preview = None;
+            return;
+        }
+        if !self.clicks.is_empty() {
+            self.reset_tool();
+        } else if self.tool != Tool::Select {
+            self.set_tool(Tool::Select);
+        } else {
+            self.selection.clear();
+        }
+    }
+
+    fn commit(&mut self, model: &mut Model, edits: Vec<SketchEdit>) -> Option<OpId> {
+        match model.edit_sketch(self.feature, edits) {
+            Ok(op) => {
+                self.message = self.solve_message(model);
+                Some(op)
+            }
+            Err(e) => {
+                self.message = Some(format!("Edit refused: {e}"));
+                None
+            }
+        }
+    }
+
+    /// A warning when the sketch no longer solves.
+    fn solve_message(&self, model: &Model) -> Option<String> {
+        match &model.sketch_result(self.feature)?.solution.status {
+            SolveStatus::Failed(SolveError::Conflicting) => Some(
+                "Constraints conflict (shown in red): delete one, or undo with Ctrl+Z".into(),
+            ),
+            SolveStatus::Failed(e) => Some(format!("Sketch does not solve: {e}")),
+            _ => None,
+        }
+    }
+
+    /// The sketch's state for the status bar: degrees of freedom, redundant
+    /// or conflicting constraints.
+    pub fn status(&self, model: &Model) -> String {
+        let Some(r) = model.sketch_result(self.feature) else {
+            return "The sketch is suppressed or was deleted".into();
+        };
+        let s = &r.solution;
+        let mut text = match &s.status {
+            SolveStatus::Solved if s.dof == 0 => "Fully defined".to_string(),
+            SolveStatus::Solved => format!("{} degrees of freedom", s.dof),
+            SolveStatus::Redundant => format!(
+                "{} redundant constraint{} (orange) · {} degrees of freedom",
+                s.redundant.len(),
+                if s.redundant.len() == 1 { "" } else { "s" },
+                s.dof
+            ),
+            SolveStatus::Failed(SolveError::Conflicting) => {
+                "Conflicting constraints (red)".to_string()
+            }
+            SolveStatus::Failed(e) => format!("Not solved: {e}"),
+        };
+        if let Err(e) = &r.regions {
+            if !matches!(s.status, SolveStatus::Failed(_)) {
+                text.push_str(&format!(" · regions: {e}"));
+            }
+        }
+        text
+    }
+
+    /// Updates hover, snapping and inference for the pointer at `pos`.
+    pub fn hover(&mut self, model: &Model, map: &ScreenMap, pos: Option<Pos2>) {
+        self.hover = None;
+        self.cursor = None;
+        self.inferred = None;
+        let (Some(pos), Some(d)) = (pos, self.display(model)) else {
+            return;
+        };
+        if self.tool == Tool::Select {
+            if self.drag.is_none() {
+                self.hover = pick(&d, &annotations(&d, map), map, pos);
+            }
+            return;
+        }
+        let Some(mut s) = snap(&d, map, pos, &[]) else {
+            return;
+        };
+        if self.tool == Tool::Line && s.target == SnapTarget::Free {
+            if let Some(start) = self.clicks.first() {
+                let v = s.at - start.at;
+                if v.length() > 0.0 {
+                    if v.y.abs() <= INFER_ANGLE.tan() * v.x.abs() {
+                        s.at.y = start.at.y;
+                        self.inferred = Some(true);
+                    } else if v.x.abs() <= INFER_ANGLE.tan() * v.y.abs() {
+                        s.at.x = start.at.x;
+                        self.inferred = Some(false);
+                    }
+                }
+            }
+        }
+        if self.tool == Tool::CenterArc && self.clicks.len() == 2 {
+            let a = (s.at - self.clicks[0].at).to_angle();
+            if let Some(last) = self.last_angle {
+                // Wrap the step into (−π, π].
+                let mut step = (a - last).rem_euclid(TAU);
+                if step > PI {
+                    step -= TAU;
+                }
+                self.turn += step;
+            } else {
+                let a0 = (self.clicks[1].at - self.clicks[0].at).to_angle();
+                let mut step = (a - a0).rem_euclid(TAU);
+                if step > PI {
+                    step -= TAU;
+                }
+                self.turn = step;
+            }
+            self.last_angle = Some(a);
+        }
+        self.cursor = Some(s);
+    }
+
+    /// Geometry of the tool in progress, as plane polylines.
+    pub fn rubber_band(&self) -> Vec<Vec<DVec2>> {
+        let Some(cur) = self.cursor else {
+            return Vec::new();
+        };
+        let c = &self.clicks;
+        match (self.tool, c.len()) {
+            (Tool::Line, 1) => vec![vec![c[0].at, cur.at]],
+            (Tool::Rectangle, 1) => {
+                let (a, b) = (c[0].at, cur.at);
+                vec![vec![
+                    a,
+                    DVec2::new(b.x, a.y),
+                    b,
+                    DVec2::new(a.x, b.y),
+                    a,
+                ]]
+            }
+            (Tool::Circle, 1) => {
+                vec![arc_points(c[0].at, (cur.at - c[0].at).length(), 0.0, TAU)]
+            }
+            (Tool::Arc, 1) => vec![vec![c[0].at, cur.at]],
+            (Tool::Arc, 2) => match circumcircle(c[0].at, c[1].at, cur.at) {
+                Some((center, r)) => {
+                    let (a0, a1, am) = (
+                        (c[0].at - center).to_angle(),
+                        (c[1].at - center).to_angle(),
+                        (cur.at - center).to_angle(),
+                    );
+                    let sweep = ccw(a0, a1);
+                    let sweep = if ccw(a0, am) < sweep {
+                        sweep
+                    } else {
+                        sweep - TAU
+                    };
+                    vec![arc_points(center, r, a0, sweep)]
+                }
+                None => vec![vec![c[0].at, c[1].at]],
+            },
+            (Tool::CenterArc, 1) => vec![vec![c[0].at, cur.at]],
+            (Tool::CenterArc, 2) => {
+                let r = (c[1].at - c[0].at).length();
+                let a0 = (c[1].at - c[0].at).to_angle();
+                vec![
+                    arc_points(c[0].at, r, a0, self.turn.clamp(-TAU, TAU)),
+                    vec![c[0].at, cur.at],
+                ]
+            }
+            (Tool::Spline, n) if n >= 1 => {
+                let mut pts: Vec<DVec2> = c.iter().map(|s| s.at).collect();
+                pts.push(cur.at);
+                pts.dedup_by(|a, b| (*a - *b).length() <= SAME_POINT);
+                match ProfileCurve::interpolate(&pts) {
+                    Ok(curve) if pts.len() >= 2 => vec![sample_curve(&curve)],
+                    _ => vec![pts],
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// A click at `pos`. `add` (Shift) extends the selection.
+    pub fn click(&mut self, model: &mut Model, map: &ScreenMap, pos: Pos2, add: bool) {
+        let Some(d) = self.display(model) else {
+            return;
+        };
+        if self.tool == Tool::Select {
+            let picked = pick(&d, &annotations(&d, map), map, pos);
+            match picked {
+                Some(p) => {
+                    let id = p.id();
+                    if add {
+                        if let Some(i) = self.selection.iter().position(|s| *s == id) {
+                            self.selection.remove(i);
+                        } else {
+                            self.selection.push(id);
+                        }
+                    } else {
+                        self.selection = vec![id];
+                    }
+                }
+                None if !add => self.selection.clear(),
+                None => {}
+            }
+            return;
+        }
+        // Use the hover state when it is for this position, so a click
+        // lands where the user saw the snap.
+        self.hover(model, map, Some(pos));
+        if let Some(s) = self.cursor {
+            self.tool_click(model, s);
+        }
+    }
+
+    fn tool_click(&mut self, model: &mut Model, s: Snap) {
+        let distinct = |a: &Snap, b: &Snap| {
+            (a.at - b.at).length() > SAME_POINT
+                && !(a.target == b.target && matches!(a.target, SnapTarget::Point(_)))
+        };
+        let construction = self.construction;
+        match self.tool {
+            Tool::Select => {}
+            Tool::Point => {
+                let mut b = Batch::default();
+                let p = b.snapped_point(&s);
+                if construction {
+                    b.edits.push(SketchEdit::SetConstruction {
+                        entity: p,
+                        construction: true,
+                    });
+                }
+                self.commit(model, b.edits);
+            }
+            Tool::Line => {
+                let Some(start) = self.clicks.first().copied() else {
+                    self.clicks.push(s);
+                    return;
+                };
+                if !distinct(&start, &s) {
+                    return;
+                }
+                let mut b = Batch::default();
+                let p0 = b.snapped_point(&start);
+                let p1 = b.snapped_point(&s);
+                let line = b.entity(Geometry::Line { start: p0, end: p1 }, construction);
+                match self.inferred {
+                    Some(true) => {
+                        b.constraint(Constraint::Horizontal { line });
+                    }
+                    Some(false) => {
+                        b.constraint(Constraint::Vertical { line });
+                    }
+                    None => {}
+                }
+                if let Some(op) = self.commit(model, b.edits) {
+                    // Chain: the next line starts at this one's end.
+                    let end = SketchId {
+                        op,
+                        index: p1.index,
+                    };
+                    let at = model
+                        .sketch_result(self.feature)
+                        .and_then(|r| r.solution.sketch.point(end))
+                        .unwrap_or(s.at);
+                    self.clicks = vec![Snap {
+                        at,
+                        target: SnapTarget::Point(end),
+                    }];
+                }
+            }
+            Tool::Rectangle => {
+                let Some(a) = self.clicks.first().copied() else {
+                    self.clicks.push(s);
+                    return;
+                };
+                let (p, q) = (a.at, s.at);
+                if (p.x - q.x).abs() <= SAME_POINT || (p.y - q.y).abs() <= SAME_POINT {
+                    return;
+                }
+                let corners = [p, DVec2::new(q.x, p.y), q, DVec2::new(p.x, q.y)];
+                let mut b = Batch::default();
+                let mut ends = Vec::new();
+                for i in 0..4 {
+                    let s0 = b.point(corners[i]);
+                    let s1 = b.point(corners[(i + 1) % 4]);
+                    ends.push((s0, s1));
+                }
+                let mut lines = Vec::new();
+                for (s0, s1) in &ends {
+                    lines.push(b.entity(
+                        Geometry::Line {
+                            start: *s0,
+                            end: *s1,
+                        },
+                        construction,
+                    ));
+                }
+                for i in 0..4 {
+                    b.constraint(Constraint::Coincident {
+                        a: ends[i].1,
+                        b: ends[(i + 1) % 4].0,
+                    });
+                }
+                for (i, line) in lines.iter().enumerate() {
+                    b.constraint(if i % 2 == 0 {
+                        Constraint::Horizontal { line: *line }
+                    } else {
+                        Constraint::Vertical { line: *line }
+                    });
+                }
+                b.attach(ends[0].0, &a);
+                b.attach(ends[1].1, &s);
+                if self.commit(model, b.edits).is_some() {
+                    self.reset_tool();
+                }
+            }
+            Tool::Circle => {
+                let Some(c) = self.clicks.first().copied() else {
+                    self.clicks.push(s);
+                    return;
+                };
+                let radius = (s.at - c.at).length();
+                if radius <= SAME_POINT {
+                    return;
+                }
+                let mut b = Batch::default();
+                let center = b.snapped_point(&c);
+                let circle = b.entity(Geometry::Circle { center, radius }, construction);
+                if let SnapTarget::Point(q) = s.target {
+                    b.constraint(Constraint::PointOnCurve {
+                        point: q,
+                        curve: circle,
+                    });
+                }
+                if self.commit(model, b.edits).is_some() {
+                    self.reset_tool();
+                }
+            }
+            Tool::Arc => {
+                if self.clicks.len() < 2 {
+                    if self.clicks.first().is_none_or(|a| distinct(a, &s)) {
+                        self.clicks.push(s);
+                    }
+                    return;
+                }
+                let (a, e) = (self.clicks[0], self.clicks[1]);
+                let Some((center, _)) = circumcircle(a.at, e.at, s.at) else {
+                    self.message = Some("The three points are in a line".into());
+                    return;
+                };
+                let (a0, a1, am) = (
+                    (a.at - center).to_angle(),
+                    (e.at - center).to_angle(),
+                    (s.at - center).to_angle(),
+                );
+                // The arc runs counter-clockwise from its start to its end
+                // through the third point.
+                let (first, second) = if ccw(a0, am) < ccw(a0, a1) {
+                    (a, e)
+                } else {
+                    (e, a)
+                };
+                let mut b = Batch::default();
+                let c = b.point(center);
+                let p0 = b.snapped_point(&first);
+                let p1 = b.snapped_point(&second);
+                b.entity(
+                    Geometry::Arc {
+                        center: c,
+                        start: p0,
+                        end: p1,
+                    },
+                    construction,
+                );
+                if self.commit(model, b.edits).is_some() {
+                    self.reset_tool();
+                }
+            }
+            Tool::CenterArc => {
+                if self.clicks.len() < 2 {
+                    if self.clicks.first().is_none_or(|a| distinct(a, &s)) {
+                        self.clicks.push(s);
+                        self.turn = 0.0;
+                        self.last_angle = None;
+                    }
+                    return;
+                }
+                let (c, start) = (self.clicks[0], self.clicks[1]);
+                let r = (start.at - c.at).length();
+                let dir = (s.at - c.at).normalize_or_zero();
+                if dir == DVec2::ZERO {
+                    return;
+                }
+                let end = Snap {
+                    at: c.at + dir * r,
+                    target: s.target,
+                };
+                let sweep = self.turn;
+                if sweep.abs() < 1e-6 || (end.at - start.at).length() <= SAME_POINT {
+                    return;
+                }
+                let (first, second) = if sweep > 0.0 {
+                    (start, end)
+                } else {
+                    (end, start)
+                };
+                let mut b = Batch::default();
+                let center = b.snapped_point(&c);
+                let p0 = b.snapped_point(&first);
+                let p1 = b.snapped_point(&second);
+                b.entity(
+                    Geometry::Arc {
+                        center,
+                        start: p0,
+                        end: p1,
+                    },
+                    construction,
+                );
+                if self.commit(model, b.edits).is_some() {
+                    self.reset_tool();
+                }
+            }
+            Tool::Spline => {
+                if self.clicks.last().is_none_or(|a| distinct(a, &s)) {
+                    self.clicks.push(s);
+                }
+            }
+        }
+    }
+
+    /// Enter: finishes a spline; ends a line chain.
+    pub fn finish(&mut self, model: &mut Model) {
+        if self.tool == Tool::Spline && self.clicks.len() >= 2 {
+            let clicks = std::mem::take(&mut self.clicks);
+            let mut lengths = vec![0.0];
+            for w in clicks.windows(2) {
+                let last = *lengths.last().unwrap_or(&0.0);
+                lengths.push(last + (w[1].at - w[0].at).length());
+            }
+            let total = *lengths.last().unwrap_or(&0.0);
+            if total <= SAME_POINT {
+                self.reset_tool();
+                return;
+            }
+            let mut params: Vec<f64> = lengths.iter().map(|l| l / total).collect();
+            if let Some(last) = params.last_mut() {
+                *last = 1.0;
+            }
+            let mut b = Batch::default();
+            let through: Vec<SketchId> = clicks.iter().map(|s| b.snapped_point(s)).collect();
+            b.entity(
+                Geometry::InterpolatedSpline { through, params },
+                self.construction,
+            );
+            self.commit(model, b.edits);
+        }
+        self.reset_tool();
+    }
+
+    /// A double-click: finishes a spline or a line chain; on a dimension,
+    /// edits its value.
+    pub fn double_click(&mut self, model: &mut Model, map: &ScreenMap, pos: Pos2) {
+        match self.tool {
+            Tool::Spline | Tool::Line => self.finish(model),
+            Tool::Select => {
+                let Some(d) = self.display(model) else {
+                    return;
+                };
+                if let Some(Pick::Constraint(id)) = pick(&d, &annotations(&d, map), map, pos) {
+                    self.edit_dimension(model, id, pos);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The pointer was pressed at `pos` and has started to move.
+    pub fn drag_start(&mut self, model: &mut Model, map: &ScreenMap, pos: Pos2) {
+        self.preview = None;
+        if self.tool != Tool::Select {
+            self.click(model, map, pos, false);
+            self.drag = Some(Drag::Draw { from: pos });
+            return;
+        }
+        let Some(d) = self.display(model) else {
+            return;
+        };
+        let grab = map.to_plane(pos);
+        let picked = pick(&d, &annotations(&d, map), map, pos);
+        self.drag = match (picked, grab) {
+            (Some(Pick::Entity(id)), Some(grab)) => {
+                let sketch = &d.sketch;
+                match kind(sketch, id) {
+                    Some(Kind::Circle) => Some(Drag::Radius { circle: id }),
+                    Some(Kind::Point) => sketch.point(id).map(|at| Drag::Move {
+                        grab,
+                        points: vec![(id, at)],
+                    }),
+                    Some(_) => {
+                        let ids = sketch
+                            .entity(id)
+                            .map(|e| e.geometry.referenced_points())
+                            .unwrap_or_default();
+                        Some(Drag::Move {
+                            grab,
+                            points: ids
+                                .into_iter()
+                                .filter_map(|p| Some((p, sketch.point(p)?)))
+                                .collect(),
+                        })
+                    }
+                    None => None,
+                }
+            }
+            _ => Some(Drag::Box { from: pos, to: pos }),
+        };
+    }
+
+    /// The pointer moved to `pos` during a drag.
+    pub fn drag_to(&mut self, model: &Model, map: &ScreenMap, pos: Pos2) {
+        let Some(drag) = self.drag.as_mut() else {
+            return;
+        };
+        let base = match &self.preview {
+            Some(p) => p.sketch.clone(),
+            None => match model.sketch_result(self.feature) {
+                Some(r) => r.solution.sketch.clone(),
+                None => return,
+            },
+        };
+        let solution = match drag {
+            Drag::Box { to, .. } => {
+                *to = pos;
+                return;
+            }
+            Drag::Draw { .. } => {
+                self.hover(model, map, Some(pos));
+                return;
+            }
+            Drag::Move { grab, points } => {
+                let Some(p) = map.to_plane(pos) else {
+                    return;
+                };
+                let delta = p - *grab;
+                let options = SolveOptions {
+                    drag: points.iter().map(|(id, at)| (*id, *at + delta)).collect(),
+                    ..SolveOptions::default()
+                };
+                solve(&base, &options)
+            }
+            Drag::Radius { circle } => {
+                let Some(p) = map.to_plane(pos) else {
+                    return;
+                };
+                let mut sketch = base;
+                let center = match sketch.entity(*circle).map(|e| &e.geometry) {
+                    Some(Geometry::Circle { center, .. }) => sketch.point(*center),
+                    _ => None,
+                };
+                let Some(center) = center else {
+                    return;
+                };
+                let r = (p - center).length();
+                if r <= SAME_POINT {
+                    return;
+                }
+                for e in &mut sketch.entities {
+                    if e.id == *circle {
+                        if let Geometry::Circle { radius, .. } = &mut e.geometry {
+                            *radius = r;
+                        }
+                    }
+                }
+                solve(&sketch, &SolveOptions::default())
+            }
+        };
+        // Keep the last good state if this step does not solve.
+        if !matches!(solution.status, SolveStatus::Failed(_)) {
+            self.preview = Some(solution);
+        }
+    }
+
+    /// The pointer was released at `pos`, ending a drag.
+    pub fn drag_end(&mut self, model: &mut Model, map: &ScreenMap, pos: Pos2) {
+        match self.drag.take() {
+            Some(Drag::Move { .. }) | Some(Drag::Radius { .. }) => {
+                let Some(preview) = self.preview.take() else {
+                    self.message = Some("That geometry can't move that way".into());
+                    return;
+                };
+                let edits = match model.sketch_def(self.feature) {
+                    Some(def) => geometry_edits(&def.sketch, &preview.sketch),
+                    None => return,
+                };
+                if !edits.is_empty() {
+                    self.commit(model, edits);
+                }
+            }
+            Some(Drag::Box { from, to }) => {
+                let Some(d) = self.display(model) else {
+                    return;
+                };
+                let r = Rect::from_two_pos(from, to);
+                let inside = |pts: &[DVec2]| {
+                    !pts.is_empty()
+                        && pts
+                            .iter()
+                            .all(|p| map.to_screen(*p).is_some_and(|s| r.contains(s)))
+                };
+                let mut picked: Vec<SketchId> = d
+                    .points()
+                    .filter(|(_, at)| inside(&[*at]))
+                    .map(|(id, _)| id)
+                    .collect();
+                picked.extend(
+                    d.curves
+                        .iter()
+                        .filter(|c| inside(&c.polyline))
+                        .map(|c| c.id),
+                );
+                for id in picked {
+                    if !self.selection.contains(&id) {
+                        self.selection.push(id);
+                    }
+                }
+            }
+            Some(Drag::Draw { from }) => {
+                if from.distance(pos) > DRAG_THRESHOLD {
+                    self.click(model, map, pos, false);
+                }
+            }
+            None => {}
+        }
+        self.preview = None;
+    }
+
+    /// The box being dragged out, if any.
+    pub fn selection_box(&self) -> Option<Rect> {
+        match self.drag {
+            Some(Drag::Box { from, to }) => Some(Rect::from_two_pos(from, to)),
+            _ => None,
+        }
+    }
+
+    /// Deletes the selection, with the end points and centres that only the
+    /// deleted curves used.
+    pub fn delete_selection(&mut self, model: &mut Model) {
+        if self.selection.is_empty() {
+            return;
+        }
+        let Some(def) = model.sketch_def(self.feature) else {
+            return;
+        };
+        let sketch = &def.sketch;
+        let selected: BTreeSet<SketchId> = self.selection.iter().copied().collect();
+        let kept_points: BTreeSet<SketchId> = sketch
+            .entities
+            .iter()
+            .filter(|e| !selected.contains(&e.id))
+            .flat_map(|e| e.geometry.referenced_points())
+            .collect();
+        let mut items = selected.clone();
+        for e in &sketch.entities {
+            if selected.contains(&e.id) {
+                items.extend(
+                    e.geometry
+                        .referenced_points()
+                        .into_iter()
+                        .filter(|p| !kept_points.contains(p)),
+                );
+            }
+        }
+        self.selection.clear();
+        self.commit(
+            model,
+            vec![SketchEdit::Delete {
+                items: items.into_iter().collect(),
+            }],
+        );
+    }
+
+    /// Toggles construction on the selected curves.
+    pub fn toggle_construction(&mut self, model: &mut Model) {
+        let Some(def) = model.sketch_def(self.feature) else {
+            return;
+        };
+        let curves: Vec<&Entity<SketchId>> = self
+            .selection
+            .iter()
+            .filter_map(|id| def.sketch.entity(*id))
+            .filter(|e| e.geometry.is_curve())
+            .collect();
+        if curves.is_empty() {
+            self.construction = !self.construction;
+            return;
+        }
+        let to = !curves.iter().all(|e| e.construction);
+        let edits = curves
+            .iter()
+            .map(|e| SketchEdit::SetConstruction {
+                entity: e.id,
+                construction: to,
+            })
+            .collect();
+        self.commit(model, edits);
+    }
+
+    /// Whether a constraint tool applies to the selection.
+    pub fn can_constrain(&self, model: &Model, tool: ConstraintTool) -> bool {
+        model
+            .sketch_def(self.feature)
+            .is_some_and(|d| constraints_for(tool, &self.selection, &d.sketch).is_ok())
+    }
+
+    /// Applies a constraint tool to the selection.
+    pub fn constrain(&mut self, model: &mut Model, tool: ConstraintTool) {
+        let Some(d) = self.display(model) else {
+            return;
+        };
+        match constraints_for(tool, &self.selection, &d.sketch) {
+            Ok(cs) => {
+                let mut b = Batch::default();
+                for c in cs {
+                    b.constraint(c);
+                }
+                if self.commit(model, b.edits).is_some() {
+                    self.selection.clear();
+                }
+            }
+            Err(e) => self.message = Some(e),
+        }
+    }
+
+    /// Starts dimensioning the selection; the value is entered in the
+    /// prompt and applied by [`SketchEditor::commit_prompt`].
+    pub fn dimension(&mut self, model: &Model, at: Pos2) {
+        let Some(d) = self.display(model) else {
+            return;
+        };
+        let made = dimension_for(&self.selection, &d.sketch).and_then(|mut c| {
+            let v = measure(&d.sketch, &c).map_err(|e| e.to_string())?;
+            c.set_value(v);
+            Ok(c)
+        });
+        match made {
+            Ok(constraint) => {
+                self.prompt = Some(DimensionPrompt {
+                    text: prompt_text(&constraint),
+                    constraint,
+                    existing: None,
+                    at,
+                    error: None,
+                });
+            }
+            Err(e) => self.message = Some(e),
+        }
+    }
+
+    /// Opens the prompt to change an existing dimension's value.
+    pub fn edit_dimension(&mut self, model: &Model, id: SketchId, at: Pos2) {
+        let Some(c) = model
+            .sketch_def(self.feature)
+            .and_then(|d| d.sketch.constraint(id))
+        else {
+            return;
+        };
+        if c.constraint.value().is_none() {
+            return;
+        }
+        self.prompt = Some(DimensionPrompt {
+            text: prompt_text(&c.constraint),
+            constraint: c.constraint.clone(),
+            existing: Some(id),
+            at,
+            error: None,
+        });
+    }
+
+    /// Changes how the prompt's new point-to-point distance is measured,
+    /// re-measuring its value.
+    pub fn set_prompt_kind(&mut self, model: &Model, kind: DistanceKind) {
+        let Some(d) = self.display(model) else {
+            return;
+        };
+        let Some(p) = self.prompt.as_mut() else {
+            return;
+        };
+        if let Constraint::Distance { a, b, .. } = p.constraint {
+            let mut c = Constraint::Distance {
+                a,
+                b,
+                kind,
+                value: 0.0,
+            };
+            match measure(&d.sketch, &c) {
+                Ok(v) if v > 0.0 => {
+                    c.set_value(v);
+                    p.text = prompt_text(&c);
+                    p.constraint = c;
+                    p.error = None;
+                }
+                Ok(_) => p.error = Some("the points are level in that direction".into()),
+                Err(e) => p.error = Some(e.to_string()),
+            }
+        }
+    }
+
+    /// Applies the prompt's value: adds the new dimension or changes the
+    /// existing one, in one undo step.
+    pub fn commit_prompt(&mut self, model: &mut Model) {
+        let Some(mut p) = self.prompt.take() else {
+            return;
+        };
+        let value = match p.value() {
+            Ok(v) => v,
+            Err(e) => {
+                p.error = Some(e);
+                self.prompt = Some(p);
+                return;
+            }
+        };
+        let edits = match p.existing {
+            Some(id) => vec![SketchEdit::SetValue {
+                constraint: id,
+                value,
+            }],
+            None => {
+                let mut c = p.constraint.clone();
+                c.set_value(value);
+                let mut b = Batch::default();
+                b.constraint(c);
+                b.edits
+            }
+        };
+        if self.commit(model, edits).is_some() {
+            self.selection.clear();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Region fill
+// ---------------------------------------------------------------------------
+
+/// Horizontal spans, `step` points tall, filling the area enclosed by
+/// closed loops of screen segments (even-odd rule, so holes stay empty).
+pub fn fill_spans(segments: &[[Pos2; 2]], step: f32) -> Vec<Rect> {
+    let mut out = Vec::new();
+    if segments.is_empty() || step <= 0.0 {
+        return out;
+    }
+    let ymin = segments
+        .iter()
+        .flatten()
+        .map(|p| p.y)
+        .fold(f32::INFINITY, f32::min);
+    let ymax = segments
+        .iter()
+        .flatten()
+        .map(|p| p.y)
+        .fold(f32::NEG_INFINITY, f32::max);
+    if !(ymin.is_finite() && ymax.is_finite()) {
+        return out;
+    }
+    let mut y = (ymin / step).floor() * step + step * 0.5;
+    let mut xs = Vec::new();
+    while y < ymax {
+        xs.clear();
+        for [a, b] in segments {
+            let (a, b) = if a.y <= b.y { (a, b) } else { (b, a) };
+            // Half-open in y, so a vertex shared by two segments counts once.
+            if y >= a.y && y < b.y {
+                xs.push(a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x));
+            }
+        }
+        xs.sort_by(f32::total_cmp);
+        for p in xs.chunks_exact(2) {
+            out.push(Rect::from_min_max(
+                Pos2::new(p[0], y - step * 0.5),
+                Pos2::new(p[1], y + step * 0.5),
+            ));
+        }
+        y += step;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn circumcircle_of_a_right_triangle() {
+        let (c, r) = circumcircle(
+            DVec2::new(0.0, 0.0),
+            DVec2::new(2.0, 0.0),
+            DVec2::new(0.0, 2.0),
+        )
+        .unwrap();
+        assert!((c - DVec2::new(1.0, 1.0)).length() < 1e-12);
+        assert!((r - 2f64.sqrt()).abs() < 1e-12);
+        assert!(circumcircle(DVec2::ZERO, DVec2::X, DVec2::X * 2.0).is_none());
+    }
+
+    #[test]
+    fn fill_spans_cover_a_square_with_a_hole() {
+        let sq = |x0: f32, y0: f32, s: f32| {
+            let p = [
+                Pos2::new(x0, y0),
+                Pos2::new(x0 + s, y0),
+                Pos2::new(x0 + s, y0 + s),
+                Pos2::new(x0, y0 + s),
+            ];
+            (0..4).map(move |i| [p[i], p[(i + 1) % 4]])
+        };
+        let segs: Vec<[Pos2; 2]> = sq(0.0, 0.0, 100.0).chain(sq(25.0, 25.0, 50.0)).collect();
+        let area: f32 = fill_spans(&segs, 1.0).iter().map(|r| r.area()).sum();
+        assert!((area - (10000.0 - 2500.0)).abs() < 1.0, "{area}");
+    }
+
+    #[test]
+    fn normal_view_faces_each_standard_plane() {
+        for frame in [Frame::top(), Frame::front(), Frame::right()] {
+            let (yaw, pitch) = normal_view(&frame);
+            let cam = Camera {
+                yaw,
+                pitch,
+                ..Camera::isometric()
+            };
+            assert!((cam.back_dir() - frame.z).length() < 1e-9, "{frame:?}");
+            assert!((cam.right_dir() - frame.x).length() < 1e-9, "{frame:?}");
+        }
+    }
+}

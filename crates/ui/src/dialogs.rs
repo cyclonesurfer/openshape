@@ -6,7 +6,8 @@
 
 use openshape_core_model::{
     units::{LengthUnit, Quantity},
-    CurveDef, DVec2, DVec3, Feature, FeatureEntry, FeatureId, PlaneRef, ProfileDef,
+    CurveDef, DVec2, DVec3, Feature, FeatureEntry, FeatureId, PlaneRef, ProfileDef, ProfileSource,
+    RevolveAxis,
 };
 
 /// Type of a dialog field.
@@ -149,7 +150,7 @@ impl FeatureDialog {
                 d
             }
             Feature::Extrude {
-                profile,
+                profile: ProfileSource::Inline(profile),
                 distance,
                 symmetric,
             } => match profile.curves.as_slice() {
@@ -173,7 +174,11 @@ impl FeatureDialog {
                 }
                 _ => return None,
             },
-            Feature::Revolve { profile, angle, .. } => match profile.curves.as_slice() {
+            Feature::Revolve {
+                profile: ProfileSource::Inline(profile),
+                angle,
+                ..
+            } => match profile.curves.as_slice() {
                 [CurveDef::Circle { center, radius }] => {
                     let mut d = Self::new(Template::Ring);
                     d.fields[0].text = mm(center.x);
@@ -190,6 +195,7 @@ impl FeatureDialog {
                 }
                 _ => return None,
             },
+            _ => return None,
         };
         d.editing = Some(entry.id);
         Some(d)
@@ -217,13 +223,13 @@ impl FeatureDialog {
                 size: DVec3::new(self.length(0)?, self.length(1)?, self.length(2)?),
             },
             Template::Cylinder => Feature::Extrude {
-                profile: ProfileDef {
+                profile: ProfileSource::Inline(ProfileDef {
                     plane: PlaneRef::Top,
                     curves: vec![CurveDef::Circle {
                         center: DVec2::new(self.length(2)?, self.length(3)?),
                         radius: self.length(0)? / 2.0,
                     }],
-                },
+                }),
                 distance: self.length(1)?,
                 symmetric: self.flag(4),
             },
@@ -246,24 +252,26 @@ impl FeatureDialog {
                     radius: self.length(3)? / 2.0,
                 });
                 Feature::Extrude {
-                    profile: ProfileDef {
+                    profile: ProfileSource::Inline(ProfileDef {
                         plane: PlaneRef::Top,
                         curves,
-                    },
+                    }),
                     distance: self.length(2)?,
                     symmetric: false,
                 }
             }
             Template::Ring => Feature::Revolve {
-                profile: ProfileDef {
+                profile: ProfileSource::Inline(ProfileDef {
                     plane: PlaneRef::Front,
                     curves: vec![CurveDef::Circle {
                         center: DVec2::new(self.length(0)?, 0.0),
                         radius: self.length(1)?,
                     }],
+                }),
+                axis: RevolveAxis::Inline {
+                    origin: DVec2::ZERO,
+                    dir: DVec2::Y,
                 },
-                axis_origin: DVec2::ZERO,
-                axis_dir: DVec2::Y,
                 angle: self.angle(2)?,
             },
             Template::Vase => {
@@ -275,7 +283,7 @@ impl FeatureDialog {
                     DVec2::new(1.1 * r, h),
                 ];
                 Feature::Revolve {
-                    profile: ProfileDef {
+                    profile: ProfileSource::Inline(ProfileDef {
                         plane: PlaneRef::Front,
                         curves: vec![
                             CurveDef::Spline { through },
@@ -292,9 +300,11 @@ impl FeatureDialog {
                                 end: DVec2::new(r, 0.0),
                             },
                         ],
+                    }),
+                    axis: RevolveAxis::Inline {
+                        origin: DVec2::ZERO,
+                        dir: DVec2::Y,
                     },
-                    axis_origin: DVec2::ZERO,
-                    axis_dir: DVec2::Y,
                     angle: std::f64::consts::TAU,
                 }
             }

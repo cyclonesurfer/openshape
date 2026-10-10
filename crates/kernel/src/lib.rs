@@ -10,6 +10,7 @@
 //!
 //! Units: lengths are metres, angles radians, all arithmetic `f64`.
 
+pub mod arrangement;
 mod check;
 mod geom;
 mod mass;
@@ -21,6 +22,7 @@ mod topo;
 
 use std::sync::Arc;
 
+pub use arrangement::{ArrangementEdge, ArrangementVertex, Region, RegionLoop, SketchArrangement};
 pub use geom::SurfaceKind;
 pub use glam::{DMat4, DVec2, DVec3};
 pub use math::{Frame, Tolerance};
@@ -185,8 +187,8 @@ pub trait Kernel: Send + Sync {
     /// Entity counts.
     fn topology(&self, body: &Self::Body) -> TopologyCounts;
 
-    /// Mass properties computed from a tessellation with the given relative
-    /// accuracy (chord tolerance as a fraction of the body's size).
+    /// Mass properties by exact boundary integration (design note 0003),
+    /// to the given accuracy relative to the body's size.
     fn mass_properties(
         &self,
         body: &Self::Body,
@@ -195,6 +197,19 @@ pub trait Kernel: Send + Sync {
 
     /// Analytic kinds of the body's faces, in face order.
     fn face_kinds(&self, body: &Self::Body) -> Vec<SurfaceKind>;
+
+    /// The planar arrangement of sketch curves: vertices, edges and bounded
+    /// regions (design note 0006).
+    fn sketch_regions(&self, curves: &[ProfileCurve]) -> Result<SketchArrangement, KernelError>;
+
+    /// The boundary of the union of the given regions of `arrangement` as
+    /// profile curves, ready for [`Kernel::extrude`] or [`Kernel::revolve`].
+    fn region_profile(
+        &self,
+        arrangement: &SketchArrangement,
+        curves: &[ProfileCurve],
+        regions: &[usize],
+    ) -> Result<Vec<ProfileCurve>, KernelError>;
 }
 
 /// The built-in OpenShape kernel.
@@ -296,5 +311,18 @@ impl Kernel for OsKernel {
 
     fn face_kinds(&self, body: &Body) -> Vec<SurfaceKind> {
         body.brep.faces.iter().map(|f| f.surface.kind()).collect()
+    }
+
+    fn sketch_regions(&self, curves: &[ProfileCurve]) -> Result<SketchArrangement, KernelError> {
+        arrangement::arrange(curves, &self.tol)
+    }
+
+    fn region_profile(
+        &self,
+        arrangement: &SketchArrangement,
+        curves: &[ProfileCurve],
+        regions: &[usize],
+    ) -> Result<Vec<ProfileCurve>, KernelError> {
+        arrangement::region_profile(arrangement, curves, regions)
     }
 }
