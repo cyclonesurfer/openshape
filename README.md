@@ -20,9 +20,10 @@ cargo run --release -p openshape -- --bench out/            # frame times
 cargo test --workspace
 ```
 
-To check a GPU machine (including a headless server) end to end, see
-[docs/GPU_CHECK.md](docs/GPU_CHECK.md): `scripts/gpu-check.sh` builds, tests,
-renders the demo and benchmarks, and writes a report.
+[docs/RUNNING.md](docs/RUNNING.md) has the full guide: prerequisites per
+distribution, the desktop app, developer checks, the offscreen demo and
+benchmark, and `scripts/gpu-check.sh` for checking a GPU machine (including a
+headless server) end to end.
 
 In the app: Insert menu to add features; drag with the left mouse button to
 orbit, right or middle button to pan, scroll to zoom, F to fit; Ctrl+Z and

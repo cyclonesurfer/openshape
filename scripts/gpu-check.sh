@@ -6,7 +6,7 @@
 #
 # Prints PASS/FAIL per step and writes <out-dir>/report.txt (paste that back),
 # the demo PNGs in <out-dir>/demo/, and <out-dir>.tar.gz with all of it.
-# See docs/GPU_CHECK.md for prerequisites.
+# See docs/RUNNING.md for prerequisites.
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -56,6 +56,8 @@ step build cargo build --release --workspace --all-targets
 step tests cargo test --release --workspace
 step demo cargo run --release -p openshape -- --headless-demo "$out/demo"
 step bench cargo run --release -p openshape -- --bench "$out/bench" 600
+step render-timing cargo test --release -p openshape-render --test offscreen \
+    thousand_instances_timing -- --nocapture
 
 say ""
 say "== Headless demo"
@@ -63,6 +65,9 @@ grep -E '^(adapter:|\[PASS\]|\[FAIL\])' "$out/demo.log" 2>/dev/null | tee -a "$r
 say ""
 say "== Benchmark"
 cat "$out/bench/bench.txt" 2>/dev/null | tee -a "$report"
+say ""
+say "== Render timing (1000 instances)"
+grep -E '^1000 x' "$out/render-timing.log" 2>/dev/null | tee -a "$report"
 say ""
 say "== Test totals"
 grep -E '^test result:' "$out/tests.log" 2>/dev/null \

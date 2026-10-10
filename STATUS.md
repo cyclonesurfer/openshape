@@ -49,9 +49,9 @@ Updated 2026-10-10, end of Phase 1 (kernel core).
   checks pass on Mesa lavapipe.
 - **Benchmark**: `openshape --bench <dir> [frames]` times offscreen frames of
   the demo scene (36,656 triangles, 1920x1080, 4x MSAA) to GPU completion.
-  Lavapipe in the cloud container: about 63 ms mean (16 fps).
+  Lavapipe in the cloud container: about 67 ms mean (15 fps).
   `scripts/gpu-check.sh` runs build, tests, demo and benchmark on a real GPU
-  and collects a report (docs/GPU_CHECK.md).
+  and collects a report (docs/RUNNING.md).
 
 ## Verified so far
 

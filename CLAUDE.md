@@ -21,7 +21,7 @@ cargo deny check            # licenses, advisories, bans, sources
 cargo run -p openshape      # desktop app (needs a GPU or Mesa)
 cargo run -p openshape -- --headless-demo out/   # offscreen proof, writes PNGs
 cargo run --release -p openshape -- --bench out/ 600   # offscreen frame times
-scripts/gpu-check.sh        # build, tests, demo, bench on a real GPU (docs/GPU_CHECK.md)
+scripts/gpu-check.sh        # build, tests, demo, bench on a real GPU (docs/RUNNING.md)
 ```
 
 All four checks must pass before every commit. `main` is never broken.
