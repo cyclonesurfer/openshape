@@ -1,0 +1,24 @@
+[package]
+name = "openshape-kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+openshape-nurbs.workspace = true
+glam.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+robust.workspace = true
+spade.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+openshape-nurbs.workspace = true
+glam.workspace = true
+
+[lints]
+workspace = true

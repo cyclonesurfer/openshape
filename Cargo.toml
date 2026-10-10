@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oplog",
+    "crates/core-model",
+    "crates/nurbs",
+    "crates/kernel",
+    "crates/features",
+    "crates/render",
+    "crates/io",
+    "crates/ui", "crates/nurbs",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/cyclonesurfer/openshape"
+authors = ["OpenShape contributors"]
+
+[workspace.dependencies]
+openshape-oplog = { path = "crates/oplog", version = "0.1.0" }
+openshape-core-model = { path = "crates/core-model", version = "0.1.0" }
+openshape-nurbs = { path = "crates/nurbs", version = "0.1.0" }
+openshape-kernel = { path = "crates/kernel", version = "0.1.0" }
+openshape-features = { path = "crates/features", version = "0.1.0" }
+openshape-render = { path = "crates/render", version = "0.1.0" }
+openshape-io = { path = "crates/io", version = "0.1.0" }
+
+glam = { version = "0.34", features = ["serde", "bytemuck"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ciborium = "0.2"
+thiserror = "2"
+robust = "1.2"
+spade = "2.15"
+bytemuck = { version = "1", features = ["derive"] }
+wgpu = "30"
+pollster = "1"
+png = "0.18"
+eframe = { version = "0.36", default-features = false }
+egui = "0.36"
+egui-wgpu = "0.36"
+proptest = "1"
+log = "0.4"
+env_logger = "0.11"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.test]
+opt-level = 1

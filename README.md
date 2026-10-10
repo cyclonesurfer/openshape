@@ -1,0 +1,35 @@
+# OpenShape
+
+A native Linux, pure-Rust, history-based parametric 3D CAD system.
+License: GPL-3.0-or-later.
+
+OpenShape is early: Phase 0 (foundations) and Phase 1 (kernel core) are in
+place. See [STATUS.md](STATUS.md) for what works today and
+[docs/ROADMAP.md](docs/ROADMAP.md) for the plan.
+
+## Build and run (Linux)
+
+Requirements: a stable Rust toolchain (rustup), and Vulkan drivers (Mesa
+RADV on AMD, `mesa-vulkan-drivers` on Debian/Ubuntu, `vulkan-radeon` on
+Arch, `mesa-vulkan-drivers` on Fedora).
+
+```sh
+cargo run --release -p openshape            # the desktop app
+cargo run --release -p openshape -- --headless-demo out/   # offscreen demo
+cargo run --release -p openshape -- --bench out/            # frame times
+cargo test --workspace
+```
+
+To check a GPU machine (including a headless server) end to end, see
+[docs/GPU_CHECK.md](docs/GPU_CHECK.md): `scripts/gpu-check.sh` builds, tests,
+renders the demo and benchmarks, and writes a report.
+
+In the app: Insert menu to add features; drag with the left mouse button to
+orbit, right or middle button to pan, scroll to zoom, F to fit; Ctrl+Z and
+Ctrl+Shift+Z to undo and redo; right-click a feature for edit, suppress,
+reorder and delete; File menu to save/open documents and export STL.
+
+## Layout
+
+See [CLAUDE.md](CLAUDE.md) for the crate map and contributor rules, and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.

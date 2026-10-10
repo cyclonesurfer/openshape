@@ -1,0 +1,85 @@
+# OpenShape status
+
+Updated 2026-10-10, end of Phase 1 (kernel core).
+
+## What works
+
+- **Op log** (`openshape-oplog`): Lamport/replica op IDs with causal deps,
+  deterministic replay, undo/redo stored as ops (redo = undo of undo),
+  history at any set of heads, sync primitives (`missing_for`, `integrate`
+  with a pending buffer for out-of-order ops), CBOR container. Property tests
+  check undo/redo against a reference model and replica convergence.
+- **Document model** (`openshape-core-model`): documents with element tabs, a
+  Part Studio feature list as data (insert, edit, rename, suppress, move,
+  delete), a reducer over the op log, units parsing of single quantities
+  (`"25.4 mm"`, `"1 in"`, `"90 deg"`; bare numbers use the default unit).
+  Expressions and variables come with Variable Studios.
+- **NURBS** (`openshape-nurbs`, kernel-private): rational curves and surfaces
+  after Piegl & Tiller — evaluation, derivatives, knot insertion, split,
+  closest point, exact arcs, interpolation, extrusion/revolution surfaces.
+- **Kernel** (`openshape-kernel`, behind the `Kernel` trait):
+  - B-rep arena (solid/shell/face/loop/coedge/edge/vertex) with validation:
+    closed loops, manifold edge use, edges on their surfaces, Euler–Poincaré,
+    outward orientation. Every operation validates its output.
+  - Box, extrude (blind, symmetric; multi-region profiles with holes; lines,
+    arcs, circles, splines) and revolve (full and partial, profiles touching
+    the axis, offset axes). Periodic faces split at ≤ π (ADR 0008).
+  - Surface classification: plane, cylinder, cone, sphere, torus, extrusion,
+    revolution, NURBS.
+  - Watertight tessellation with chord and angle tolerances (shared edge
+    discretisation, constrained Delaunay per face, singular points handled).
+  - Exact mass properties (volume, area, centroid, inertia) by boundary
+    integration, accurate to 1e-9 relative on the golden corpus.
+- **Features** (`openshape-features`): regenerates a Part Studio through the
+  kernel with per-feature status (ok, suppressed, failed with message). A
+  failing feature never blocks the others.
+- **Rendering** (`openshape-render`): wgpu renderer for the window and an
+  offscreen renderer; shaded parts with edges, perspective/orthographic
+  camera, orbit/pan/zoom, view presets, fit. Vulkan first, GL fallback.
+- **App** (`openshape` binary, egui/eframe): File (new, open/save `.osdoc`,
+  export STL), Edit (undo/redo, Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y), Insert
+  (box, cylinder, plate with hole, ring, spline vase), View (presets, fit with
+  F, perspective/ortho). Feature tree with status icons; right-click to edit,
+  rename, suppress, move up/down, delete. Properties panel shows mass
+  properties. Dialogs take values with units.
+- **I/O** (`openshape-io`): STL export, ASCII and binary.
+- **Headless demo**: `cargo run -p openshape -- --headless-demo out/` builds
+  a box through the op log, orbits, adds three more parts, undoes and redoes,
+  saves and reopens, exports STL, and checks each step pixel-exactly. All 12
+  checks pass on Mesa lavapipe.
+- **Benchmark**: `openshape --bench <dir> [frames]` times offscreen frames of
+  the demo scene (36,656 triangles, 1920x1080, 4x MSAA) to GPU completion.
+  Lavapipe in the cloud container: about 63 ms mean (16 fps).
+  `scripts/gpu-check.sh` runs build, tests, demo and benchmark on a real GPU
+  and collects a report (docs/GPU_CHECK.md).
+
+## Verified so far
+
+- `cargo fmt`, `cargo clippy -D warnings`, `cargo test --workspace` and
+  `cargo deny check` pass.
+- Rendering is verified only offscreen on lavapipe (software Vulkan). The
+  windowed app has not yet been run on real hardware; the AMD/RADV run is
+  pending.
+
+## Not yet / known limits
+
+- No sketcher: features come from fixed templates (Phase 2).
+- No booleans: each feature makes its own part (Phase 3).
+- No persistent naming or incremental regeneration: every edit regenerates
+  the whole studio (Phase 3). Features don't reference model geometry yet, so
+  nothing can break on upstream edits today.
+- Non-manifold topology deferred to Phase 3.
+- File dialogs are a text path prompt, not a native picker.
+- No STEP or other exchange formats beyond STL (Phase 4; see docs/FORMATS.md).
+
+## Next steps
+
+1. Phase 2: design note for the constraint solver, then the sketch data model
+   in core-model, the solver crate (Newton/LM, DOF analysis, over/under-
+   constraint diagnostics, property tests) and region detection feeding
+   extrude/revolve.
+2. Get a real AMD/RADV run (`scripts/gpu-check.sh` on the GPU server, and
+   the windowed app on a desktop) and fix anything that differs from
+   lavapipe.
+3. Phase 3 groundwork: design notes for curve/surface intersection, booleans
+   and persistent naming, so the sketcher's references are built on them.
