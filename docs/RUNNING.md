@@ -154,3 +154,9 @@ scp -r root@10.0.20.10:openshape/gpu-check-out/demo ./openshape-gpu-demo
 To work hands-on on a GPU machine, run Claude Code inside the clone
 (`cd openshape && claude`). CLAUDE.md gives it the project's rules and
 commands, and it works against the same repository as the cloud project.
+
+[huginn-tasks.md](huginn-tasks.md) has ready-to-paste task prompts for it:
+the standard GPU check, a regression check of a branch or pull request, a
+performance run, and investigating a failure that only happens on the GPU.
+Each prompt holds the agent to the project's rules and ends with a report to
+paste back into the project.

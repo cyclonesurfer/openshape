@@ -493,12 +493,62 @@ fn concave_edges_visible_at_oblique_angles() {
     }
 }
 
+/// Largest per-channel difference allowed between the GPU's own sRGB
+/// encoder (sRGB render targets) and the shader's encoder (other targets) on
+/// pixels without antialiasing.
+///
+/// Both compute the IEC 61966-2-1 curve, but they are not bit-identical and
+/// need not be: Vulkan converts a float to UNORM8 by returning either of the
+/// two nearest codes ("implementations should round to nearest"), hardware
+/// sRGB encoders are specified to a tolerance, and WGSL's `pow` is accurate
+/// to a few ULP rather than correctly rounded. When the exact value lies near
+/// a half step, the two paths can round to neighbouring codes. Each is within
+/// a fraction of a step of the exact value, so they differ by at most one
+/// code (RADV on a Radeon 8060S gave 196 against 197 in one channel; lavapipe
+/// matches exactly). A larger difference anywhere means a wrong curve.
+const ENCODER_TOLERANCE: u8 = 1;
+
+fn max_channel_diff(a: [u8; 4], b: [u8; 4]) -> u8 {
+    (0..3).map(|i| a[i].abs_diff(b[i])).max().unwrap_or(0)
+}
+
+/// Renders `scene` into a fresh texture of `format` and reads it back.
+fn render_target(
+    device: &openshape_render::wgpu::Device,
+    queue: &openshape_render::wgpu::Queue,
+    scene: &mut openshape_render::SceneRenderer,
+    format: openshape_render::wgpu::TextureFormat,
+    camera: &Camera,
+    (w, h): (u32, u32),
+) -> RgbaImage {
+    use openshape_render::{read_texture_rgba8, wgpu};
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("test viewport"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    scene.render(device, queue, camera, &view, (w, h));
+    read_texture_rgba8(device, queue, &texture).unwrap()
+}
+
 /// The UI path: a SceneRenderer created on someone else's device, drawing
 /// into a non-sRGB BGRA texture (as egui-wgpu commonly uses), matches the
-/// offscreen sRGB render.
+/// offscreen sRGB render to within [`ENCODER_TOLERANCE`] everywhere except
+/// antialiased edge pixels, and its sRGB encoding matches the hardware's
+/// over the whole tonal range.
 #[test]
 fn shared_device_non_srgb_target_matches() {
-    use openshape_render::{read_texture_rgba8, wgpu, SceneRenderer};
+    use openshape_render::{wgpu, SceneRenderer};
     let mut r = renderer();
     let camera = Camera::isometric().fitted([-0.5; 3], [0.5; 3]);
     let reference = r.render_meshes_rgba(&[unit_cube()], &camera, W, H).unwrap();
@@ -513,68 +563,72 @@ fn shared_device_non_srgb_target_matches() {
     let format = wgpu::TextureFormat::Bgra8Unorm;
     let mut scene = SceneRenderer::new(&device, format);
     scene.set_meshes(&device, &[unit_cube()]);
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("test viewport"),
-        size: wgpu::Extent3d {
-            width: W,
-            height: H,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&Default::default());
-    scene.render(&device, &queue, &camera, &view, (W, H));
-    let img = read_texture_rgba8(&device, &queue, &texture).unwrap();
+    let img = render_target(&device, &queue, &mut scene, format, &camera, (W, H));
     maybe_dump("shared_bgra", &img);
-    // Everything matches to rounding except antialiased pixels at edge
-    // lines: a non-sRGB target resolves MSAA on encoded values, not linear.
-    // Every silhouette of the cube carries an edge line, so this covers all
-    // partially covered pixels.
-    let mut unexplained = 0;
+    // Antialiased pixels at edge lines legitimately differ more: a non-sRGB
+    // target resolves MSAA on encoded values, not linear ones. Every
+    // silhouette of the cube carries an edge line, so this covers all
+    // partially covered pixels. Everything else is an encoder comparison.
+    let (mut unexplained, mut worst, mut off_by_one) = (0, 0, 0);
     for y in 0..H {
         for x in 0..W {
-            if rgb_diff(reference.pixel(x, y), img.pixel(x, y)) <= 6 {
-                continue;
-            }
+            let d = max_channel_diff(reference.pixel(x, y), img.pixel(x, y));
             let near_line = (y.saturating_sub(2)..(y + 3).min(H))
                 .flat_map(|yy| (x.saturating_sub(2)..(x + 3).min(W)).map(move |xx| (xx, yy)))
                 .any(|(xx, yy)| on_line(xx, yy));
-            if !near_line {
+            if near_line {
+                continue;
+            }
+            worst = worst.max(d);
+            off_by_one += usize::from(d == 1);
+            if d > ENCODER_TOLERANCE {
                 unexplained += 1;
             }
         }
     }
-    assert_eq!(unexplained, 0, "pixels differ away from edge lines");
-    assert_eq!(img.pixel(W / 2, H / 4), reference.pixel(W / 2, H / 4));
+    eprintln!(
+        "away from edge lines: largest channel difference {worst}, {off_by_one} pixels differ by one"
+    );
+    assert_eq!(
+        unexplained, 0,
+        "pixels differ by more than the encoder tolerance"
+    );
+
+    // The encoders agree over the whole curve: vertical gradients from black
+    // to a colour (every code in each channel) and from black to a dark
+    // colour (the linear toe and the start of the power segment).
+    for (bottom, min_codes) in [([1.0, 0.6, 0.3], 200), ([0.2, 0.12, 0.06], 25)] {
+        let (gw, gh) = (8, 1024);
+        r.scene_mut().set_background([0.0; 3], bottom);
+        scene.set_background([0.0; 3], bottom);
+        let hw = r.render_meshes_rgba(&[], &camera, gw, gh).unwrap();
+        scene.set_meshes(&device, &[]);
+        let sw = render_target(&device, &queue, &mut scene, format, &camera, (gw, gh));
+        let mut codes = std::collections::BTreeSet::new();
+        let mut worst = 0;
+        for y in 0..gh {
+            let (a, b) = (hw.pixel(gw / 2, y), sw.pixel(gw / 2, y));
+            codes.insert(a[0]);
+            worst = worst.max(max_channel_diff(a, b));
+        }
+        eprintln!(
+            "gradient to {bottom:?}: {} red codes, largest channel difference {worst}",
+            codes.len()
+        );
+        assert!(
+            worst <= ENCODER_TOLERANCE,
+            "gradient to {bottom:?}: {worst}"
+        );
+        assert!(codes.len() >= min_codes, "the gradient spans the curve");
+        assert!(
+            codes.first().is_some_and(|c| *c <= 2),
+            "the gradient reaches black"
+        );
+    }
+    scene.set_meshes(&device, &[unit_cube()]);
 
     // Resizing recreates attachments.
-    let small = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("test viewport small"),
-        size: wgpu::Extent3d {
-            width: 100,
-            height: 70,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    scene.render(
-        &device,
-        &queue,
-        &camera,
-        &small.create_view(&Default::default()),
-        (100, 70),
-    );
-    let img = read_texture_rgba8(&device, &queue, &small).unwrap();
+    let img = render_target(&device, &queue, &mut scene, format, &camera, (100, 70));
     assert_ne!(img.pixel(50, 35), img.pixel(0, 0));
 }
 

@@ -64,7 +64,19 @@ Updated 2026-10-10, end of Phase 1 (kernel core).
   lavapipe). Edges are now drawn as fixed-width screen-space quads (1.5 px
   by default, scaled by DPI in the app), so line weight no longer depends on
   the driver, and the two tests locate lines from geometry instead of one
-  pixel or a colour threshold. Re-run on RADV pending.
+  pixel or a colour threshold.
+- Re-run on the same machine, commit d62aee9: build, demo (12/12),
+  benchmark and render timing pass; 157 of 158 tests passed. 1080p
+  benchmark: 0.120 ms mean, 0.230 ms p99 (8,350 fps) for the 4-part demo
+  scene; 1,000 instances: 0.5 ms per frame steady, including readback.
+  The one failure was a test assumption, not a rendering bug: it required
+  one pixel to be bit-identical between the GPU's sRGB encoder and the
+  shader's, which Vulkan does not guarantee (lavapipe also differs by one
+  code on 9,184 pixels; RADV happened to differ at the sampled one). The
+  test now bounds the difference at one code on every pixel away from
+  antialiased edges and across full-range and dark gradients, which is
+  stricter than before, and fails if the encoder is replaced by a plain
+  gamma 2.2 curve. Confirming run on RADV pending.
 - The windowed app has not yet been run on real hardware.
 
 ## Not yet / known limits
@@ -84,8 +96,8 @@ Updated 2026-10-10, end of Phase 1 (kernel core).
    in core-model, the solver crate (Newton/LM, DOF analysis, over/under-
    constraint diagnostics, property tests) and region detection feeding
    extrude/revolve.
-2. Get a real AMD/RADV run (`scripts/gpu-check.sh` on the GPU server, and
-   the windowed app on a desktop) and fix anything that differs from
-   lavapipe.
+2. Re-run `scripts/gpu-check.sh` on RADV to confirm the encoder-tolerance
+   change (docs/huginn-tasks.md has the prompt), and run the windowed app on
+   a desktop.
 3. Phase 3 groundwork: design notes for curve/surface intersection, booleans
    and persistent naming, so the sketcher's references are built on them.
