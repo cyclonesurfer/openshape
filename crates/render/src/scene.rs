@@ -30,6 +30,13 @@ pub const DEFAULT_BACKGROUND_BOTTOM: [f32; 3] = [0.90, 0.91, 0.93];
 /// Default edge line colour (sRGB + alpha).
 pub const DEFAULT_EDGE_COLOR: [f32; 4] = [0.06, 0.07, 0.09, 1.0];
 
+/// Default edge line width in physical pixels.
+///
+/// Edges are drawn as screen-space quads rather than hardware lines, so they
+/// have the same width and weight on every driver (hardware 1-pixel lines
+/// under MSAA come out at different strengths on different GPUs).
+pub const DEFAULT_EDGE_WIDTH_PX: f32 = 1.5;
+
 /// Upper bound on the size of one GPU vertex or index buffer created by the
 /// renderer (further limited by the device's `max_buffer_size`).
 const MAX_BATCH_BYTES: u64 = 128 << 20;
@@ -70,7 +77,10 @@ struct GpuVertex {
 
 const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4];
-const EDGE_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
+/// Per-instance attributes of an edge segment: its two end points, read
+/// from the packed line-list buffer (two vertices per segment).
+const EDGE_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
 
 /// Uniform block; layout must match `Globals` in `shader.wgsl`.
 #[repr(C)]
@@ -86,6 +96,7 @@ struct Globals {
     bg_bottom: [f32; 4],
     params: [f32; 4],
     material: [f32; 4],
+    viewport: [f32; 4],
 }
 
 /// Key light direction in view space (towards the light): from slightly
@@ -149,6 +160,7 @@ pub struct SceneRenderer {
     background_top: [f32; 3],
     background_bottom: [f32; 3],
     edge_color: [f32; 4],
+    edge_width: f32,
 }
 
 impl SceneRenderer {
@@ -238,6 +250,7 @@ impl SceneRenderer {
             background_top: DEFAULT_BACKGROUND_TOP,
             background_bottom: DEFAULT_BACKGROUND_BOTTOM,
             edge_color: DEFAULT_EDGE_COLOR,
+            edge_width: DEFAULT_EDGE_WIDTH_PX,
         }
     }
 
@@ -270,6 +283,20 @@ impl SceneRenderer {
     /// Sets the edge line colour (sRGB + alpha).
     pub fn set_edge_color(&mut self, color: [f32; 4]) {
         self.edge_color = color;
+    }
+
+    /// Edge line width in physical pixels.
+    pub fn edge_width(&self) -> f32 {
+        self.edge_width
+    }
+
+    /// Sets the edge line width in physical pixels (clamped to 0.5..=16;
+    /// non-finite values are ignored). Scale by the display's pixels per
+    /// point for a constant apparent width on high-DPI screens.
+    pub fn set_edge_width(&mut self, px: f32) {
+        if px.is_finite() {
+            self.edge_width = px.clamp(0.5, 16.0);
+        }
     }
 
     /// Bounds `(min, max)` of everything uploaded by the last
@@ -432,8 +459,9 @@ impl SceneRenderer {
         if draw_edges && !self.edges.is_empty() {
             pass.set_pipeline(&self.edge_pipeline);
             for batch in &self.edges {
+                // One instance per segment, six vertices (two triangles) each.
                 pass.set_vertex_buffer(0, batch.vertices.slice(..));
-                pass.draw(0..batch.vertex_count, 0..1);
+                pass.draw(0..6, 0..batch.vertex_count / 2);
             }
         }
         if draw_surfaces && !self.transparent.is_empty() {
@@ -514,6 +542,7 @@ impl SceneRenderer {
             bg_bottom: with_w(srgb_to_linear3(self.background_bottom), 1.0),
             params: [edge_scale, edge_offset, srgb_encode, perspective],
             material: [SPECULAR_STRENGTH, SHININESS, 0.0, 0.0],
+            viewport: [size.0 as f32, size.1 as f32, 0.5 * self.edge_width, 0.0],
         }
     }
 }
@@ -745,8 +774,8 @@ impl PipelineBuilder<'_> {
             attributes: &MESH_ATTRIBUTES,
         };
         let edge_layout = wgpu::VertexBufferLayout {
-            array_stride: 12,
-            step_mode: wgpu::VertexStepMode::Vertex,
+            array_stride: 24,
+            step_mode: wgpu::VertexStepMode::Instance,
             attributes: &EDGE_ATTRIBUTES,
         };
         let (label, vs, fs, buffers, topology, depth_write, depth_compare, blend) = match kind {
@@ -785,7 +814,7 @@ impl PipelineBuilder<'_> {
                 "vs_edge",
                 "fs_edge",
                 Some(edge_layout),
-                wgpu::PrimitiveTopology::LineList,
+                wgpu::PrimitiveTopology::TriangleList,
                 true,
                 wgpu::CompareFunction::GreaterEqual,
                 Some(wgpu::BlendState::ALPHA_BLENDING),

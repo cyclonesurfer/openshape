@@ -23,6 +23,8 @@ struct Globals {
     params: vec4<f32>,
     // x: specular strength, y: shininess.
     material: vec4<f32>,
+    // xy: target size in pixels, z: half the edge line width in pixels.
+    viewport: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -132,16 +134,56 @@ fn fs_mesh(in: MeshOut) -> @location(0) vec4<f32> {
 }
 
 // ---------------------------------------------------------------------------
-// Edge lines, pulled slightly towards the eye so they win the depth test
+// Edge lines, drawn as screen-space quads of a fixed pixel width (one
+// instance per segment, six vertices) so they look the same on every driver.
+// End points are pulled slightly towards the eye so lines win the depth test
 // against the faces they lie on. In perspective the view-space position is
 // scaled towards the eye (a relative depth bias that keeps the screen
 // position); in orthographic it is shifted along +Z by a constant.
 
-@vertex
-fn vs_edge(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
+fn edge_clip(position: vec3<f32>) -> vec4<f32> {
     let pv = g.view * vec4<f32>(position, 1.0);
     let biased = vec3<f32>(pv.xyz * g.params.x) + vec3<f32>(0.0, 0.0, g.params.y);
     return g.proj * vec4<f32>(biased, 1.0);
+}
+
+@vertex
+fn vs_edge(
+    @builtin(vertex_index) vi: u32,
+    @location(0) a: vec3<f32>,
+    @location(1) b: vec3<f32>,
+) -> @builtin(position) vec4<f32> {
+    var ca = edge_clip(a);
+    var cb = edge_clip(b);
+    // Keep both ends in front of the eye before dividing by w; the hardware
+    // near-plane clip handles the rest.
+    let min_w = 1e-6;
+    if ca.w < min_w && cb.w < min_w {
+        return vec4<f32>(2.0, 2.0, 2.0, 1.0);
+    }
+    if ca.w < min_w {
+        ca = mix(ca, cb, (min_w - ca.w) / (cb.w - ca.w));
+    } else if cb.w < min_w {
+        cb = mix(cb, ca, (min_w - cb.w) / (ca.w - cb.w));
+    }
+    // Corners: (end, side) = (a,-) (a,+) (b,-) | (b,-) (a,+) (b,+).
+    let at_b = vi == 2u || vi == 3u || vi == 5u;
+    let side = select(-1.0, 1.0, vi == 1u || vi == 4u || vi == 5u);
+    let size = g.viewport.xy;
+    let pa = ca.xy / ca.w * 0.5 * size;
+    let pb = cb.xy / cb.w * 0.5 * size;
+    var dir = vec2<f32>(1.0, 0.0);
+    let len = length(pb - pa);
+    if len > 1e-6 {
+        dir = (pb - pa) / len;
+    }
+    let normal = vec2<f32>(-dir.y, dir.x);
+    let half_width = g.viewport.z;
+    // Square caps (extend by half the width) so polyline joins have no gaps.
+    let along = select(-1.0, 1.0, at_b);
+    let offset_px = normal * (side * half_width) + dir * (along * half_width);
+    let c = select(ca, cb, at_b);
+    return vec4<f32>(c.xy + offset_px * 2.0 / size * c.w, c.z, c.w);
 }
 
 @fragment

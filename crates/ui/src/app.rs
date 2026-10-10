@@ -525,6 +525,9 @@ impl OpenShapeApp {
             vp.uploaded_generation = self.model.generation;
         }
         vp.scene.set_display_mode(self.display_mode);
+        // Same apparent line weight on high-DPI screens.
+        vp.scene
+            .set_edge_width(openshape_render::DEFAULT_EDGE_WIDTH_PX * ppp);
         if vp.texture.is_none() || vp.size != size {
             let texture = rs.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("openshape viewport"),

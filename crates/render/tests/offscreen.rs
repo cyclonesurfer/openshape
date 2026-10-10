@@ -120,8 +120,18 @@ fn display_modes() {
     // Hidden edges stay hidden: the top face centre lies on the projection
     // of the hidden back vertical edge.
     let hidden_px = project(&camera, [0.0, 0.0, 0.5], W, H);
-    assert_eq!(shaded.pixel_at(hidden_px), with_edges.pixel_at(hidden_px));
-    assert!(rgb_diff(wire.pixel_at(hidden_px), bg.pixel_at(hidden_px)) > 30);
+    let around_hidden = || {
+        let (hx, hy) = hidden_px;
+        (hy - 1..=hy + 1).flat_map(move |y| (hx - 1..=hx + 1).map(move |x| (x, y)))
+    };
+    assert!(around_hidden().all(|(x, y)| shaded.pixel(x, y) == with_edges.pixel(x, y)));
+    // Wireframe draws it: some pixel next to the projected point (the line
+    // need not cover that exact pixel's centre) differs from the background.
+    let strongest = around_hidden()
+        .map(|(x, y)| rgb_diff(wire.pixel(x, y), bg.pixel(x, y)))
+        .max()
+        .unwrap();
+    assert!(strongest > 30, "hidden edge in wireframe: diff {strongest}");
     // Wireframe: face centre is background, edges still drawn.
     assert_eq!(wire.pixel_at(face_px), bg.pixel_at(face_px));
     assert!(near_edge(&wire) < luma(bg.pixel_at(edge_px)) - 40.0);
@@ -492,6 +502,11 @@ fn shared_device_non_srgb_target_matches() {
     let mut r = renderer();
     let camera = Camera::isometric().fitted([-0.5; 3], [0.5; 3]);
     let reference = r.render_meshes_rgba(&[unit_cube()], &camera, W, H).unwrap();
+    // Where edge lines land: pixels that change when edges are drawn.
+    r.scene_mut().set_display_mode(DisplayMode::Shaded);
+    let no_edges = r.render_rgba(&camera, W, H).unwrap();
+    r.scene_mut().set_display_mode(DisplayMode::ShadedWithEdges);
+    let on_line = |x: u32, y: u32| rgb_diff(reference.pixel(x, y), no_edges.pixel(x, y)) > 6;
 
     let device = r.device().clone();
     let queue = r.queue().clone();
@@ -516,8 +531,10 @@ fn shared_device_non_srgb_target_matches() {
     scene.render(&device, &queue, &camera, &view, (W, H));
     let img = read_texture_rgba8(&device, &queue, &texture).unwrap();
     maybe_dump("shared_bgra", &img);
-    // Everything matches to rounding except antialiased pixels next to edge
+    // Everything matches to rounding except antialiased pixels at edge
     // lines: a non-sRGB target resolves MSAA on encoded values, not linear.
+    // Every silhouette of the cube carries an edge line, so this covers all
+    // partially covered pixels.
     let mut unexplained = 0;
     for y in 0..H {
         for x in 0..W {
@@ -526,7 +543,7 @@ fn shared_device_non_srgb_target_matches() {
             }
             let near_line = (y.saturating_sub(2)..(y + 3).min(H))
                 .flat_map(|yy| (x.saturating_sub(2)..(x + 3).min(W)).map(move |xx| (xx, yy)))
-                .any(|(xx, yy)| luma(reference.pixel(xx, yy)) < 110.0);
+                .any(|(xx, yy)| on_line(xx, yy));
             if !near_line {
                 unexplained += 1;
             }
@@ -568,4 +585,42 @@ fn renderer_types_are_send_and_sync() {
     check::<openshape_render::OffscreenRenderer>();
     check::<Camera>();
     check::<MeshData>();
+}
+
+/// Edge lines are screen-space quads of the configured width, so the inked
+/// area grows in proportion to the width on every driver.
+#[test]
+fn edge_width_is_respected() {
+    let mut r = renderer();
+    let bg = background(&mut r, W, H);
+    let camera = Camera::isometric().fitted([-0.5; 3], [0.5; 3]);
+    r.set_meshes(&[unit_cube()]).unwrap();
+    r.scene_mut().set_display_mode(DisplayMode::Wireframe);
+    let ink = |r: &mut openshape_render::OffscreenRenderer, width: f32| {
+        r.scene_mut().set_edge_width(width);
+        let img = r.render_rgba(&camera, W, H).unwrap();
+        maybe_dump(&format!("edge_width_{width}"), &img);
+        // Coverage-weighted: each pixel counts by how far it moved from the
+        // background towards the edge colour.
+        let mut total = 0.0;
+        for y in 0..H {
+            for x in 0..W {
+                let b = luma(bg.pixel(x, y));
+                total += ((b - luma(img.pixel(x, y))) / b).clamp(0.0, 1.0) as f64;
+            }
+        }
+        total
+    };
+    let thin = ink(&mut r, 1.5);
+    let thick = ink(&mut r, 4.5);
+    let ratio = thick / thin;
+    assert!(
+        thin > 0.0 && (2.4..3.6).contains(&ratio),
+        "ink ratio {ratio}"
+    );
+    assert_eq!(r.scene().edge_width(), 4.5);
+    r.scene_mut().set_edge_width(f32::NAN);
+    assert_eq!(r.scene().edge_width(), 4.5);
+    r.scene_mut().set_edge_width(100.0);
+    assert_eq!(r.scene().edge_width(), 16.0);
 }

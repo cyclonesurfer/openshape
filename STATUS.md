@@ -57,9 +57,15 @@ Updated 2026-10-10, end of Phase 1 (kernel core).
 
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test --workspace` and
   `cargo deny check` pass.
-- Rendering is verified only offscreen on lavapipe (software Vulkan). The
-  windowed app has not yet been run on real hardware; the AMD/RADV run is
-  pending.
+- Real GPU, 2026-10-10, AMD Radeon 8060S (RADV, Mesa 26.0.6, Fedora 44),
+  commit f844d3b: the headless demo passed all 12 checks; 156 of 158 tests
+  passed. The 2 failures were render tests sampling edge lines: hardware
+  1-pixel lines under MSAA came out faint on RADV (they were solid on
+  lavapipe). Edges are now drawn as fixed-width screen-space quads (1.5 px
+  by default, scaled by DPI in the app), so line weight no longer depends on
+  the driver, and the two tests locate lines from geometry instead of one
+  pixel or a colour threshold. Re-run on RADV pending.
+- The windowed app has not yet been run on real hardware.
 
 ## Not yet / known limits
 

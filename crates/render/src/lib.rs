@@ -36,7 +36,10 @@ pub use offscreen::{
     padded_bytes_per_row, read_texture_rgba8, write_png, BackendPreference, OffscreenRenderer,
     RgbaImage, BACKEND_ENV_VAR,
 };
-pub use scene::{DisplayMode, SceneRenderer, SceneStats, DEFAULT_SAMPLE_COUNT, DEPTH_FORMAT};
+pub use scene::{
+    DisplayMode, SceneRenderer, SceneStats, DEFAULT_EDGE_WIDTH_PX, DEFAULT_SAMPLE_COUNT,
+    DEPTH_FORMAT,
+};
 
 /// Re-export of the wgpu version this crate is built against, so callers can
 /// name matching types.
