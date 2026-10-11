@@ -184,3 +184,88 @@ solved state and commits the final state as one edit.
 * Determinism: solving twice gives bit-identical output.
 * Timing smoke tests for 50- and 300-entity sketches (reported, with
   generous limits in debug builds).
+
+## 9. As built: differences from the plan above
+
+The implementation follows §§3–8 with these changes, each made because a
+test or the fuzzers showed the plan was not enough.
+
+* **Substitution presolve** (`reduce.rs`). Before the numerical solve,
+  equalities of two unknowns (coincident points, horizontal/vertical,
+  concentric, equal radii) and unknowns fixed to constants (fixes, radius
+  and diameter dimensions) are eliminated exactly, as SolveSpace does. Rank
+  and null space transfer exactly to the full system. An elimination that
+  contradicts an earlier one stays in the numerical system, where it is
+  diagnosed as a conflict. Interpolated-spline control points are eliminated
+  exactly by the interpolation equations.
+* **DOF** is computed from the rows of the null-space basis that belong to
+  visible unknowns, so hidden spline parameters never count.
+* **Tolerances** account for lever length and f64 rounding noise. The final
+  check (in metres, against the model tolerance) also allows the rounding
+  bound for very short directions far from the origin.
+* **Final acceptance check.** A result is accepted only if every constraint
+  holds and nothing is degenerate at the result's own scale (threshold × 8
+  margin): no direction a constraint needs, and no collapsed curve. That
+  every line, circle and arc keeps its extent is an implicit requirement: a
+  line whose end points meet, a circle or arc of zero radius, or an arc
+  whose end has come onto its start (unless it is so in the input) is a
+  collapse, and the input must pass the same check before the fallback below
+  may return it, so a zero-length input line never solves. A collapse is
+  attributed like a conflict: the constraints of the collapsed curve's
+  connected part that hold it collapsed are tried in reverse priority order
+  (latest first), each trial solving that part alone without the
+  constraint, and the first whose removal gives a solution with nothing
+  collapsed is reported as `Conflicting` (one per collapsed part), geometry
+  left at the input — horizontal then vertical on one line blames the
+  vertical. "Hold" is decided to first order at the collapsed state: the
+  collapsed vector's (or radius's) gradient is written as the minimum-norm
+  combination of the equation gradients (complete orthogonal
+  decomposition), and the constraints with a nonzero coefficient hold it;
+  equations that need a direction or length that has collapsed too add
+  their constraint and the constraints holding that vector, found the same
+  way. This keeps blaming to one or two trial solves in large sketches (at
+  most 32 in any case). If no single removal helps, the solve fails as
+  `Degenerate` naming the curve. A converged collapse is never answered by
+  the fallback, and a solve that fails heading into a collapse (a radius
+  cannot reach zero) is attributed the same way. Collapses that the eliminations already produce before
+  solving (an arc start made coincident with its centre, a needed direction
+  of zero length) are reported `Degenerate` by the start checks, as before.
+  Otherwise a result failing the check is `NotConverged`; the solver never
+  reports success on geometry a second solve would reject.
+* **Input fallback.** If a solve without drags fails but the input already
+  passes the final check, the input is returned as the solution, so
+  re-solving a settled sketch always succeeds. Duplicates that agree within
+  the model tolerance are reported as `Redundant`, not `Conflicting`.
+* **Continuation** is adaptive and also interpolates fixed values. A
+  turn-limited retry (steps that rotate a direction by more than π/4 are
+  shortened) and foot-point restarts for point-on-curve constraints handle
+  seeds far from the solution.
+* **Rank** is first bounded rigorously from the pivoted QR's singular-value
+  bounds; the Jacobi SVD runs only when the bounds are inconclusive. Both
+  give the same rank. This took the 300-entity chain from 352 ms to 11.6 ms
+  (release).
+* **Spline parameters** use an active set at the domain ends; spline
+  corners (repeated knots) are supported; the start point for a
+  point-on-spline is found by sampling every knot span and refining each
+  local minimum (golden section, then Newton).
+* **Limits.** Coordinates beyond 1e6 m are rejected; iterates leaving a
+  reach box of 1e3 sketch sizes fail; a radius may at most halve per step.
+  An arc with zero start radius is rejected up front as `Degenerate`, and a
+  zero-length line in `resolve_curves` is `Degenerate`.
+* **Tangent equations** are normalized (divided by the lengths involved),
+  like parallel and perpendicular.
+* **Reporting.** A constraint that is both conflicting and redundant is
+  reported only as conflicting. `NotConverged` also covers results that
+  diverged, left the reach box or were degenerate.
+
+**Known limitation.** Conflict detection is local: from a seed far from any
+solution, the solver can report `Conflicting` although another branch
+would satisfy every constraint. It never reports success on a violated
+constraint.
+
+**Measured** (final code): about 400k constructive property cases at scales
+1e-4 to 1e3 and 500k garbage-input fuzz cases with zero failures (no panic,
+no NaN, every success verified by an independent checker, re-solving every
+output succeeds). With random perturbations of 2–5% of the sketch size every
+case solves; at 10% about 1 in 40,000 fails; at 30% about 1 in 600 fails,
+mostly by flipping to another branch. A failed solve always says so.

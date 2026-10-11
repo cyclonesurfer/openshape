@@ -39,7 +39,7 @@ pub(crate) fn resolve_curves<K: SketchKey>(
                 let ds = pos(s) - center;
                 let de = pos(e) - center;
                 let radius = ds.length();
-                if !(radius > 0.0) || de == DVec2::ZERO {
+                if radius.is_nan() || radius <= 0.0 || de == DVec2::ZERO {
                     return Err(SolveError::Degenerate(format!(
                         "arc {id:?} has zero radius"
                     )));

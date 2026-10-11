@@ -35,7 +35,13 @@ fn dimmed(c: Color32) -> Color32 {
     c.gamma_multiply(0.55)
 }
 
-fn stroke_polyline(painter: &Painter, map: &ScreenMap, pts: &[DVec2], stroke: Stroke, dashed: bool) {
+fn stroke_polyline(
+    painter: &Painter,
+    map: &ScreenMap,
+    pts: &[DVec2],
+    stroke: Stroke,
+    dashed: bool,
+) {
     for run in map.polyline(pts) {
         if dashed {
             painter.extend(Shape::dashed_line(&run, stroke, 6.0, 4.0));
@@ -53,7 +59,13 @@ pub fn paint_inactive(painter: &Painter, map: &ScreenMap, d: &SketchDisplay) {
         } else {
             INACTIVE
         };
-        stroke_polyline(painter, map, &c.polyline, Stroke::new(1.25, color), c.construction);
+        stroke_polyline(
+            painter,
+            map,
+            &c.polyline,
+            Stroke::new(1.25, color),
+            c.construction,
+        );
     }
 }
 
@@ -95,17 +107,27 @@ pub fn paint_editor(painter: &Painter, map: &ScreenMap, d: &SketchDisplay, edito
     for c in &d.curves {
         let col = color(c.id);
         let col = if c.construction { dimmed(col) } else { col };
-        let width = if selected(c.id) || hovered(c.id) { 2.5 } else { 1.75 };
-        stroke_polyline(painter, map, &c.polyline, Stroke::new(width, col), c.construction);
+        let width = if selected(c.id) || hovered(c.id) {
+            2.5
+        } else {
+            1.75
+        };
+        stroke_polyline(
+            painter,
+            map,
+            &c.polyline,
+            Stroke::new(width, col),
+            c.construction,
+        );
     }
     for (id, at) in d.points() {
         if let Some(s) = map.to_screen(at) {
-            let size = if selected(id) || hovered(id) { 7.0 } else { 5.0 };
-            painter.rect_filled(
-                Rect::from_center_size(s, Vec2::splat(size)),
-                0.0,
-                color(id),
-            );
+            let size = if selected(id) || hovered(id) {
+                7.0
+            } else {
+                5.0
+            };
+            painter.rect_filled(Rect::from_center_size(s, Vec2::splat(size)), 0.0, color(id));
         }
     }
     for a in annotations(d, map) {
@@ -131,10 +153,7 @@ pub fn paint_editor(painter: &Painter, map: &ScreenMap, d: &SketchDisplay, edito
                 SnapTarget::Curve(_) => {
                     let k = 5.0;
                     painter.line_segment([p - Vec2::splat(k), p + Vec2::splat(k)], ring);
-                    painter.line_segment(
-                        [p + Vec2::new(-k, k), p + Vec2::new(k, -k)],
-                        ring,
-                    );
+                    painter.line_segment([p + Vec2::new(-k, k), p + Vec2::new(k, -k)], ring);
                 }
                 SnapTarget::Free => {
                     painter.circle_filled(p, 2.0, FREE);
@@ -175,8 +194,17 @@ fn paint_annotation(painter: &Painter, a: &Annotation, d: &SketchDisplay, editor
     for l in &a.lines {
         painter.line_segment(*l, Stroke::new(1.0, color));
     }
-    painter.rect_filled(a.rect, 3.0, Color32::from_rgba_unmultiplied(255, 255, 255, 215));
-    painter.rect_stroke(a.rect, 3.0, Stroke::new(1.0, color), egui::StrokeKind::Inside);
+    painter.rect_filled(
+        a.rect,
+        3.0,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 215),
+    );
+    painter.rect_stroke(
+        a.rect,
+        3.0,
+        Stroke::new(1.0, color),
+        egui::StrokeKind::Inside,
+    );
     painter.text(
         a.rect.center(),
         Align2::CENTER_CENTER,

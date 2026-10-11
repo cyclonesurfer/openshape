@@ -1,0 +1,24 @@
+[package]
+name = "openshape-ui-kit"
+description = "OpenShape's visual language: theme tokens, original icons, view cube and offscreen egui snapshots."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "GPL-3.0-or-later"
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+openshape-render = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+wgpu = { workspace = true }
+glam = { workspace = true }
+pollster = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

@@ -10,20 +10,21 @@ use openshape_render::{wgpu, Camera, DisplayMode, Projection, SceneRenderer, Vie
 
 use crate::dialogs::{FeatureDialog, FieldKind, Template};
 use crate::profile_pick::{ProfilePick, SweepKind};
-use crate::sketch_mode::{normal_view, ConstraintTool, ScreenMap, SketchDisplay, SketchEditor, Tool};
+use crate::sketch_mode::{
+    normal_view, ConstraintTool, ScreenMap, SketchDisplay, SketchEditor, Tool,
+};
 use crate::sketch_paint;
+use crate::viewport::ViewportTexture;
 use crate::Model;
 
 /// Offscreen target the 3D view renders into; shown by egui as a texture.
 struct Viewport {
     scene: SceneRenderer,
-    texture: Option<(wgpu::Texture, wgpu::TextureView)>,
-    size: (u32, u32),
+    format: wgpu::TextureFormat,
+    texture: Option<ViewportTexture>,
     texture_id: Option<egui::TextureId>,
     uploaded_generation: u64,
 }
-
-const VIEW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// What the file prompt is for.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -55,17 +56,34 @@ pub struct OpenShapeApp {
     view_rect: egui::Rect,
 }
 
+/// The app's fonts: egui's defaults, with the monospace face (Hack) added as
+/// the last fallback of the proportional family for the symbols the
+/// proportional faces lack (the parallel and perpendicular glyphs, ∠, ≡ …).
+pub fn font_definitions() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    if fonts.font_data.contains_key("Hack") {
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .push("Hack".to_owned());
+    }
+    fonts
+}
+
 impl OpenShapeApp {
     /// Creates the app; sets up GPU resources on eframe's wgpu device.
     pub fn new(cc: &eframe::CreationContext<'_>, model: Model) -> Self {
+        cc.egui_ctx.set_fonts(font_definitions());
         let (viewport, adapter) = match cc.wgpu_render_state.as_ref() {
             Some(rs) => {
                 let info = rs.adapter.get_info();
+                let format = crate::viewport::scene_format(&rs.adapter);
                 (
                     Some(Viewport {
-                        scene: SceneRenderer::new(&rs.device, VIEW_FORMAT),
+                        scene: SceneRenderer::new(&rs.device, format),
+                        format,
                         texture: None,
-                        size: (0, 0),
                         texture_id: None,
                         uploaded_generation: u64::MAX,
                     }),
@@ -111,7 +129,11 @@ impl OpenShapeApp {
         let pts: Vec<DVec3> = d
             .points()
             .map(|(_, p)| frame.point2(p))
-            .chain(d.curves.iter().flat_map(|c| c.polyline.iter().map(|p| frame.point2(*p))))
+            .chain(
+                d.curves
+                    .iter()
+                    .flat_map(|c| c.polyline.iter().map(|p| frame.point2(*p))),
+            )
             .collect();
         if let Some((lo, hi)) = bounds(&pts) {
             self.camera.fit(lo, hi);
@@ -539,7 +561,10 @@ impl OpenShapeApp {
                 .on_hover_text("Dimension the selection; double-click a dimension to change it")
                 .clicked()
             {
-                let at = ui.ctx().input(|i| i.pointer.hover_pos()).unwrap_or_default();
+                let at = ui
+                    .ctx()
+                    .input(|i| i.pointer.hover_pos())
+                    .unwrap_or_default();
                 ed.dimension(model, at);
             }
             if ui
@@ -601,9 +626,8 @@ impl OpenShapeApp {
                     });
                 }
                 ui.horizontal(|ui| {
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut prompt.text).desired_width(90.0),
-                    );
+                    let r =
+                        ui.add(egui::TextEdit::singleline(&mut prompt.text).desired_width(90.0));
                     if !r.has_focus() && !r.lost_focus() {
                         r.request_focus();
                     }
@@ -666,29 +690,35 @@ impl OpenShapeApp {
                         p.regions.clear();
                     }
                 });
-                egui::Grid::new("sweep").num_columns(2).show(ui, |ui| match p.kind {
-                    SweepKind::Extrude => {
-                        ui.label("Distance");
-                        ui.text_edit_singleline(&mut p.distance);
-                        ui.end_row();
-                        ui.label("Symmetric");
-                        ui.checkbox(&mut p.symmetric, "");
-                        ui.end_row();
-                    }
-                    SweepKind::Revolve => {
-                        ui.label("Axis");
-                        ui.horizontal(|ui| {
-                            ui.label(if p.axis.is_some() { "a sketch line" } else { "none" });
-                            if ui.selectable_label(p.picking_axis, "Pick…").clicked() {
-                                p.picking_axis = !p.picking_axis;
-                            }
-                        });
-                        ui.end_row();
-                        ui.label("Angle");
-                        ui.text_edit_singleline(&mut p.angle);
-                        ui.end_row();
-                    }
-                });
+                egui::Grid::new("sweep")
+                    .num_columns(2)
+                    .show(ui, |ui| match p.kind {
+                        SweepKind::Extrude => {
+                            ui.label("Distance");
+                            ui.text_edit_singleline(&mut p.distance);
+                            ui.end_row();
+                            ui.label("Symmetric");
+                            ui.checkbox(&mut p.symmetric, "");
+                            ui.end_row();
+                        }
+                        SweepKind::Revolve => {
+                            ui.label("Axis");
+                            ui.horizontal(|ui| {
+                                ui.label(if p.axis.is_some() {
+                                    "a sketch line"
+                                } else {
+                                    "none"
+                                });
+                                if ui.selectable_label(p.picking_axis, "Pick…").clicked() {
+                                    p.picking_axis = !p.picking_axis;
+                                }
+                            });
+                            ui.end_row();
+                            ui.label("Angle");
+                            ui.text_edit_singleline(&mut p.angle);
+                            ui.end_row();
+                        }
+                    });
                 if let Some(e) = &p.error {
                     ui.colored_label(sketch_paint::CONFLICT, e);
                 }
@@ -911,46 +941,29 @@ impl OpenShapeApp {
         // Same apparent line weight on high-DPI screens.
         vp.scene
             .set_edge_width(openshape_render::DEFAULT_EDGE_WIDTH_PX * ppp);
-        if vp.texture.is_none() || vp.size != size {
-            let texture = rs.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("openshape viewport"),
-                size: wgpu::Extent3d {
-                    width: size.0,
-                    height: size.1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: VIEW_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        if vp.texture.as_ref().map(|t| t.size) != Some(size) {
+            let t = ViewportTexture::new(&rs.device, vp.format, size);
             let mut renderer = rs.renderer.write();
             match vp.texture_id {
                 Some(id) => renderer.update_egui_texture_from_wgpu_texture(
                     &rs.device,
-                    &view,
+                    &t.egui_view,
                     wgpu::FilterMode::Linear,
                     id,
                 ),
                 None => {
                     vp.texture_id = Some(renderer.register_native_texture(
                         &rs.device,
-                        &view,
+                        &t.egui_view,
                         wgpu::FilterMode::Linear,
                     ))
                 }
             }
-            vp.texture = Some((texture, view));
-            vp.size = size;
+            vp.texture = Some(t);
         }
-        if let Some((_, view)) = &vp.texture {
+        if let Some(t) = &vp.texture {
             vp.scene
-                .render(&rs.device, &rs.queue, &self.camera, view, size);
+                .render(&rs.device, &rs.queue, &self.camera, &t.render_view, size);
         }
         if let Some(id) = vp.texture_id {
             ui.painter().image(

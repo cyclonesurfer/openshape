@@ -53,6 +53,42 @@ pub enum ProfileCurve {
 }
 
 impl ProfileCurve {
+    /// `n + 1` points at evenly spaced parameters along the curve (angle for
+    /// arcs and circles, knot parameter for splines), starting and ending at
+    /// its ends: for drawing and picking. Fails for an invalid spline.
+    pub fn sample(&self, n: usize) -> Result<Vec<DVec2>, KernelError> {
+        let n = n.max(1);
+        let f = |i: usize| i as f64 / n as f64;
+        Ok(match self {
+            ProfileCurve::Line { start, end } => (0..=n).map(|i| start.lerp(*end, f(i))).collect(),
+            ProfileCurve::Arc {
+                center,
+                radius,
+                start_angle,
+                sweep_angle,
+            } => (0..=n)
+                .map(|i| *center + DVec2::from_angle(start_angle + sweep_angle * f(i)) * *radius)
+                .collect(),
+            ProfileCurve::Circle { center, radius } => (0..=n)
+                .map(|i| *center + DVec2::from_angle(2.0 * PI * f(i)) * *radius)
+                .collect(),
+            ProfileCurve::Spline {
+                degree,
+                knots,
+                points,
+                weights,
+            } => {
+                let p3: Vec<DVec3> = points.iter().map(|p| p.extend(0.0)).collect();
+                let c = NurbsCurve::new(*degree, knots.clone(), p3, weights.clone())
+                    .map_err(|e| KernelError::InvalidInput(format!("spline: {e}")))?;
+                let (a, b) = c.domain();
+                (0..=n)
+                    .map(|i| c.point(a + (b - a) * f(i)).truncate())
+                    .collect()
+            }
+        })
+    }
+
     /// A cubic (or lower, for few points) spline interpolating `points`.
     pub fn interpolate(points: &[DVec2]) -> Result<ProfileCurve, KernelError> {
         let degree = 3.min(points.len().saturating_sub(1)).max(1);

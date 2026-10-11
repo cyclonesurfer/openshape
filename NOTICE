@@ -1,0 +1,35 @@
+OpenShape
+Copyright (C) 2026 The OpenShape contributors
+
+OpenShape is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option)
+any later version. See LICENSE.
+
+Independent implementation
+--------------------------
+OpenShape is an independent, clean-room implementation of a parametric CAD
+system. It contains no code, file formats, icons, artwork or other assets
+of any proprietary CAD product. Its feature goals are benchmarked against
+commercial CAD systems, including Onshape. Onshape is a trademark of PTC
+Inc. OpenShape is not affiliated with, endorsed by or derived from PTC Inc.
+or its products. The policy, and the public sources OpenShape relies on, are
+in docs/CLEANROOM.md.
+
+Every icon in OpenShape is an original drawing made for it, in code
+(crates/ui-kit/src/icons.rs).
+
+Third-party components
+----------------------
+OpenShape links third-party Rust crates from crates.io, listed with their
+exact versions in Cargo.lock. Each is under a licence compatible with
+GPL-3.0-or-later, checked on every build by cargo-deny (deny.toml); their
+licence texts are in the crates' own source distributions.
+
+The user interface draws text with the fonts bundled by the egui toolkit
+(crate epaint_default_fonts):
+  - Ubuntu Light: Ubuntu Font Licence 1.0
+  - Hack: MIT License, with the Bitstream Vera License for the glyphs from
+    Bitstream Vera Sans Mono (the DejaVu contributions are public domain)
+  - Noto Emoji: SIL Open Font License 1.1
+  - emoji-icon-font (John Slegers): MIT License

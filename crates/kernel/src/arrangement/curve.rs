@@ -39,12 +39,7 @@ pub(super) enum Geom {
     /// `a + t (b − a)`, `t ∈ [0, 1]`.
     Line { a: DVec2, b: DVec2 },
     /// `c + r (cos φ, sin φ)` with `φ = a0 + sgn · t`.
-    Arc {
-        c: DVec2,
-        r: f64,
-        a0: f64,
-        sgn: f64,
-    },
+    Arc { c: DVec2, r: f64, a0: f64, sgn: f64 },
     /// B-spline, decomposed into its knot spans.
     Spline { spans: Vec<Span> },
 }
@@ -143,10 +138,7 @@ impl Crv {
                     return Err(bad(i, "line is shorter than the model tolerance"));
                 }
                 Ok(Crv {
-                    geom: Geom::Line {
-                        a: *start,
-                        b: *end,
-                    },
+                    geom: Geom::Line { a: *start, b: *end },
                     lo: 0.0,
                     hi: 1.0,
                     periodic: false,
@@ -260,7 +252,10 @@ impl Crv {
                 wmax = wmax.max(x);
             }
             if wmax > wmin * 1e12 {
-                return Err(bad(i, "spline weights span more than 12 orders of magnitude"));
+                return Err(bad(
+                    i,
+                    "spline weights span more than 12 orders of magnitude",
+                ));
             }
         }
         let p3: Vec<DVec3> = points.iter().map(|p| p.extend(0.0)).collect();
@@ -358,11 +353,6 @@ impl Crv {
         self.bmax = hi;
     }
 
-    /// Diagonal of the bounding box.
-    pub fn size(&self) -> f64 {
-        (self.bmax - self.bmin).length()
-    }
-
     /// Spline spans, if this is a spline.
     pub fn spans(&self) -> &[Span] {
         match &self.geom {
@@ -456,7 +446,7 @@ impl Crv {
     pub fn closest(&self, p: DVec2, t0: f64, t1: f64) -> (f64, f64) {
         let dist = |t: f64| (self.point(t) - p).length();
         let mut best = (t0, dist(t0));
-        let mut consider = |t: f64, best: &mut (f64, f64)| {
+        let consider = |t: f64, best: &mut (f64, f64)| {
             let d = dist(t);
             if d < best.1 {
                 *best = (t, d);

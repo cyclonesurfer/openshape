@@ -51,49 +51,84 @@ pub(super) fn orient(a: DVec2, b: DVec2, c: DVec2) -> f64 {
 pub(super) fn piece_area(c: &Crv, t0: f64, t1: f64, o: DVec2) -> f64 {
     match &c.geom {
         Geom::Line { .. } => 0.5 * (c.point(t0) - o).perp_dot(c.point(t1) - o),
-        Geom::Arc { c: ctr, r, sgn, .. } => {
-            let p0 = c.point(t0);
-            let p1 = c.point(t1);
-            0.5 * ((*ctr - o).perp_dot(p1 - p0) + r * r * sgn * (t1 - t0))
+        Geom::Arc { r, sgn, .. } => {
+            // Triangle (o, p0, p1) plus the circular segment between the
+            // chord and the arc: well conditioned for short pieces of large
+            // circles far from the origin.
+            let p0 = c.point(t0) - o;
+            let p1 = c.point(t1) - o;
+            0.5 * p0.perp_dot(p1) + 0.5 * r * r * sgn * angle_minus_sine(t1 - t0)
         }
-        Geom::Spline { .. } => c
-            .pieces(t0, t1)
-            .iter()
-            .map(|p| bez_area(&p.bez, o))
-            .sum(),
+        Geom::Spline { .. } => c.pieces(t0, t1).iter().map(|p| bez_area(&p.bez, o)).sum(),
     }
 }
 
+/// `d − sin d`, without cancellation for small `d`.
+fn angle_minus_sine(d: f64) -> f64 {
+    if d.abs() >= 0.5 {
+        return d - d.sin();
+    }
+    // d³/3! − d⁵/5! + …, to d¹⁵ (the next term is below 1e-18 relative).
+    let d2 = d * d;
+    let mut term = d * d2 / 6.0;
+    let mut sum = term;
+    for k in (5..=15).step_by(2) {
+        term *= -d2 / ((k - 1) * k) as f64;
+        sum += term;
+    }
+    sum
+}
+
 fn bez_area(b: &Bez, o: DVec2) -> f64 {
+    // The integrand and its magnitude scale `|p − o| |p'| / 2`, which bounds
+    // the rounding error of each evaluation.
     let f = |u: f64| {
         let [p, d1, _] = b.derivs(u);
-        0.5 * (p - o).perp_dot(d1)
+        let r = p - o;
+        (0.5 * r.perp_dot(d1), 0.5 * r.length() * d1.length())
     };
-    let gauss = |n: usize, a: f64, bb: f64| -> f64 {
-        let h = 0.5 * (bb - a);
-        gauss_legendre(n)
-            .iter()
-            .map(|&(x, w)| w * f(a + h * (x + 1.0)))
-            .sum::<f64>()
-            * h
+    let rule = |n: usize| {
+        let nodes = gauss_legendre(n);
+        move |a: f64, bb: f64| -> (f64, f64) {
+            let h = 0.5 * (bb - a);
+            let (mut v, mut m) = (0.0, 0.0);
+            for &(x, w) in &nodes {
+                let (fv, fm) = f(a + h * (x + 1.0));
+                v += w * fv;
+                m += w * fm;
+            }
+            (v * h, m * h)
+        }
     };
     if b.is_polynomial() {
-        return gauss(b.degree() + 1, 0.0, 1.0);
+        return rule(b.degree() + 1)(0.0, 1.0).0;
     }
-    let n = 2 * b.degree() + 8;
-    fn adapt(g: &dyn Fn(usize, f64, f64) -> f64, n: usize, a: f64, b: f64, whole: f64, depth: u32) -> f64 {
-        let m = 0.5 * (a + b);
-        let l = g(n, a, m);
-        let r = g(n, m, b);
-        let scale = l.abs() + r.abs();
-        if depth >= 24 || (l + r - whole).abs() <= 1e-15 * scale.max(f64::MIN_POSITIVE) {
-            l + r
+    // Rational: adaptive bisection until halving changes an interval's
+    // integral by less than 1e-14 of the whole integrand's magnitude (shared
+    // out over the parameter interval) or than the rounding level of the
+    // interval's own evaluations; at most `MAX_INTERVALS` subdivisions.
+    const MAX_INTERVALS: usize = 4096;
+    let gauss = rule(2 * b.degree() + 8);
+    let (whole, magnitude) = gauss(0.0, 1.0);
+    let target = 1e-14 * magnitude;
+    let mut total = 0.0;
+    let mut stack = vec![(0.0, 1.0, whole)];
+    let mut splits = 0;
+    while let Some((a, bb, w)) = stack.pop() {
+        let m = 0.5 * (a + bb);
+        let (l, lm) = gauss(a, m);
+        let (r, rm) = gauss(m, bb);
+        let err = (l + r - w).abs();
+        let accept = (target * (bb - a)).max(256.0 * f64::EPSILON * (lm + rm));
+        if !err.is_finite() || err <= accept || splits >= MAX_INTERVALS {
+            total += l + r;
         } else {
-            adapt(g, n, a, m, l, depth + 1) + adapt(g, n, m, b, r, depth + 1)
+            splits += 1;
+            stack.push((a, m, l));
+            stack.push((m, bb, r));
         }
     }
-    let whole = gauss(n, 0.0, 1.0);
-    adapt(&gauss, n, 0.0, 1.0, whole, 0)
+    total
 }
 
 /// Signed area of a closed loop (positive when counter-clockwise), with
@@ -308,7 +343,8 @@ impl<'a> RegionShape<'a> {
             for axis in 0..2 {
                 let o = 1 - axis;
                 for i in 0..k {
-                    let c = self.lo[axis] + (i as f64 + 0.5) / k as f64 * (self.hi[axis] - self.lo[axis]);
+                    let c = self.lo[axis]
+                        + (i as f64 + 0.5) / k as f64 * (self.hi[axis] - self.lo[axis]);
                     let mut xs = Vec::new();
                     for pl in &polys {
                         for j in 0..pl.len() {
@@ -359,5 +395,25 @@ impl<'a> RegionShape<'a> {
             }
         }
         Some((p, d))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn angle_minus_sine_is_accurate() {
+        for d in [0.1, 0.3, 0.49, -0.49] {
+            // The direct formula loses about ε·|d| to cancellation.
+            let direct = d - f64::sin(d);
+            assert!((angle_minus_sine(d) - direct).abs() <= 4.0 * f64::EPSILON * d.abs());
+        }
+        for d in [1e-3f64, 1e-6, -1e-5] {
+            let want = d.powi(3) / 6.0 * (1.0 - d * d / 20.0 + d.powi(4) / 840.0);
+            assert!((angle_minus_sine(d) - want).abs() <= 1e-15 * want.abs());
+        }
+        assert_eq!(angle_minus_sine(0.0), 0.0);
+        assert!((angle_minus_sine(2.0) - (2.0 - 2f64.sin())).abs() < 1e-16);
     }
 }

@@ -177,7 +177,7 @@ pub(crate) fn scale_of<K: SketchKey>(
         (0.0, DVec2::ZERO)
     };
     let mut l = diag.max(max_dim);
-    if !(l > 0.0) || !l.is_finite() {
+    if !(l.is_finite() && l > 0.0) {
         l = 1e-6;
     }
     Scale {
@@ -295,7 +295,10 @@ impl Builder<'_> {
             }
             Con::OnSpline(p, s) => {
                 let t = 2 * self.n_points + self.n_circles + self.params.len();
-                self.params.push(Param { spline: s, point: p });
+                self.params.push(Param {
+                    spline: s,
+                    point: p,
+                });
                 for axis in 0..2 {
                     self.push(
                         owner,
@@ -431,16 +434,7 @@ impl Builder<'_> {
                 } else {
                     PairMode::Dot
                 };
-                self.push(
-                    owner,
-                    EqKind::DirPair {
-                        a: da,
-                        b: db,
-                        mode,
-                    },
-                    true,
-                    None,
-                );
+                self.push(owner, EqKind::DirPair { a: da, b: db, mode }, true, None);
             }
             Con::TangentLC(l, c, left) => {
                 let r = self.radius(c);

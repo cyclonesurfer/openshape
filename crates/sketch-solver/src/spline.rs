@@ -26,6 +26,9 @@ pub(crate) struct SplineMap {
     pub inv: Option<Matrix>,
     /// Number of referenced points (= number of control points).
     pub count: usize,
+    /// Interior knots of multiplicity ≥ degree, ascending: where the first
+    /// derivative may jump (corners of a degree-1 spline).
+    pub kinks: Vec<f64>,
 }
 
 /// Reasons a spline definition is unusable.
@@ -51,9 +54,11 @@ impl SplineMap {
                 degree + 1
             )));
         }
+        let knots = clamped_uniform_knots(count, degree);
         Ok(SplineMap {
             degree,
-            knots: clamped_uniform_knots(count, degree),
+            kinks: kinks(&knots, degree),
+            knots,
             inv: None,
             count,
         })
@@ -99,8 +104,16 @@ impl SplineMap {
                 "the interpolation system is singular".to_string(),
             ));
         }
+        // Clamped knots make the first and last collocation rows unit rows,
+        // so the end control points are the end through-points: exactly,
+        // not to rounding (the curve meets what its ends are joined to).
+        for k in 0..count {
+            inv[(0, k)] = if k == 0 { 1.0 } else { 0.0 };
+            inv[(count - 1, k)] = if k == count - 1 { 1.0 } else { 0.0 };
+        }
         Ok(SplineMap {
             degree,
+            kinks: kinks(&knots, degree),
             knots,
             inv: Some(inv),
             count,
@@ -117,9 +130,29 @@ impl SplineMap {
     /// Weights and their first and (if `ders ≥ 2`) second derivatives.
     pub fn weights_ders(&self, t: f64, ders: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         let t = t.clamp(0.0, 1.0);
+        let span = find_span(self.count - 1, self.degree, t, &self.knots);
+        self.weights_in_span(span, t, ders)
+    }
+
+    /// At a kink `t`, the weight derivatives `w'_k` of the piece to the left
+    /// of `t` (the right-hand piece's are those of [`Self::weights`]).
+    /// `None` if `t` is not a kink.
+    pub fn left_derivative(&self, t: f64) -> Option<Vec<f64>> {
+        if !self.kinks.contains(&t) {
+            return None;
+        }
+        let right = find_span(self.count - 1, self.degree, t, &self.knots);
+        let mut left = right;
+        while self.knots[left] >= t {
+            left -= 1;
+        }
+        Some(self.weights_in_span(left, t, 1).1)
+    }
+
+    /// Weights and derivatives from the polynomial piece of knot span
+    /// `span`, evaluated at `t`.
+    fn weights_in_span(&self, span: usize, t: f64, ders: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         let p = self.degree;
-        let n = self.count - 1;
-        let span = find_span(n, p, t, &self.knots);
         let d = ders_basis_funs(span, t, p, ders.min(p), &self.knots);
         let mut w = vec![0.0; self.count];
         let mut w1 = vec![0.0; self.count];
@@ -205,6 +238,24 @@ pub(crate) fn check_params(params: &[f64]) -> Result<(), SplineError> {
         ));
     }
     Ok(())
+}
+
+/// Interior knot values of multiplicity ≥ `p` (ascending, distinct).
+fn kinks(knots: &[f64], p: usize) -> Vec<f64> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < knots.len() {
+        let mut j = i;
+        while j + 1 < knots.len() && knots[j + 1] == knots[i] {
+            j += 1;
+        }
+        let u = knots[i];
+        if u > 0.0 && u < 1.0 && j + 1 - i >= p {
+            out.push(u);
+        }
+        i = j + 1;
+    }
+    out
 }
 
 /// Clamped knots on `[0, 1]` with uniform interior knots for `count`
@@ -371,6 +422,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn kinks_and_one_sided_derivatives() {
+        // Degree 1 through 4 points: corners at 1/3 and 2/3.
+        let m = SplineMap::control(4, 1).unwrap();
+        assert_eq!(m.kinks, vec![1.0 / 3.0, 2.0 / 3.0]);
+        let t = m.kinks[0];
+        let left = m.left_derivative(t).unwrap();
+        let (_, right) = m.weights(t);
+        let (_, before) = m.weights(t - 1e-3);
+        let (_, after) = m.weights(t + 1e-3);
+        let close = |a: &[f64], b: &[f64]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9);
+        assert!(close(&left, &before));
+        assert!(close(&right, &after));
+        assert!(!close(&left, &right));
+        assert!(m.left_derivative(0.5).is_none());
+        // Smooth splines have none.
+        assert!(SplineMap::control(7, 3).unwrap().kinks.is_empty());
+        assert!(SplineMap::control(5, 2).unwrap().kinks.is_empty());
+        assert!(SplineMap::interpolated(&[0.0, 0.3, 0.6, 1.0])
+            .unwrap()
+            .kinks
+            .is_empty());
     }
 
     #[test]

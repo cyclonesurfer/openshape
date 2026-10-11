@@ -82,7 +82,9 @@ impl B {
 
     pub fn c(&mut self, constraint: Constraint<u32>) -> u32 {
         let id = self.key();
-        self.sketch.constraints.push(ConstraintEntry { id, constraint });
+        self.sketch
+            .constraints
+            .push(ConstraintEntry { id, constraint });
         id
     }
 
@@ -142,11 +144,24 @@ fn dist_to_line(p: DVec2, (s, e): (DVec2, DVec2)) -> f64 {
 /// Evaluates a clamped B-spline (de Boor's algorithm, P&T A3.1 in its
 /// recursive form) — written independently of the solver's basis code.
 pub fn de_boor(degree: usize, knots: &[f64], pts: &[DVec2], t: f64) -> DVec2 {
+    de_boor_in(degree, knots, pts, t, f64::NEG_INFINITY)
+}
+
+/// [`de_boor`] using the polynomial piece of the knot span that starts at
+/// `span_start` when `t` lies in it or at its end (the span is found from
+/// `span_start` if that is a knot, otherwise from `t`).
+pub fn de_boor_in(degree: usize, knots: &[f64], pts: &[DVec2], t: f64, span_start: f64) -> DVec2 {
     let n = pts.len() - 1;
     let t = t.clamp(knots[degree], knots[n + 1]);
     let mut k = degree;
-    while k < n && t >= knots[k + 1] {
-        k += 1;
+    if span_start > f64::NEG_INFINITY {
+        while k < n && knots[k + 1] <= span_start {
+            k += 1;
+        }
+    } else {
+        while k < n && t >= knots[k + 1] {
+            k += 1;
+        }
     }
     let mut d: Vec<DVec2> = (0..=degree).map(|j| pts[j + k - degree]).collect();
     for r in 1..=degree {
@@ -160,8 +175,18 @@ pub fn de_boor(degree: usize, knots: &[f64], pts: &[DVec2], t: f64) -> DVec2 {
     d[degree]
 }
 
-fn resolved(s: &Sketch<u32>, k: u32) -> ResolvedCurve {
-    resolve_curves(s)
+/// The explicit geometry of curve `k` alone (other curves may be
+/// degenerate without affecting it).
+pub fn resolved(s: &Sketch<u32>, k: u32) -> ResolvedCurve {
+    let e = s.entity(k).expect("curve").clone();
+    let mut own = Sketch::default();
+    for p in e.geometry.referenced_points() {
+        if own.entity(p).is_none() {
+            own.entities.push(s.entity(p).expect("point").clone());
+        }
+    }
+    own.entities.push(e);
+    resolve_curves(&own)
         .expect("resolvable")
         .into_iter()
         .find(|(id, _, _)| *id == k)
@@ -169,9 +194,11 @@ fn resolved(s: &Sketch<u32>, k: u32) -> ResolvedCurve {
         .2
 }
 
-/// Distance from `p` to a spline curve: dense sampling plus golden-section
-/// refinement around the best sample.
-fn dist_to_spline(s: &Sketch<u32>, k: u32, p: DVec2) -> f64 {
+/// Distance from `p` to a spline curve. Each knot span (a polynomial
+/// piece) is sampled densely, and golden-section search refines every
+/// local minimum of the samples within the piece (a looping curve can pass
+/// near `p` more than once; at a corner the two pieces are separate).
+pub fn dist_to_spline(s: &Sketch<u32>, k: u32, p: DVec2) -> f64 {
     let ResolvedCurve::Spline {
         degree,
         knots,
@@ -180,34 +207,49 @@ fn dist_to_spline(s: &Sketch<u32>, k: u32, p: DVec2) -> f64 {
     else {
         panic!("not a spline")
     };
-    let f = |t: f64| (de_boor(degree, &knots, &points, t) - p).length();
-    let n = 4000;
-    let mut best = (0.0, f(0.0));
-    for i in 1..=n {
-        let t = i as f64 / n as f64;
-        let d = f(t);
-        if d < best.1 {
-            best = (t, d);
-        }
-    }
-    let (mut a, mut b) = ((best.0 - 1.0 / n as f64).max(0.0), (best.0 + 1.0 / n as f64).min(1.0));
+    let mut best = f64::INFINITY;
     let g = 0.5 * (5f64.sqrt() - 1.0);
-    for _ in 0..200 {
-        let c = b - g * (b - a);
-        let d = a + g * (b - a);
-        if f(c) < f(d) {
-            b = d;
-        } else {
-            a = c;
+    for span in knots.windows(2) {
+        let (lo, hi) = (span[0], span[1]);
+        if hi <= lo {
+            continue;
+        }
+        // Evaluate inside the span, approaching its ends from within (the
+        // ends themselves are evaluated by the neighbouring spans too).
+        let f = |t: f64| (de_boor_in(degree, &knots, &points, t, lo) - p).length();
+        let n = 4000;
+        let ts: Vec<f64> = (0..=n)
+            .map(|i| lo + (hi - lo) * i as f64 / n as f64)
+            .collect();
+        let d: Vec<f64> = ts.iter().map(|&t| f(t)).collect();
+        for i in 0..=n {
+            let left = if i > 0 { d[i - 1] } else { f64::INFINITY };
+            let right = if i < n { d[i + 1] } else { f64::INFINITY };
+            best = best.min(d[i]);
+            if !(d[i] <= left && d[i] <= right) {
+                continue;
+            }
+            let (mut a, mut b) = (ts[i.saturating_sub(1)], ts[(i + 1).min(n)]);
+            for _ in 0..200 {
+                let c = b - g * (b - a);
+                let e = a + g * (b - a);
+                if f(c) < f(e) {
+                    b = e;
+                } else {
+                    a = c;
+                }
+            }
+            best = best.min(f(0.5 * (a + b)));
         }
     }
-    f(0.5 * (a + b)).min(best.1)
+    best
 }
 
-/// Unit tangent direction of a curve at its end `p` (lines: direction;
-/// arcs: perpendicular to the radius at `p`; splines: first or last
-/// control leg).
-fn end_tangent(s: &Sketch<u32>, k: u32, p: DVec2) -> DVec2 {
+/// Unit tangent direction of a curve at its end `key` (lines: direction;
+/// arcs: perpendicular to the radius there; splines: the first or last
+/// control leg — the end that is `key` itself, or else the nearer one).
+fn end_tangent(s: &Sketch<u32>, k: u32, key: u32) -> DVec2 {
+    let p = pos(s, key);
     match s.entity(k).unwrap().geometry.clone() {
         Geometry::Line { .. } => {
             let (a, b) = line(s, k);
@@ -219,13 +261,43 @@ fn end_tangent(s: &Sketch<u32>, k: u32, p: DVec2) -> DVec2 {
                 unreachable!()
             };
             let n = points.len();
-            if (points[0] - p).length() <= (points[n - 1] - p).length() {
+            let refs = s.entity(k).unwrap().geometry.referenced_points();
+            // The end that is the point, or is joined to it by coincident
+            // constraints (as the solver decides); else the nearer end.
+            let joined = |q: u32| coincident_class(s, key).contains(&q);
+            let at_start = match (joined(refs[0]), joined(refs[refs.len() - 1])) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => (points[0] - p).length() <= (points[n - 1] - p).length(),
+            };
+            if at_start {
                 (points[1] - points[0]).normalize()
             } else {
                 (points[n - 1] - points[n - 2]).normalize()
             }
         }
         _ => panic!("no tangent"),
+    }
+}
+
+/// The points joined to `key` by chains of coincident constraints
+/// (including `key`).
+fn coincident_class(s: &Sketch<u32>, key: u32) -> Vec<u32> {
+    let mut class = vec![key];
+    loop {
+        let before = class.len();
+        for c in &s.constraints {
+            if let Constraint::Coincident { a, b } = c.constraint {
+                if class.contains(&a) && !class.contains(&b) {
+                    class.push(b);
+                } else if class.contains(&b) && !class.contains(&a) {
+                    class.push(a);
+                }
+            }
+        }
+        if class.len() == before {
+            return class;
+        }
     }
 }
 
@@ -290,9 +362,8 @@ pub fn violation(s: &Sketch<u32>, c: &Constraint<u32>) -> (f64, bool) {
         }
         Constraint::Tangent { a, b, kind } => match kind {
             TangentKind::AtPoint { point } => {
-                let q = p(*point);
-                let ta = end_tangent(s, *a, q);
-                let tb = end_tangent(s, *b, q);
+                let ta = end_tangent(s, *a, *point);
+                let tb = end_tangent(s, *b, *point);
                 (ta.perp_dot(tb).abs(), true)
             }
             TangentKind::LineCircle { center_left } => {
@@ -316,7 +387,9 @@ pub fn violation(s: &Sketch<u32>, c: &Constraint<u32>) -> (f64, bool) {
                 ((dist - want).abs(), false)
             }
         },
-        Constraint::Normal { line: l, curve } => (dist_to_line(circ(s, *curve).0, line(s, *l)), false),
+        Constraint::Normal { line: l, curve } => {
+            (dist_to_line(circ(s, *curve).0, line(s, *l)), false)
+        }
         Constraint::Fix { point, at } => ((p(*point) - *at).length(), false),
         Constraint::Distance { a, b, kind, value } => {
             let ea = &s.entity(*a).unwrap().geometry;
@@ -384,7 +457,8 @@ pub fn worst(s: &Sketch<u32>, scale: f64) -> (f64, String) {
     for c in &s.constraints {
         let (v, ang) = violation(s, &c.constraint);
         let rel = if ang { v } else { v / scale };
-        if !(rel <= w.0) {
+        // A NaN violation counts as the worst.
+        if rel.is_nan() || rel > w.0 {
             w = (rel, format!("{:?} {:?}", c.id, c.constraint));
         }
     }
@@ -392,7 +466,7 @@ pub fn worst(s: &Sketch<u32>, scale: f64) -> (f64, String) {
         if let Geometry::Arc { center, start, end } = e.geometry {
             let c = pos(s, center);
             let v = ((pos(s, end) - c).length() - (pos(s, start) - c).length()).abs() / scale;
-            if !(v <= w.0) {
+            if v.is_nan() || v > w.0 {
                 w = (v, format!("arc {:?} radius mismatch", e.id));
             }
         }

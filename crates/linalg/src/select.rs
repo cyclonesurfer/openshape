@@ -54,8 +54,8 @@ pub fn select_columns_in_order(
         }
         while max_count.is_some() && k < cap {
             let mut best: Option<(usize, f64)> = None;
-            for j in 0..n {
-                if accepted[j] {
+            for (j, &taken) in accepted.iter().enumerate() {
+                if taken {
                     continue;
                 }
                 let d = norm2(&w.col(j)[k..]);
@@ -82,8 +82,8 @@ pub fn select_columns_in_order(
 fn accept(w: &mut Matrix, accepted: &mut [bool], j: usize, k: usize) {
     let tau = make_reflector(&mut w.col_mut(j)[k..]);
     accepted[j] = true;
-    for c in 0..w.cols() {
-        if accepted[c] {
+    for (c, &taken) in accepted.iter().enumerate() {
+        if taken {
             continue;
         }
         let (cj, cc) = w.two_cols_mut(j, c);

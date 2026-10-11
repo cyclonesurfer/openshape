@@ -2275,6 +2275,7 @@ dependencies = [
  "openshape-kernel",
  "openshape-render",
  "openshape-sketch-solver",
+ "openshape-ui-kit",
 ]
 
 [[package]]
@@ -2376,6 +2377,20 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "openshape-ui-kit"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "egui-wgpu",
+ "glam",
+ "log",
+ "openshape-render",
+ "pollster",
+ "proptest",
+ "wgpu",
 ]
 
 [[package]]

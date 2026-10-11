@@ -5,9 +5,7 @@
 
 use egui::{Pos2, Rect};
 use openshape_app::profile_pick::{ProfilePick, SweepKind};
-use openshape_app::sketch_mode::{
-    normal_view, ConstraintTool, ScreenMap, SketchEditor, Tool,
-};
+use openshape_app::sketch_mode::{normal_view, ConstraintTool, ScreenMap, SketchEditor, Tool};
 use openshape_app::Model;
 use openshape_core_model::sketch::{Constraint, Geometry};
 use openshape_core_model::{DVec2, DVec3, FeatureId, PlaneRef};
@@ -197,7 +195,15 @@ fn a_dimension_drives_the_geometry_and_the_extrude_follows() {
     assert!(ed.prompt.as_ref().unwrap().error.is_some());
     ed.prompt.as_mut().unwrap().text = "5 cm".into();
     ed.commit_prompt(&mut m);
-    let area = m.sketch_result(f).unwrap().regions.as_ref().unwrap().arrangement.regions[0].area;
+    let area = m
+        .sketch_result(f)
+        .unwrap()
+        .regions
+        .as_ref()
+        .unwrap()
+        .arrangement
+        .regions[0]
+        .area;
     assert!(close(area, 1000.0 * MM * MM), "{area}");
 }
 
@@ -247,7 +253,10 @@ fn lines_chain_infer_horizontal_and_snap_to_the_origin() {
         })
         .find(|p| (p.x - 30.0 * MM).abs() < 1e-3 && p.y.abs() < 1e-3)
         .expect("corner");
-    assert!(corner.y.abs() < 1e-12, "the first line is exactly horizontal");
+    assert!(
+        corner.y.abs() < 1e-12,
+        "the first line is exactly horizontal"
+    );
 }
 
 #[test]
@@ -311,10 +320,7 @@ fn a_conflicting_constraint_is_reported_and_undo_recovers() {
     click(&mut m, &mut ed, &map, 20.0, 20.0);
     assert!(ed.can_constrain(&m, ConstraintTool::Vertical));
     ed.constrain(&mut m, ConstraintTool::Vertical);
-    assert_eq!(
-        status(&m, f),
-        SolveStatus::Failed(SolveError::Conflicting)
-    );
+    assert_eq!(status(&m, f), SolveStatus::Failed(SolveError::Conflicting));
     assert!(matches!(m.status(f), Some(FeatureStatus::Failed(_))));
     assert!(ed.status(&m).contains("Conflicting"));
     assert!(ed.message.as_deref().unwrap_or("").contains("conflict"));
@@ -362,7 +368,10 @@ fn circles_arcs_and_splines() {
     let regions = r.regions.as_ref().unwrap();
     assert_eq!(regions.arrangement.regions.len(), 1);
     let area = regions.arrangement.regions[0].area;
-    assert!(close(area, std::f64::consts::PI * 100.0 * MM * MM), "{area}");
+    assert!(
+        close(area, std::f64::consts::PI * 100.0 * MM * MM),
+        "{area}"
+    );
 
     // A 3-point arc through the top runs counter-clockwise from the right.
     ed.set_tool(Tool::Arc);
@@ -444,4 +453,131 @@ fn undoing_the_sketch_removes_it() {
     assert!(m.undo());
     assert!(m.undo());
     assert!(m.sketch_result(ed.feature).is_none());
+}
+
+/// Opens the dimension prompt for the current selection, types `value` and
+/// commits it; panics if the prompt reports an error.
+fn dimension(m: &mut Model, ed: &mut SketchEditor, map: &ScreenMap, shown: &str, value: &str) {
+    ed.dimension(m, at(map, 90.0, 90.0));
+    let prompt = ed.prompt.as_mut().expect("dimension prompt");
+    assert_eq!(prompt.text, shown);
+    prompt.text = value.into();
+    ed.commit_prompt(m);
+    assert!(ed.prompt.is_none(), "{:?}", ed.prompt);
+}
+
+fn solved(m: &Model, f: FeatureId) -> openshape_core_model::SketchData {
+    let r = m.sketch_result(f).unwrap();
+    assert_eq!(r.solution.status, SolveStatus::Solved);
+    r.solution.sketch.clone()
+}
+
+#[test]
+fn every_dimension_kind_is_placed_from_a_selection_and_drives_the_geometry() {
+    let (mut m, mut ed, map) = setup();
+    let f = ed.feature;
+
+    // A circle: diameter.
+    ed.set_tool(Tool::Circle);
+    click(&mut m, &mut ed, &map, 40.0, 40.0);
+    click(&mut m, &mut ed, &map, 55.0, 40.0);
+    ed.set_tool(Tool::Select);
+    click(&mut m, &mut ed, &map, 40.0, 55.0);
+    dimension(&mut m, &mut ed, &map, "30", "50");
+    let s = solved(&m, f);
+    let radius = s
+        .entities
+        .iter()
+        .find_map(|e| match e.geometry {
+            Geometry::Circle { radius, .. } => Some(radius),
+            _ => None,
+        })
+        .unwrap();
+    assert!(close(radius, 25.0 * MM), "{radius}");
+    assert_eq!(
+        constraints(&m, f, |c| matches!(c, Constraint::Diameter { .. })),
+        1
+    );
+
+    // An arc (centre (-50, 0), radius 10): radius.
+    ed.set_tool(Tool::Arc);
+    click(&mut m, &mut ed, &map, -40.0, 0.0);
+    click(&mut m, &mut ed, &map, -60.0, 0.0);
+    click(&mut m, &mut ed, &map, -50.0, 10.0);
+    ed.set_tool(Tool::Select);
+    click(&mut m, &mut ed, &map, -50.0, 10.0);
+    dimension(&mut m, &mut ed, &map, "10", "12 mm");
+    let s = solved(&m, f);
+    let (c, a) = s
+        .entities
+        .iter()
+        .find_map(|e| match e.geometry {
+            Geometry::Arc { center, start, .. } => Some((center, start)),
+            _ => None,
+        })
+        .unwrap();
+    let r = (s.point(a).unwrap() - s.point(c).unwrap()).length();
+    assert!(close(r, 12.0 * MM), "{r}");
+
+    // Two lines from the origin at 45° to each other: angle.
+    ed.set_tool(Tool::Line);
+    click(&mut m, &mut ed, &map, 0.0, -60.0);
+    click(&mut m, &mut ed, &map, 40.0, -60.0);
+    ed.escape();
+    click(&mut m, &mut ed, &map, 0.0, -60.0);
+    click(&mut m, &mut ed, &map, 30.0, -30.0);
+    ed.escape();
+    ed.set_tool(Tool::Select);
+    click(&mut m, &mut ed, &map, 20.0, -60.0);
+    ed.click(&mut m, &map, at(&map, 15.0, -45.0), true);
+    assert_eq!(ed.selection.len(), 2);
+    dimension(&mut m, &mut ed, &map, "45", "60");
+    let s = solved(&m, f);
+    let lines: Vec<DVec2> = s
+        .entities
+        .iter()
+        .filter_map(|e| match e.geometry {
+            Geometry::Line { start, end } => Some(s.point(end)? - s.point(start)?),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let angle = lines[0].angle_to(lines[1]).abs().to_degrees();
+    assert!((angle - 60.0).abs() < 1e-6, "{angle}");
+
+    // Two points: aligned by default, switched to a horizontal distance.
+    ed.set_tool(Tool::Point);
+    click(&mut m, &mut ed, &map, -80.0, 60.0);
+    click(&mut m, &mut ed, &map, -50.0, 80.0);
+    ed.set_tool(Tool::Select);
+    click(&mut m, &mut ed, &map, -80.0, 60.0);
+    ed.click(&mut m, &map, at(&map, -50.0, 80.0), true);
+    ed.dimension(&m, at(&map, 90.0, 90.0));
+    ed.set_prompt_kind(&m, openshape_core_model::sketch::DistanceKind::Horizontal);
+    let prompt = ed.prompt.as_mut().unwrap();
+    assert_eq!(prompt.text, "30");
+    prompt.text = "45".into();
+    ed.commit_prompt(&mut m);
+    assert!(ed.prompt.is_none());
+    let s = solved(&m, f);
+    let xs: Vec<f64> = s
+        .entities
+        .iter()
+        .filter_map(|e| match e.geometry {
+            Geometry::Point { at } if at.y > 50.0 * MM => Some(at.x),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(xs.len(), 2);
+    assert!(close((xs[0] - xs[1]).abs(), 45.0 * MM), "{xs:?}");
+    assert_eq!(
+        constraints(&m, f, |c| matches!(
+            c,
+            Constraint::Distance {
+                kind: openshape_core_model::sketch::DistanceKind::Horizontal,
+                ..
+            }
+        )),
+        1
+    );
 }

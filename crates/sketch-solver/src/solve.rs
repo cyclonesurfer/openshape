@@ -1,20 +1,26 @@
 //! The solve pipeline (design note 0005 §5): validate, scale and build,
-//! eliminate and decompose, solve each component, write back, check against
-//! the model tolerance, diagnose.
+//! eliminate and decompose, solve each component, diagnose, write back and
+//! check the result against the model tolerance ([`accept`]: also
+//! non-degenerate at the result's own scale, so that it can be solved
+//! again). If solving fails but the undragged input already passes that
+//! check, the input is the answer. A result with a collapsed curve
+//! ([`collapsed`]) is no answer: the constraint to blame is searched for
+//! ([`Part::attribute`], design note 0005 §9) and reported as
+//! conflicting, or the curve is reported degenerate.
 
 use std::collections::BTreeMap;
 
 use glam::DVec2;
-use openshape_linalg::{select_columns_in_order, Matrix};
+use openshape_linalg::{dot, norm2, residual, select_columns_in_order, CompleteOrthogonal, Matrix};
 
 use crate::build::{build, scale_of, Problem, Scale, DEGENERATE};
 use crate::diagnose::{conflicts, diagnose, CompDiag};
-use crate::eq::SplineDef;
-use crate::index::{Circ, EntKind, Index};
+use crate::index::{Circ, EntKind, Index, MAX_MAGNITUDE};
 use crate::model::{Geometry, Sketch, SketchKey};
-use crate::newton::{equation_tol, solve_component, CompSystem, LengthTol, RANK_TOL};
+use crate::newton::{
+    equation_tol, solve_component, CompSystem, LengthTol, Region, RANK_TOL, REACH,
+};
 use crate::reduce::{reduce, Reduced, Status};
-use crate::spline::combine;
 use crate::{EntityState, Solution, SolveError, SolveOptions, SolveStatus};
 
 /// Model linear tolerance (metres), ADR 0006.
@@ -64,54 +70,12 @@ fn entity_slots<K: SketchKey>(index: &Index<K>, prob: &Problem, ent: usize) -> V
             v
         }
         EntKind::Circular(Circ::Arc { c, s, e }) => [pt(c), pt(s), pt(e)].concat(),
-        EntKind::Spline(s) => index.splines[s].points.iter().flat_map(|&p| pt(p)).collect(),
+        EntKind::Spline(s) => index.splines[s]
+            .points
+            .iter()
+            .flat_map(|&p| pt(p))
+            .collect(),
     }
-}
-
-/// The curve parameter of the point of `def` closest to point `p` (slot
-/// values `v`): dense sampling, then safeguarded Newton on
-/// `(C(t) − P)·C′(t) = 0` (P&T eq. 6.3).
-fn closest_param(def: &SplineDef, v: &[f64], p: usize) -> f64 {
-    let pts: Vec<DVec2> = def
-        .points
-        .iter()
-        .map(|&q| DVec2::new(v[2 * q], v[2 * q + 1]))
-        .collect();
-    let target = DVec2::new(v[2 * p], v[2 * p + 1]);
-    let dist2 = |t: f64| {
-        let (w, _) = def.map.weights(t);
-        (combine(&w, &pts) - target).length_squared()
-    };
-    let samples = 16 * def.map.count + 16;
-    let mut best_t = 0.0;
-    let mut best_d = f64::INFINITY;
-    for i in 0..=samples {
-        let t = i as f64 / samples as f64;
-        let d = dist2(t);
-        if d < best_d {
-            best_d = d;
-            best_t = t;
-        }
-    }
-    for _ in 0..32 {
-        let (w, w1, w2) = def.map.weights_ders(best_t, 2);
-        let c = combine(&w, &pts) - target;
-        let c1 = combine(&w1, &pts);
-        let c2 = combine(&w2, &pts);
-        let g = c.dot(c1);
-        let gp = c1.dot(c1) + c.dot(c2);
-        if !(gp > 0.0) {
-            break;
-        }
-        let t = (best_t - g / gp).clamp(0.0, 1.0);
-        let d = dist2(t);
-        if !(d < best_d) {
-            break;
-        }
-        best_d = d;
-        best_t = t;
-    }
-    best_t
 }
 
 /// The message for a degenerate equation.
@@ -147,7 +111,12 @@ fn check_all(prob: &Problem, v: &[f64], lin: f64, ang: f64) -> Vec<Option<(f64, 
 
 /// Absolute slot values of a sketch (positions and radii) with the given
 /// hidden parameters.
-fn absolute_slots<K: SketchKey>(index: &Index<K>, positions: &[DVec2], radii: &[f64], params: &[f64]) -> Vec<f64> {
+fn absolute_slots<K: SketchKey>(
+    index: &Index<K>,
+    positions: &[DVec2],
+    radii: &[f64],
+    params: &[f64],
+) -> Vec<f64> {
     let mut v = Vec::with_capacity(2 * positions.len() + radii.len() + params.len());
     for p in positions {
         v.push(p.x);
@@ -171,6 +140,16 @@ fn max_abs_residual(checks: &[Option<(f64, f64, bool)>]) -> f64 {
 }
 
 pub(crate) fn solve<K: SketchKey>(sketch: &Sketch<K>, options: &SolveOptions<K>) -> Solution<K> {
+    solve_inner(sketch, options, true)
+}
+
+/// The pipeline; `attribute` enables the search for the constraint that
+/// collapses a curve ([`Part::attribute`], which solves without it).
+fn solve_inner<K: SketchKey>(
+    sketch: &Sketch<K>,
+    options: &SolveOptions<K>,
+    attribute: bool,
+) -> Solution<K> {
     let index = match Index::new(sketch) {
         Ok(i) => i,
         Err(e) => return early_failure(sketch, e),
@@ -236,8 +215,15 @@ pub(crate) fn solve<K: SketchKey>(sketch: &Sketch<K>, options: &SolveOptions<K>)
         .iter()
         .map(|cl| {
             let dm: Vec<usize> = cl.members.iter().copied().filter(|&s| dragged[s]).collect();
-            let set = if dm.is_empty() { cl.members.clone() } else { dm };
-            if set.iter().all(|&s| seed[s].to_bits() == seed[set[0]].to_bits()) {
+            let set = if dm.is_empty() {
+                cl.members.clone()
+            } else {
+                dm
+            };
+            if set
+                .iter()
+                .all(|&s| seed[s].to_bits() == seed[set[0]].to_bits())
+            {
                 seed[set[0]]
             } else {
                 set.iter().map(|&s| seed[s]).sum::<f64>() / set.len() as f64
@@ -253,7 +239,7 @@ pub(crate) fn solve<K: SketchKey>(sketch: &Sketch<K>, options: &SolveOptions<K>)
     }
     // Hidden curve parameters start at the closest point.
     for (k, par) in prob.params.iter().enumerate() {
-        let t = closest_param(&prob.splines[par.spline], &v, par.point);
+        let t = prob.splines[par.spline].closest_param(&v, par.point);
         v[prob.param_slot(k)] = t;
     }
     let mut u_global: Vec<f64> = red
@@ -268,7 +254,18 @@ pub(crate) fn solve<K: SketchKey>(sketch: &Sketch<K>, options: &SolveOptions<K>)
         .map(|&c| red.classes[c].members.iter().map(|&s| slot_w[s]).sum())
         .collect();
 
-    // Degenerate geometry at the start.
+    // Degenerate geometry at the start: arcs without a radius, and
+    // directions that constraints need.
+    for (i, k) in index.kinds.iter().enumerate() {
+        if let EntKind::Circular(Circ::Arc { c, s, .. }) = *k {
+            let (dx, dy) = (v[2 * s] - v[2 * c], v[2 * s + 1] - v[2 * c + 1]);
+            let radius = dx.hypot(dy);
+            if radius.is_nan() || radius <= prob.degen {
+                let msg = format!("arc {:?} has zero radius", sketch.entities[i].id);
+                return early_failure(sketch, SolveError::Degenerate(msg));
+            }
+        }
+    }
     for (i, e) in prob.eqs.iter().enumerate() {
         if matches!(red.status[i], Status::General | Status::Demoted)
             && e.kind.eval(&v, &prob.splines, prob.degen, None).is_none()
@@ -277,6 +274,20 @@ pub(crate) fn solve<K: SketchKey>(sketch: &Sketch<K>, options: &SolveOptions<K>)
             return early_failure(sketch, SolveError::Degenerate(msg));
         }
     }
+
+    // Where geometry may go (scaled): within REACH sketch extents of the
+    // centre, and within the coordinate limit of input validation.
+    let bounds = |c: f64| {
+        (
+            ((-MAX_MAGNITUDE - c) / scale.l).max(-REACH),
+            ((MAX_MAGNITUDE - c) / scale.l).min(REACH),
+        )
+    };
+    let region = Region {
+        x: bounds(scale.cx),
+        y: bounds(scale.cy),
+        r_max: (MAX_MAGNITUDE / scale.l).min(REACH),
+    };
 
     // Solve every component.
     let mut iterations = 0usize;
@@ -287,7 +298,7 @@ pub(crate) fn solve<K: SketchKey>(sketch: &Sketch<K>, options: &SolveOptions<K>)
     let mut dof = 0usize;
     let mut comp_rank: Vec<usize> = Vec::with_capacity(red.components.len());
     for comp in &red.components {
-        let mut sys = CompSystem::new(&prob, &red, comp, v.clone(), &unknown_w, len_tol);
+        let mut sys = CompSystem::new(&prob, &red, comp, v.clone(), &unknown_w, len_tol, region);
         let u0: Vec<f64> = comp.unknowns.iter().map(|&u| u_global[u]).collect();
         // Constant slots referenced, with their values in the start geometry.
         let mut const_seed: Vec<(usize, f64)> = Vec::new();
@@ -339,6 +350,7 @@ pub(crate) fn solve<K: SketchKey>(sketch: &Sketch<K>, options: &SolveOptions<K>)
     }
     // Equations whose unknowns were all eliminated: satisfied (hence implied
     // by the eliminations) or in conflict with them.
+    let mut const_conflicts: Vec<usize> = Vec::new();
     {
         let mut grad = Vec::new();
         for &i in &red.constant_eqs {
@@ -354,6 +366,7 @@ pub(crate) fn solve<K: SketchKey>(sketch: &Sketch<K>, options: &SolveOptions<K>)
                     } else {
                         failed = true;
                         conflicting_eqs.push(i);
+                        const_conflicts.push(i);
                     }
                 }
                 None => {
@@ -397,40 +410,32 @@ pub(crate) fn solve<K: SketchKey>(sketch: &Sketch<K>, options: &SolveOptions<K>)
         pos.dedup();
         pos.into_iter().map(|c| sketch.constraints[c].id).collect()
     };
-    let redundant = owners(&redundant_eqs);
     let conflicting = owners(&conflicting_eqs);
+    // A constraint with several equations can be partly implied and partly
+    // in conflict (a second fix of a point at another x but the same y):
+    // it is reported as conflicting only.
+    let redundant: Vec<K> = owners(&redundant_eqs)
+        .into_iter()
+        .filter(|k| !conflicting.contains(k))
+        .collect();
 
     // The absolute system, for the model-tolerance check and max_residual.
     let mut abs_prob = build(&index, &cons, Scale::identity());
-    abs_prob.degen = DEGENERATE * scale.l;
     let params: Vec<f64> = (0..prob.params.len())
         .map(|k| v_final[prob.param_slot(k)])
         .collect();
     let input_params: Vec<f64> = (0..prob.params.len())
         .map(|k| v[prob.param_slot(k)])
         .collect();
-    let input_residual = || {
-        let va = absolute_slots(&index, &index.positions, &index.radii, &input_params);
-        max_abs_residual(&check_all(&abs_prob, &va, LINEAR_TOL, ANGULAR_TOL))
-    };
-
-    if failed {
-        let err = if conflicting.is_empty() {
-            SolveError::NotConverged
-        } else {
-            SolveError::Conflicting
-        };
-        return Solution {
-            status: SolveStatus::Failed(err),
-            sketch: sketch.clone(),
-            dof,
-            entities,
-            redundant,
-            conflicting,
-            max_residual: input_residual(),
-            iterations,
-        };
-    }
+    let degen_in = DEGENERATE * scale.l * ACCEPT_MARGIN;
+    let (input_ok, input_residual) = accept(
+        &mut abs_prob,
+        &index,
+        &index.positions,
+        &index.radii,
+        &input_params,
+        degen_in,
+    );
 
     // Write back.
     let abs_value = |s: usize| -> f64 {
@@ -463,22 +468,134 @@ pub(crate) fn solve<K: SketchKey>(sketch: &Sketch<K>, options: &SolveOptions<K>)
     let radii: Vec<f64> = (0..prob.n_circles)
         .map(|r| abs_value(prob.radius_slot(r)))
         .collect();
-    let va = absolute_slots(&index, &positions, &radii, &params);
-    let checks = check_all(&abs_prob, &va, LINEAR_TOL, ANGULAR_TOL);
-    let all_ok = checks
-        .iter()
-        .all(|c| matches!(c, Some((r, tol, true)) if r.abs() <= *tol))
-        && positions.iter().all(|p| p.is_finite())
-        && radii.iter().all(|r| r.is_finite() && *r > 0.0);
-    if !all_ok {
+    // The result must also be non-degenerate at its own scale, which is
+    // the scale it will be solved at next.
+    let out_scale = {
+        let mut out_index = index.clone();
+        out_index.positions.clone_from(&positions);
+        out_index.radii.clone_from(&radii);
+        scale_of(&out_index, &cons, &[])
+    };
+    let degen_out = DEGENERATE * scale.l.max(out_scale.l) * ACCEPT_MARGIN;
+    // Constraints that collapse a curve (a line to a point, a circle or arc
+    // to its centre, an arc onto itself) have no valid solution, however
+    // well the equations hold: blame the constraint whose removal avoids
+    // the collapse, like a conflict, or report the curve degenerate. The
+    // input fallback does not apply to a converged result: an input this
+    // close to the collapse is degenerate under its constraints too. A
+    // solve that failed with no conflict found while heading into a
+    // collapse (a radius that cannot reach zero) is blamed the same way
+    // when the input is no solution, and otherwise left as it is.
+    let fallback = input_ok && drag.is_empty();
+    let collapse = if (!failed || conflicting.is_empty()) && !(failed && fallback) {
+        collapsed(
+            &index,
+            &positions,
+            &radii,
+            Some((&index.positions, degen_in)),
+            degen_out,
+        )
+    } else {
+        Vec::new()
+    };
+    if let Some(&first) = collapse.first() {
+        let blamed = if attribute {
+            let reached = Reached {
+                prob: &prob,
+                v: &v_final,
+                degen: degen_out,
+                degen_in,
+            };
+            let (blamed, its) = blame_collapse(sketch, options, &index, &reached, &collapse);
+            iterations += its;
+            blamed
+        } else {
+            Err(first)
+        };
+        match blamed {
+            Ok(culprits) => {
+                let conflicting: Vec<K> =
+                    culprits.iter().map(|&j| sketch.constraints[j].id).collect();
+                return Solution {
+                    status: SolveStatus::Failed(SolveError::Conflicting),
+                    sketch: sketch.clone(),
+                    dof,
+                    entities,
+                    redundant: redundant
+                        .into_iter()
+                        .filter(|k| !conflicting.contains(k))
+                        .collect(),
+                    conflicting,
+                    max_residual: input_residual,
+                    iterations,
+                };
+            }
+            Err((ent, how)) if !failed => {
+                let kind = match index.kinds[ent] {
+                    EntKind::Line(_) => "line",
+                    EntKind::Circular(Circ::Circle { .. }) => "circle",
+                    _ => "arc",
+                };
+                let msg = format!("{kind} {:?} {}", sketch.entities[ent].id, how.says());
+                return early_failure(sketch, SolveError::Degenerate(msg));
+            }
+            Err(_) => {}
+        }
+    }
+    let (out_ok, max_residual) = if failed {
+        (false, f64::NAN)
+    } else {
+        accept(
+            &mut abs_prob,
+            &index,
+            &positions,
+            &radii,
+            &params,
+            degen_out,
+        )
+    };
+    if !out_ok {
+        // The input itself may already be a solution (to the model
+        // tolerance) that iterating could not polish or that a converged
+        // but degenerate result would replace, e.g. a sketch solved at
+        // another scale; then it is the answer. Not for drags: a drag that
+        // cannot be followed fails.
+        if fallback {
+            // Equations in conflict at the solver's tolerance hold at the
+            // input to the model tolerance: those whose unknowns were all
+            // eliminated are implied by the eliminations, and the others
+            // were diagnosed redundant or not by rank as usual.
+            let mut eqs = redundant_eqs.clone();
+            eqs.extend(&const_conflicts);
+            let redundant = owners(&eqs);
+            return Solution {
+                status: if redundant.is_empty() {
+                    SolveStatus::Solved
+                } else {
+                    SolveStatus::Redundant
+                },
+                sketch: sketch.clone(),
+                dof,
+                entities,
+                redundant,
+                conflicting: Vec::new(),
+                max_residual: input_residual,
+                iterations,
+            };
+        }
+        let err = if conflicting.is_empty() {
+            SolveError::NotConverged
+        } else {
+            SolveError::Conflicting
+        };
         return Solution {
-            status: SolveStatus::Failed(SolveError::NotConverged),
+            status: SolveStatus::Failed(err),
             sketch: sketch.clone(),
             dof,
             entities,
             redundant,
             conflicting,
-            max_residual: input_residual(),
+            max_residual: input_residual,
             iterations,
         };
     }
@@ -505,8 +622,490 @@ pub(crate) fn solve<K: SketchKey>(sketch: &Sketch<K>, options: &SolveOptions<K>)
         entities,
         redundant,
         conflicting: Vec::new(),
-        max_residual: max_abs_residual(&checks),
+        max_residual,
         iterations,
+    }
+}
+
+/// Margin on the degeneracy threshold for accepting a result, so that it
+/// is not degenerate when solved again (at a scale that may differ).
+const ACCEPT_MARGIN: f64 = 8.0;
+
+/// The final check of a result (design note 0005 §5): every equation holds
+/// to the model tolerance (on its branch), no direction a constraint needs
+/// is shorter than `degen` (metres), no curve has collapsed at that
+/// threshold ([`collapsed`], an arc may end where it starts), and
+/// coordinates and radii are within the input limits. Returns whether it
+/// passes and the largest absolute residual.
+fn accept<K: SketchKey>(
+    abs_prob: &mut Problem,
+    index: &Index<K>,
+    positions: &[DVec2],
+    radii: &[f64],
+    params: &[f64],
+    degen: f64,
+) -> (bool, f64) {
+    abs_prob.degen = degen;
+    let va = absolute_slots(index, positions, radii, params);
+    let checks = check_all(abs_prob, &va, LINEAR_TOL, ANGULAR_TOL);
+    let ok = collapsed(index, positions, radii, None, degen).is_empty()
+        && checks
+            .iter()
+            .all(|c| matches!(c, Some((r, tol, true)) if r.abs() <= *tol))
+        && positions
+            .iter()
+            .all(|p| p.is_finite() && p.x.abs() <= MAX_MAGNITUDE && p.y.abs() <= MAX_MAGNITUDE)
+        && radii
+            .iter()
+            .all(|r| r.is_finite() && *r > degen && *r <= MAX_MAGNITUDE);
+    (ok, max_abs_residual(&checks))
+}
+
+/// The point indices of entity `ent`.
+fn entity_points<K: SketchKey>(index: &Index<K>, ent: usize) -> Vec<usize> {
+    match index.kinds[ent] {
+        EntKind::Point(p) => vec![p],
+        EntKind::Line(l) => vec![l.s, l.e],
+        EntKind::Circular(Circ::Circle { c, .. }) => vec![c],
+        EntKind::Circular(Circ::Arc { c, s, e }) => vec![c, s, e],
+        EntKind::Spline(s) => index.splines[s].points.clone(),
+    }
+}
+
+/// Union–find root with path halving.
+fn find(uf: &mut [usize], mut x: usize) -> usize {
+    while uf[x] != x {
+        uf[x] = uf[uf[x]];
+        x = uf[x];
+    }
+    x
+}
+
+/// Joins the sets of `a` and `b` under the smaller root.
+fn union(uf: &mut [usize], a: usize, b: usize) {
+    let (ra, rb) = (find(uf, a), find(uf, b));
+    if ra != rb {
+        uf[ra.max(rb)] = ra.min(rb);
+    }
+}
+
+/// The connected parts of a sketch, as a root per point index: points are
+/// joined through the curves they define and the constraints that
+/// reference them.
+fn point_roots<K: SketchKey>(sketch: &Sketch<K>, index: &Index<K>) -> Vec<usize> {
+    fn join(uf: &mut [usize], pts: &[usize]) {
+        for w in pts.windows(2) {
+            union(uf, w[0], w[1]);
+        }
+    }
+    let mut uf: Vec<usize> = (0..index.positions.len()).collect();
+    for ent in 0..index.kinds.len() {
+        join(&mut uf, &entity_points(index, ent));
+    }
+    for c in &sketch.constraints {
+        let pts: Vec<usize> = c
+            .constraint
+            .referenced()
+            .iter()
+            .filter_map(|k| index.ent.get(k))
+            .flat_map(|&ent| entity_points(index, ent))
+            .collect();
+        join(&mut uf, &pts);
+    }
+    (0..uf.len()).map(|p| find(&mut uf, p)).collect()
+}
+
+/// How a curve has collapsed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Collapse {
+    /// A line whose end points meet.
+    Length,
+    /// A circle or arc without a radius.
+    Radius,
+    /// An arc whose end has come onto its start.
+    Closed,
+}
+
+impl Collapse {
+    /// What happened, for messages.
+    fn says(self) -> &'static str {
+        match self {
+            Collapse::Length => "has zero length",
+            Collapse::Radius => "has zero radius",
+            Collapse::Closed => "ends where it starts",
+        }
+    }
+}
+
+/// The curves that have collapsed at `positions` and `radii`, in entity
+/// order: a line no longer than `degen` (metres), a circle or arc whose
+/// radius is no longer, or an arc whose end lies within `degen` of its
+/// start where it did not in the input (`input`: the input positions and
+/// their threshold; `None` when `positions` are the input, whose arcs may
+/// end where they start). Splines are not checked: their control points
+/// may coincide.
+fn collapsed<K: SketchKey>(
+    index: &Index<K>,
+    positions: &[DVec2],
+    radii: &[f64],
+    input: Option<(&[DVec2], f64)>,
+    degen: f64,
+) -> Vec<(usize, Collapse)> {
+    let short = |a: usize, b: usize| (positions[b] - positions[a]).length() <= degen;
+    let mut out = Vec::new();
+    for (ent, k) in index.kinds.iter().enumerate() {
+        let how = match *k {
+            EntKind::Line(l) if short(l.s, l.e) => Collapse::Length,
+            EntKind::Circular(Circ::Circle { r, .. }) if radii[r].abs() <= degen => {
+                Collapse::Radius
+            }
+            EntKind::Circular(Circ::Arc { c, s, e }) if short(c, s) || short(c, e) => {
+                Collapse::Radius
+            }
+            EntKind::Circular(Circ::Arc { s, e, .. })
+                if short(s, e) && input.is_some_and(|(at, d)| (at[e] - at[s]).length() > d) =>
+            {
+                Collapse::Closed
+            }
+            _ => continue,
+        };
+        out.push((ent, how));
+    }
+    out
+}
+
+/// The quantity that has collapsed, as gradient rows over slots: the
+/// vector between the two points that met (two rows), or the radius.
+fn collapse_rows<K: SketchKey>(
+    index: &Index<K>,
+    prob: &Problem,
+    ent: usize,
+    how: Collapse,
+) -> Vec<Vec<(usize, f64)>> {
+    let between = |a: usize, b: usize| {
+        vec![
+            vec![(2 * b, 1.0), (2 * a, -1.0)],
+            vec![(2 * b + 1, 1.0), (2 * a + 1, -1.0)],
+        ]
+    };
+    match (index.kinds[ent], how) {
+        (EntKind::Line(l), _) => between(l.s, l.e),
+        (EntKind::Circular(Circ::Circle { r, .. }), _) => vec![vec![(prob.radius_slot(r), 1.0)]],
+        (EntKind::Circular(Circ::Arc { s, e, .. }), Collapse::Closed) => between(s, e),
+        (EntKind::Circular(Circ::Arc { c, s, .. }), _) => between(c, s),
+        _ => Vec::new(),
+    }
+}
+
+/// Relative size below which a certificate coefficient or residual is zero
+/// in [`holding`].
+const HOLD_TOL: f64 = 1e-8;
+
+/// Which constraints hold a collapsed curve collapsed, to first order at
+/// the state reached (scaled slot values `v`), indexed by constraint
+/// position.
+///
+/// The collapsed quantity (`rows`: the gradients of its components) is
+/// pinned by the equations `eqs` when its gradient lies in the span of
+/// theirs, and the constraints holding it are those with a nonzero
+/// coefficient in the minimum-norm combination: removing any other leaves
+/// that combination intact. Where only some direction of a collapsed
+/// vector is pinned, that direction is used; where none is, nothing holds
+/// it. An equation that uses a direction or length that has collapsed as
+/// well (it cannot be evaluated there, or has a kink) gives no gradient:
+/// its constraint is counted as holding, and so are the constraints that
+/// hold that vector collapsed, found the same way.
+fn holding(
+    prob: &Problem,
+    v: &[f64],
+    eqs: &[usize],
+    rows: &[Vec<(usize, f64)>],
+    n_constraints: usize,
+) -> Vec<bool> {
+    let mut out = vec![false; n_constraints];
+    let mut quantities: Vec<Vec<Vec<(usize, f64)>>> = vec![rows.to_vec()];
+    let mut used: Vec<usize> = Vec::new();
+    let mut grads: Vec<Vec<(usize, f64)>> = Vec::new();
+    for &i in eqs {
+        let kind = &prob.eqs[i].kind;
+        let short = kind.short_vectors(v, prob.degen);
+        let mut grad = Vec::new();
+        let ok = short.is_empty()
+            && !kind.abs_kinked(v, prob.degen)
+            && kind
+                .eval(v, &prob.splines, prob.degen, Some(&mut grad))
+                .is_some();
+        if ok {
+            used.push(i);
+            grads.push(grad);
+            continue;
+        }
+        if let Some(c) = prob.eqs[i].owner {
+            out[c] = true;
+        }
+        for w in short {
+            quantities.push(vec![
+                w.0.iter().map(|&(p, c)| (2 * p, c)).collect(),
+                w.0.iter().map(|&(p, c)| (2 * p + 1, c)).collect(),
+            ]);
+        }
+    }
+    let mut col = BTreeMap::new();
+    for (s, _) in grads.iter().chain(quantities.iter().flatten()).flatten() {
+        let n = col.len();
+        col.entry(*s).or_insert(n);
+    }
+    // Equation gradients as columns: A λ = g asks for a combination.
+    let mut a = Matrix::zeros(col.len(), used.len());
+    for (k, grad) in grads.iter().enumerate() {
+        for &(s, g) in grad {
+            a[(col[&s], k)] += g;
+        }
+    }
+    let cod = CompleteOrthogonal::new(&a, RANK_TOL);
+    for rows in &quantities {
+        for lambda in pinned_combinations(&a, &cod, &col, rows) {
+            let big = lambda.iter().fold(0.0f64, |m, l| m.max(l.abs()));
+            for (k, l) in lambda.iter().enumerate() {
+                if l.abs() > HOLD_TOL * big {
+                    if let Some(c) = prob.eqs[used[k]].owner {
+                        out[c] = true;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// For [`holding`]: the minimum-norm combinations `λ` of the columns of `a`
+/// (factored as `cod`; `col` maps slots to rows of `a`) that equal the
+/// gradient rows `rows` of a collapsed quantity: one per row when all are
+/// pinned, else (for a vector) one for its direction closest to pinned if
+/// that one is, else none.
+fn pinned_combinations(
+    a: &Matrix,
+    cod: &CompleteOrthogonal,
+    col: &BTreeMap<usize, usize>,
+    rows: &[Vec<(usize, f64)>],
+) -> Vec<Vec<f64>> {
+    let mut lambdas = Vec::with_capacity(rows.len());
+    let mut resids = Vec::with_capacity(rows.len());
+    let mut size = 0.0f64;
+    for row in rows {
+        let mut g = vec![0.0; col.len()];
+        for &(s, c) in row {
+            g[col[&s]] += c;
+        }
+        size = size.max(norm2(&g));
+        let lambda = cod.solve(&g);
+        resids.push(residual(a, &lambda, &g));
+        lambdas.push(lambda);
+    }
+    let pinned = |r: &[f64]| norm2(r) <= HOLD_TOL * size;
+    if resids.iter().all(|r| pinned(r)) {
+        return lambdas;
+    }
+    if resids.len() != 2 {
+        return Vec::new();
+    }
+    // The direction (x, y) of the collapsed vector closest to pinned: the
+    // eigenvector of the smaller eigenvalue of the residuals' Gram matrix.
+    let (p, q, r) = (
+        dot(&resids[0], &resids[0]),
+        dot(&resids[0], &resids[1]),
+        dot(&resids[1], &resids[1]),
+    );
+    let mu = 0.5 * (p + r) - (0.25 * (p - r) * (p - r) + q * q).sqrt();
+    let (x, y) = if q != 0.0 {
+        (mu - r, q)
+    } else if p <= r {
+        (1.0, 0.0)
+    } else {
+        (0.0, 1.0)
+    };
+    let h = x.hypot(y);
+    let mix = |u: &[f64], w: &[f64]| -> Vec<f64> {
+        u.iter().zip(w).map(|(a, b)| (x * a + y * b) / h).collect()
+    };
+    if pinned(&mix(&resids[0], &resids[1])) {
+        vec![mix(&lambdas[0], &lambdas[1])]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Most trial solves spent on blaming the collapse of one part.
+const MAX_TRIALS: usize = 32;
+
+/// The state a solve reached, for blaming a collapse.
+struct Reached<'a> {
+    /// The scaled problem.
+    prob: &'a Problem,
+    /// Its slot values reached.
+    v: &'a [f64],
+    /// Collapse threshold of the result (metres).
+    degen: f64,
+    /// Collapse threshold of the input (metres).
+    degen_in: f64,
+}
+
+/// Blames a constraint for each connected part of the sketch with a
+/// collapsed curve ([`Part::attribute`]). Returns the constraints'
+/// positions in priority order, or the first collapsed curve of a part
+/// where no single removal helps; and the iterations spent.
+fn blame_collapse<K: SketchKey>(
+    sketch: &Sketch<K>,
+    options: &SolveOptions<K>,
+    index: &Index<K>,
+    reached: &Reached<'_>,
+    collapse: &[(usize, Collapse)],
+) -> (Result<Vec<usize>, (usize, Collapse)>, usize) {
+    let roots = point_roots(sketch, index);
+    let mut culprits: Vec<usize> = Vec::new();
+    let mut done: Vec<usize> = Vec::new();
+    let mut iterations = 0;
+    for &(ent, how) in collapse {
+        let root = roots[entity_points(index, ent)[0]];
+        if done.contains(&root) {
+            continue;
+        }
+        done.push(root);
+        let part = Part {
+            sketch,
+            options,
+            index,
+            roots: &roots,
+            root,
+        };
+        let (found, its) = part.attribute(reached, ent, how);
+        iterations += its;
+        match found {
+            Some(j) => culprits.push(j),
+            None => return (Err((ent, how)), iterations),
+        }
+    }
+    culprits.sort_unstable();
+    (Ok(culprits), iterations)
+}
+
+/// A connected part of a sketch: the entities and constraints whose points
+/// have root `root` in `roots` ([`point_roots`]).
+struct Part<'a, K: SketchKey> {
+    sketch: &'a Sketch<K>,
+    options: &'a SolveOptions<K>,
+    index: &'a Index<K>,
+    roots: &'a [usize],
+    root: usize,
+}
+
+impl<K: SketchKey> Part<'_, K> {
+    fn has_entity(&self, ent: usize) -> bool {
+        self.roots[entity_points(self.index, ent)[0]] == self.root
+    }
+
+    fn has_constraint(&self, j: usize) -> bool {
+        let refs = self.sketch.constraints[j].constraint.referenced();
+        refs.first()
+            .and_then(|k| self.index.ent.get(k))
+            .is_some_and(|&ent| self.has_entity(ent))
+    }
+
+    /// Finds the constraint to blame for the collapse of curve `ent` in
+    /// this part (design note 0005 §9). The part's constraints that hold
+    /// the curve collapsed ([`holding`], at the state reached) are tried in
+    /// reverse priority order (latest first), at most [`MAX_TRIALS`] of
+    /// them: the first whose removal lets the part solve with no curve
+    /// collapsed (also at the threshold of the whole result) is returned,
+    /// as a position in `sketch.constraints`. Each trial solves only the
+    /// part, without this search. Also returns the iterations spent.
+    fn attribute(
+        &self,
+        reached: &Reached<'_>,
+        ent: usize,
+        how: Collapse,
+    ) -> (Option<usize>, usize) {
+        let Reached {
+            prob,
+            v,
+            degen,
+            degen_in,
+        } = *reached;
+        let sketch = self.sketch;
+        let cons: Vec<usize> = (0..sketch.constraints.len())
+            .filter(|&j| self.has_constraint(j))
+            .collect();
+        let eqs: Vec<usize> = (0..prob.eqs.len())
+            .filter(|&i| match (prob.eqs[i].owner, prob.eqs[i].arc) {
+                (Some(j), _) => self.has_constraint(j),
+                (None, Some(a)) => self.has_entity(a),
+                _ => false,
+            })
+            .collect();
+        let rows = collapse_rows(self.index, prob, ent, how);
+        let held = holding(prob, v, &eqs, &rows, sketch.constraints.len());
+        let candidates: Vec<usize> = cons
+            .iter()
+            .rev()
+            .copied()
+            .filter(|&j| held[j])
+            .take(MAX_TRIALS)
+            .collect();
+        if candidates.is_empty() {
+            return (None, 0);
+        }
+        let mut part = Sketch {
+            entities: sketch
+                .entities
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| self.has_entity(i))
+                .map(|(_, e)| e.clone())
+                .collect(),
+            constraints: Vec::new(),
+        };
+        let part_options = SolveOptions {
+            drag: self
+                .options
+                .drag
+                .iter()
+                .filter(|(k, _)| self.index.ent.get(k).is_some_and(|&e| self.has_entity(e)))
+                .copied()
+                .collect(),
+            max_iterations: self.options.max_iterations,
+        };
+        let Ok(part_index) = Index::new(&part) else {
+            return (None, 0);
+        };
+        let mut iterations = 0;
+        for j in candidates {
+            part.constraints = cons
+                .iter()
+                .filter(|&&c| c != j)
+                .map(|&c| sketch.constraints[c].clone())
+                .collect();
+            let out = solve_inner(&part, &part_options, false);
+            iterations += out.iterations;
+            if !matches!(out.status, SolveStatus::Solved | SolveStatus::Redundant) {
+                continue;
+            }
+            let Ok(out_index) = Index::new(&out.sketch) else {
+                continue;
+            };
+            let input = Some((part_index.positions.as_slice(), degen_in));
+            if collapsed(
+                &out_index,
+                &out_index.positions,
+                &out_index.radii,
+                input,
+                degen,
+            )
+            .is_empty()
+            {
+                return (Some(j), iterations);
+            }
+        }
+        (None, iterations)
     }
 }
 
@@ -527,22 +1126,15 @@ fn priority_redundancy(
 ) -> Vec<usize> {
     let n = prob.n_slots();
     let neq = prob.eqs.len();
-    let slots: Vec<Vec<usize>> = prob.eqs.iter().map(|e| e.kind.slots(&prob.splines)).collect();
+    let slots: Vec<Vec<usize>> = prob
+        .eqs
+        .iter()
+        .map(|e| e.kind.slots(&prob.splines))
+        .collect();
     let mut uf: Vec<usize> = (0..n).collect();
-    fn find(uf: &mut [usize], mut x: usize) -> usize {
-        while uf[x] != x {
-            uf[x] = uf[uf[x]];
-            x = uf[x];
-        }
-        x
-    }
     for ss in &slots {
         for w in ss.windows(2) {
-            let (a, b) = (find(&mut uf, w[0]), find(&mut uf, w[1]));
-            if a != b {
-                let (lo, hi) = (a.min(b), a.max(b));
-                uf[hi] = lo;
-            }
+            union(&mut uf, w[0], w[1]);
         }
     }
     let root_of_eq: Vec<Option<usize>> = slots
@@ -598,7 +1190,11 @@ fn priority_redundancy(
             .filter(|&&i| red.status[i] == Status::Accepted)
             .count();
         for (ci, comp) in red.components.iter().enumerate() {
-            if comp.eqs.first().is_some_and(|&e| root_of_eq[e] == Some(root)) {
+            if comp
+                .eqs
+                .first()
+                .is_some_and(|&e| root_of_eq[e] == Some(root))
+            {
                 rank += comp_rank[ci];
             }
         }
@@ -623,21 +1219,4 @@ fn priority_redundancy(
     out.sort_unstable();
     out.dedup();
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn closest_param_on_a_segment() {
-        let def = SplineDef {
-            map: crate::spline::SplineMap::control(2, 1).unwrap(),
-            points: vec![0, 1],
-        };
-        // P0 = (0,0), P1 = (1,0), query (0.3, 0.5).
-        let v = vec![0.0, 0.0, 1.0, 0.0, 0.3, 0.5];
-        let t = closest_param(&def, &v, 2);
-        assert!((t - 0.3).abs() < 1e-12);
-    }
 }

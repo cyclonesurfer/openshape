@@ -306,10 +306,13 @@ impl SketchDisplay {
 
     /// Point entities and their positions.
     pub fn points(&self) -> impl Iterator<Item = (SketchId, DVec2)> + '_ {
-        self.sketch.entities.iter().filter_map(|e| match e.geometry {
-            Geometry::Point { at } => Some((e.id, at)),
-            _ => None,
-        })
+        self.sketch
+            .entities
+            .iter()
+            .filter_map(|e| match e.geometry {
+                Geometry::Point { at } => Some((e.id, at)),
+                _ => None,
+            })
     }
 
     /// The drawn curve of an entity.
@@ -344,8 +347,8 @@ pub fn glyph(c: &Constraint<SketchId>) -> &'static str {
         Constraint::PointOnCurve { .. } => "○",
         Constraint::Horizontal { .. } | Constraint::HorizontalPoints { .. } => "H",
         Constraint::Vertical { .. } | Constraint::VerticalPoints { .. } => "V",
-        Constraint::Parallel { .. } => "∥",
-        Constraint::Perpendicular { .. } => "⊥",
+        Constraint::Parallel { .. } => "‖",
+        Constraint::Perpendicular { .. } => "⟂",
         Constraint::Equal { .. } => "=",
         Constraint::Midpoint { .. } => "M",
         Constraint::Concentric { .. } => "◎",
@@ -531,17 +534,13 @@ fn dimension_annotation(
     c: &ConstraintEntry<SketchId>,
 ) -> Option<Annotation> {
     let sketch = &d.sketch;
-    let anchor = c
-        .constraint
-        .referenced()
-        .iter()
-        .find_map(|e| {
-            points
-                .get(e)
-                .copied()
-                .or_else(|| line_ends(sketch, points, *e).map(|(a, _)| a))
-                .or_else(|| circular(sketch, points, *e).map(|(c, _, _)| c))
-        })?;
+    let anchor = c.constraint.referenced().iter().find_map(|e| {
+        points
+            .get(e)
+            .copied()
+            .or_else(|| line_ends(sketch, points, *e).map(|(a, _)| a))
+            .or_else(|| circular(sketch, points, *e).map(|(c, _, _)| c))
+    })?;
     let ppp = map.plane_per_point(map.to_screen(anchor)?);
     let off = 24.0 * ppp;
     let aligned = |a: DVec2, b: DVec2| -> (Vec<[DVec2; 2]>, DVec2) {
@@ -604,7 +603,10 @@ fn dimension_annotation(
                         l1
                     };
                     let n = perp((foot - p).normalize_or_zero());
-                    (vec![[p, foot], [foot, near]], (p + foot) * 0.5 + n * off * 0.6)
+                    (
+                        vec![[p, foot], [foot, near]],
+                        (p + foot) * 0.5 + n * off * 0.6,
+                    )
                 }
             }
         }
@@ -639,7 +641,10 @@ fn dimension_annotation(
                 .map(|i| x + DVec2::from_angle(start + value * i as f64 / n as f64) * r)
                 .collect();
             let lines = arc.windows(2).map(|w| [w[0], w[1]]).collect();
-            (lines, x + DVec2::from_angle(start + value * 0.5) * (r + off * 0.9))
+            (
+                lines,
+                x + DVec2::from_angle(start + value * 0.5) * (r + off * 0.9),
+            )
         }
         _ => return None,
     };
@@ -850,8 +855,10 @@ impl Batch {
     fn constraint(&mut self, constraint: Constraint<SketchId>) -> SketchId {
         let id = SketchId::new_in_batch(self.next);
         self.next += 1;
-        self.edits
-            .push(SketchEdit::AddConstraint(ConstraintEntry { id, constraint }));
+        self.edits.push(SketchEdit::AddConstraint(ConstraintEntry {
+            id,
+            constraint,
+        }));
         id
     }
 
@@ -1228,14 +1235,11 @@ pub fn constraints_for(
                 .map(|&b| C::Equal { a: ids[0], b })
                 .collect()
         }
-        ConstraintTool::Midpoint if ids.len() == 2 => match (find(Kind::Point), find(Kind::Line))
-        {
+        ConstraintTool::Midpoint if ids.len() == 2 => match (find(Kind::Point), find(Kind::Line)) {
             (Some(point), Some(line)) => vec![C::Midpoint { point, line }],
             _ => return need(),
         },
-        ConstraintTool::Concentric
-            if ids.len() == 2 && kinds.iter().all(|k| k.circular()) =>
-        {
+        ConstraintTool::Concentric if ids.len() == 2 && kinds.iter().all(|k| k.circular()) => {
             vec![C::Concentric {
                 a: ids[0],
                 b: ids[1],
@@ -1248,11 +1252,7 @@ pub fn constraints_for(
                 .map(|(id, _)| *id)
                 .collect();
             match (pts.as_slice(), find(Kind::Line)) {
-                ([a, b], Some(axis)) => vec![C::Symmetric {
-                    a: *a,
-                    b: *b,
-                    axis,
-                }],
+                ([a, b], Some(axis)) => vec![C::Symmetric { a: *a, b: *b, axis }],
                 _ => return need(),
             }
         }
@@ -1282,7 +1282,11 @@ pub fn constraints_for(
             } else if kinds.contains(&Kind::Spline) {
                 return Err("Tangency with a spline needs a shared end point".into());
             } else if kinds.contains(&Kind::Line) {
-                let (line, circ) = if kinds[0] == Kind::Line { (a, b) } else { (b, a) };
+                let (line, circ) = if kinds[0] == Kind::Line {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
                 let ends = end_points(sketch, line);
                 let (s, e) = (
                     sketch.point(ends[0]).ok_or("missing point")?,
@@ -1334,14 +1338,12 @@ pub fn dimension_for(
             kind: DistanceKind::Aligned,
             value: 0.0,
         },
-        [(a, Kind::Point), (b, Kind::Line)] | [(b, Kind::Line), (a, Kind::Point)] => {
-            C::Distance {
-                a: *a,
-                b: *b,
-                kind: DistanceKind::Aligned,
-                value: 0.0,
-            }
-        }
+        [(a, Kind::Point), (b, Kind::Line)] | [(b, Kind::Line), (a, Kind::Point)] => C::Distance {
+            a: *a,
+            b: *b,
+            kind: DistanceKind::Aligned,
+            value: 0.0,
+        },
         [(a, Kind::Line), (b, Kind::Line)] => {
             let dir = |l: SketchId| -> Option<DVec2> {
                 let e = end_points(sketch, l);
@@ -1367,9 +1369,11 @@ pub fn dimension_for(
             }
         }
         _ => {
-            return Err("Dimension needs a line, a circle or arc, two points, a point and a \
+            return Err(
+                "Dimension needs a line, a circle or arc, two points, a point and a \
                         line, or two lines"
-                .into())
+                    .into(),
+            )
         }
     })
 }
@@ -1569,9 +1573,9 @@ impl SketchEditor {
     /// A warning when the sketch no longer solves.
     fn solve_message(&self, model: &Model) -> Option<String> {
         match &model.sketch_result(self.feature)?.solution.status {
-            SolveStatus::Failed(SolveError::Conflicting) => Some(
-                "Constraints conflict (shown in red): delete one, or undo with Ctrl+Z".into(),
-            ),
+            SolveStatus::Failed(SolveError::Conflicting) => {
+                Some("Constraints conflict (shown in red): delete one, or undo with Ctrl+Z".into())
+            }
             SolveStatus::Failed(e) => Some(format!("Sketch does not solve: {e}")),
             _ => None,
         }
@@ -1669,13 +1673,7 @@ impl SketchEditor {
             (Tool::Line, 1) => vec![vec![c[0].at, cur.at]],
             (Tool::Rectangle, 1) => {
                 let (a, b) = (c[0].at, cur.at);
-                vec![vec![
-                    a,
-                    DVec2::new(b.x, a.y),
-                    b,
-                    DVec2::new(a.x, b.y),
-                    a,
-                ]]
+                vec![vec![a, DVec2::new(b.x, a.y), b, DVec2::new(a.x, b.y), a]]
             }
             (Tool::Circle, 1) => {
                 vec![arc_points(c[0].at, (cur.at - c[0].at).length(), 0.0, TAU)]

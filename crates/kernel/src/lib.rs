@@ -210,6 +210,16 @@ pub trait Kernel: Send + Sync {
         curves: &[ProfileCurve],
         regions: &[usize],
     ) -> Result<Vec<ProfileCurve>, KernelError>;
+
+    /// The region of `arrangement` containing `point` (at least the model
+    /// tolerance inside it), if any: for picking regions and for re-finding
+    /// a named region after a sketch edit.
+    fn region_containing(
+        &self,
+        arrangement: &SketchArrangement,
+        curves: &[ProfileCurve],
+        point: DVec2,
+    ) -> Option<usize>;
 }
 
 /// The built-in OpenShape kernel.
@@ -323,6 +333,15 @@ impl Kernel for OsKernel {
         curves: &[ProfileCurve],
         regions: &[usize],
     ) -> Result<Vec<ProfileCurve>, KernelError> {
-        arrangement::region_profile(arrangement, curves, regions)
+        arrangement::region_profile_with_tolerance(arrangement, curves, regions, &self.tol)
+    }
+
+    fn region_containing(
+        &self,
+        arrangement: &SketchArrangement,
+        curves: &[ProfileCurve],
+        point: DVec2,
+    ) -> Option<usize> {
+        arrangement::region_containing(arrangement, curves, point, &self.tol)
     }
 }

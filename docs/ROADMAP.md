@@ -29,11 +29,11 @@ item is delivered in the phase noted.
 - [ ] Non-manifold topology (deferred to Phase 3 with booleans)
 
 ## Phase 2 — Sketcher
-- [ ] Sketch data model in core-model; sketch tab in the UI
-- [ ] Constraint solver (Newton/LM with DOF analysis, over/under-constraint diagnostics)
-- [ ] Property tests over random constraint systems; fuzzing
-- [ ] Region detection from arbitrary sketch curves (intersections) feeding extrude/revolve
-- [ ] Sketch tools and constraints (see §2 below)
+- [x] Sketch data model in core-model; sketch mode in the UI (ADR 0011)
+- [x] Constraint solver (Newton/LM with DOF analysis, over/under-constraint diagnostics; design note 0005)
+- [x] Property tests over random constraint systems; fuzzing (constructive and garbage-input proptests)
+- [x] Region detection from arbitrary sketch curves (intersections) feeding extrude/revolve (design note 0006)
+- [ ] Sketch tools and constraints (see §2 below; core set done, editing tools pending)
 
 ## Phase 3 — Booleans and core features
 - [ ] Curve/curve, curve/surface, surface/surface intersection (design note first)
@@ -90,18 +90,18 @@ item is delivered in the phase noted.
 
 ### 2. Part Studio
 Sketch tools
-- [ ] Lines, arcs (3-point, tangent, center), circles, ellipses, splines (through-point, control-point), conics, rectangles (corner, center, aligned), polygons, slots, points
-- [ ] Construction geometry, text, image tracing
+- [ ] Lines ✔, arcs (3-point ✔, tangent, center ✔), circles ✔, ellipses, splines (through-point ✔, control-point), conics, rectangles (corner ✔, center, aligned), polygons, slots, points ✔
+- [ ] Construction geometry ✔, text, image tracing
 - [ ] Use/project/convert, offset, trim, extend, split, sketch fillet, mirror, linear/circular sketch patterns, transform, intersection curves
 
 Sketch constraints
-- [ ] Coincident, concentric, parallel, perpendicular, horizontal, vertical, tangent, equal, midpoint, normal, pierce, symmetric, fix, curvature
-- [ ] Dimensions: linear, angular, radial, diameter
-- [ ] Inference while drawing; colour-coded DOF state
+- [ ] Coincident ✔, concentric ✔, parallel ✔, perpendicular ✔, horizontal ✔, vertical ✔, tangent ✔, equal ✔, midpoint ✔, normal ✔, pierce, symmetric ✔, fix ✔, curvature
+- [x] Dimensions: linear (aligned, horizontal, vertical), angular, radial, diameter; typed with units
+- [ ] Inference while drawing (horizontal/vertical, point, curve and origin snaps ✔; parallel, perpendicular, tangent pending); colour-coded DOF state ✔
 
 Features
-- [ ] Extrude: blind ✔, symmetric ✔, up-to, through-all, draft, second direction, thin
-- [ ] Revolve (full/partial ✔; up-to and two-direction pending)
+- [ ] Extrude: blind ✔, symmetric ✔, from picked sketch regions ✔, up-to, through-all, draft, second direction, thin
+- [ ] Revolve (full/partial ✔, about a sketch line ✔; up-to and two-direction pending)
 - [ ] Sweep: guides, twist, profile control
 - [ ] Loft: guides, end conditions, connections
 - [ ] Thicken, enclose

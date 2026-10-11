@@ -4,7 +4,7 @@
 //! parallel lines, tangent circles, points on curves…), constraints are
 //! added that hold, and dimensions are measured from the geometry.
 
-use std::f64::consts::{FRAC_PI_2, PI, TAU};
+use std::f64::consts::{PI, TAU};
 
 use openshape_sketch_solver::{
     measure, resolve_curves, Constraint, DVec2, DistanceKind, Geometry, ResolvedCurve, Sketch,
@@ -106,19 +106,22 @@ impl G {
     fn con(&mut self, c: Constraint<u32>) {
         self.b.c(c);
     }
+    /// A line length: long enough that perturbing its ends (by up to 0.1
+    /// in each coordinate, see [`perturb`]) cannot swap them.
     fn len(&mut self) -> f64 {
-        self.rng.range(0.25, 1.0)
+        self.rng.range(0.4, 1.0)
     }
 
     fn polygon(&mut self) {
         let k = 3 + self.rng.int(3);
         let center = self.rng.pt() * 0.5;
-        let rad = self.rng.range(0.4, 0.9);
+        let rad = self.rng.range(0.6, 1.0);
         let base = self.rng.range(-PI, PI);
+        // Edges of at least ~0.35.
         let verts: Vec<DVec2> = (0..k)
             .map(|i| {
-                let a = base + TAU * (i as f64 + self.rng.range(-0.25, 0.25)) / k as f64;
-                center + rad * self.rng.range(0.7, 1.0) * DVec2::new(a.cos(), a.sin())
+                let a = base + TAU * (i as f64 + self.rng.range(-0.15, 0.15)) / k as f64;
+                center + rad * self.rng.range(0.85, 1.0) * DVec2::new(a.cos(), a.sin())
             })
             .collect();
         let closed = self.rng.chance(0.6);
@@ -131,14 +134,17 @@ impl G {
         for i in 0..n_edges {
             if i + 1 < n_edges || closed {
                 let next = ends[(i + 1) % n_edges].0;
-                self.con(Constraint::Coincident { a: ends[i].1, b: next });
+                self.con(Constraint::Coincident {
+                    a: ends[i].1,
+                    b: next,
+                });
             }
         }
     }
 
     fn rectangle(&mut self) {
         let c = self.rng.pt() * 0.5;
-        let (w, h) = (self.rng.range(0.3, 1.0), self.rng.range(0.3, 1.0));
+        let (w, h) = (self.rng.range(0.45, 1.0), self.rng.range(0.45, 1.0));
         let p = [
             c + DVec2::new(-w, -h) * 0.5,
             c + DVec2::new(w, -h) * 0.5,
@@ -194,9 +200,12 @@ impl G {
         };
         let equal = self.rng.chance(0.4);
         let lb = if equal { la } else { self.len() };
-        // Keep parallel lines apart so the line-line distance is not tiny.
-        let b0 = if kind < 2 && d.perp_dot(b0 - a0).abs() < 0.1 {
-            b0 + d.perp() * 0.3
+        // Keep parallel lines well apart: the line–line distance is
+        // unsigned, and the perturbation must not move one line across the
+        // other (a different branch).
+        let off = d.perp_dot(b0 - a0);
+        let b0 = if kind < 2 && off.abs() < 0.35 {
+            b0 + d.perp() * (0.5 * if off < 0.0 { -1.0 } else { 1.0 })
         } else {
             b0
         };
@@ -223,17 +232,24 @@ impl G {
         let a = self.rng.pt();
         let d = self.rng.dir();
         let l = self.len();
-        let (ln, s, e) = self.line(a, a + d * l);
-        let t = self.rng.range(-0.5, 1.5);
+        let (ln, _, _) = self.line(a, a + d * l);
+        // Away from the midpoint (which may be constrained too): two
+        // constrained points close together would pin the line's direction
+        // only weakly.
+        let side = if self.rng.chance(0.5) { 1.0 } else { -1.0 };
+        let t = 0.5 + side * self.rng.range(0.3, 1.0);
         let p = self.point(a + d * l * t);
-        self.con(Constraint::PointOnCurve { point: p, curve: ln });
+        self.con(Constraint::PointOnCurve {
+            point: p,
+            curve: ln,
+        });
         if self.rng.chance(0.4) {
             let m = self.point(a + d * l * 0.5);
             self.con(Constraint::Midpoint { point: m, line: ln });
         }
         if self.rng.chance(0.3) {
             // A point off the line with a point–line distance dimension.
-            let (u, h) = (self.rng.range(0.0, 1.0), self.rng.range(0.1, 0.5));
+            let (u, h) = (self.rng.range(0.0, 1.0), self.rng.range(0.35, 0.6));
             let q = self.point(a + d * l * u + d.perp() * h);
             self.con(Constraint::Distance {
                 a: q,
@@ -242,7 +258,6 @@ impl G {
                 value: 1.0,
             });
         }
-        let _ = (s, e);
     }
 
     fn symmetric(&mut self) {
@@ -266,7 +281,7 @@ impl G {
     fn circles(&mut self) {
         let c = self.rng.pt() * 0.6;
         let r = self.rng.range(0.15, 0.5);
-        let (k, cc) = self.circle(c, r);
+        let (k, _) = self.circle(c, r);
         if self.rng.chance(0.5) {
             let a = self.rng.range(-PI, PI);
             let p = self.point(c + r * DVec2::new(a.cos(), a.sin()));
@@ -331,7 +346,6 @@ impl G {
                 value: 1.0,
             });
         }
-        let _ = cc;
     }
 
     fn arcs(&mut self) {
@@ -339,7 +353,7 @@ impl G {
         let r = self.rng.range(0.2, 0.6);
         let a0 = self.rng.range(-PI, PI);
         let sweep = self.rng.range(0.6, 4.5);
-        let (k, cc, s, e) = self.arc(c, r, a0, sweep);
+        let (k, _, _, e) = self.arc(c, r, a0, sweep);
         let a1 = a0 + sweep;
         let pe = c + r * DVec2::new(a1.cos(), a1.sin());
         let tangent = DVec2::new(-a1.sin(), a1.cos());
@@ -360,7 +374,11 @@ impl G {
                 let r2 = self.rng.range(0.2, 0.6);
                 let toward = (c - pe).normalize();
                 let same_side = self.rng.chance(0.5);
-                let c2 = if same_side { pe + toward * r2 } else { pe - toward * r2 };
+                let c2 = if same_side {
+                    pe + toward * r2
+                } else {
+                    pe - toward * r2
+                };
                 let b0 = (pe - c2).y.atan2((pe - c2).x);
                 let sweep2 = self.rng.range(0.6, 3.0);
                 let (k2, _, s2, _) = self.arc(c2, r2, b0, sweep2);
@@ -383,7 +401,6 @@ impl G {
                 value: 1.0,
             });
         }
-        let _ = (cc, s);
     }
 
     fn splines(&mut self) {
@@ -401,9 +418,28 @@ impl G {
                 degree: degree as u32,
             });
             let knots = control_knots(n, degree);
-            let t = self.rng.range(0.05, 0.95);
-            let q = self.point(de_boor(degree, &knots, &pts, t));
-            self.con(Constraint::PointOnCurve { point: q, curve: sp });
+            // Inside a knot span, away from its ends: a degree-1 spline has
+            // corners there, and a point near a corner may be closer to the
+            // other segment after the perturbation (a different branch).
+            let segs = n - degree;
+            let j = self.rng.int(segs);
+            let t = (j as f64 + self.rng.range(0.2, 0.8)) / segs as f64;
+            let at = de_boor(degree, &knots, &pts, t);
+            // On a polyline, a point close to the line of another segment
+            // is ambiguous at the perturbation's scale (it could be on
+            // either): keep it at least 0.3 from those lines.
+            let clear = degree > 1
+                || (0..n - 1).filter(|&i| i != j).all(|i| {
+                    let d = pts[i + 1] - pts[i];
+                    d.length() > 0.0 && d.perp_dot(at - pts[i]).abs() / d.length() >= 0.3
+                });
+            if clear {
+                let q = self.point(at);
+                self.con(Constraint::PointOnCurve {
+                    point: q,
+                    curve: sp,
+                });
+            }
             if self.rng.chance(0.5) {
                 self.spline_tangent_line(sp, &keys, true);
             }
@@ -428,14 +464,24 @@ impl G {
             }
             if self.rng.chance(0.5) {
                 // A point on the curve, from its resolved form.
-                if let Some((_, _, ResolvedCurve::Spline { degree, knots, points })) =
-                    resolve_curves(&self.b.sketch)
-                        .ok()
-                        .and_then(|v| v.into_iter().find(|(k, _, _)| *k == sp))
+                if let Some((
+                    _,
+                    _,
+                    ResolvedCurve::Spline {
+                        degree,
+                        knots,
+                        points,
+                    },
+                )) = resolve_curves(&self.b.sketch)
+                    .ok()
+                    .and_then(|v| v.into_iter().find(|(k, _, _)| *k == sp))
                 {
                     let t = self.rng.range(0.05, 0.95);
                     let q = self.point(de_boor(degree, &knots, &points, t));
-                    self.con(Constraint::PointOnCurve { point: q, curve: sp });
+                    self.con(Constraint::PointOnCurve {
+                        point: q,
+                        curve: sp,
+                    });
                 }
             }
         }
@@ -500,10 +546,16 @@ impl G {
                 continue;
             }
             let d = self.b.sketch.point(b).unwrap() - self.b.sketch.point(a).unwrap();
+            // Unsigned horizontal and vertical distances only where the
+            // perturbation cannot change the sign of the difference. The
+            // same for aligned distances in both coordinates: other
+            // constraints may pin one coordinate of a point, and then the
+            // sign of the other difference picks one of two solutions (a
+            // perturbation across it starts the solve beyond a fold).
             let kind = match self.rng.int(3) {
-                0 if d.length() > 0.1 => DistanceKind::Aligned,
-                1 if d.x.abs() > 0.1 => DistanceKind::Horizontal,
-                2 if d.y.abs() > 0.1 => DistanceKind::Vertical,
+                0 if d.x.abs() > 0.3 && d.y.abs() > 0.3 => DistanceKind::Aligned,
+                1 if d.x.abs() > 0.3 => DistanceKind::Horizontal,
+                2 if d.y.abs() > 0.3 => DistanceKind::Vertical,
                 _ => continue,
             };
             self.con(Constraint::Distance {
@@ -522,7 +574,10 @@ impl G {
         }
         if !self.lines.is_empty() && self.rng.chance(0.5) {
             let l = self.lines[self.rng.int(self.lines.len())];
-            self.con(Constraint::Length { line: l, value: 1.0 });
+            self.con(Constraint::Length {
+                line: l,
+                value: 1.0,
+            });
         }
     }
 }
@@ -602,7 +657,6 @@ pub fn generate(seed: u64, motifs: usize, scale: f64, offset: DVec2) -> Generate
             if *value <= -PI {
                 *value = PI;
             }
-            let _ = FRAC_PI_2;
         }
     }
     Generated {

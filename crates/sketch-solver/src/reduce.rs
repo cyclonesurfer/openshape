@@ -194,8 +194,8 @@ pub(crate) fn reduce(prob: &Problem, const_tol: f64) -> Reduced {
     let mut comp_of_root = vec![usize::MAX; nu];
     let mut components: Vec<Component> = Vec::new();
     let mut free_unknowns = Vec::new();
-    for u in 0..nu {
-        if !referenced[u] {
+    for (u, &is_referenced) in referenced.iter().enumerate().take(nu) {
+        if !is_referenced {
             free_unknowns.push(u);
             continue;
         }

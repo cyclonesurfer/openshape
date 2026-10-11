@@ -4,8 +4,7 @@
 //! rank-deficient matrices.
 
 use openshape_linalg::{
-    lstsq_min_norm, null_space, select_columns_in_order, svd, weighted_min_norm, Matrix,
-    QrPivoted,
+    lstsq_min_norm, null_space, select_columns_in_order, svd, weighted_min_norm, Matrix, QrPivoted,
 };
 use proptest::prelude::*;
 

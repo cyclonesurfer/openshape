@@ -174,7 +174,10 @@ mod tests {
             let rec = usv.matmul(&d.v.transpose());
             for i in 0..m {
                 for j in 0..n {
-                    assert!((rec[(i, j)] - a[(i, j)]).abs() < 1e-13, "{m}x{n} {rec:?} {a:?} {d:?}");
+                    assert!(
+                        (rec[(i, j)] - a[(i, j)]).abs() < 1e-13,
+                        "{m}x{n} {rec:?} {a:?} {d:?}"
+                    );
                 }
             }
             for w in d.s.windows(2) {

@@ -37,12 +37,19 @@ fn largest_move(a: &Sketch<u32>, b: &Sketch<u32>) -> f64 {
 /// Checks the parts of a solution that hold whatever the outcome.
 fn check_common(input: &Sketch<u32>, s: &openshape_sketch_solver::Solution<u32>) {
     assert!(finite(&s.sketch), "non-finite geometry");
-    assert!(s.max_residual.is_finite(), "max_residual {}", s.max_residual);
+    assert!(
+        s.max_residual.is_finite(),
+        "max_residual {}",
+        s.max_residual
+    );
     assert_eq!(s.entities.len(), input.entities.len(), "entity states");
     for e in &input.entities {
         assert!(s.entities.contains_key(&e.id));
     }
-    assert_eq!(s.sketch.constraints, input.constraints, "constraints are not changed");
+    assert_eq!(
+        s.sketch.constraints, input.constraints,
+        "constraints are not changed"
+    );
     let unknowns: usize = input
         .entities
         .iter()
@@ -100,8 +107,18 @@ proptest! {
         assert_satisfied(&s.sketch);
     }
 
-    /// Perturbed by up to 2 % of the sketch size, every sketch solves and
-    /// every constraint holds.
+    /// Perturbed by up to 0.05 of the generator's unit in each coordinate
+    /// (motifs span about 2–4 units: up to 1.5–2.5 % of the sketch size),
+    /// every sketch solves and every constraint holds.
+    ///
+    /// The generator keeps sign-sensitive quantities (unsigned distances,
+    /// line directions, which segment of a polyline a point is on) at least
+    /// 0.3 from zero, so the perturbation cannot move the start onto
+    /// another branch. Beyond that, success is not guaranteed for every
+    /// sketch — a random dimension can leave a sketch close to a fold,
+    /// where a local method's basin is small — and the next property only
+    /// requires honesty (measured failure rates at larger perturbations are
+    /// in the solver's report).
     #[test]
     fn perturbed_sketches_solve(
         seed in any::<u64>(),
@@ -109,7 +126,7 @@ proptest! {
         e in -4i32..=3,
         ox in -3.0f64..3.0,
         oy in -3.0f64..3.0,
-        amount in 0.0f64..0.02,
+        amount in 0.0f64..0.05,
     ) {
         let scale = 10f64.powi(e);
         let g = generate(seed, motifs, scale, DVec2::new(ox, oy));
@@ -140,7 +157,7 @@ proptest! {
         seed in any::<u64>(),
         motifs in 1usize..9,
         e in -4i32..=3,
-        amount in 0.02f64..0.4,
+        amount in 0.05f64..0.5,
     ) {
         let scale = 10f64.powi(e);
         let g = generate(seed, motifs, scale, DVec2::ZERO);

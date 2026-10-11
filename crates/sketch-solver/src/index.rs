@@ -240,11 +240,9 @@ impl<K: SketchKey> Index<K> {
                         .map(|k| point(id, k, "control point"))
                         .collect::<Result<Vec<_>, _>>()?;
                     let deg = usize::try_from(*degree).unwrap_or(usize::MAX);
-                    let map = SplineMap::control(pts.len(), deg).map_err(|err| spline_err(id, err))?;
-                    splines.push(SplineEnt {
-                        map,
-                        points: pts,
-                    });
+                    let map =
+                        SplineMap::control(pts.len(), deg).map_err(|err| spline_err(id, err))?;
+                    splines.push(SplineEnt { map, points: pts });
                     EntKind::Spline(splines.len() - 1)
                 }
                 Geometry::InterpolatedSpline { through, params } => {
@@ -265,10 +263,7 @@ impl<K: SketchKey> Index<K> {
                         )));
                     }
                     let map = SplineMap::interpolated(params).map_err(|err| spline_err(id, err))?;
-                    splines.push(SplineEnt {
-                        map,
-                        points: pts,
-                    });
+                    splines.push(SplineEnt { map, points: pts });
                     EntKind::Spline(splines.len() - 1)
                 }
             };

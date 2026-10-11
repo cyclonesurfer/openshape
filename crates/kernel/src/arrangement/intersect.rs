@@ -19,9 +19,11 @@
 //! the duplicated piece between them is removed later, when pieces joining
 //! the same two vertices are found to lie within the tolerance of each other.
 
+use std::collections::HashMap;
+
 use glam::DVec2;
 
-use super::bezier::{self, Bez};
+use super::bezier;
 use super::curve::{BPiece, Crv, Geom};
 use crate::KernelError;
 
@@ -71,14 +73,7 @@ pub(super) fn pair_contacts(
                 out.push((s, t));
             }
         }
-        (
-            Geom::Arc {
-                c: ca, r: ra, ..
-            },
-            Geom::Arc {
-                c: cb, r: rb, ..
-            },
-        ) => {
+        (Geom::Arc { c: ca, r: ra, .. }, Geom::Arc { c: cb, r: rb, .. }) => {
             if (*ca - *cb).length() + (ra - rb).abs() <= tol {
                 // Co-circular: the end points (already recorded) bound the
                 // overlap; two full circles share a vertex at angle 0.
@@ -275,22 +270,18 @@ fn chord_normal(h: &[DVec2]) -> Option<DVec2> {
 }
 
 fn extent(h: &[DVec2], n: DVec2) -> (f64, f64) {
-    h.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
-        let x = p.dot(n);
-        (lo.min(x), hi.max(x))
-    })
+    h.iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+            let x = p.dot(n);
+            (lo.min(x), hi.max(x))
+        })
 }
 
 /// Contacts between two curves of which at least one is a spline.
-fn bez_pair(
-    a: &Crv,
-    b: &Crv,
-    ctx: &mut Ctx,
-    out: &mut Vec<(f64, f64)>,
-) -> Result<(), KernelError> {
+fn bez_pair(a: &Crv, b: &Crv, ctx: &mut Ctx, out: &mut Vec<(f64, f64)>) -> Result<(), KernelError> {
     let na: Vec<Node> = a.pieces(a.lo, a.hi).into_iter().map(Node::new).collect();
     let nb: Vec<Node> = b.pieces(b.lo, b.hi).into_iter().map(Node::new).collect();
-    let mut found = Vec::new();
+    let mut found = Found::new(ctx.tol);
     for p in &na {
         for q in &nb {
             let mut s = Subdiv {
@@ -303,8 +294,54 @@ fn bez_pair(
             s.rec(p, q, 0)?;
         }
     }
-    out.extend(found);
+    out.extend(found.list.iter().map(|f| (f.0, f.1)));
     Ok(())
+}
+
+/// Contacts found so far, with a grid over their points so that duplicates
+/// (both points within a quarter of the tolerance of an earlier contact's)
+/// are found in constant time; along an overlap there are many contacts.
+struct Found {
+    list: Vec<(f64, f64, DVec2, DVec2)>,
+    grid: HashMap<(i64, i64), Vec<usize>>,
+    cell: f64,
+}
+
+impl Found {
+    fn new(tol: f64) -> Found {
+        Found {
+            list: Vec::new(),
+            grid: HashMap::new(),
+            cell: 0.25 * tol,
+        }
+    }
+
+    fn key(&self, p: DVec2) -> (i64, i64) {
+        (
+            (p.x / self.cell).floor() as i64,
+            (p.y / self.cell).floor() as i64,
+        )
+    }
+
+    /// Records `(s, t)` with points `pa`, `pb` unless it duplicates an
+    /// earlier contact.
+    fn insert(&mut self, s: f64, t: f64, pa: DVec2, pb: DVec2) {
+        let (kx, ky) = self.key(pa);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                if let Some(ids) = self.grid.get(&(kx + dx, ky + dy)) {
+                    for &i in ids {
+                        let (_, _, qa, qb) = self.list[i];
+                        if (qa - pa).length() <= self.cell && (qb - pb).length() <= self.cell {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        self.grid.entry((kx, ky)).or_default().push(self.list.len());
+        self.list.push((s, t, pa, pb));
+    }
 }
 
 /// Recursive subdivision between pieces of `a` and `b`.
@@ -314,7 +351,7 @@ struct Subdiv<'a, 'c> {
     ctx: &'c mut Ctx,
     /// Parameter bounds for refinement (`a`, then `b`), when restricted.
     bounds: Option<[(f64, f64); 2]>,
-    out: &'c mut Vec<(f64, f64)>,
+    out: &'c mut Found,
 }
 
 impl Subdiv<'_, '_> {
@@ -358,7 +395,10 @@ impl Subdiv<'_, '_> {
             let w = b0 - a0;
             let s = w.perp_dot(db) / den;
             let t = w.perp_dot(da) / den;
-            if s.is_finite() && t.is_finite() && (-0.01..=1.01).contains(&s) && (-0.01..=1.01).contains(&t)
+            if s.is_finite()
+                && t.is_finite()
+                && (-0.01..=1.01).contains(&s)
+                && (-0.01..=1.01).contains(&t)
             {
                 cand.push((s.clamp(0.0, 1.0), t.clamp(0.0, 1.0)));
             }
@@ -392,13 +432,7 @@ impl Subdiv<'_, '_> {
             if (pa - pb).length() > tol {
                 continue;
             }
-            let dup = self.out.iter().any(|&(s2, t2)| {
-                (self.a.point(s2) - pa).length() <= tol * 0.25
-                    && (self.b.point(t2) - pb).length() <= tol * 0.25
-            });
-            if !dup {
-                self.out.push((s, t));
-            }
+            self.out.insert(s, t, pa, pb);
         }
     }
 }
@@ -483,11 +517,7 @@ pub(super) fn self_contacts(a: &Crv, ctx: &mut Ctx) -> Result<Vec<(f64, f64)>, K
         return Ok(Vec::new());
     }
     let tol = ctx.tol;
-    let nodes: Vec<Node> = a
-        .monotone_pieces(tol)
-        .into_iter()
-        .map(Node::new)
-        .collect();
+    let nodes: Vec<Node> = a.monotone_pieces(tol).into_iter().map(Node::new).collect();
     let mut out: Vec<(f64, f64)> = Vec::new();
     for i in 0..nodes.len() {
         for j in i + 1..nodes.len() {
@@ -496,7 +526,7 @@ pub(super) fn self_contacts(a: &Crv, ctx: &mut Ctx) -> Result<Vec<(f64, f64)>, K
                 continue;
             }
             let adjacent = p.piece.t1 == q.piece.t0;
-            let mut found = Vec::new();
+            let mut found = Found::new(tol);
             let mut s = Subdiv {
                 a,
                 b: a,
@@ -506,8 +536,7 @@ pub(super) fn self_contacts(a: &Crv, ctx: &mut Ctx) -> Result<Vec<(f64, f64)>, K
             };
             s.rec(p, q, 0)?;
             let junction = a.point(p.piece.t1);
-            for (s, t) in found {
-                let (ps, pt) = (a.point(s), a.point(t));
+            for (s, t, ps, pt) in found.list {
                 if adjacent
                     && (ps - junction).length() <= 2.0 * tol
                     && (pt - junction).length() <= 2.0 * tol
@@ -527,12 +556,7 @@ pub(super) fn self_contacts(a: &Crv, ctx: &mut Ctx) -> Result<Vec<(f64, f64)>, K
 
 /// True if the curve between `s` and `t` gets farther than `r` from `p`.
 fn leaves(a: &Crv, s: f64, t: f64, p: DVec2, r: f64) -> bool {
-    a.pieces(s, t).iter().any(|pc| {
-        (0..=16).any(|k| (pc.bez.point(k as f64 / 16.0) - p).length() > r)
-    })
-}
-
-/// The Bézier pieces of a curve, for callers outside this module.
-pub(super) fn bez_of(c: &Crv, t0: f64, t1: f64) -> Vec<Bez> {
-    c.pieces(t0, t1).into_iter().map(|p| p.bez).collect()
+    a.pieces(s, t)
+        .iter()
+        .any(|pc| (0..=16).any(|k| (pc.bez.point(k as f64 / 16.0) - p).length() > r))
 }

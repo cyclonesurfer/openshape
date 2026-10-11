@@ -169,9 +169,7 @@ impl QrPivoted {
             return 0;
         }
         let thr = rel_tol * r00;
-        (0..k)
-            .take_while(|&i| self.qr[(i, i)].abs() > thr)
-            .count()
+        (0..k).take_while(|&i| self.qr[(i, i)].abs() > thr).count()
     }
 
     /// The compact factor storage (`R` on and above the diagonal, reflector

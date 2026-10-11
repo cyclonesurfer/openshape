@@ -178,7 +178,10 @@ fn point_on_spline_slides() {
         degree: 3,
     });
     let p = b.point(1.5, 0.3);
-    b.c(Constraint::PointOnCurve { point: p, curve: sp });
+    b.c(Constraint::PointOnCurve {
+        point: p,
+        curve: sp,
+    });
     let s = solve(&b.build(), &opts());
     assert_eq!(s.status, SolveStatus::Solved, "{:?}", s.status);
     assert_eq!(s.dof, 1, "the point slides along the fixed spline");

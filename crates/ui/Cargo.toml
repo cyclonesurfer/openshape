@@ -30,5 +30,8 @@ egui-wgpu.workspace = true
 log.workspace = true
 env_logger.workspace = true
 
+[dev-dependencies]
+openshape-ui-kit.workspace = true
+
 [lints]
 workspace = true

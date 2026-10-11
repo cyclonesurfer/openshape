@@ -2,7 +2,7 @@
 //!
 //! See `docs/design/0005-sketch-solver.md`. The data model ([`Sketch`],
 //! [`Entity`], [`Geometry`], [`Constraint`]) is shared with the document
-//! model; [`solve`] moves the geometry to satisfy the constraints, nearest to
+//! model; [`solve()`] moves the geometry to satisfy the constraints, nearest to
 //! where it is, and diagnoses what is free, redundant or conflicting.
 //! [`resolve_curves`] turns a sketch's curves into explicit geometry for the
 //! kernel.
@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Options for [`solve`].
+/// Options for [`solve()`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct SolveOptions<K> {
     /// Points being dragged and their target positions (design note §7).
@@ -52,20 +52,23 @@ pub enum SolveError {
     #[error("invalid sketch: {0}")]
     Invalid(String),
     /// Geometry is degenerate where a constraint needs it not to be (e.g. a
-    /// zero-length line under a parallel constraint).
+    /// zero-length line under a parallel constraint), or a curve collapses
+    /// (see [`solve()`]) with no single constraint to blame, e.g. because it
+    /// is already collapsed in the input. The message names the item.
     #[error("degenerate geometry: {0}")]
     Degenerate(String),
-    /// The constraints cannot all be satisfied; see
-    /// [`Solution::conflicting`].
+    /// The constraints cannot all be satisfied, or only by collapsing a
+    /// curve; see [`Solution::conflicting`].
     #[error("constraints conflict")]
     Conflicting,
-    /// The iteration limit was reached without convergence and no conflict
-    /// could be identified.
+    /// No acceptable solution was reached (the iteration limit, or a result
+    /// that fails the final check of [`solve()`]) and no conflict could be
+    /// identified.
     #[error("solver did not converge")]
     NotConverged,
 }
 
-/// Outcome of [`solve`].
+/// Outcome of [`solve()`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SolveStatus {
     /// All constraints satisfied; none redundant.
@@ -86,7 +89,7 @@ pub enum EntityState {
     Constrained,
 }
 
-/// Result of [`solve`].
+/// Result of [`solve()`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Solution<K: Ord> {
     /// Outcome.
@@ -100,7 +103,8 @@ pub struct Solution<K: Ord> {
     pub entities: BTreeMap<K, EntityState>,
     /// Constraints implied by earlier ones.
     pub redundant: Vec<K>,
-    /// Constraints that cannot be satisfied together (on failure).
+    /// Constraints that cannot be satisfied together, or that collapse a
+    /// curve (on failure).
     pub conflicting: Vec<K>,
     /// Largest constraint residual at the result, in metres or radians.
     pub max_residual: f64,
@@ -109,6 +113,32 @@ pub struct Solution<K: Ord> {
 }
 
 /// Solves `sketch` (design note 0005).
+///
+/// A result is accepted only if every constraint holds to the model
+/// tolerance (1e-7 m, 1e-9 rad — or, where rounding of the coordinates to
+/// f64 alone exceeds that, as for very short directions far from the origin
+/// or across long levers, to a bound on that rounding), every angle is on
+/// its branch, no direction a constraint needs is degenerate and no curve
+/// has collapsed at the result's own scale (so solving the result again
+/// does not report it degenerate), and coordinates and radii stay within
+/// ±1e6 m. Otherwise the solve fails as `NotConverged` (or `Conflicting`),
+/// unless nothing is dragged and the input itself passes this check: then
+/// the input is the solution, so a solved sketch stays solved.
+///
+/// A curve has collapsed when a line's end points meet, a circle's or
+/// arc's radius vanishes, or an arc's end comes onto its start (where it
+/// is not so in the input), all within 8 × 1e-10 of the sketch size. That
+/// is never a solution, even when every constraint holds. It is blamed
+/// like a conflict: the constraints of the collapsed curve's connected part
+/// of the sketch that hold it collapsed (to first order) are tried in
+/// reverse order (latest first, at most 32), and the first whose removal
+/// lets that part solve with nothing collapsed is reported in
+/// [`Solution::conflicting`] with status `Conflicting` (one constraint per
+/// collapsed part), e.g. the vertical constraint of a line made horizontal
+/// and then vertical. If no single removal helps, as for a curve already
+/// collapsed in the input, the solve fails as `Degenerate` naming the
+/// curve. A solve that fails while heading into a collapse (a radius
+/// cannot reach zero) is blamed the same way.
 ///
 /// On failure the returned geometry is the input. For `Invalid` and
 /// `Degenerate` failures nothing is solved or diagnosed: `dof` counts every

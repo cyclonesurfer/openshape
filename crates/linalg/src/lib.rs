@@ -30,8 +30,8 @@ mod svd;
 mod vector;
 
 pub use cod::{
-    lstsq_min_norm, null_space, projection_norm, residual, weighted_min_norm,
-    CompleteOrthogonal, WeightedSolution,
+    lstsq_min_norm, null_space, projection_norm, residual, weighted_min_norm, CompleteOrthogonal,
+    WeightedSolution,
 };
 pub use matrix::Matrix;
 pub use qr::QrPivoted;

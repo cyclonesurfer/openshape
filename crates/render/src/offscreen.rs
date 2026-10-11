@@ -121,6 +121,101 @@ struct Target {
     padded_bytes_per_row: u32,
 }
 
+/// A headless wgpu instance, adapter, device and queue, chosen by a
+/// [`BackendPreference`]: the device behind [`OffscreenRenderer`], also
+/// usable on its own (for example to render a UI offscreen on the same
+/// backend selection).
+pub struct HeadlessGpu {
+    /// The instance the adapter came from; keep it alive with the device.
+    pub instance: wgpu::Instance,
+    /// The adapter in use.
+    pub adapter: wgpu::Adapter,
+    /// The device, created with the adapter's limits and no extra features.
+    pub device: wgpu::Device,
+    /// The device's queue.
+    pub queue: wgpu::Queue,
+}
+
+impl HeadlessGpu {
+    /// Creates a headless device using the backend selected by
+    /// [`BACKEND_ENV_VAR`] (Vulkan preferred by default); `label` names the
+    /// device in debug tools.
+    ///
+    /// Fails if no adapter is available; it never silently falls back to a
+    /// no-op device.
+    pub fn new(label: &str) -> Result<Self, RenderError> {
+        Self::with_backend(BackendPreference::from_env()?, label)
+    }
+
+    /// Creates a headless device restricted to `preference`.
+    ///
+    /// The backend sets of the preference are tried in order and the first
+    /// adapter found wins, so with [`BackendPreference::PreferVulkan`] any
+    /// Vulkan adapter wins, including Mesa's software lavapipe; set
+    /// [`BACKEND_ENV_VAR`]`=gl` on machines whose only hardware driver is
+    /// OpenGL.
+    pub fn with_backend(preference: BackendPreference, label: &str) -> Result<Self, RenderError> {
+        let mut last_error = None;
+        for &backends in preference.attempts() {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends,
+                flags: wgpu::InstanceFlags::from_build_config().with_env(),
+                backend_options: wgpu::BackendOptions::from_env_or_default(),
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            });
+            let options = wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::from_env()
+                    .unwrap_or(wgpu::PowerPreference::HighPerformance),
+                force_fallback_adapter: false,
+                compatible_surface: None,
+                apply_limit_buckets: false,
+            };
+            match pollster::block_on(instance.request_adapter(&options)) {
+                Ok(adapter) => return Self::from_adapter(instance, adapter, label),
+                Err(e) => {
+                    log::info!("openshape-render: no adapter for {backends:?}: {e}");
+                    last_error = Some((backends, e));
+                }
+            }
+        }
+        let (backends, source) = last_error.expect("at least one backend attempt");
+        Err(RenderError::NoAdapter {
+            preference,
+            backends,
+            source,
+        })
+    }
+
+    fn from_adapter(
+        instance: wgpu::Instance,
+        adapter: wgpu::Adapter,
+        label: &str,
+    ) -> Result<Self, RenderError> {
+        let info = adapter.get_info();
+        log::info!(
+            "openshape-render: using {} ({:?}, {:?}, driver {} {})",
+            info.name,
+            info.backend,
+            info.device_type,
+            info.driver,
+            info.driver_info
+        );
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some(label),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            }))?;
+        Ok(HeadlessGpu {
+            instance,
+            adapter,
+            device,
+            queue,
+        })
+    }
+}
+
 /// Headless renderer with its own wgpu device, for tests, thumbnails and
 /// command-line export.
 ///
@@ -149,60 +244,19 @@ impl OffscreenRenderer {
         Self::with_backend(BackendPreference::from_env()?)
     }
 
-    /// Creates a headless renderer restricted to `preference`.
+    /// Creates a headless renderer restricted to `preference` (see
+    /// [`HeadlessGpu::with_backend`]).
     ///
     /// With [`BackendPreference::PreferVulkan`] any Vulkan adapter wins,
     /// including Mesa's software lavapipe; set [`BACKEND_ENV_VAR`]`=gl` on
     /// machines whose only hardware driver is OpenGL.
     pub fn with_backend(preference: BackendPreference) -> Result<Self, RenderError> {
-        let mut last_error = None;
-        for &backends in preference.attempts() {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends,
-                flags: wgpu::InstanceFlags::from_build_config().with_env(),
-                backend_options: wgpu::BackendOptions::from_env_or_default(),
-                ..wgpu::InstanceDescriptor::new_without_display_handle()
-            });
-            let options = wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::from_env()
-                    .unwrap_or(wgpu::PowerPreference::HighPerformance),
-                force_fallback_adapter: false,
-                compatible_surface: None,
-                apply_limit_buckets: false,
-            };
-            match pollster::block_on(instance.request_adapter(&options)) {
-                Ok(adapter) => return Self::from_adapter(instance, adapter),
-                Err(e) => {
-                    log::info!("openshape-render: no adapter for {backends:?}: {e}");
-                    last_error = Some((backends, e));
-                }
-            }
-        }
-        let (backends, source) = last_error.expect("at least one backend attempt");
-        Err(RenderError::NoAdapter {
-            preference,
-            backends,
-            source,
-        })
-    }
-
-    fn from_adapter(instance: wgpu::Instance, adapter: wgpu::Adapter) -> Result<Self, RenderError> {
-        let info = adapter.get_info();
-        log::info!(
-            "openshape-render: using {} ({:?}, {:?}, driver {} {})",
-            info.name,
-            info.backend,
-            info.device_type,
-            info.driver,
-            info.driver_info
-        );
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("openshape-render offscreen"),
-                required_features: wgpu::Features::empty(),
-                required_limits: adapter.limits(),
-                ..Default::default()
-            }))?;
+        let HeadlessGpu {
+            instance,
+            adapter,
+            device,
+            queue,
+        } = HeadlessGpu::with_backend(preference, "openshape-render offscreen")?;
         let scene = SceneRenderer::new(&device, Self::COLOR_FORMAT);
         Ok(OffscreenRenderer {
             _instance: instance,

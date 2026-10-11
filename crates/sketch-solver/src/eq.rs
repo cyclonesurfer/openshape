@@ -236,6 +236,123 @@ pub(crate) struct SplineDef {
     pub points: Vec<usize>,
 }
 
+impl SplineDef {
+    /// The point of the curve at `t` (slot values `v`).
+    pub fn point_at(&self, v: &[f64], t: f64) -> (f64, f64) {
+        let (w, _) = self.map.weights(t);
+        let (mut x, mut y) = (0.0, 0.0);
+        for (k, &q) in self.points.iter().enumerate() {
+            x += w[k] * v[2 * q];
+            y += w[k] * v[2 * q + 1];
+        }
+        (x, y)
+    }
+
+    /// The squared distance from point `p` to the curve point at `t`.
+    pub fn dist2(&self, v: &[f64], p: usize, t: f64) -> f64 {
+        let (x, y) = self.point_at(v, t);
+        let (dx, dy) = (x - v[2 * p], y - v[2 * p + 1]);
+        dx * dx + dy * dy
+    }
+
+    /// The curve parameter of the point closest to point `p` (slot values
+    /// `v`). Every knot span (polynomial piece) is sampled; each local
+    /// minimum of the sampled distance is refined by golden-section search
+    /// between its neighbouring samples, then by safeguarded Newton on
+    /// `(C(t) − P)·C′(t) = 0` (P&T eq. 6.3); the nearest wins (the first on
+    /// ties). A curve that passes near `P` more than once is thus not
+    /// mistaken for its nearest sample's neighbourhood.
+    pub fn closest_param(&self, v: &[f64], p: usize) -> f64 {
+        const PER_SPAN: usize = 16;
+        let mut ts: Vec<f64> = Vec::new();
+        for w in self.map.knots.windows(2) {
+            if w[1] > w[0] {
+                for i in 0..PER_SPAN {
+                    ts.push(w[0] + (w[1] - w[0]) * (i as f64 / PER_SPAN as f64));
+                }
+            }
+        }
+        ts.push(1.0);
+        let d: Vec<f64> = ts.iter().map(|&t| self.dist2(v, p, t)).collect();
+        let n = ts.len();
+        let mut best = (f64::INFINITY, 0.0);
+        for i in 0..n {
+            let left = if i > 0 { d[i - 1] } else { f64::INFINITY };
+            let right = if i + 1 < n { d[i + 1] } else { f64::INFINITY };
+            // Local minima of the samples; of a run of equal samples (a
+            // stretch of curve that does not move, such as a zero-length
+            // leg), only its two ends.
+            if !(d[i] <= left && d[i] <= right) || (d[i] == left && d[i] == right) {
+                continue;
+            }
+            let (a, b) = (ts[i.saturating_sub(1)], ts[(i + 1).min(n - 1)]);
+            let (t, dt) = self.refine(v, p, (ts[i], d[i]), a, b);
+            if dt < best.0 {
+                best = (dt, t);
+            }
+        }
+        best.1
+    }
+
+    /// Refines a sampled local minimum `(t, distance²)` of the distance to
+    /// point `p` within `[a, b]`; returns the improved `(t, distance²)`.
+    fn refine(&self, v: &[f64], p: usize, start: (f64, f64), a: f64, b: f64) -> (f64, f64) {
+        let (mut best_t, mut best_d) = start;
+        // Golden-section search (Kiefer 1953) on [a, b].
+        let g = 0.5 * (5f64.sqrt() - 1.0);
+        let (mut lo, mut hi) = (a, b);
+        let (mut x1, mut x2) = (hi - g * (hi - lo), lo + g * (hi - lo));
+        let (mut f1, mut f2) = (self.dist2(v, p, x1), self.dist2(v, p, x2));
+        for _ in 0..40 {
+            if f1 <= f2 {
+                hi = x2;
+                (x2, f2) = (x1, f1);
+                x1 = hi - g * (hi - lo);
+                f1 = self.dist2(v, p, x1);
+            } else {
+                lo = x1;
+                (x1, f1) = (x2, f2);
+                x2 = lo + g * (hi - lo);
+                f2 = self.dist2(v, p, x2);
+            }
+        }
+        for (t, d) in [(x1, f1), (x2, f2)] {
+            if d < best_d {
+                (best_t, best_d) = (t, d);
+            }
+        }
+        // Newton polish, accepting steps that do not increase the distance
+        // (near the minimum the distance stalls at rounding level while the
+        // parameter still improves).
+        for _ in 0..16 {
+            let (w, w1, w2) = self.map.weights_ders(best_t, 2);
+            let (mut c, mut c1, mut c2) = ([0.0f64; 2], [0.0f64; 2], [0.0f64; 2]);
+            for (k, &q) in self.points.iter().enumerate() {
+                for axis in 0..2 {
+                    let x = v[2 * q + axis];
+                    c[axis] += w[k] * x;
+                    c1[axis] += w1[k] * x;
+                    c2[axis] += w2[k] * x;
+                }
+            }
+            c[0] -= v[2 * p];
+            c[1] -= v[2 * p + 1];
+            let gr = c[0] * c1[0] + c[1] * c1[1];
+            let gp = c1[0] * c1[0] + c1[1] * c1[1] + c[0] * c2[0] + c[1] * c2[1];
+            if gp.is_nan() || gp <= 0.0 {
+                break;
+            }
+            let t = (best_t - gr / gp).clamp(0.0, 1.0);
+            let d = self.dist2(v, p, t);
+            if d.is_nan() || best_d.is_nan() || d > best_d || t == best_t {
+                break;
+            }
+            (best_t, best_d) = (t, d);
+        }
+        (best_t, best_d)
+    }
+}
+
 /// Result of evaluating an equation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Eval {
@@ -266,6 +383,57 @@ pub(crate) fn unit(x: f64, y: f64) -> (f64, f64) {
 }
 
 impl EqKind {
+    /// The vectors whose length or direction the residual uses that are
+    /// within `degen` of zero (or not finite) at slot values `v`: there
+    /// the residual cannot be evaluated (a direction) or has a kink (a
+    /// length, whose gradient is then an arbitrary choice).
+    pub fn short_vectors(&self, v: &[f64], degen: f64) -> Vec<&VecExpr> {
+        let short = |e: &VecExpr| {
+            let (x, y) = e.eval(v);
+            let n = norm(x, y);
+            n.is_nan() || n <= degen
+        };
+        fn rhs_norms<'a>(r: &'a Rhs, out: &mut Vec<&'a VecExpr>) {
+            for (_, t) in &r.terms {
+                if let RTerm::Norm(e) = t {
+                    out.push(e);
+                }
+            }
+        }
+        let mut out: Vec<&VecExpr> = Vec::new();
+        match self {
+            EqKind::Norm { v: e, rhs, .. } => {
+                out.push(e);
+                rhs_norms(rhs, &mut out);
+            }
+            EqKind::SignedDist { dir, rhs, .. } => {
+                out.push(dir);
+                rhs_norms(rhs, &mut out);
+            }
+            EqKind::Proj { dir, .. } => out.push(dir),
+            EqKind::DirPair { a, b, .. } => {
+                out.push(a);
+                out.push(b);
+            }
+            EqKind::Lin { .. } | EqKind::AbsLin { .. } | EqKind::SplinePoint { .. } => {}
+        }
+        out.retain(|e| short(e));
+        out
+    }
+
+    /// True where an absolute value the residual takes is within `degen`
+    /// of zero at slot values `v` (a kink).
+    pub fn abs_kinked(&self, v: &[f64], degen: f64) -> bool {
+        let near = |x: f64| x.abs() <= degen;
+        match self {
+            EqKind::AbsLin { terms, .. } => near(terms.iter().map(|&(s, c)| c * v[s]).sum()),
+            EqKind::Norm { rhs, .. } | EqKind::SignedDist { rhs, .. } => {
+                rhs.abs && near(rhs.raw(v))
+            }
+            _ => false,
+        }
+    }
+
     /// Evaluates the residual at slot values `v`, pushing the gradient into
     /// `grad` if given. Returns `None` if a direction it divides by is
     /// shorter than `degen`.
@@ -318,7 +486,12 @@ impl EqKind {
                     lever: inf,
                 })
             }
-            EqKind::SignedDist { dir, v: w, abs, rhs } => {
+            EqKind::SignedDist {
+                dir,
+                v: w,
+                abs,
+                rhs,
+            } => {
                 let (dx, dy) = dir.eval(v);
                 let n = norm(dx, dy);
                 if n.is_nan() || n <= degen {
@@ -331,11 +504,7 @@ impl EqKind {
                 if let Some(g) = grad {
                     let n3 = n * n * n;
                     w.push_grad(sg * (-dy / n), sg * (dx / n), g);
-                    dir.push_grad(
-                        sg * (wy / n - c * dx / n3),
-                        sg * (-wx / n - c * dy / n3),
-                        g,
-                    );
+                    dir.push_grad(sg * (wy / n - c * dx / n3), sg * (-wx / n - c * dy / n3), g);
                     rhs.push_grad(v, -1.0, g);
                 }
                 Some(Eval {
@@ -393,12 +562,7 @@ impl EqKind {
                     lever: na.min(nb),
                 })
             }
-            EqKind::SplinePoint {
-                spline,
-                t,
-                p,
-                axis,
-            } => {
+            EqKind::SplinePoint { spline, t, p, axis } => {
                 let def = &splines[*spline];
                 let (w, dw) = def.map.weights(v[*t]);
                 let mut c = 0.0;
@@ -524,6 +688,57 @@ mod tests {
 
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn closest_param_on_a_segment_and_a_polyline() {
+        let def = SplineDef {
+            map: crate::spline::SplineMap::control(2, 1).unwrap(),
+            points: vec![0, 1],
+        };
+        // P0 = (0,0), P1 = (1,0), query (0.3, 0.5).
+        let v = vec![0.0, 0.0, 1.0, 0.0, 0.3, 0.5];
+        let t = def.closest_param(&v, 2);
+        assert!((t - 0.3).abs() < 1e-12);
+        // Beyond the end: clamped to it.
+        let v = vec![0.0, 0.0, 1.0, 0.0, 1.7, 0.2];
+        assert_eq!(def.closest_param(&v, 2), 1.0);
+        // A polyline (0,0) → (1,0) → (1,1): the query (1.4, 0.6) is closest
+        // to the second segment at (1, 0.6), t = 0.5 + 0.6 / 2.
+        let def = SplineDef {
+            map: crate::spline::SplineMap::control(3, 1).unwrap(),
+            points: vec![0, 1, 2],
+        };
+        let v = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.4, 0.6];
+        let t = def.closest_param(&v, 3);
+        assert!((t - 0.8).abs() < 1e-12, "{t}");
+        assert!((def.dist2(&v, 3, t) - 0.16).abs() < 1e-12);
+        // A zero-length first leg (control points 0, 0, 1, 2): the samples
+        // over it tie; the query just past its end lies on the next leg.
+        let def = SplineDef {
+            map: crate::spline::SplineMap::control(4, 1).unwrap(),
+            points: vec![0, 0, 1, 2],
+        };
+        let v = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.01, 0.0];
+        let t = def.closest_param(&v, 3);
+        assert!((t - (1.0 + 0.01) / 3.0).abs() < 1e-12, "{t}");
+        assert!(def.dist2(&v, 3, t) < 1e-24);
+        // A curve passing the query twice, the nearer pass between samples
+        // of a coarse grid: still found.
+        let def = SplineDef {
+            map: crate::spline::SplineMap::control(5, 1).unwrap(),
+            points: vec![0, 1, 2, 3, 4],
+        };
+        // (0,0) → (10,0) → (10,0.001) → (0,0.001) → (0,0.5); query (5,0.0004).
+        let v = vec![
+            0.0, 0.0, 10.0, 0.0, 10.0, 0.001, 0.0, 0.001, 0.0, 0.5, 5.0, 0.0004,
+        ];
+        let t = def.closest_param(&v, 5);
+        assert!(
+            (def.dist2(&v, 5, t) - 0.0004f64.powi(2)).abs() < 1e-18,
+            "{t}"
+        );
+        assert!((t - 0.125).abs() < 1e-12, "{t}");
+    }
 
     /// Six points (12 slots), a radius slot (12), a radius slot (13), a
     /// spline parameter slot (14).
@@ -771,7 +986,7 @@ mod tests {
             return Ok(());
         };
         prop_assert!(e.r.is_finite());
-        let mut dense = vec![0.0; SLOTS];
+        let mut dense = [0.0; SLOTS];
         for (i, d) in g {
             dense[i] += d;
         }

@@ -11,6 +11,7 @@ pub mod dialogs;
 pub mod profile_pick;
 pub mod sketch_mode;
 pub mod sketch_paint;
+pub mod viewport;
 
 use std::path::Path;
 
@@ -278,7 +279,13 @@ impl Model {
             edits,
         });
         self.regenerate();
-        match self.session.document().conflicts.iter().find(|c| c.op == id) {
+        match self
+            .session
+            .document()
+            .conflicts
+            .iter()
+            .find(|c| c.op == id)
+        {
             Some(c) => Err(c.reason.clone()),
             None => Ok(id),
         }
