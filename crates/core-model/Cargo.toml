@@ -9,6 +9,7 @@ authors.workspace = true
 
 [dependencies]
 openshape-oplog.workspace = true
+openshape-sketch-solver.workspace = true
 glam.workspace = true
 serde.workspace = true
 thiserror.workspace = true

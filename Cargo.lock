@@ -2267,12 +2267,15 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "env_logger",
+ "glam",
  "log",
  "openshape-core-model",
  "openshape-features",
  "openshape-io",
  "openshape-kernel",
  "openshape-render",
+ "openshape-sketch-solver",
+ "openshape-ui-kit",
 ]
 
 [[package]]
@@ -2281,6 +2284,7 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "openshape-oplog",
+ "openshape-sketch-solver",
  "proptest",
  "serde",
  "serde_json",
@@ -2294,6 +2298,7 @@ dependencies = [
  "openshape-core-model",
  "openshape-kernel",
  "openshape-oplog",
+ "openshape-sketch-solver",
 ]
 
 [[package]]
@@ -2315,6 +2320,13 @@ dependencies = [
  "serde",
  "spade",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "openshape-linalg"
+version = "0.1.0"
+dependencies = [
+ "proptest",
 ]
 
 [[package]]
@@ -2352,6 +2364,32 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "wgpu",
+]
+
+[[package]]
+name = "openshape-sketch-solver"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "openshape-linalg",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "openshape-ui-kit"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "egui-wgpu",
+ "glam",
+ "log",
+ "openshape-render",
+ "pollster",
+ "proptest",
  "wgpu",
 ]
 

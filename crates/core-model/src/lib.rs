@@ -9,11 +9,13 @@
 //! with plain data (planes, profile curves, dimensions in SI units) and are
 //! evaluated by the `features` crate.
 
+pub mod sketch;
 pub mod units;
 
 pub use glam::{DVec2, DVec3};
 pub use openshape_oplog::{Op, OpId, OpKind, OpLog, OpLogError, ReplicaId};
 use serde::{Deserialize, Serialize};
+pub use sketch::{RegionKey, SketchData, SketchDef, SketchEdit, SketchId};
 
 /// Identifies an element (tab) of a document; derived from the creating op.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -87,9 +89,44 @@ pub struct ProfileDef {
     pub curves: Vec<CurveDef>,
 }
 
+/// Where a sweep's profile comes from.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ProfileSource {
+    /// Curves given directly.
+    Inline(ProfileDef),
+    /// Regions of an earlier sketch feature; the profile is the boundary of
+    /// their union, in the sketch's plane.
+    Sketch {
+        /// The sketch feature.
+        sketch: FeatureId,
+        /// The selected regions.
+        regions: Vec<RegionKey>,
+    },
+}
+
+/// A revolve axis, in the profile's plane coordinates.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum RevolveAxis {
+    /// A point and a direction.
+    Inline {
+        /// Point on the axis.
+        origin: DVec2,
+        /// Direction.
+        dir: DVec2,
+    },
+    /// A line of the profile's sketch (typically construction geometry),
+    /// from its start towards its end.
+    SketchLine {
+        /// The line entity.
+        line: SketchId,
+    },
+}
+
 /// A modeling feature: pure data, evaluated by the `features` crate.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Feature {
+    /// A 2D sketch: entities and constraints on a plane.
+    Sketch(SketchDef),
     /// An axis-aligned box primitive with one corner at `corner`.
     Box {
         /// Corner position.
@@ -100,7 +137,7 @@ pub enum Feature {
     /// Linear extrusion of a profile.
     Extrude {
         /// Profile.
-        profile: ProfileDef,
+        profile: ProfileSource,
         /// Signed distance along the plane normal.
         distance: f64,
         /// Extrude half to each side.
@@ -109,11 +146,9 @@ pub enum Feature {
     /// Rotational sweep of a profile about an in-plane axis.
     Revolve {
         /// Profile.
-        profile: ProfileDef,
-        /// Point on the axis (plane coordinates).
-        axis_origin: DVec2,
-        /// Axis direction (plane coordinates).
-        axis_dir: DVec2,
+        profile: ProfileSource,
+        /// Axis.
+        axis: RevolveAxis,
         /// Signed angle in radians.
         angle: f64,
     },
@@ -123,6 +158,7 @@ impl Feature {
     /// A short type name for display.
     pub fn type_name(&self) -> &'static str {
         match self {
+            Feature::Sketch(_) => "Sketch",
             Feature::Box { .. } => "Box",
             Feature::Extrude { .. } => "Extrude",
             Feature::Revolve { .. } => "Revolve",
@@ -257,6 +293,15 @@ pub enum ModelOp {
         element: ElementId,
         /// Feature.
         feature: FeatureId,
+    },
+    /// Edits a sketch feature: a batch applied atomically (ADR 0011).
+    EditSketch {
+        /// Element.
+        element: ElementId,
+        /// The sketch feature.
+        feature: FeatureId,
+        /// Edits, in order.
+        edits: Vec<SketchEdit>,
     },
 }
 
@@ -404,6 +449,15 @@ impl Document {
                 studio.features.remove(i);
                 Ok(())
             }
+            ModelOp::EditSketch {
+                element,
+                feature,
+                edits,
+            } => match &mut feature_mut(&mut self.element_mut(*element)?.studio, *feature)?.feature
+            {
+                Feature::Sketch(def) => def.apply_edits(id, edits),
+                _ => Err("feature is not a sketch".into()),
+            },
         }
     }
 }
@@ -655,15 +709,17 @@ mod tests {
             at: InsertAt::End,
             name: "Revolve 1".into(),
             feature: Feature::Revolve {
-                profile: ProfileDef {
+                profile: ProfileSource::Inline(ProfileDef {
                     plane: PlaneRef::Front,
                     curves: vec![CurveDef::Circle {
                         center: DVec2::new(0.05, 0.0),
                         radius: 0.01,
                     }],
+                }),
+                axis: RevolveAxis::Inline {
+                    origin: DVec2::ZERO,
+                    dir: DVec2::Y,
                 },
-                axis_origin: DVec2::ZERO,
-                axis_dir: DVec2::Y,
                 angle: 1.0,
             },
         };

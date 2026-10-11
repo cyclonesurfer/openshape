@@ -3,8 +3,9 @@
 A native Linux, pure-Rust, history-based parametric 3D CAD system.
 License: GPL-3.0-or-later.
 
-OpenShape is early: Phase 0 (foundations) and Phase 1 (kernel core) are in
-place. See [STATUS.md](STATUS.md) for what works today and
+OpenShape is early: Phase 0 (foundations), Phase 1 (kernel core) and the
+first Phase 2 milestone (the sketcher: constraint solver, sketch mode,
+dimensions, region extrude and revolve) are in place. See [STATUS.md](STATUS.md) for what works today and
 [docs/ROADMAP.md](docs/ROADMAP.md) for the plan.
 
 ## Build and run (Linux)

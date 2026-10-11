@@ -10,6 +10,7 @@ authors.workspace = true
 [dependencies]
 openshape-core-model.workspace = true
 openshape-kernel.workspace = true
+openshape-sketch-solver.workspace = true
 
 [dev-dependencies]
 openshape-oplog.workspace = true

@@ -5,7 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use openshape_core_model::{CurveDef, DVec2, DVec3, Feature, PlaneRef, ProfileDef};
+use openshape_core_model::{
+    CurveDef, DVec2, DVec3, Feature, PlaneRef, ProfileDef, ProfileSource, RevolveAxis,
+};
 use openshape_kernel::Kernel;
 use openshape_render::{write_png, Camera, OffscreenRenderer, RgbaImage};
 
@@ -50,7 +52,7 @@ pub fn vase_at(x0: f64) -> Feature {
     let (h, r) = (0.05, 0.012);
     let p = |x: f64, y: f64| DVec2::new(x0 + x, y);
     Feature::Revolve {
-        profile: ProfileDef {
+        profile: ProfileSource::Inline(ProfileDef {
             plane: PlaneRef::Front,
             curves: vec![
                 CurveDef::Spline {
@@ -74,9 +76,11 @@ pub fn vase_at(x0: f64) -> Feature {
                     end: p(r, 0.0),
                 },
             ],
+        }),
+        axis: RevolveAxis::Inline {
+            origin: DVec2::new(x0, 0.0),
+            dir: DVec2::Y,
         },
-        axis_origin: DVec2::new(x0, 0.0),
-        axis_dir: DVec2::Y,
         angle: std::f64::consts::TAU,
     }
 }

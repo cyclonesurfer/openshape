@@ -8,15 +8,24 @@
 pub mod app;
 pub mod demo;
 pub mod dialogs;
+pub mod profile_pick;
+pub mod sketch_mode;
+pub mod sketch_paint;
+pub mod viewport;
 
 use std::path::Path;
 
+use std::collections::BTreeMap;
+
+use openshape_core_model::sketch::Geometry;
 use openshape_core_model::{
-    ElementId, Feature, FeatureId, InsertAt, ModelOp, PartStudio, ReplicaId, Session,
+    ElementId, Feature, FeatureEntry, FeatureId, InsertAt, ModelOp, OpId, PartStudio, PlaneRef,
+    ReplicaId, Session, SketchData, SketchDef, SketchEdit, SketchId,
 };
-use openshape_features::{regenerate, FeatureStatus, StudioResult};
+use openshape_features::{regenerate, FeatureStatus, SketchResult, StudioResult};
 use openshape_kernel::{Body, BodyMesh, Kernel, OsKernel, TessellationOptions};
 use openshape_render::MeshData;
+use openshape_sketch_solver::{solve, SolveOptions, SolveStatus};
 
 /// Colours cycled through for successive parts (sRGB).
 const PART_COLORS: [[f32; 4]; 6] = [
@@ -80,10 +89,7 @@ impl Model {
         let mut m = Model {
             session,
             kernel: OsKernel::default(),
-            result: StudioResult {
-                statuses: Vec::new(),
-                bodies: Vec::new(),
-            },
+            result: StudioResult::default(),
             meshes: Vec::new(),
             tessellation: TessellationOptions {
                 chord_tolerance: 2e-5,
@@ -216,6 +222,75 @@ impl Model {
         r
     }
 
+    /// The feature with this id.
+    pub fn feature(&self, id: FeatureId) -> Option<&FeatureEntry> {
+        self.studio().features.iter().find(|f| f.id == id)
+    }
+
+    /// Appends an empty sketch on `plane`.
+    pub fn add_sketch(&mut self, plane: PlaneRef) -> FeatureId {
+        let name = self.next_name("Sketch");
+        self.add_feature(
+            &name,
+            Feature::Sketch(SketchDef {
+                plane,
+                sketch: SketchData::default(),
+            }),
+        )
+    }
+
+    /// The stored definition of a sketch feature.
+    pub fn sketch_def(&self, id: FeatureId) -> Option<&SketchDef> {
+        match &self.feature(id)?.feature {
+            Feature::Sketch(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The regenerated (solved) state of a sketch feature; `None` when it is
+    /// suppressed or missing.
+    pub fn sketch_result(&self, id: FeatureId) -> Option<&SketchResult> {
+        self.result.sketch(id)
+    }
+
+    /// Applies a sketch edit batch as one op (one undo step).
+    ///
+    /// The batch is first checked on a copy of the sketch; an invalid batch
+    /// is refused without touching the op log. Otherwise the sketch is
+    /// solved with the batch applied and the solved positions are appended
+    /// to the batch (they are the solver's starting point next time,
+    /// ADR 0011). Constraints that cannot be satisfied are still added: the
+    /// sketch then reports the conflict until the user removes one.
+    pub fn edit_sketch(
+        &mut self,
+        feature: FeatureId,
+        mut edits: Vec<SketchEdit>,
+    ) -> Result<OpId, String> {
+        let def = self
+            .sketch_def(feature)
+            .ok_or("the sketch no longer exists")?;
+        let mut trial = def.clone();
+        trial.apply_edits(OpId::NULL, &edits)?;
+        edits.extend(settle(&trial.sketch));
+        let element = self.studio_id();
+        let id = self.session.apply(ModelOp::EditSketch {
+            element,
+            feature,
+            edits,
+        });
+        self.regenerate();
+        match self
+            .session
+            .document()
+            .conflicts
+            .iter()
+            .find(|c| c.op == id)
+        {
+            Some(c) => Err(c.reason.clone()),
+            None => Ok(id),
+        }
+    }
+
     /// A fresh name like "Extrude 3" for a new feature of this type.
     pub fn next_name(&self, type_name: &str) -> String {
         let n = self
@@ -225,6 +300,11 @@ impl Model {
             .filter(|f| f.feature.type_name() == type_name)
             .count();
         format!("{type_name} {}", n + 1)
+    }
+
+    /// The solved sketch of a regenerated studio, by feature.
+    pub fn sketches(&self) -> &[SketchResult] {
+        &self.result.sketches
     }
 
     /// Regenerates all parts and rebuilds display meshes.
@@ -250,4 +330,43 @@ impl Model {
         self.meshes = meshes;
         self.generation += 1;
     }
+}
+
+/// The edits that move `sketch` to its solved state: positions of points and
+/// radii of circles that the solver changed. Empty when it does not solve.
+pub fn settle(sketch: &SketchData) -> Vec<SketchEdit> {
+    let solution = solve(sketch, &SolveOptions::default());
+    if matches!(solution.status, SolveStatus::Failed(_)) {
+        return Vec::new();
+    }
+    geometry_edits(sketch, &solution.sketch)
+}
+
+/// The edits that change `from`'s point positions and circle radii to
+/// `to`'s (entities are matched by id; others are ignored).
+pub fn geometry_edits(from: &SketchData, to: &SketchData) -> Vec<SketchEdit> {
+    let target: BTreeMap<SketchId, &Geometry<SketchId>> =
+        to.entities.iter().map(|e| (e.id, &e.geometry)).collect();
+    let mut moves = Vec::new();
+    let mut edits = Vec::new();
+    for e in &from.entities {
+        match (&e.geometry, target.get(&e.id)) {
+            (Geometry::Point { at }, Some(Geometry::Point { at: p })) if at != p => {
+                moves.push((e.id, *p));
+            }
+            (Geometry::Circle { radius, .. }, Some(Geometry::Circle { radius: r, .. }))
+                if radius != r =>
+            {
+                edits.push(SketchEdit::SetRadius {
+                    entity: e.id,
+                    radius: *r,
+                });
+            }
+            _ => {}
+        }
+    }
+    if !moves.is_empty() {
+        edits.insert(0, SketchEdit::MovePoints { points: moves });
+    }
+    edits
 }

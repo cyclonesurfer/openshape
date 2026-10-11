@@ -39,13 +39,16 @@ container without a GPU, install Mesa's software Vulkan (lavapipe):
 | `crates/core-model` | `openshape-core-model` | documents, elements (tabs), feature tree as data, units, `ModelOp` reducer |
 | `crates/nurbs` | `openshape-nurbs` | NURBS curves/surfaces (Piegl & Tiller); **kernel-private** — only `kernel` may depend on it |
 | `crates/kernel` | `openshape-kernel` | B-rep kernel behind the `Kernel` trait |
+| `crates/linalg` | `openshape-linalg` | deterministic dense linear algebra (pivoted QR, COD, SVD) for the solvers (ADR 0010) |
+| `crates/sketch-solver` | `openshape-sketch-solver` | 2D sketch constraint solver with DOF/redundancy/conflict diagnostics (design note 0005) |
 | `crates/features` | `openshape-features` | evaluates a part studio's feature list through `Kernel` |
 | `crates/render` | `openshape-render` | wgpu viewport renderer + offscreen renderer; no kernel/egui deps |
 | `crates/io` | `openshape-io` | import/export formats (STL today) |
+| `crates/ui-kit` | `openshape-ui-kit` | the look: theme tokens, original icon set, view cube, offscreen egui rendering (ADR 0012) |
 | `crates/ui` | `openshape` (bin) | egui/eframe application shell |
 
 Planned crates (not yet created; see docs/ARCHITECTURE.md): `naming`, `regen`,
-`sketch-solver`, `mate-solver`, `script`, `drawing`, `sim`, `cam`,
+`mate-solver`, `script`, `drawing`, `sim`, `cam`,
 `render-studio`, `server`, `client-sync`, `api`, `plugins`.
 
 ## Rules (from the project brief — non-negotiable)
@@ -70,6 +73,13 @@ Planned crates (not yet created; see docs/ARCHITECTURE.md): `naming`, `regen`,
 - Document every public API item (`missing_docs` is on).
 - `unsafe` is forbidden workspace-wide.
 - Solo mode must never link the server crate (it will live behind a feature).
+- Clean room (docs/CLEANROOM.md): build only from public standards,
+  literature, public documentation and our own reasoning. Never consult or
+  use another product's code, binaries, leaked material, proprietary
+  formats, icons, colours, screenshots or name; every icon is drawn in code
+  by us. The product never names the reference product
+  (`crates/ui/tests/cleanroom.rs`). The project record may become legal
+  evidence: describe your own decisions and sources.
 - Golden-model tests assert volume, area, topology counts and validity.
   Fuzz solvers, booleans, parsers and op-log merge.
 - Commit at every green milestone with a clear message.

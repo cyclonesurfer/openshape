@@ -8,7 +8,10 @@ members = [
     "crates/features",
     "crates/render",
     "crates/io",
-    "crates/ui", "crates/nurbs",
+    "crates/ui",
+    "crates/ui-kit",
+    "crates/linalg",
+    "crates/sketch-solver",
 ]
 
 [workspace.package]
@@ -27,6 +30,9 @@ openshape-kernel = { path = "crates/kernel", version = "0.1.0" }
 openshape-features = { path = "crates/features", version = "0.1.0" }
 openshape-render = { path = "crates/render", version = "0.1.0" }
 openshape-io = { path = "crates/io", version = "0.1.0" }
+openshape-linalg = { path = "crates/linalg", version = "0.1.0" }
+openshape-sketch-solver = { path = "crates/sketch-solver", version = "0.1.0" }
+openshape-ui-kit = { path = "crates/ui-kit", version = "0.1.0" }
 
 glam = { version = "0.34", features = ["serde", "bytemuck"] }
 serde = { version = "1", features = ["derive"] }
