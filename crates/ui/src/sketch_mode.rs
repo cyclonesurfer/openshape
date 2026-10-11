@@ -922,7 +922,7 @@ fn ccw(a: f64, b: f64) -> f64 {
 // ---------------------------------------------------------------------------
 
 /// A sketch tool.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tool {
     /// Select, drag, delete.
     Select,
@@ -1009,7 +1009,7 @@ impl Tool {
 }
 
 /// A geometric constraint applied to the selection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ConstraintTool {
     /// Two points coincide, or a point lies on a curve.
     Coincident,

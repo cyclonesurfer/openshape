@@ -19,8 +19,8 @@ use std::collections::BTreeMap;
 
 use openshape_core_model::sketch::Geometry;
 use openshape_core_model::{
-    ElementId, Feature, FeatureEntry, FeatureId, InsertAt, ModelOp, OpId, PartStudio, PlaneRef,
-    ReplicaId, Session, SketchData, SketchDef, SketchEdit, SketchId,
+    Element, ElementId, ElementKind, Feature, FeatureEntry, FeatureId, InsertAt, ModelOp, OpId,
+    PartStudio, PlaneRef, ReplicaId, Session, SketchData, SketchDef, SketchEdit, SketchId,
 };
 use openshape_features::{regenerate, FeatureStatus, SketchResult, StudioResult};
 use openshape_kernel::{Body, BodyMesh, Kernel, OsKernel, TessellationOptions};
@@ -65,6 +65,8 @@ pub fn to_mesh_data(mesh: &BodyMesh, color: [f32; 4]) -> MeshData {
 /// The application model: document session, kernel, and regenerated parts.
 pub struct Model {
     session: Session,
+    /// The element being edited; the first one when unset or deleted.
+    active: Option<ElementId>,
     kernel: OsKernel,
     result: StudioResult<Body>,
     meshes: Vec<MeshData>,
@@ -88,6 +90,7 @@ impl Model {
     fn from_session(session: Session) -> Self {
         let mut m = Model {
             session,
+            active: None,
             kernel: OsKernel::default(),
             result: StudioResult::default(),
             meshes: Vec::new(),
@@ -130,11 +133,90 @@ impl Model {
             .map_err(|e| e.to_string())
     }
 
-    /// The Part Studio being edited.
+    /// The Part Studio being edited: the active element, or the first one
+    /// when the active element no longer exists (deleted, or its creation
+    /// undone).
     pub fn studio_id(&self) -> ElementId {
-        self.session
-            .first_studio()
-            .expect("a document always has its genesis Part Studio")
+        self.active
+            .filter(|id| self.session.document().element(*id).is_some())
+            .or_else(|| self.session.first_studio())
+            .expect("a document always keeps at least one element")
+    }
+
+    /// The document's elements (tabs), in order.
+    pub fn elements(&self) -> &[Element] {
+        &self.session.document().elements
+    }
+
+    /// Makes `element` the one being edited and regenerates it.
+    pub fn set_active(&mut self, element: ElementId) {
+        if self.session.document().element(element).is_some() && element != self.studio_id() {
+            self.active = Some(element);
+            self.regenerate();
+        }
+    }
+
+    /// Adds a Part Studio after the existing elements and makes it active.
+    pub fn add_part_studio(&mut self) -> ElementId {
+        let n = (1..)
+            .map(|i| format!("Part Studio {i}"))
+            .find(|name| self.elements().iter().all(|e| e.name != *name))
+            .expect("some number is free");
+        let id = ElementId(self.session.apply(ModelOp::CreateElement {
+            name: n,
+            kind: ElementKind::PartStudio,
+        }));
+        self.active = Some(id);
+        self.regenerate();
+        id
+    }
+
+    /// Renames an element.
+    pub fn rename_element(&mut self, element: ElementId, name: &str) {
+        self.apply(ModelOp::RenameElement {
+            element,
+            name: name.to_string(),
+        });
+    }
+
+    /// Deletes an element (undoable). The last element cannot be deleted.
+    pub fn delete_element(&mut self, element: ElementId) -> Result<(), String> {
+        if self.elements().len() <= 1 {
+            return Err("A document keeps at least one tab".into());
+        }
+        let was_active = element == self.studio_id();
+        if was_active {
+            // Activate a neighbour: the next tab, or the previous one.
+            let i = self
+                .elements()
+                .iter()
+                .position(|e| e.id == element)
+                .ok_or("The tab no longer exists")?;
+            let next = self.elements().get(i + 1).or(self.elements().get(i.wrapping_sub(1)));
+            self.active = next.map(|e| e.id);
+        }
+        self.apply(ModelOp::DeleteElement { element });
+        Ok(())
+    }
+
+    /// Moves the active Part Studio's rollback bar.
+    pub fn set_rollback(&mut self, at: InsertAt) {
+        if self.studio().rollback != at {
+            let element = self.studio_id();
+            self.apply(ModelOp::SetRollback { element, at });
+        }
+    }
+
+    /// Undoes this session's actions back to an earlier
+    /// [`Session::undo_depth`] (cancelling everything done since).
+    pub fn undo_to(&mut self, depth: usize) {
+        let mut changed = false;
+        while self.session.undo_depth() > depth && self.session.undo() {
+            changed = true;
+        }
+        if changed {
+            self.regenerate();
+        }
     }
 
     /// The Part Studio's feature list.
@@ -191,12 +273,14 @@ impl Model {
         self.regenerate();
     }
 
-    /// Appends a feature at the end of the Part Studio.
+    /// Inserts a feature at the active Part Studio's rollback bar (at the
+    /// end when the bar is at the end); the bar moves past it.
     pub fn add_feature(&mut self, name: &str, feature: Feature) -> FeatureId {
         let element = self.studio_id();
+        let at = self.studio().rollback;
         let id = self.session.apply(ModelOp::InsertFeature {
             element,
-            at: InsertAt::End,
+            at,
             name: name.to_string(),
             feature,
         });

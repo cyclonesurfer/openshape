@@ -2,3 +2,4 @@
 *.png.tmp
 /out
 /gpu-check-out
+/.claude/worktrees/

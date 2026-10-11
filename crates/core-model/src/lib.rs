@@ -184,12 +184,78 @@ pub struct FeatureEntry {
 pub struct PartStudio {
     /// Features in regeneration order.
     pub features: Vec<FeatureEntry>,
+    /// The rollback bar (ADR 0013): features after it are not regenerated,
+    /// and the application inserts new features at it. The reducer keeps it
+    /// normalized: [`InsertAt::After`] names an existing feature other than
+    /// the last, [`InsertAt::Start`] is used only when there are features
+    /// after it, and a bar after every feature is [`InsertAt::End`].
+    #[serde(default)]
+    pub rollback: InsertAt,
 }
 
 impl PartStudio {
     /// Index of a feature.
     pub fn index_of(&self, id: FeatureId) -> Option<usize> {
         self.features.iter().position(|f| f.id == id)
+    }
+
+    /// The number of features before the rollback bar: `features[..i]` are
+    /// regenerated, the rest are rolled back.
+    pub fn rollback_index(&self) -> usize {
+        match self.rollback {
+            InsertAt::End => self.features.len(),
+            InsertAt::Start => 0,
+            InsertAt::After(f) => self
+                .index_of(f)
+                .map_or(self.features.len(), |i| i + 1),
+        }
+    }
+
+    /// The features before the rollback bar, in regeneration order.
+    pub fn active_features(&self) -> &[FeatureEntry] {
+        &self.features[..self.rollback_index()]
+    }
+
+    /// True if the feature exists and is after the rollback bar.
+    pub fn is_rolled_back(&self, id: FeatureId) -> bool {
+        self.index_of(id).is_some_and(|i| i >= self.rollback_index())
+    }
+
+    /// The bar's canonical form for its current position (see
+    /// [`PartStudio::rollback`]).
+    fn normalize_rollback(&mut self) {
+        let i = self.rollback_index();
+        self.rollback = if i >= self.features.len() {
+            InsertAt::End
+        } else if i == 0 {
+            InsertAt::Start
+        } else {
+            InsertAt::After(self.features[i - 1].id)
+        };
+    }
+
+    /// Before the feature at `index` is removed: if it anchors the bar, the
+    /// bar moves to the feature before it (or the start), so the same
+    /// features stay active.
+    fn release_anchor(&mut self, index: usize) {
+        if self.rollback == InsertAt::After(self.features[index].id) {
+            self.rollback = match index {
+                0 => InsertAt::Start,
+                i => InsertAt::After(self.features[i - 1].id),
+            };
+        }
+    }
+
+    /// Inserts `entry` at `pos`. A feature placed exactly at a rollback bar
+    /// that is not at the end goes above it (the bar advances past it).
+    fn insert_at_bar_rule(&mut self, pos: usize, entry: FeatureEntry) {
+        let bar = self.rollback_index();
+        let id = entry.id;
+        self.features.insert(pos, entry);
+        if self.rollback != InsertAt::End && pos == bar {
+            self.rollback = InsertAt::After(id);
+        }
+        self.normalize_rollback();
     }
 }
 
@@ -212,10 +278,11 @@ pub struct Element {
     pub studio: PartStudio,
 }
 
-/// Where to insert a feature.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// Where to insert a feature; also the position of a rollback bar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum InsertAt {
     /// At the end of the list.
+    #[default]
     End,
     /// At the start of the list.
     Start,
@@ -232,6 +299,11 @@ pub enum ModelOp {
         name: String,
         /// Kind.
         kind: ElementKind,
+    },
+    /// Deletes an element. Refused for a document's last element.
+    DeleteElement {
+        /// Element.
+        element: ElementId,
     },
     /// Renames an element.
     RenameElement {
@@ -293,6 +365,14 @@ pub enum ModelOp {
         element: ElementId,
         /// Feature.
         feature: FeatureId,
+    },
+    /// Moves a Part Studio's rollback bar (ADR 0013).
+    SetRollback {
+        /// Element.
+        element: ElementId,
+        /// New position: the bar goes after this feature, or at the start
+        /// or end of the list.
+        at: InsertAt,
     },
     /// Edits a sketch feature: a batch applied atomically (ADR 0011).
     EditSketch {
@@ -370,6 +450,18 @@ impl Document {
                 }
                 Ok(())
             }
+            ModelOp::DeleteElement { element } => {
+                let i = self
+                    .elements
+                    .iter()
+                    .position(|e| e.id == *element)
+                    .ok_or("element no longer exists")?;
+                if self.elements.len() == 1 {
+                    return Err("a document keeps at least one element".into());
+                }
+                self.elements.remove(i);
+                Ok(())
+            }
             ModelOp::RenameElement { element, name } => {
                 self.element_mut(*element)?.name = name.clone();
                 Ok(())
@@ -388,7 +480,7 @@ impl Document {
                     feature: feature.clone(),
                 };
                 let pos = position(studio, *at)?;
-                studio.features.insert(pos, entry);
+                studio.insert_at_bar_rule(pos, entry);
                 Ok(())
             }
             ModelOp::EditFeature {
@@ -429,24 +521,35 @@ impl Document {
                 let from = studio
                     .index_of(*feature)
                     .ok_or("feature no longer exists")?;
-                let entry = studio.features.remove(from);
-                match position(studio, *to) {
-                    Ok(p) => {
-                        studio.features.insert(p, entry);
-                        Ok(())
-                    }
-                    Err(e) => {
-                        studio.features.insert(from, entry);
-                        Err(e)
-                    }
+                if let InsertAt::After(anchor) = to {
+                    studio
+                        .index_of(*anchor)
+                        .ok_or("anchor feature no longer exists")?;
                 }
+                studio.release_anchor(from);
+                let entry = studio.features.remove(from);
+                studio.normalize_rollback();
+                let p = position(studio, *to).expect("the anchor was checked");
+                studio.insert_at_bar_rule(p, entry);
+                Ok(())
             }
             ModelOp::DeleteFeature { element, feature } => {
                 let studio = &mut self.element_mut(*element)?.studio;
                 let i = studio
                     .index_of(*feature)
                     .ok_or("feature no longer exists")?;
+                studio.release_anchor(i);
                 studio.features.remove(i);
+                studio.normalize_rollback();
+                Ok(())
+            }
+            ModelOp::SetRollback { element, at } => {
+                let studio = &mut self.element_mut(*element)?.studio;
+                if let InsertAt::After(f) = at {
+                    studio.index_of(*f).ok_or("feature no longer exists")?;
+                }
+                studio.rollback = *at;
+                studio.normalize_rollback();
                 Ok(())
             }
             ModelOp::EditSketch {
@@ -570,6 +673,12 @@ impl Session {
             self.doc = Document::replay(&self.log);
         }
         r
+    }
+
+    /// How many of this session's actions can be undone; undoing back to an
+    /// earlier depth reverts everything done since.
+    pub fn undo_depth(&self) -> usize {
+        self.log.undo_depth()
     }
 
     /// True if there is something to undo.

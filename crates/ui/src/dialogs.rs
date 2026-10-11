@@ -33,7 +33,7 @@ pub struct Field {
 }
 
 /// The feature templates the UI can create.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Template {
     /// Box primitive.
     Box,

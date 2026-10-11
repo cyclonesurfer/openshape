@@ -254,6 +254,11 @@ impl<P: Clone + PartialEq> OpLog<P> {
         !self.undo_stack.is_empty()
     }
 
+    /// The number of this replica's actions that can be undone.
+    pub fn undo_depth(&self) -> usize {
+        self.undo_stack.len()
+    }
+
     /// True if this replica has an undone action to redo.
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
