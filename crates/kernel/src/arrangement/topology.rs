@@ -1026,7 +1026,10 @@ impl Builder<'_> {
                     out.push(info[k].0.he);
                 } else {
                     let (a0, a1) = (info[run[0]].1, info[k].1);
-                    let span = if run.len() == n {
+                    // A run closed by a gap spans from its first angle to
+                    // its last, also when it holds every half-edge (all
+                    // leaving one way, say at ±π with a gap of 2π between).
+                    let span = if link.iter().all(|&l| l) {
                         TAU
                     } else {
                         (a1 - a0).rem_euclid(TAU)

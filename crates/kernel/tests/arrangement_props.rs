@@ -884,6 +884,29 @@ fn lattice_crescent_between_tangent_circles() {
     }
 }
 
+/// Two arcs tangent to a line where it ends, all three leaving that vertex
+/// towards −x, inside a circle (found by the lattice test after 24,130
+/// cases, at scale 10³ only). Only one gap separates the vertex's
+/// half-edges, so they form one run of nearly equal directions, and the
+/// run's middle direction was taken half a turn past its first angle, as
+/// for a run with no gap: it pointed away from the curves, their angles
+/// seen from it fell on both sides of ±π, two faces merged into the
+/// outer cycle and Euler's formula failed.
+#[test]
+fn lattice_arcs_tangent_to_a_line_at_its_end() {
+    let items = [
+        (Lat::Circle(0, 1, 2), [0.0; 4]),
+        (Lat::Line(0, 0, 0, 3), [0.0; 4]),
+        (Lat::Arc(3, 3, 3, 3, -1), [0.0; 4]),
+        (Lat::Arc(3, 1, 1, 2, 1), [0.0; 4]),
+    ];
+    for perturb in [false, true] {
+        for scale in [1.0, 1e-3, 1e3] {
+            check_lattice(&items, perturb, scale).unwrap_or_else(|e| panic!("scale {scale}: {e}"));
+        }
+    }
+}
+
 /// Two circles crossing at 26° with two arcs of one and a chord, at scale
 /// 10³ (found by the scale test). The corner's two arcs are matched (design
 /// note 0002 §5); bisecting the segments next to a matched pair at their

@@ -511,13 +511,20 @@ random sketch tests extrudes; implementing the notes is next.
   regression test, checked to fail without its fix.
   Stress runs at raised case counts: polygons and circles 2,000, grids
   2,000, scale invariance 1,000, splines 500, garbage input 20,000, all
-  passed; the lattice test's 40,000-case run was still going at commit
-  time (its result is added here when it ends). Documented refusals so
-  far: lattice
-  inputs perturbed by about a tolerance or more refused as unresolvable
-  (194), profile loops below the builder's resolution (13), slivers whose
-  mass cannot show 1e-10 (52, computed to 1e-6) and pinched profiles
-  (27); none was a wrong result.
+  passed. The lattice test's 40,000-case run failed after 24,130 cases:
+  two arcs tangent to a line at its end, all three leaving the vertex
+  towards −x, made Euler's formula fail at scale 10³ only. The vertex's
+  half-edges formed one run of nearly equal directions with a single
+  gap, and the run's middle direction was taken half a turn past its
+  first angle, as for a run with no gap at all, so it pointed away from
+  the curves and their angles seen from it fell on both sides of ±π.
+  Fixed (a run closed by a gap spans its own angles) and kept as a
+  regression test, checked to fail without the fix (a 40,000-case rerun
+  was going at commit time). Documented refusals in the failed run: lattice inputs
+  perturbed by about a tolerance or more refused as unresolvable (198),
+  profile loops below the builder's resolution (14), slivers whose mass
+  cannot show 1e-10 (57, computed to 1e-6) and pinched profiles (30);
+  none was a wrong result.
 - Curvature combs and region robustness, 2026-10-12, on Mesa lavapipe:
   fmt, clippy with `-D warnings`, 822 tests and `cargo deny` pass. The
   comb's samples are checked against closed forms (circle, ellipse,
