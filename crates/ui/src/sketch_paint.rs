@@ -155,6 +155,22 @@ pub fn paint_editor(
                     painter.circle_stroke(p, 5.0, Stroke::new(2.0, theme.selection));
                 }
             }
+            Preview::Shapes { curves, points } => {
+                for c in curves {
+                    let pts = sample_curve(&kernel_curve(c));
+                    stroke_polyline(painter, map, &pts, Stroke::new(HALO, k.halo), false);
+                    stroke_polyline(painter, map, &pts, Stroke::new(2.0, theme.preselect), true);
+                }
+                for q in points {
+                    if let Some(p) = map.to_screen(*q) {
+                        painter.rect_filled(
+                            Rect::from_center_size(p, Vec2::splat(6.0)),
+                            0.0,
+                            theme.preselect,
+                        );
+                    }
+                }
+            }
         }
     }
     // The tool in progress.

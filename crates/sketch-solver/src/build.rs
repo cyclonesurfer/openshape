@@ -262,6 +262,31 @@ impl Builder<'_> {
         }
     }
 
+    /// `q` is the mirror image of `p` about line `l`: their midpoint is on
+    /// the line and `q − p` is normal to it.
+    fn symmetric(&mut self, owner: usize, p: usize, q: usize, l: LineRef) {
+        self.push(
+            owner,
+            EqKind::SignedDist {
+                dir: Self::dir(l),
+                v: VecExpr(vec![(p, 0.5), (q, 0.5), (l.s, -1.0)]),
+                abs: false,
+                rhs: Rhs::zero(),
+            },
+            false,
+            None,
+        );
+        self.push(
+            owner,
+            EqKind::Proj {
+                dir: Self::dir(l),
+                v: VecExpr::diff(q, p),
+            },
+            false,
+            None,
+        );
+    }
+
     fn constraint(&mut self, owner: usize, con: &Con) {
         let sc = self.scale;
         match *con {
@@ -402,28 +427,7 @@ impl Builder<'_> {
                 self.equal_slots(owner, self.x(ca), self.x(cb));
                 self.equal_slots(owner, self.y(ca), self.y(cb));
             }
-            Con::Symmetric(p, q, l) => {
-                self.push(
-                    owner,
-                    EqKind::SignedDist {
-                        dir: Self::dir(l),
-                        v: VecExpr(vec![(p, 0.5), (q, 0.5), (l.s, -1.0)]),
-                        abs: false,
-                        rhs: Rhs::zero(),
-                    },
-                    false,
-                    None,
-                );
-                self.push(
-                    owner,
-                    EqKind::Proj {
-                        dir: Self::dir(l),
-                        v: VecExpr::diff(q, p),
-                    },
-                    false,
-                    None,
-                );
-            }
+            Con::Symmetric(p, q, l) => self.symmetric(owner, p, q, l),
             Con::TangentAt(a, b, p) => {
                 let (da, ta) = self.tan_dir(a, p);
                 let (db, tb) = self.tan_dir(b, p);
@@ -569,6 +573,30 @@ impl Builder<'_> {
                 true,
                 None,
             ),
+            Con::Mirror(l, ref d) => {
+                // Design note 0007 §9: two equations per image point, whose
+                // Jacobian block in that point (half the axis normal, the
+                // axis direction) is regular whatever else holds it.
+                for &(p, q) in &d.points {
+                    self.symmetric(owner, p, q, l);
+                }
+                for &p in &d.fixed {
+                    self.push(
+                        owner,
+                        EqKind::SignedDist {
+                            dir: Self::dir(l),
+                            v: VecExpr::diff(p, l.s),
+                            abs: false,
+                            rhs: Rhs::zero(),
+                        },
+                        false,
+                        None,
+                    );
+                }
+                for &(r, r2) in &d.radii {
+                    self.equal_slots(owner, self.radius_base + r, self.radius_base + r2);
+                }
+            }
             Con::Radius(c, v) | Con::Diameter(c, v) => {
                 let diameter = matches!(con, Con::Diameter(..));
                 let k = if diameter { 2.0 } else { 1.0 };
@@ -627,8 +655,19 @@ pub(crate) fn build<K: SketchKey>(index: &Index<K>, cons: &[Con], scale: Scale) 
         eqs: Vec::new(),
         params: Vec::new(),
     };
-    // Implicit equations first: every arc keeps |end − centre| = |start − centre|.
+    // Implicit equations first: every arc keeps |end − centre| = |start −
+    // centre|, except derived images, whose source's equation implies it.
+    let derived_arcs: std::collections::BTreeSet<usize> = cons
+        .iter()
+        .flat_map(|c| match c {
+            Con::Mirror(_, d) => d.arcs.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
     for (i, k) in index.kinds.iter().enumerate() {
+        if derived_arcs.contains(&i) {
+            continue;
+        }
         if let crate::index::EntKind::Circular(Circ::Arc { c, s, e }) = *k {
             b.eqs.push(Equation {
                 kind: EqKind::Norm {

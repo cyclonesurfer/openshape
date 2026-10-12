@@ -130,6 +130,10 @@ fn relabel<F: Fn(u32) -> u64>(s: &Sketch<u32>, f: F) -> Sketch<u64> {
             curve: f(curve),
             value,
         },
+        C::Mirror { axis, pairs } => C::Mirror {
+            axis: f(axis),
+            pairs: pairs.into_iter().map(|(s, i)| (f(s), f(i))).collect(),
+        },
     };
     Sketch {
         entities: s

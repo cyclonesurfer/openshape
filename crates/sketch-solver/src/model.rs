@@ -319,6 +319,26 @@ pub enum Constraint<K> {
         /// Value.
         value: f64,
     },
+    /// Derived geometry (design note 0007 §9): each image entity is the
+    /// mirror image of its source about the line `axis`, and moves with it.
+    ///
+    /// A pair is two points, lines, circles or arcs, or two splines of the
+    /// same form (control splines of one degree, or interpolated splines
+    /// with the same parameters) with as many points. Each image point is
+    /// the reflection of the corresponding source point, except that a
+    /// reflection reverses the sense of rotation, so an image arc starts at
+    /// the reflection of its source's end and ends at the reflection of its
+    /// start; an image circle has its source's radius. A source point on
+    /// the axis may be shared with the image (the point is then held on the
+    /// axis). Images add no degrees of freedom: a dimension on an image of a
+    /// dimensioned curve is redundant. Deleting a source or an image removes
+    /// its pair ([`Constraint::without`]).
+    Mirror {
+        /// The mirror line.
+        axis: K,
+        /// `(source, image)` entity pairs.
+        pairs: Vec<(K, K)>,
+    },
 }
 
 impl<K: SketchKey> Constraint<K> {
@@ -420,6 +440,35 @@ impl<K: SketchKey> Constraint<K> {
                 curve: f(*curve),
                 value: *value,
             },
+            C::Mirror { axis, pairs } => C::Mirror {
+                axis: f(*axis),
+                pairs: pairs.iter().map(|(s, i)| (f(*s), f(*i))).collect(),
+            },
+        }
+    }
+
+    /// The constraint left after deleting the entities for which `gone` is
+    /// true, or `None` when nothing of it remains. A derived constraint
+    /// ([`Constraint::Mirror`]) loses the pairs that reference a deleted
+    /// entity, and goes with its axis or its last pair; any other
+    /// constraint goes when an entity it references does.
+    pub fn without(&self, gone: impl Fn(K) -> bool) -> Option<Constraint<K>> {
+        match self {
+            Constraint::Mirror { axis, pairs } => {
+                if gone(*axis) {
+                    return None;
+                }
+                let kept: Vec<(K, K)> = pairs
+                    .iter()
+                    .copied()
+                    .filter(|(s, i)| !gone(*s) && !gone(*i))
+                    .collect();
+                (!kept.is_empty()).then_some(Constraint::Mirror {
+                    axis: *axis,
+                    pairs: kept,
+                })
+            }
+            _ => (!self.referenced().into_iter().any(gone)).then(|| self.clone()),
         }
     }
 
@@ -448,6 +497,9 @@ impl<K: SketchKey> Constraint<K> {
             Constraint::Normal { line, curve } => vec![*line, *curve],
             Constraint::Fix { point, .. } => vec![*point],
             Constraint::Radius { curve, .. } | Constraint::Diameter { curve, .. } => vec![*curve],
+            Constraint::Mirror { axis, pairs } => std::iter::once(*axis)
+                .chain(pairs.iter().flat_map(|(s, i)| [*s, *i]))
+                .collect(),
         }
     }
 }
@@ -566,6 +618,10 @@ mod tests {
             Constraint::Diameter {
                 curve: 1,
                 value: 0.5,
+            },
+            Constraint::Mirror {
+                axis: 1,
+                pairs: vec![(2, 3), (4, 5)],
             },
         ];
         for c in &all {

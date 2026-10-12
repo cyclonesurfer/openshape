@@ -26,6 +26,7 @@ use openshape_sketch_solver::{
 };
 
 use crate::sketch_ops::fillet::fillet;
+use crate::sketch_ops::mirror;
 use crate::sketch_ops::shapes::{self, TangentStart};
 use crate::sketch_ops::trim::{self, Cuts, Plan};
 use crate::sketch_ops::{curve_ending_at, deletion, leaving_direction, Batch};
@@ -360,6 +361,7 @@ pub fn glyph(c: &Constraint<SketchId>) -> &'static str {
         Constraint::Tangent { .. } => "T",
         Constraint::Normal { .. } => "N",
         Constraint::Fix { .. } => "F",
+        Constraint::Mirror { .. } => "↔",
         Constraint::Distance { .. }
         | Constraint::Length { .. }
         | Constraint::Angle { .. }
@@ -380,6 +382,7 @@ fn glyph_anchors(c: &Constraint<SketchId>) -> Vec<SketchId> {
         Constraint::Fix { point, .. } => vec![*point],
         Constraint::Horizontal { line } | Constraint::Vertical { line } => vec![*line],
         Constraint::Normal { line, .. } => vec![*line],
+        Constraint::Mirror { axis, .. } => vec![*axis],
         Constraint::Parallel { a, b }
         | Constraint::Perpendicular { a, b }
         | Constraint::Equal { a, b }
@@ -949,11 +952,13 @@ pub enum Tool {
     Split,
     /// Rounds the corner where two lines or arcs meet.
     SketchFillet,
+    /// Mirror images of curves and points about a line.
+    Mirror,
 }
 
 impl Tool {
     /// Every tool, in toolbar order.
-    pub const ALL: [Tool; 17] = [
+    pub const ALL: [Tool; 18] = [
         Tool::Select,
         Tool::Line,
         Tool::Rectangle,
@@ -971,6 +976,7 @@ impl Tool {
         Tool::Extend,
         Tool::Split,
         Tool::SketchFillet,
+        Tool::Mirror,
     ];
 
     /// The tools sharing one toolbar button with this one (shown in its
@@ -994,6 +1000,7 @@ impl Tool {
             Tool::Point => &[Tool::Point],
             Tool::Spline => &[Tool::Spline],
             Tool::SketchFillet => &[Tool::SketchFillet],
+            Tool::Mirror => &[Tool::Mirror],
         }
     }
 
@@ -1017,6 +1024,7 @@ impl Tool {
             Tool::Extend => "Extend",
             Tool::Split => "Split",
             Tool::SketchFillet => "Sketch fillet",
+            Tool::Mirror => "Mirror",
         }
     }
 
@@ -1048,7 +1056,8 @@ impl Tool {
             | Tool::Polygon
             | Tool::Extend
             | Tool::Split
-            | Tool::SketchFillet => return None,
+            | Tool::SketchFillet
+            | Tool::Mirror => return None,
         })
     }
 
@@ -1093,6 +1102,7 @@ impl Tool {
             }
             (Tool::Split, _) => "Click a line or arc where it should be split",
             (Tool::SketchFillet, _) => "Click the corner point where two lines or arcs meet",
+            (Tool::Mirror, _) => "Click the mirror line, then the curves to mirror",
         }
     }
 }
@@ -1617,6 +1627,11 @@ pub struct SketchEditor {
     pub curve_edit: Option<CurveEdit>,
     /// The last cuts found for trim, with the curves they were found in.
     cuts: Option<(Vec<(SketchId, ResolvedCurve)>, Cuts)>,
+    /// The mirror tool's line, once chosen.
+    pub mirror_axis: Option<SketchId>,
+    /// What the mirror tool mirrors about the first line clicked: the
+    /// selection when the tool was chosen.
+    pub mirror_sources: Vec<SketchId>,
 }
 
 /// What the trim, extend or split tool would do at the pointer.
@@ -1652,6 +1667,8 @@ impl SketchEditor {
             message: None,
             curve_edit: None,
             cuts: None,
+            mirror_axis: None,
+            mirror_sources: Vec::new(),
         }
     }
 
@@ -1675,11 +1692,16 @@ impl SketchEditor {
         self.reset_tool();
         self.last_line = None;
         self.hover = None;
+        if tool == Tool::Mirror {
+            self.mirror_sources = self.selection.clone();
+        }
     }
 
     fn reset_tool(&mut self) {
         self.clicks.clear();
         self.curve_edit = None;
+        self.mirror_axis = None;
+        self.mirror_sources.clear();
         self.inferred = None;
         self.tangent_start = None;
         self.turn = 0.0;
@@ -1696,7 +1718,7 @@ impl SketchEditor {
             self.preview = None;
             return;
         }
-        if !self.clicks.is_empty() {
+        if !self.clicks.is_empty() || self.mirror_axis.is_some() {
             self.reset_tool();
         } else if self.tool != Tool::Select {
             self.set_tool(Tool::Select);
@@ -1742,6 +1764,22 @@ impl SketchEditor {
         }
     }
 
+    /// What to do next with the current tool.
+    pub fn hint(&self) -> String {
+        if self.tool == Tool::Mirror {
+            return match (self.mirror_axis, self.mirror_sources.len()) {
+                (Some(_), _) => {
+                    "Click curves or points to mirror about the chosen line; Esc chooses another line"
+                        .into()
+                }
+                (None, 0) => self.tool.hint(0).into(),
+                (None, 1) => "Click the line to mirror the selected item about".into(),
+                (None, n) => format!("Click the line to mirror the {n} selected items about"),
+            };
+        }
+        self.tool.hint(self.clicks.len()).into()
+    }
+
     /// The sketch's state for the status bar: degrees of freedom, redundant
     /// or conflicting constraints.
     pub fn status(&self, model: &Model) -> String {
@@ -1784,6 +1822,10 @@ impl SketchEditor {
             if self.drag.is_none() {
                 self.hover = pick(&d, &annotations(&d, map), map, pos);
             }
+            return;
+        }
+        if self.tool == Tool::Mirror {
+            self.curve_edit = self.plan_mirror(&d, map, pos);
             return;
         }
         if self.tool == Tool::SketchFillet {
@@ -1845,6 +1887,117 @@ impl SketchEditor {
             self.last_angle = Some(a);
         }
         self.cursor = Some(s);
+    }
+
+    /// The mirror tool's plan at `pos`: while choosing the line, the line
+    /// under the pointer (with the selection's images about it, if any);
+    /// once it is chosen, the image of the curve or point under the
+    /// pointer.
+    fn plan_mirror(&self, d: &SketchDisplay, map: &ScreenMap, pos: Pos2) -> Option<CurveEdit> {
+        let curves: Vec<(SketchId, ResolvedCurve)> =
+            d.curves.iter().map(|c| (c.id, c.curve.clone())).collect();
+        match self.mirror_axis {
+            None => {
+                let (target, _) = nearest_curve(d, map, pos, CURVE_PICK)?;
+                let sources = mirror::sources(&d.sketch, &self.mirror_sources);
+                let plan = if kind(&d.sketch, target) != Some(Kind::Line) {
+                    Err("The mirror line must be a line".to_string())
+                } else if sources.is_empty() {
+                    // Choosing the line: nothing to show but the line.
+                    Ok(Plan {
+                        edits: Vec::new(),
+                        removed: 0,
+                        preview: trim::Preview::Shapes {
+                            curves: Vec::new(),
+                            points: Vec::new(),
+                        },
+                    })
+                } else {
+                    mirror::mirror(&d.sketch, &curves, &sources, target, true).map(|m| m.plan)
+                };
+                Some(CurveEdit { target, plan })
+            }
+            Some(axis) => {
+                // A lone point under the pointer, else a curve.
+                let lone = nearest_point(d, map, pos, POINT_PICK, &[])
+                    .map(|(p, _)| p)
+                    .filter(|p| {
+                        !d.sketch
+                            .entities
+                            .iter()
+                            .any(|e| e.geometry.referenced_points().contains(p))
+                    });
+                let target =
+                    lone.or_else(|| nearest_curve(d, map, pos, CURVE_PICK).map(|(c, _)| c))?;
+                let plan = if target == axis {
+                    Err("This is the mirror line".to_string())
+                } else {
+                    mirror::mirror(&d.sketch, &curves, &[target], axis, true).map(|m| m.plan)
+                };
+                Some(CurveEdit { target, plan })
+            }
+        }
+    }
+
+    /// Commits the mirror tool's click at `pos`: chooses the line, or
+    /// mirrors the selection about it, or the item under the pointer about
+    /// the chosen line.
+    fn click_mirror(&mut self, model: &mut Model, map: &ScreenMap, pos: Pos2) {
+        self.hover(model, map, Some(pos));
+        let Some(d) = self.display(model) else {
+            return;
+        };
+        let Some(edit) = self.curve_edit.take() else {
+            self.message = Some(match self.mirror_axis {
+                None => "Click a line to mirror about".into(),
+                Some(_) => "Click a curve or point to mirror".into(),
+            });
+            return;
+        };
+        if let Err(e) = edit.plan {
+            self.message = Some(e);
+            return;
+        }
+        let (axis, sources) = match self.mirror_axis {
+            Some(axis) => (axis, vec![edit.target]),
+            None => {
+                let sources = mirror::sources(&d.sketch, &self.mirror_sources);
+                if sources.is_empty() {
+                    self.mirror_axis = Some(edit.target);
+                    self.message = Some("Mirror line chosen".into());
+                    self.hover(model, map, Some(pos));
+                    return;
+                }
+                (edit.target, sources)
+            }
+        };
+        let curves: Vec<(SketchId, ResolvedCurve)> =
+            d.curves.iter().map(|c| (c.id, c.curve.clone())).collect();
+        // Images share the source's points on the line where they can;
+        // where that would repeat what a constraint already says, they get
+        // points of their own (which the mirror keeps on the same spot).
+        let mut outcome = Err(String::new());
+        for share in [true, false] {
+            let planned = mirror::mirror(&d.sketch, &curves, &sources, axis, share);
+            outcome = planned.and_then(|m| {
+                model
+                    .edit_sketch_checked(self.feature, m.plan.edits.clone())
+                    .map(|_| m.message())
+            });
+            if outcome.is_ok() {
+                break;
+            }
+        }
+        match outcome {
+            Ok(done) => {
+                self.message = self.solve_message(model).or(Some(done));
+                self.mirror_axis = Some(axis);
+                self.mirror_sources.clear();
+                self.selection.clear();
+            }
+            Err(e) => self.message = Some(format!("Not done: {e}")),
+        }
+        self.hover(model, map, Some(pos));
     }
 
     /// Plans the trim, extend or split of `target` at plane point `at`.
@@ -2070,6 +2223,10 @@ impl SketchEditor {
             }
             return;
         }
+        if self.tool == Tool::Mirror {
+            self.click_mirror(model, map, pos);
+            return;
+        }
         if self.tool.edits_curves() {
             self.edit_curve(model, map, pos);
             return;
@@ -2090,7 +2247,12 @@ impl SketchEditor {
         let construction = self.construction;
         match self.tool {
             // Curve editing tools act on clicks directly (`edit_curve`).
-            Tool::Select | Tool::Trim | Tool::Extend | Tool::Split | Tool::SketchFillet => {}
+            Tool::Select
+            | Tool::Trim
+            | Tool::Extend
+            | Tool::Split
+            | Tool::SketchFillet
+            | Tool::Mirror => {}
             Tool::Point => {
                 let mut b = Batch::default();
                 let p = b.snapped_point(&s);

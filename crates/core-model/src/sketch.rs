@@ -86,7 +86,8 @@ pub enum SketchEdit {
     },
     /// Deletes entities and constraints, together with everything that
     /// references them (curves using a deleted point, constraints on a
-    /// deleted entity). Items that no longer exist are ignored, so
+    /// deleted entity; a mirror loses only the pairs of deleted entities,
+    /// `Constraint::without`). Items that no longer exist are ignored, so
     /// concurrent deletes merge.
     Delete {
         /// Items to delete.
@@ -236,10 +237,17 @@ impl SketchDef {
                     }
                 }
                 self.sketch.entities.retain(|e| !gone.contains(&e.id));
-                self.sketch.constraints.retain(|c| {
-                    !gone.contains(&c.id)
-                        && !c.constraint.referenced().iter().any(|e| gone.contains(e))
-                });
+                self.sketch.constraints = std::mem::take(&mut self.sketch.constraints)
+                    .into_iter()
+                    .filter(|c| !gone.contains(&c.id))
+                    .filter_map(|c| {
+                        let constraint = c.constraint.without(|e| gone.contains(&e))?;
+                        Some(ConstraintEntry {
+                            id: c.id,
+                            constraint,
+                        })
+                    })
+                    .collect();
                 Ok(())
             }
             SketchEdit::SetConstruction {

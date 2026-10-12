@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f19971384725d595922b92cf1e4a687205a108723ff062b43017c6652c0c686a # shrinks to shapes_in = [Rectangle(DVec2(0.0, 0.0), DVec2(31.041374296313084, -42.37718057776075))], through = Some(0), angle = 0.0, fixed = false, batches = [[false, false, false, false, false, true, false, false, false, false, false, false]]

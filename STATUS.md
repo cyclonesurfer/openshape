@@ -120,7 +120,15 @@ application shell done; sketch editing tools next.
   construction curves ending there (a centre-point rectangle's diagonals)
   move to a virtual sharp, so a dimensioned shape keeps its size and the
   degrees of freedom do not change; fuzzed over about 4,000 fillets of
-  rectangles, polygons, chains and line/arc corners. Every edit is one undoable op; Cancel
+  rectangles, polygons, chains and line/arc corners. Mirror (design note
+  0007 §9.1) reflects a selection, or curves and points clicked one at a
+  time, about a line; one derived solver constraint per line keeps every
+  image the exact reflection of its source with no added degrees of
+  freedom or redundancy, images share the sources' points on the line (so
+  a mirrored half profile closes) and replace the point-on-line
+  constraints there, and deleting a source or an image drops just that
+  pair; fuzzed over 3,000 random batches of rectangles, polygons, slots,
+  circles, arcs and points about random lines. Every edit is one undoable op; Cancel
   undoes the whole sketch session. The editor is UI-toolkit independent and
   tested end to end by driving it with screen clicks.
 - **UI kit** (`openshape-ui-kit`): the application's look in one place
@@ -184,6 +192,14 @@ application shell done; sketch editing tools next.
   solver reported success. Any result with a zero-length line or a
   zero-radius circle or arc now fails, and the constraint that caused the
   collapse is reported as conflicting.
+- The mirror fuzz found and fixed a second solver defect, in diagnosis
+  only: a constraint implied exactly by others that the solver eliminates
+  (an angle of 90° between a horizontal and a vertical line) could be the
+  only equation of its component, and its Jacobian row, rounding noise of
+  about 1e-32, counted as full rank against itself. The constraint was
+  reported redundant when the input was nudged and not when it was placed
+  exactly. Rows that cancel to within 1e-10 of their own terms are now
+  zero (design note 0005 §9), with a regression test on both inputs.
 - App shell, 2026-10-12, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   455 tests and `cargo deny` pass. `crates/ui/tests/shell.rs` drives the
   real application offscreen with synthetic mouse and keyboard input (13
@@ -197,8 +213,8 @@ application shell done; sketch editing tools next.
 
 ## Not yet / known limits
 
-- Sketch editing tools are not done: offset, mirror, patterns (in
-  progress, design note 0007), and ellipses, conics, text, use/project.
+- Sketch editing tools are not done: offset and patterns (in progress,
+  design note 0007), and ellipses, conics, text, use/project.
   A fillet removes (and reports) equal-length and midpoint constraints on
   the filleted lines, so a filleted regular polygon is no longer held
   regular; equal distances between virtual sharps are not expressible yet. Trim cuts one piece per click (no drag across several
@@ -237,8 +253,8 @@ application shell done; sketch editing tools next.
 
 ## Next steps
 
-1. Sketch editing tools (design note 0007): mirror, offset, linear and
-   circular patterns; draggable dimension labels.
+1. Sketch editing tools (design note 0007): offset, linear and circular
+   patterns; draggable dimension labels.
 2. Live preview in feature dialogs.
 3. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.

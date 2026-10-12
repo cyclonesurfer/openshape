@@ -75,6 +75,13 @@ pub enum Preview {
     Piece(ResolvedCurve),
     /// Where the curve is cut (split).
     Point(DVec2),
+    /// New curves and points (mirror images).
+    Shapes {
+        /// Curves.
+        curves: Vec<ResolvedCurve>,
+        /// Points.
+        points: Vec<DVec2>,
+    },
 }
 
 /// Finds where the other curves cut `target` (`curves` are the sketch's

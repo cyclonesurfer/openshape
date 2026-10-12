@@ -422,6 +422,36 @@ pub fn violation(s: &Sketch<u32>, c: &Constraint<u32>) -> (f64, bool) {
         }
         Constraint::Radius { curve, value } => ((circ(s, *curve).1 - value).abs(), false),
         Constraint::Diameter { curve, value } => ((2.0 * circ(s, *curve).1 - value).abs(), false),
+        Constraint::Mirror { axis, pairs } => {
+            let (s0, s1) = line(s, *axis);
+            let d = (s1 - s0).normalize();
+            let reflect = |q: DVec2| {
+                let v = q - s0;
+                s0 + d * (2.0 * v.dot(d)) - v
+            };
+            let mut worst = 0.0f64;
+            for (src, img) in pairs {
+                // Image point k against the reflection of source point k,
+                // an arc's ends crossed over; circles also by radius.
+                let (gs, gi) = (
+                    &s.entity(*src).unwrap().geometry,
+                    &s.entity(*img).unwrap().geometry,
+                );
+                let (ps, pi) = (gs.referenced_points(), gi.referenced_points());
+                let ps = match gs {
+                    Geometry::Arc { center, start, end } => vec![*center, *end, *start],
+                    _ => ps,
+                };
+                assert_eq!(ps.len(), pi.len(), "mirror pair of different kinds");
+                for (a, b) in ps.iter().zip(&pi) {
+                    worst = worst.max((reflect(p(*a)) - p(*b)).length());
+                }
+                if let (Geometry::Circle { .. }, Geometry::Circle { .. }) = (gs, gi) {
+                    worst = worst.max((circ(s, *src).1 - circ(s, *img).1).abs());
+                }
+            }
+            (worst, false)
+        }
     }
 }
 

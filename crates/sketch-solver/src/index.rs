@@ -3,7 +3,7 @@
 //! [`SolveError::Invalid`] with a message naming the entity or constraint;
 //! nothing here panics on bad input.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 
 use glam::DVec2;
@@ -105,6 +105,25 @@ pub(crate) enum Con {
     Angle(LineRef, LineRef, f64),
     Radius(Circ, f64),
     Diameter(Circ, f64),
+    Mirror(LineRef, Derived),
+}
+
+/// The point-level content of a derived constraint (design note 0007 §9):
+/// which image unknowns follow which source unknowns.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Derived {
+    /// `(source, image)` point pairs, each once, image ≠ source.
+    pub points: Vec<(usize, usize)>,
+    /// Source points shared with their image that must be held where the
+    /// map fixes them (for a mirror: on the axis).
+    pub fixed: Vec<usize>,
+    /// `(source, image)` circle radius indices.
+    pub radii: Vec<(usize, usize)>,
+    /// `(source, image)` entity positions.
+    pub entities: Vec<(usize, usize)>,
+    /// Entity positions of the image arcs, whose implicit equation the
+    /// derived equations imply.
+    pub arcs: Vec<usize>,
 }
 
 /// What an entity is, over internal indices.
@@ -127,6 +146,9 @@ pub(crate) struct SplineEnt {
     pub map: SplineMap,
     /// Referenced point indices, in order.
     pub points: Vec<usize>,
+    /// The through-point parameters of an interpolated spline (`None` for
+    /// a control spline).
+    pub params: Option<Vec<f64>>,
 }
 
 /// A sketch's entities over dense indices.
@@ -134,6 +156,8 @@ pub(crate) struct SplineEnt {
 pub(crate) struct Index<K> {
     /// Entity key → entity position.
     pub ent: BTreeMap<K, usize>,
+    /// Entity position → key.
+    pub keys: Vec<K>,
     /// Point index → entity position.
     pub points: Vec<usize>,
     /// Position of each point.
@@ -242,7 +266,11 @@ impl<K: SketchKey> Index<K> {
                     let deg = usize::try_from(*degree).unwrap_or(usize::MAX);
                     let map =
                         SplineMap::control(pts.len(), deg).map_err(|err| spline_err(id, err))?;
-                    splines.push(SplineEnt { map, points: pts });
+                    splines.push(SplineEnt {
+                        map,
+                        points: pts,
+                        params: None,
+                    });
                     EntKind::Spline(splines.len() - 1)
                 }
                 Geometry::InterpolatedSpline { through, params } => {
@@ -263,7 +291,11 @@ impl<K: SketchKey> Index<K> {
                         )));
                     }
                     let map = SplineMap::interpolated(params).map_err(|err| spline_err(id, err))?;
-                    splines.push(SplineEnt { map, points: pts });
+                    splines.push(SplineEnt {
+                        map,
+                        points: pts,
+                        params: Some(params.clone()),
+                    });
                     EntKind::Spline(splines.len() - 1)
                 }
             };
@@ -271,6 +303,7 @@ impl<K: SketchKey> Index<K> {
         }
         Ok(Index {
             ent,
+            keys: sketch.entities.iter().map(|e| e.id).collect(),
             points,
             positions,
             circles,
@@ -516,7 +549,151 @@ impl<K: SketchKey> Index<K> {
             Constraint::Diameter { curve, value } => {
                 Con::Diameter(self.circular(id, curve)?, length(*value, "diameter")?)
             }
+            Constraint::Mirror { axis, pairs } => {
+                let l = self.line(id, axis)?;
+                if pairs.iter().any(|(s, i)| s == axis || i == axis) {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: the mirror line {axis:?} cannot be mirrored or be an image"
+                    )));
+                }
+                let mut d = self.derived(id, pairs, true)?;
+                if let Some(&(_, q)) = d.points.iter().find(|&&(_, q)| q == l.s || q == l.e) {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: point {:?} is an end of the mirror line and cannot be an image",
+                        self.point_key(q)
+                    )));
+                }
+                // A shared point that is (coincident with) an end of the
+                // axis is on it already; holding it there again would be
+                // an identically satisfied, redundant equation. Likewise
+                // one shared point per coincidence class is held: its
+                // coincident partners follow.
+                let class = |p: usize| coincident.get(p).copied().unwrap_or(p);
+                let mut held = BTreeSet::new();
+                d.fixed.retain(|&p| {
+                    class(p) != class(l.s) && class(p) != class(l.e) && held.insert(class(p))
+                });
+                Con::Mirror(l, d)
+            }
         })
+    }
+
+    /// The key of point index `p`.
+    fn point_key(&self, p: usize) -> K {
+        self.keys[self.points[p]]
+    }
+
+    /// Validates the `(source, image)` entity pairs of a derived constraint
+    /// (design note 0007 §9) and maps them to point pairs. `reverses`: the
+    /// map reverses the sense of rotation (a mirror), so an image arc
+    /// starts at the image of its source's end; a mirror is also its own
+    /// inverse, so a point pair met both ways round is one relation.
+    fn derived(
+        &self,
+        id: &dyn Debug,
+        pairs: &[(K, K)],
+        reverses: bool,
+    ) -> Result<Derived, SolveError> {
+        if pairs.is_empty() {
+            return Err(invalid(format!(
+                "constraint {id:?}: there are no entities to derive"
+            )));
+        }
+        let mut d = Derived::default();
+        let mut point_pairs: Vec<(usize, usize)> = Vec::new();
+        for (src, img) in pairs {
+            if src == img {
+                return Err(invalid(format!(
+                    "constraint {id:?}: entity {src:?} cannot be its own image"
+                )));
+            }
+            let (ks, ki) = (self.kind_of(id, src)?, self.kind_of(id, img)?);
+            let (es, ei) = (self.ent[src], self.ent[img]);
+            if d.entities.iter().any(|&(_, i)| i == ei) {
+                return Err(invalid(format!(
+                    "constraint {id:?}: entity {img:?} is the image of more than one entity"
+                )));
+            }
+            match (ks, ki) {
+                (EntKind::Point(p), EntKind::Point(q)) => point_pairs.push((p, q)),
+                (EntKind::Line(a), EntKind::Line(b)) => {
+                    point_pairs.extend([(a.s, b.s), (a.e, b.e)]);
+                }
+                (
+                    EntKind::Circular(Circ::Circle { c, r }),
+                    EntKind::Circular(Circ::Circle { c: c2, r: r2 }),
+                ) => {
+                    point_pairs.push((c, c2));
+                    d.radii.push((r, r2));
+                }
+                (
+                    EntKind::Circular(Circ::Arc { c, s, e }),
+                    EntKind::Circular(Circ::Arc {
+                        c: c2,
+                        s: s2,
+                        e: e2,
+                    }),
+                ) => {
+                    let (s, e) = if reverses { (e, s) } else { (s, e) };
+                    point_pairs.extend([(c, c2), (s, s2), (e, e2)]);
+                    d.arcs.push(ei);
+                }
+                (EntKind::Spline(a), EntKind::Spline(b)) => {
+                    let (a, b) = (&self.splines[a], &self.splines[b]);
+                    if a.map.degree != b.map.degree
+                        || a.points.len() != b.points.len()
+                        || a.params != b.params
+                    {
+                        return Err(invalid(format!(
+                            "constraint {id:?}: {src:?} and its image {img:?} are not splines of the same form"
+                        )));
+                    }
+                    point_pairs.extend(a.points.iter().copied().zip(b.points.iter().copied()));
+                }
+                _ => {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: {src:?} and its image {img:?} are not the same kind of entity"
+                    )))
+                }
+            }
+            d.entities.push((es, ei));
+        }
+        // Each image point follows exactly one source point; a pair met
+        // twice (an end shared by two curves) counts once, and so does a
+        // pair met both ways round when the map is its own inverse (a
+        // curve mirrored from a point of an earlier image back onto that
+        // image's source).
+        let mut source_of: BTreeMap<usize, usize> = BTreeMap::new();
+        for (p, q) in point_pairs {
+            if reverses && source_of.get(&p) == Some(&q) {
+                continue;
+            }
+            match source_of.insert(q, p) {
+                Some(p0) if p0 != p => {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: point {:?} would be the image of both {:?} and {:?}",
+                        self.point_key(q),
+                        self.point_key(p0),
+                        self.point_key(p)
+                    )))
+                }
+                Some(_) => continue,
+                None => {}
+            }
+            if p == q {
+                d.fixed.push(p);
+            } else {
+                d.points.push((p, q));
+            }
+        }
+        let sources: BTreeSet<usize> = source_of.values().copied().collect();
+        if let Some(&(_, q)) = d.points.iter().find(|(_, q)| sources.contains(q)) {
+            return Err(invalid(format!(
+                "constraint {id:?}: point {:?} is both an image and a source",
+                self.point_key(q)
+            )));
+        }
+        Ok(d)
     }
 
     fn tan_side(
@@ -605,11 +782,49 @@ impl<K: SketchKey> Index<K> {
             }
         }
         let classes: Vec<usize> = (0..self.points.len()).map(|p| find(&mut uf, p)).collect();
-        sketch
+        let cons = sketch
             .constraints
             .iter()
             .map(|c| self.constraint_dbg(&c.id, &c.constraint, &classes))
-            .collect()
+            .collect::<Result<Vec<Con>, _>>()?;
+        self.check_derived(sketch, &cons)?;
+        Ok(cons)
+    }
+
+    /// Checks the derived constraints together: an entity is the image of
+    /// at most one, and no entity is derived, through any chain, from its
+    /// own image (an image arc's implicit equation is left out because its
+    /// source's implies it, which needs every chain to end at a source
+    /// that is no image).
+    fn check_derived(&self, sketch: &Sketch<K>, cons: &[Con]) -> Result<(), SolveError> {
+        // Image entity → (source entity, constraint position).
+        let mut source_of: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+        for (j, con) in cons.iter().enumerate() {
+            let Con::Mirror(_, d) = con else { continue };
+            for &(s, i) in &d.entities {
+                if let Some((_, j0)) = source_of.insert(i, (s, j)) {
+                    return Err(invalid(format!(
+                        "constraint {:?}: entity {:?} is already an image of constraint {:?}",
+                        sketch.constraints[j].id, self.keys[i], sketch.constraints[j0].id
+                    )));
+                }
+            }
+        }
+        for (&image, &(mut x, j)) in &source_of {
+            for _ in 0..source_of.len() {
+                if x == image {
+                    return Err(invalid(format!(
+                        "constraint {:?}: entity {:?} is derived from its own image",
+                        sketch.constraints[j].id, self.keys[image]
+                    )));
+                }
+                match source_of.get(&x) {
+                    Some(&(next, _)) => x = next,
+                    None => break,
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Validates drag targets: `(point index, target)`.

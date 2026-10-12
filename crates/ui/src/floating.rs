@@ -352,7 +352,7 @@ impl OpenShapeApp {
         // Why the trim, extend or split under the pointer cannot be done.
         let hint = match &ed.curve_edit {
             Some(CurveEdit { plan: Err(why), .. }) => why.clone(),
-            _ => ed.tool.hint(ed.clicks.len()).to_string(),
+            _ => ed.hint(),
         };
         let message = ed.message.clone();
         let tool = ed.tool;

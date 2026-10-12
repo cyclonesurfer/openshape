@@ -4,6 +4,7 @@
 //! compute the exact geometry and the constraints that keep it.
 
 pub mod fillet;
+pub mod mirror;
 pub mod shapes;
 pub mod trim;
 

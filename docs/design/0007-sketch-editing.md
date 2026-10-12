@@ -314,6 +314,70 @@ add no degrees of freedom and no redundancy; constraints the user adds on
 images are judged like any others (a dimension on a mirror image of a
 dimensioned curve is redundant, as it should be).
 
+### 9.1 As built (mirror)
+
+* **Equations.** For each image point q of a source point p: the midpoint
+  (p + q)/2 lies on the line (its signed distance is zero) and q − p is
+  normal to it (its projection on the line's direction is zero). In q the
+  two rows are the line's normal and direction, so the block is regular
+  whatever else holds the sketch. An image arc's start and end are the
+  images of the source's end and start; image arcs' implicit equations
+  are not emitted, and image circles' radii are substituted by the
+  source's.
+* **Validity** (refused with a message naming the constraint): the line
+  cannot be a source or an image; an entity cannot be its own image, the
+  image of two entities, or an image of two mirror constraints; a pair must
+  be the same kind (splines the same form and size); a point cannot be the
+  image of two points, nor both a source and an image within one
+  constraint; an end of the line cannot be an image; no entity may be
+  derived, through any chain of mirrors, from its own image.
+* **Shared points.** A source point on the line is shared with the image,
+  so a mirrored half profile closes. Such a pair (p, p) gives one
+  equation, p on the line, and the edit that adds the mirror deletes the
+  point-on-line constraints that held p there (and those on points
+  coincident with it), so nothing is said twice. A shared point
+  coincident with an end of the line gets no equation (the line holds
+  it), and of shared points coincident with each other only one is held
+  (the fuzz found this: a slot's centre line and its arc meet at
+  coincident points, and mirroring both about a line through that joint
+  held the joint twice). A point held on the line by a midpoint constraint is not shared:
+  that constraint already says "on the line" and more, so its image gets
+  a point of its own, which the mirror keeps on the same spot. The editor
+  commits with sharing and, if the checked edit refuses it (a constraint
+  would become redundant), again without; in 3,000 fuzz cases (4,650
+  mirrors) the fallback was not needed once, but it keeps the tool from
+  failing on a case nobody foresaw.
+* **Coincident sources.** Two coincident source points (a joint drawn as
+  two line ends) get two image points; the mirror makes them coincident
+  as a consequence, so no constraint is added and none is redundant.
+* **One constraint per line.** Mirroring again about the same line
+  replaces its constraint by one holding the old and new pairs, and image
+  points are reused (both ways: a reflection is its own inverse), so
+  curves mirrored one at a time join exactly as their sources do. Sources
+  already in a pair about the line, and entities that are their own image
+  (a circle centred on the line, a line along it or symmetric across it, a
+  point on it), are skipped and counted in the message.
+* **Deleting.** Deleting a source or an image removes only that pair
+  (`Constraint::without`); deleting the line removes the constraint, and
+  the images stay as free geometry.
+* **Tool.** With a selection, the first line clicked mirrors it in one
+  edit; without one, the first click chooses the line and each later
+  click mirrors the curve or lone point under the pointer. The tool stays
+  on the line; Esc chooses another, a second Esc leaves the tool. Hovering
+  previews the images.
+
+Two property tests guard it. `crates/sketch-solver/tests/mirror.rs`
+mirrors random curves of random constrained sketches about a fixed or
+free line: the mirror adds no freedom and no redundancy and every
+equation holds after the solve. `crates/ui/tests/sketch_mirror.rs`
+mirrors random rectangles, polygons, slots, circles, arcs and points in
+random batches about random lines, often through one of their points,
+through the editor's planner: every mirror commits through the checked
+edit, the sketch stays solved without redundancy, the degrees of freedom
+drop only by one per newly shared point, no source moves, and every image
+point is its source's reflection to 1e-9. Both ran 3,000 cases clean. The fuzz also found a solver defect,
+fixed separately (design note 0005 §9, "Rows that cancel are zero").
+
 ## 10. Offset
 
 ### 10.1 Selection
