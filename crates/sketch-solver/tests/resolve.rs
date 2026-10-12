@@ -168,6 +168,7 @@ fn control_splines_get_clamped_uniform_knots() {
         b.entity(Geometry::ControlSpline {
             control: keys,
             degree,
+            periodic: false,
         });
         let (d, k, points) = spline_of(&curves(&b.build())[0].2);
         assert_eq!(d, degree as usize);
@@ -215,6 +216,7 @@ fn interpolated_splines_pass_through_their_points() {
         b.entity(Geometry::InterpolatedSpline {
             through: keys,
             params: params.clone(),
+            periodic: false,
         });
         let (d, k, control) = spline_of(&curves(&b.build())[0].2);
         assert_eq!(d, degree);

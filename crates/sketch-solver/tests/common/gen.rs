@@ -416,6 +416,7 @@ impl G {
             let sp = self.b.entity(Geometry::ControlSpline {
                 control: keys.clone(),
                 degree: degree as u32,
+                periodic: false,
             });
             let knots = control_knots(n, degree);
             // Inside a knot span, away from its ends: a degree-1 spline has
@@ -458,6 +459,7 @@ impl G {
             let sp = self.b.entity(Geometry::InterpolatedSpline {
                 through: keys.clone(),
                 params,
+                periodic: false,
             });
             if self.rng.chance(0.6) {
                 self.spline_tangent_line(sp, &keys, false);

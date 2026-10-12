@@ -152,14 +152,16 @@ impl Problem {
         slot >= self.param_base()
     }
 
-    /// True for hidden parameters confined to `[0, 1]` (on splines and
-    /// conics; an ellipse's parameter is periodic and unbounded).
+    /// True for hidden parameters confined to `[0, 1]` (on open splines and
+    /// conics; the parameters of an ellipse and of a smooth closed spline
+    /// are periodic and unbounded).
     pub fn is_bounded_param(&self, slot: usize) -> bool {
         self.is_param(slot)
-            && !matches!(
-                self.params[slot - self.param_base()].curve,
-                ParamCurve::Ellipse(_)
-            )
+            && match self.params[slot - self.param_base()].curve {
+                ParamCurve::Ellipse(_) => false,
+                ParamCurve::Spline(s) => !self.splines[s].map.periodic,
+                ParamCurve::Conic(_) => true,
+            }
     }
 
     /// True for circle-radius slots.

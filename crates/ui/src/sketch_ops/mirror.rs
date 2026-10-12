@@ -350,13 +350,23 @@ pub fn mirror(
                     end: t,
                 }
             }
-            Geometry::ControlSpline { control, degree } => Geometry::ControlSpline {
+            Geometry::ControlSpline {
+                control,
+                degree,
+                periodic,
+            } => Geometry::ControlSpline {
                 control: control.iter().map(|p| map(*p)).collect::<Result<_, _>>()?,
                 degree: *degree,
+                periodic: *periodic,
             },
-            Geometry::InterpolatedSpline { through, params } => Geometry::InterpolatedSpline {
+            Geometry::InterpolatedSpline {
+                through,
+                params,
+                periodic,
+            } => Geometry::InterpolatedSpline {
                 through: through.iter().map(|p| map(*p)).collect::<Result<_, _>>()?,
                 params: params.clone(),
+                periodic: *periodic,
             },
             // A mirror image of text is mirrored text; its corners keep
             // their names in its own frame (ADR 0015).

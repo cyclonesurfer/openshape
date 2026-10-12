@@ -58,11 +58,21 @@ pub enum Geometry<K> {
     },
     /// A clamped B-spline with uniform interior knots on [0, 1], defined by
     /// its control points (point entities, at least `degree + 1`).
+    ///
+    /// When `periodic`, the spline is closed smoothly (ADR 0016): `control`
+    /// ends on its first point again, and the curve is the uniform periodic
+    /// B-spline on the closed control polygon (at least `degree + 1`
+    /// distinct points, degree 2 to 5). It does not pass through its control
+    /// points and has no end points.
     ControlSpline {
         /// Control point entities, in order.
         control: Vec<K>,
         /// Degree, 1 to 5.
         degree: u32,
+        /// Closed smoothly on its first point (absent in documents written
+        /// before ADR 0016, which read as `false`).
+        #[serde(default, skip_serializing_if = "is_false")]
+        periodic: bool,
     },
     /// A full ellipse `E(θ) = c + cos θ·A + sin θ·B` with semi-axes
     /// `A = major − center` and `B = minor − center` (design note 0008 §3).
@@ -109,11 +119,21 @@ pub enum Geometry<K> {
     /// at the fixed, strictly increasing parameters `params` (first 0, last
     /// 1). Its control points are derived (P&T A9.1, knots by averaging), so
     /// they add no degrees of freedom.
+    ///
+    /// When `periodic`, the spline is closed smoothly (ADR 0016): `through`
+    /// ends on its first point again (at parameter 1), and the curve is the
+    /// periodic cubic spline with knots at the parameters, twice
+    /// continuously differentiable everywhere, the start included; at least
+    /// three distinct points.
     InterpolatedSpline {
         /// Points the curve passes through, in order.
         through: Vec<K>,
         /// Curve parameter at each through-point.
         params: Vec<f64>,
+        /// Closed smoothly on its first point (absent in documents written
+        /// before ADR 0016, which read as `false`).
+        #[serde(default, skip_serializing_if = "is_false")]
+        periodic: bool,
     },
     /// A line of text (ADR 0015) filling the box on its four corner
     /// points. The solver keeps the corners a rectangle `aspect` times as
@@ -257,6 +277,39 @@ impl<K: SketchKey> Geometry<K> {
         }
     }
 
+    /// The start and end points of an open curve: a line, an arc, an
+    /// elliptical arc, a conic or a spline that is not smooth closed. `None`
+    /// for points, circles, ellipses, smooth closed splines (ADR 0016) and
+    /// text, which have no ends.
+    pub fn end_points(&self) -> Option<(K, K)> {
+        match self {
+            Geometry::Line { start, end }
+            | Geometry::Arc { start, end, .. }
+            | Geometry::EllipticalArc { start, end, .. }
+            | Geometry::Conic { start, end, .. } => Some((*start, *end)),
+            Geometry::ControlSpline {
+                control: p,
+                periodic: false,
+                ..
+            }
+            | Geometry::InterpolatedSpline {
+                through: p,
+                periodic: false,
+                ..
+            } => Some((*p.first()?, *p.last()?)),
+            _ => None,
+        }
+    }
+
+    /// True for a smooth closed spline (ADR 0016).
+    pub fn is_closed_spline(&self) -> bool {
+        matches!(
+            self,
+            Geometry::ControlSpline { periodic: true, .. }
+                | Geometry::InterpolatedSpline { periodic: true, .. }
+        )
+    }
+
     /// True for curves (everything but points).
     pub fn is_curve(&self) -> bool {
         !matches!(self, Geometry::Point { .. })
@@ -312,13 +365,23 @@ impl<K: SketchKey> Geometry<K> {
                 end: f(*end),
                 rho: *rho,
             },
-            Geometry::ControlSpline { control, degree } => Geometry::ControlSpline {
+            Geometry::ControlSpline {
+                control,
+                degree,
+                periodic,
+            } => Geometry::ControlSpline {
                 control: control.iter().map(|k| f(*k)).collect(),
                 degree: *degree,
+                periodic: *periodic,
             },
-            Geometry::InterpolatedSpline { through, params } => Geometry::InterpolatedSpline {
+            Geometry::InterpolatedSpline {
+                through,
+                params,
+                periodic,
+            } => Geometry::InterpolatedSpline {
                 through: through.iter().map(|k| f(*k)).collect(),
                 params: params.clone(),
+                periodic: *periodic,
             },
             Geometry::Text {
                 corners,
@@ -929,6 +992,11 @@ impl<K: SketchKey> Constraint<K> {
     }
 }
 
+/// Serde's test for leaving a `false` flag out of a document.
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// The copies of a pattern that reference no deleted entity.
 fn kept_copies<K: SketchKey>(
     copies: &[(K, K, u32)],
@@ -1107,10 +1175,12 @@ mod tests {
             Geometry::ControlSpline {
                 control: vec![1, 2, 3],
                 degree: 2,
+                periodic: false,
             },
             Geometry::InterpolatedSpline {
                 through: vec![1, 2],
                 params: vec![0.0, 1.0],
+                periodic: false,
             },
             Geometry::Ellipse {
                 center: 1,

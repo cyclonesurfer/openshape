@@ -6,11 +6,10 @@
 mod common;
 
 use common::*;
-use openshape_app::sketch_mode::Tool;
+use openshape_app::sketch_mode::{ConstraintTool, Tool};
 use openshape_core_model::sketch::Geometry;
 use openshape_core_model::{DVec2, FeatureId, SketchId};
 use openshape_sketch_solver::SolveStatus;
-use std::collections::BTreeSet;
 
 /// Clamped knots with uniform interior knots, written out here rather than
 /// taken from the solver so the check is independent.
@@ -89,7 +88,9 @@ fn splines(m: &openshape_app::Model, f: FeatureId) -> Vec<(Vec<SketchId>, u32)> 
         .entities
         .iter()
         .filter_map(|e| match &e.geometry {
-            Geometry::ControlSpline { control, degree } => Some((control.clone(), *degree)),
+            Geometry::ControlSpline {
+                control, degree, ..
+            } => Some((control.clone(), *degree)),
             _ => None,
         })
         .collect()
@@ -155,27 +156,36 @@ fn an_open_spline_closed_by_a_line_bounds_the_exact_area() {
 }
 
 #[test]
-fn clicking_the_first_point_again_closes_the_curve_on_it() {
+fn a_corner_closure_is_two_ends_made_coincident() {
+    // Clicking the first point again closes a spline smoothly (ADR 0016,
+    // tests/sketch_closed_spline.rs); a closure with a corner ends near
+    // the start and joins the ends with a coincident constraint.
     let (mut m, mut ed, map) = setup();
     let f = ed.feature;
     ed.set_tool(Tool::ControlSpline);
-    for (x, y) in [(-30.0, -20.0), (-30.0, 30.0), (30.0, 30.0), (30.0, -20.0)] {
+    for (x, y) in [
+        (-30.0, -20.0),
+        (-30.0, 30.0),
+        (30.0, 30.0),
+        (30.0, -20.0),
+        (-24.0, -20.0),
+    ] {
         click(&mut m, &mut ed, &map, x, y);
     }
-    // Nothing is made until the curve is finished…
-    assert!(splines(&m, f).is_empty());
-    // …and a click a pixel or two from the first point finishes it there.
-    click(&mut m, &mut ed, &map, -29.5, -19.7);
+    ed.finish(&mut m);
     let s = splines(&m, f);
-    assert_eq!(s.len(), 1, "the closing click finishes the curve");
-    let (control, degree) = &s[0];
-    assert_eq!((control.len(), *degree), (5, 3));
-    assert_eq!(control.first(), control.last(), "closed on the same point");
-    assert_eq!(control.iter().collect::<BTreeSet<_>>().len(), 4);
+    assert_eq!(s.len(), 1);
+    let (control, degree) = s[0].clone();
+    assert_eq!((control.len(), degree), (5, 3));
+    assert!(region_areas(&m, f).is_empty(), "open");
+    ed.set_tool(Tool::Select);
+    ed.selection = vec![control[0], control[4]];
+    ed.constrain(&mut m, ConstraintTool::Coincident);
+    assert_eq!(status(&m, f), SolveStatus::Solved);
     assert_eq!(dof(&m, f), 8);
 
-    let pts = solved(&m, f, control);
-    assert!((pts[0] - DVec2::new(-30.0, -20.0) * MM).length() < 1e-9);
+    let pts = solved(&m, f, &control);
+    assert!((pts[0] - pts[4]).length() < 1e-12);
     let expected = spline_area(&pts, 3).abs();
     let areas = region_areas(&m, f);
     assert_eq!(areas.len(), 1, "{areas:?}");

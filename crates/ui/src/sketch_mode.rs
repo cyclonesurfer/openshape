@@ -1362,6 +1362,38 @@ pub fn control_degree(count: usize) -> u32 {
     (count.saturating_sub(1)).clamp(1, 3) as u32
 }
 
+/// Chord-length parameters for a through-point spline through `points`,
+/// from 0 to exactly 1; `None` when the points are all in one place.
+pub fn chord_params(points: &[DVec2]) -> Option<Vec<f64>> {
+    let mut lengths = vec![0.0];
+    for w in points.windows(2) {
+        let last = *lengths.last().unwrap_or(&0.0);
+        lengths.push(last + (w[1] - w[0]).length());
+    }
+    let total = *lengths.last().unwrap_or(&0.0);
+    if total <= SAME_POINT {
+        return None;
+    }
+    let mut params: Vec<f64> = lengths.iter().map(|l| l / total).collect();
+    if let Some(last) = params.last_mut() {
+        *last = 1.0;
+    }
+    Some(params)
+}
+
+/// The smooth closed spline (ADR 0016) the spline tools make when the
+/// clicks at `points` close on the first one again (`points` ends on its
+/// first point): control-point (`control`) or through-point.
+pub fn closed_spline(points: &[DVec2], control: bool) -> Option<ResolvedCurve> {
+    let n = points.len().checked_sub(1)?;
+    if control {
+        openshape_sketch_solver::control_spline_curve(points, control_degree(n), true)
+    } else {
+        let params = chord_params(points)?;
+        openshape_sketch_solver::interpolated_spline_curve(points, &params, true)
+    }
+}
+
 /// The control-point spline (clamped, uniform knots) on `control`, from
 /// three points; `None` with fewer.
 pub fn control_spline(control: &[DVec2]) -> Option<ProfileCurve> {
@@ -1682,11 +1714,14 @@ impl Tool {
             (Tool::Polygon, _) => "Click a vertex",
             (Tool::Point, _) => "Click to place a point",
             (Tool::Spline, 0) => "Click the first point",
-            (Tool::Spline, _) => "Click more points; Enter or double-click finishes",
+            (Tool::Spline, 1 | 2) => "Click more points; Enter or double-click finishes",
+            (Tool::Spline, _) => {
+                "Click more points; Enter or double-click finishes, the first point closes it smoothly"
+            }
             (Tool::ControlSpline, 0) => "Click the first control point (the curve starts there)",
             (Tool::ControlSpline, 1 | 2) => "Click more control points",
             (Tool::ControlSpline, _) => {
-                "Click more control points; Enter or double-click finishes, the first point closes it"
+                "Click more control points; Enter or double-click finishes, the first point closes it smoothly"
             }
             (Tool::Trim, _) => {
                 "Click the piece of a curve to remove (a curve nothing crosses is deleted)"
@@ -1878,19 +1913,24 @@ fn kind(sketch: &SketchData, id: SketchId) -> Option<Kind> {
     })
 }
 
-/// The end points of a curve (none for a circle or an ellipse).
+/// Why tangency and curvature continuity refuse a smooth closed spline.
+const CLOSED_HAS_NO_ENDS: &str = "A smooth closed spline has no end points: tangency and \
+     curvature continuity join curves at a shared end (ADR 0016)";
+
+/// True when `id` is a smooth closed spline (ADR 0016).
+fn is_closed_spline(sketch: &SketchData, id: SketchId) -> bool {
+    sketch
+        .entity(id)
+        .is_some_and(|e| e.geometry.is_closed_spline())
+}
+
+/// The end points of a curve (none for a circle, an ellipse or a smooth
+/// closed spline).
 fn end_points(sketch: &SketchData, id: SketchId) -> Vec<SketchId> {
-    match &sketch.entity(id).map(|e| &e.geometry) {
-        Some(Geometry::Line { start, end })
-        | Some(Geometry::Arc { start, end, .. })
-        | Some(Geometry::EllipticalArc { start, end, .. })
-        | Some(Geometry::Conic { start, end, .. }) => vec![*start, *end],
-        Some(Geometry::ControlSpline { control: p, .. })
-        | Some(Geometry::InterpolatedSpline { through: p, .. }) => {
-            p.first().into_iter().chain(p.last()).copied().collect()
-        }
-        _ => Vec::new(),
-    }
+    sketch
+        .entity(id)
+        .and_then(|e| e.geometry.end_points())
+        .map_or_else(Vec::new, |(s, e)| vec![s, e])
 }
 
 /// An end point of `a` that `b` shares: the same point, a coincident one,
@@ -2052,6 +2092,9 @@ pub fn constraints_for(
             if kinds == [Kind::Line, Kind::Line] {
                 return Err("Two lines can't be tangent; use Parallel".into());
             }
+            if is_closed_spline(sketch, a) || is_closed_spline(sketch, b) {
+                return Err(CLOSED_HAS_NO_ENDS.into());
+            }
             let kind = if let Some(point) = shared_end(sketch, a, b) {
                 TangentKind::AtPoint { point }
             } else if kinds.contains(&Kind::Spline) {
@@ -2091,6 +2134,9 @@ pub fn constraints_for(
             let (a, b) = (ids[0], ids[1]);
             if !kinds.contains(&Kind::Spline) {
                 return Err("Curvature continuity needs a spline on at least one side".into());
+            }
+            if is_closed_spline(sketch, a) || is_closed_spline(sketch, b) {
+                return Err(CLOSED_HAS_NO_ENDS.into());
             }
             let ends = |id: SketchId| !end_points(sketch, id).is_empty();
             if !ends(a) || !ends(b) {
@@ -2836,7 +2882,7 @@ impl SketchEditor {
             self.curve_edit = self.plan_pattern(model, &d, s);
         }
         // A control-point spline closes on its first point.
-        if self.tool == Tool::ControlSpline && self.clicks.len() >= 3 {
+        if matches!(self.tool, Tool::Spline | Tool::ControlSpline) && self.clicks.len() >= 3 {
             let first = self.clicks[0];
             if map
                 .to_screen(first.at)
@@ -3632,6 +3678,23 @@ impl SketchEditor {
                 Some(t) => vec![shapes::tangent_arc_outline(t, cur.at)],
                 None => Vec::new(),
             },
+            (Tool::Spline | Tool::ControlSpline, n) if n >= 3 && !distinct_clicks(&c[0], &cur) => {
+                // Back on the first point: the smooth closed curve it
+                // would make (ADR 0016), with the control polygon.
+                let mut pts: Vec<DVec2> = c.iter().map(|s| s.at).collect();
+                pts.push(c[0].at);
+                let control = self.tool == Tool::ControlSpline;
+                let mut out = Vec::new();
+                if control {
+                    out.push(pts.clone());
+                }
+                match closed_spline(&pts, control) {
+                    Some(curve) => out.push(sample_resolved(&curve)),
+                    None if !control => out.push(pts),
+                    None => {}
+                }
+                out
+            }
             (Tool::Spline, n) if n >= 1 => {
                 let mut pts: Vec<DVec2> = c.iter().map(|s| s.at).collect();
                 pts.push(cur.at);
@@ -4039,12 +4102,7 @@ impl SketchEditor {
                     self.reset_tool();
                 }
             }
-            Tool::Spline => {
-                if self.clicks.last().is_none_or(|a| distinct(a, &s)) {
-                    self.clicks.push(s);
-                }
-            }
-            Tool::ControlSpline => {
+            Tool::Spline | Tool::ControlSpline => {
                 if self.clicks.last().is_none_or(|a| distinct(a, &s)) {
                     let closes = self.clicks.len() >= 3 && !distinct(&self.clicks[0], &s);
                     self.clicks.push(s);
@@ -4132,19 +4190,11 @@ impl SketchEditor {
         }
     }
 
-    /// Enter: finishes a spline; ends a line chain.
+    /// Enter: finishes a spline; ends a line chain. A spline whose last
+    /// click is its first point again closes smoothly (ADR 0016).
     pub fn finish(&mut self, model: &mut Model) {
-        if self.tool == Tool::ControlSpline {
+        if matches!(self.tool, Tool::Spline | Tool::ControlSpline) {
             let clicks = std::mem::take(&mut self.clicks);
-            if clicks.len() < 3 {
-                if !clicks.is_empty() {
-                    self.message = Some("A control-point spline needs at least 3 points".into());
-                }
-                self.reset_tool();
-                return;
-            }
-            let mut b = Batch::default();
-            // Ending on the first point closes the curve: the same point.
             let closed =
                 clicks.len() >= 4 && !distinct_clicks(&clicks[0], &clicks[clicks.len() - 1]);
             let open = if closed {
@@ -4152,44 +4202,40 @@ impl SketchEditor {
             } else {
                 &clicks[..]
             };
-            let mut control: Vec<SketchId> = open.iter().map(|s| b.snapped_point(s)).collect();
-            if closed {
-                control.push(control[0]);
-            }
-            b.entity(
-                Geometry::ControlSpline {
-                    degree: control_degree(control.len()),
-                    control,
-                },
-                self.construction,
-            );
-            self.commit(model, b.edits);
-            self.reset_tool();
-            return;
-        }
-        if self.tool == Tool::Spline && self.clicks.len() >= 2 {
-            let clicks = std::mem::take(&mut self.clicks);
-            let mut lengths = vec![0.0];
-            for w in clicks.windows(2) {
-                let last = *lengths.last().unwrap_or(&0.0);
-                lengths.push(last + (w[1].at - w[0].at).length());
-            }
-            let total = *lengths.last().unwrap_or(&0.0);
-            if total <= SAME_POINT {
+            let at: Vec<DVec2> = clicks.iter().map(|s| s.at).collect();
+            let geometry = |points: Vec<SketchId>| match self.tool {
+                Tool::ControlSpline => Some(Geometry::ControlSpline {
+                    degree: control_degree(open.len()),
+                    control: points,
+                    periodic: closed,
+                }),
+                _ => Some(Geometry::InterpolatedSpline {
+                    params: chord_params(&at)?,
+                    through: points,
+                    periodic: closed,
+                }),
+            };
+            let too_few = match self.tool {
+                Tool::ControlSpline => open.len() < 3,
+                _ => open.len() < 2,
+            };
+            if too_few {
+                if self.tool == Tool::ControlSpline && !clicks.is_empty() {
+                    self.message = Some("A control-point spline needs at least 3 points".into());
+                }
                 self.reset_tool();
                 return;
             }
-            let mut params: Vec<f64> = lengths.iter().map(|l| l / total).collect();
-            if let Some(last) = params.last_mut() {
-                *last = 1.0;
-            }
             let mut b = Batch::default();
-            let through: Vec<SketchId> = clicks.iter().map(|s| b.snapped_point(s)).collect();
-            b.entity(
-                Geometry::InterpolatedSpline { through, params },
-                self.construction,
-            );
-            self.commit(model, b.edits);
+            let mut points: Vec<SketchId> = open.iter().map(|s| b.snapped_point(s)).collect();
+            if closed {
+                // The same point entity: the curve closes on it exactly.
+                points.push(points[0]);
+            }
+            if let Some(g) = geometry(points) {
+                b.entity(g, self.construction);
+                self.commit(model, b.edits);
+            }
         }
         self.reset_tool();
     }

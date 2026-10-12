@@ -10,8 +10,57 @@ use crate::ellipse;
 use crate::eq::signed_angle;
 use crate::index::{Circ, Con, EntKind, Index, LineRef};
 use crate::model::{Constraint, DistanceKind, Geometry, Sketch, SketchKey, TextPiece};
-use crate::spline::clamped_uniform_knots;
+use crate::spline::{clamped_uniform_knots, SplineMap};
 use crate::{ResolvedCurve, SolveError};
+
+/// The explicit curve of a control-point spline of `degree` on control
+/// points at `points`, in order (for a smooth closed spline, `periodic`,
+/// the list ends on its first point again; ADR 0016), as the solver
+/// resolves it; `None` for a definition the solver refuses.
+pub fn control_spline_curve(
+    points: &[DVec2],
+    degree: u32,
+    periodic: bool,
+) -> Option<ResolvedCurve> {
+    let degree = usize::try_from(degree).ok()?;
+    let map = if periodic {
+        SplineMap::control_periodic(points.len(), degree)
+    } else {
+        SplineMap::control(points.len(), degree)
+    }
+    .ok()?;
+    Some(spline_of(&map, points))
+}
+
+/// The explicit curve of a through-point spline through `points` at
+/// `params`, in order (for a smooth closed spline, `periodic`, the list
+/// ends on its first point again at parameter 1; ADR 0016), as the solver
+/// resolves it; `None` for a definition the solver refuses.
+pub fn interpolated_spline_curve(
+    points: &[DVec2],
+    params: &[f64],
+    periodic: bool,
+) -> Option<ResolvedCurve> {
+    if params.len() != points.len() {
+        return None;
+    }
+    let map = if periodic {
+        SplineMap::interpolated_periodic(params)
+    } else {
+        SplineMap::interpolated(params)
+    }
+    .ok()?;
+    Some(spline_of(&map, points))
+}
+
+/// The clamped curve of `map` on its referenced points' positions.
+fn spline_of(map: &SplineMap, points: &[DVec2]) -> ResolvedCurve {
+    ResolvedCurve::Spline {
+        degree: map.degree,
+        knots: map.knots.clone(),
+        points: map.control_points(points),
+    }
+}
 
 /// The curves of a text's outline (in box units, ADR 0015) placed in the
 /// box with corners `[bottom-left, bottom-right, top-right, top-left]`
@@ -175,11 +224,7 @@ pub(crate) fn resolve_curves<K: SketchKey>(
             EntKind::Spline(s) => {
                 let sp = &index.splines[s];
                 let pts: Vec<DVec2> = sp.points.iter().map(|&p| pos(p)).collect();
-                ResolvedCurve::Spline {
-                    degree: sp.map.degree,
-                    knots: sp.map.knots.clone(),
-                    points: sp.map.control_points(&pts),
-                }
+                spline_of(&sp.map, &pts)
             }
             EntKind::Text(t) => {
                 let Geometry::Text { outline, .. } = &e.geometry else {

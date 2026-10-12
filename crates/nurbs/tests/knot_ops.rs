@@ -134,6 +134,42 @@ fn split_at_existing_knot_and_repeated_splits() {
 }
 
 #[test]
+fn a_split_a_rounding_step_from_a_knot_splits_at_the_knot() {
+    // A knot one rounding step below 0.5 (as chord-length parameters
+    // make: 110/220 summed in pieces), and a split at the midpoint 0.5.
+    let knot: f64 = 0.5 - f64::EPSILON / 4.0;
+    let t: f64 = 0.5;
+    assert!(t != knot && (t - knot).abs() < 4.0 * f64::EPSILON);
+    let curve = NurbsCurve::new(
+        3,
+        vec![0., 0., 0., 0., 0.25, knot, 0.75, 1., 1., 1., 1.],
+        (0..7)
+            .map(|i| DVec3::new(i as f64, ((i * 7) % 5) as f64, ((i * 3) % 4) as f64))
+            .collect(),
+        None,
+    )
+    .unwrap();
+    for u in [t, knot - f64::EPSILON / 2.0, knot + 2.0 * f64::EPSILON] {
+        let (l, r) = curve.split(u);
+        let (el, er) = curve.split(knot);
+        assert_eq!(l, el, "{u}");
+        assert_eq!(r, er, "{u}");
+        // No sliver spans: every nonzero span is a real one.
+        for piece in [&l, &r] {
+            for w in piece.knots().as_slice().windows(2) {
+                assert!(w[1] == w[0] || w[1] - w[0] >= 0.25 - 1e-15, "{u}: {w:?}");
+            }
+        }
+        // End derivatives agree across the cut (the curve is C² there).
+        let (dl, dr) = (l.derivatives(knot, 1)[1], r.derivatives(knot, 1)[1]);
+        assert!((dl - dr).length() <= 1e-12 * dl.length(), "{dl} {dr}");
+    }
+    // Away from knots nothing moves.
+    let (l, _) = curve.split(0.3);
+    assert_eq!(l.domain(), (0.0, 0.3));
+}
+
+#[test]
 fn split_outside_domain_is_an_error() {
     let curve = NurbsCurve::line(DVec3::ZERO, DVec3::X).unwrap();
     for t in [0.0, 1.0, -1.0, 2.0, f64::NAN] {

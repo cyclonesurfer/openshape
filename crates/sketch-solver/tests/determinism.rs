@@ -58,13 +58,23 @@ fn relabel<F: Fn(u32) -> u64>(s: &Sketch<u32>, f: F) -> Sketch<u64> {
             start: f(start),
             end: f(end),
         },
-        Geometry::ControlSpline { control, degree } => Geometry::ControlSpline {
+        Geometry::ControlSpline {
+            control,
+            degree,
+            periodic,
+        } => Geometry::ControlSpline {
             control: control.into_iter().map(&f).collect(),
             degree,
+            periodic,
         },
-        Geometry::InterpolatedSpline { through, params } => Geometry::InterpolatedSpline {
+        Geometry::InterpolatedSpline {
+            through,
+            params,
+            periodic,
+        } => Geometry::InterpolatedSpline {
             through: through.into_iter().map(&f).collect(),
             params,
+            periodic,
         },
         Geometry::Ellipse {
             center,
@@ -260,6 +270,7 @@ fn mixed() -> Sketch<u32> {
     let sp = b.entity(Geometry::ControlSpline {
         control: ctrl.clone(),
         degree: 3,
+        periodic: false,
     });
     b.coincident(a1, b0);
     b.coincident(b1, s);

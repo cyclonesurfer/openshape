@@ -106,17 +106,27 @@ All shapes are built from the existing entities and constraints.
   interior knots (P&T eq. 2.13, clamped form), degree min(3, n − 1); at
   least three points, so the tool never makes a straight line. The clamped
   form starts at the first control point, ends at the last and is tangent
-  to the polygon there (P&T §3.2). Clicking the first point again (it
-  snaps within the point pick radius) finishes the curve on that same
-  point entity, so the curve closes: with clamped knots it meets itself
-  with a corner, not smoothly. A smooth closure needs a periodic spline
-  (P&T §12.2: wrapped control points on uniform unclamped knots), which
-  the sketch cannot express yet. Mirror and patterns copy it exactly (a
+  to the polygon there (P&T §3.2). Clicking the first point again after
+  at least three points (it snaps within the point pick radius) finishes
+  the curve on that same point entity as a smooth closed spline (ADR
+  0016): the uniform periodic B-spline on the wrapped polygon (P&T
+  §12.2), degree min(3, n − 1) for n distinct points, held as its exact
+  clamped equivalent, with no seam. A closure with a corner is an open
+  spline ending near its start with its ends made coincident. While the
+  pointer is on the first point, the closed curve is previewed. Mirror
+  and patterns copy it exactly (a
   B-spline is affine invariant, P&T §3.2: the image of the curve is the
   curve on the images of its control points). DOF 2n, no constraints.
   While drawing, the control polygon is shown dashed with the curve to the
   pointer; afterwards the polygon stays visible, dimmed, so its points can
   be dragged.
+* **Spline** (through points; click the points, Enter or double-click
+  finishes): an `InterpolatedSpline` through the clicked points at
+  chord-length parameters from 0 to 1 (P&T §9.2.1). Clicking the first
+  point again after at least three points closes it smoothly (ADR 0016):
+  the periodic cubic interpolant with knots at the parameters, the
+  closing chord included in the chord lengths, previewed while the
+  pointer is on the first point. DOF 2n.
 
 ## 5. Inference while drawing lines
 

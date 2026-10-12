@@ -179,12 +179,12 @@ pub fn fillet(
                 continue;
             }
             Geometry::Line { start, end } | Geometry::Arc { start, end, .. } => (*start, *end),
-            Geometry::ControlSpline { control: p, .. }
-            | Geometry::InterpolatedSpline { through: p, .. } => {
-                if p.first().is_some_and(|x| at_corner(*x))
-                    || p.last().is_some_and(|x| at_corner(*x))
-                {
-                    return Err("Fillets join lines and arcs; a spline ends here".into());
+            Geometry::ControlSpline { .. } | Geometry::InterpolatedSpline { .. } => {
+                // A smooth closed spline has no ends (ADR 0016).
+                if let Some((first, last)) = e.geometry.end_points() {
+                    if at_corner(first) || at_corner(last) {
+                        return Err("Fillets join lines and arcs; a spline ends here".into());
+                    }
                 }
                 continue;
             }

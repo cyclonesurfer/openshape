@@ -2,7 +2,8 @@
 
 Updated 2026-10-12, Phase 2 (sketcher): core sketcher, the application
 shell, the editing tools, ellipses, conics, transform, curvature
-continuity and text done; smooth closed splines next.
+continuity, text and smooth closed splines done; ellipse and conic
+trimming next.
 
 ## What works
 
@@ -34,8 +35,12 @@ continuity and text done; smooth closed splines next.
   - Watertight tessellation with chord and angle tolerances (shared edge
     discretisation, constrained Delaunay per face, singular points handled).
     It marks seam edges, where two pieces of one surface meet (the splits of
-    ADR 0008), so the display draws only creases; the comparison is
-    geometric and errs towards showing an edge.
+    ADR 0008) or where a sweep's faces from two profile curves meet at a
+    point where the curves have equal first derivatives (a closed spline
+    cut in two), so the display draws only creases; the comparison is
+    geometric and errs towards showing an edge (a tangent joint between
+    different curves stays visible). A NURBS split a rounding step from a
+    knot splits at the knot, so no piece ends on a sliver knot span.
   - Exact mass properties (volume, area, centroid, inertia) by boundary
     integration with adaptive Gauss–Legendre quadrature (design note
     0003): accurate to the relative accuracy the caller asks (down to
@@ -51,7 +56,9 @@ continuity and text done; smooth closed splines next.
   topologically and re-found after sketch edits (design note 0006 §5).
 - **Sketch solver** (`openshape-sketch-solver`, on the deterministic
   `openshape-linalg`): points, lines, circles, arcs, through-point and
-  control-point splines, ellipses and elliptical arcs (design note 0008),
+  control-point splines, open or smooth closed (ADR 0016: the periodic
+  spline held as its exact clamped equivalent, a fixed linear map of the
+  sketch's points), ellipses and elliptical arcs (design note 0008),
   conic arcs with their ρ (design note 0009) under 16 geometric constraint
   kinds (curvature continuity the latest, design note 0010) and 6
   dimension kinds. Weighted
@@ -106,8 +113,10 @@ continuity and text done; smooth closed splines next.
 - **Sketch mode**: line (chained), corner, centre-point and aligned
   rectangles, circle, 3-point, centre and tangent arcs, slot, regular
   polygon (3 to 64 sides), point, through-point and control-point splines
-  (the control polygon shown dashed; clicking the first point again closes
-  the curve, with a corner there), ellipse and elliptical arc (design note
+  (the control polygon shown dashed; clicking the first point again
+  closes the curve smoothly, previewed while the pointer is there, ADR
+  0016; a smooth closed spline has no ends, so tangency and curvature
+  continuity at it are refused with the reason), ellipse and elliptical arc (design note
   0008: centre, axis end, then the other axis's extent, with
   construction semi-axes that can be dimensioned like any line; an arc's
   ends are clicked anywhere around it and it runs the way the pointer
@@ -364,6 +373,29 @@ continuity and text done; smooth closed splines next.
   returned a strongly rational conic's volume 21 % small, and a spline
   split one rounding step from a knot left a 5.6e-17 knot span on which
   quadrature never converged; both are regression tests.
+- Smooth closed splines, 2026-10-12, on Mesa lavapipe: fmt, clippy with
+  `-D warnings`, 780 tests and `cargo deny` pass. The solver tests check
+  the closed control spline against the uniform periodic B-spline on the
+  wrapped polygon and the closed through-point spline against the
+  periodic cubic interpolant in second-derivative form (de Boor), both
+  evaluated in the tests independently of the solver, plus freedoms, a
+  point sliding across the seam, refusals, mirror images and old
+  documents reading unchanged; eight end-to-end tests close both tools
+  on their first point and compare the shape, the region area and the
+  extruded volume with the same independent constructions, check the
+  preview is the curve the click makes, the refusals, mirror, pattern,
+  copy and undo. The screenshots showed two lines down the smooth side
+  of an extruded closed spline: where the profile loop cuts the curve in
+  two the faces meet smoothly, but the display could only hide seams
+  inside one surface. The kernel now hides an edge where swept pieces
+  meet with equal first derivatives (golden tests: smooth, tangent-only
+  and cornered joints, extruded and revolved). The through-point side
+  still showed one line: the cut at the parameter midpoint landed a
+  rounding step from a knot (0.5 against 0.49999999999999994), leaving a
+  sliver span whose end derivative was meaningless. Such splits now snap
+  to the knot. The closure's end derivatives, which matched to 7e-14
+  from the solve, are now equal by construction, so the display test
+  does not depend on how well the interpolation system is conditioned.
 - Curvature continuity, 2026-10-12, on Mesa lavapipe: fmt, clippy with
   `-D warnings`, 717 tests and `cargo deny` pass. The solver tests
   check every joint against curvatures computed in the test from closed
@@ -450,9 +482,6 @@ continuity and text done; smooth closed splines next.
   far-off starts (§9 of the note: about 8 in 100,000 random sketches
   perturbed by up to 5% of their size, against 0 without ellipses),
   always reporting the failure, never a wrong result.
-  A spline closed on its first point meets itself with a corner: a smooth
-  (periodic) closed spline is not expressible in the sketch yet (design
-  note 0007 §4).
   Splines cannot be offset (their offsets are not splines; an
   approximation with a guaranteed tolerance is future work).
   A fillet removes (and reports) equal-length and midpoint constraints on
@@ -492,13 +521,12 @@ continuity and text done; smooth closed splines next.
 
 ## Next steps
 
-1. The rest of the Phase 2 sketcher that needs no faces: smooth
-   closed splines, trim/extend/split of ellipses and conics, and a
-   curvature comb display. Project/convert,
+1. The rest of the Phase 2 sketcher that needs no faces:
+   trim/extend/split of ellipses and conics, and a curvature comb
+   display. Project/convert,
    intersection curves and pierce wait for Phase 3 faces.
 2. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.
 3. Phase 3 groundwork: design notes for curve/surface intersection, booleans
    and persistent naming; make the kernel's tessellation and profile checks
-   adapt to local feature size; snap NURBS splits that land a rounding step
-   from a knot onto the knot.
+   adapt to local feature size.

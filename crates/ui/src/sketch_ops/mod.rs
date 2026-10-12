@@ -234,15 +234,7 @@ pub fn perp(v: DVec2) -> DVec2 {
 /// it is the end: the curve a new tangent curve continues.
 pub fn curve_ending_at(sketch: &SketchData, point: SketchId) -> Option<(SketchId, bool)> {
     sketch.entities.iter().find_map(|e| {
-        let (first, last) = match &e.geometry {
-            Geometry::Line { start, end }
-            | Geometry::Arc { start, end, .. }
-            | Geometry::EllipticalArc { start, end, .. }
-            | Geometry::Conic { start, end, .. } => (*start, *end),
-            Geometry::ControlSpline { control: p, .. }
-            | Geometry::InterpolatedSpline { through: p, .. } => (*p.first()?, *p.last()?),
-            _ => return None,
-        };
+        let (first, last) = e.geometry.end_points()?;
         if last == point {
             Some((e.id, true))
         } else if first == point {

@@ -22,6 +22,7 @@ fn control(b: &mut B, pts: &[DVec2], degree: u32) -> (u32, Vec<u32>) {
     let k = b.entity(Geometry::ControlSpline {
         control: control.clone(),
         degree,
+        periodic: false,
     });
     (k, control)
 }
@@ -40,6 +41,7 @@ fn through(b: &mut B, pts: &[DVec2]) -> (u32, Vec<u32>) {
     let k = b.entity(Geometry::InterpolatedSpline {
         through: keys.clone(),
         params,
+        periodic: false,
     });
     (k, keys)
 }

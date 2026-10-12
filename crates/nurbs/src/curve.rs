@@ -430,7 +430,12 @@ impl NurbsCurve {
     /// each keeping the original parametrization.
     ///
     /// Implemented by inserting `t` until its multiplicity equals the degree
-    /// (Algorithm A5.1) and distributing the control points.
+    /// (Algorithm A5.1) and distributing the control points. A `t` within a
+    /// few rounding steps of an interior knot splits at that knot instead
+    /// (the pieces then meet at that knot's parameter): splitting beside it
+    /// would leave a knot span of width ~1e-17 at a piece's end, on which
+    /// end derivatives and quadrature mean nothing. The split point moves
+    /// along the curve by a rounding-level distance only.
     ///
     /// # Panics
     ///
@@ -453,6 +458,15 @@ impl NurbsCurve {
             ));
         }
         let p = self.degree;
+        let near_knot = 8.0 * f64::EPSILON * a.abs().max(b.abs()).max(b - a);
+        let t = self
+            .knots
+            .as_slice()
+            .iter()
+            .copied()
+            .filter(|&k| k > a && k < b && (k - t).abs() <= near_knot)
+            .min_by(|x, y| (x - t).abs().total_cmp(&(y - t).abs()))
+            .unwrap_or(t);
         let s = self.knots.multiplicity(t);
         let refined = if s < p {
             self.insert_knot(t, p - s)

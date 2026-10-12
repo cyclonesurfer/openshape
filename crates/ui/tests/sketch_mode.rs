@@ -404,9 +404,9 @@ fn circles_arcs_and_splines() {
         .entities
         .iter()
         .find_map(|e| match &e.geometry {
-            Geometry::InterpolatedSpline { through, params } => {
-                Some((through.len(), params.clone()))
-            }
+            Geometry::InterpolatedSpline {
+                through, params, ..
+            } => Some((through.len(), params.clone())),
             _ => None,
         })
         .expect("spline");

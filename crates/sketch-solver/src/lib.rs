@@ -24,7 +24,7 @@ mod spline;
 
 pub use glam::DVec2;
 pub use model::*;
-pub use resolve::text_curves;
+pub use resolve::{control_spline_curve, interpolated_spline_curve, text_curves};
 pub use spline::clamped_uniform_knots;
 
 use std::collections::BTreeMap;
@@ -246,7 +246,10 @@ pub enum ResolvedCurve {
 /// carry their middle weight. Control-point splines
 /// get clamped uniform knots on `[0, 1]`; interpolated splines are cubic
 /// (quadratic through 3 points, a straight segment through 2) with knots by
-/// averaging (Piegl & Tiller eq. 9.8, A9.1). Zero-length lines, zero-radius
+/// averaging (Piegl & Tiller eq. 9.8, A9.1). A smooth closed spline (ADR
+/// 0016) is resolved to the clamped spline it equals on one period, closed
+/// exactly: a control-point one on clamped uniform knots, a through-point
+/// one on the knots `0⁴, t₁ … t_{n−1}, 1⁴`. Zero-length lines, zero-radius
 /// arcs, arcs that end where they start and conics whose ends meet or whose
 /// three points are in line are `Degenerate`; bad references are `Invalid`.
 pub fn resolve_curves<K: model::SketchKey>(

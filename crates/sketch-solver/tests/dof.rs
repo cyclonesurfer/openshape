@@ -176,6 +176,7 @@ fn point_on_spline_slides() {
     let sp = b.entity(Geometry::ControlSpline {
         control: ctrl.clone(),
         degree: 3,
+        periodic: false,
     });
     let p = b.point(1.5, 0.3);
     b.c(Constraint::PointOnCurve {
@@ -200,6 +201,7 @@ fn interpolated_spline_has_two_per_point() {
     let sp = b.entity(Geometry::InterpolatedSpline {
         through: pts.clone(),
         params: vec![0.0, 0.2, 0.5, 0.7, 1.0],
+        periodic: false,
     });
     let s = solve(&b.build(), &opts());
     assert_eq!(s.dof, 10);

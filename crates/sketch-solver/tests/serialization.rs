@@ -32,6 +32,7 @@ fn everything() -> Sketch<u32> {
     let cs = b.entity(Geometry::ControlSpline {
         control: ctrl.clone(),
         degree: 3,
+        periodic: false,
     });
     let thr: Vec<u32> = [(0.0, -5.0), (1.0, -4.0), (2.0, -5.5)]
         .iter()
@@ -40,6 +41,7 @@ fn everything() -> Sketch<u32> {
     b.entity(Geometry::InterpolatedSpline {
         through: thr.clone(),
         params: vec![0.0, 0.1 + 0.2, 1.0],
+        periodic: false,
     });
     let p = b.point(1e-300, -1e300 / 1e294);
     b.sketch.entities.last_mut().unwrap().construction = true;

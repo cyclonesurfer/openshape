@@ -868,3 +868,106 @@ fn revolve_about_offset_axis() {
     let m = k().mass_properties(&b, 1e-13).unwrap();
     assert!((m.centroid.x - x0).abs() < 1e-12 && m.centroid.y.abs() < 1e-12);
 }
+
+/// A cubic Bézier as a profile spline.
+fn bezier(p: [DVec2; 4]) -> ProfileCurve {
+    ProfileCurve::Spline {
+        degree: 3,
+        knots: vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        points: p.to_vec(),
+        weights: None,
+    }
+}
+
+/// Units of the oval: a centimetre.
+const OV: f64 = 0.01;
+
+/// An oval of two cubic Béziers, shifted by `dx` (in [`OV`] units, as
+/// below): the upper one from (0, 0) to (2, 0) and the lower one back. The
+/// lower one's last control point before (0, 0) is `back`: (0, −1) closes
+/// it with equal derivatives (one C¹ curve), (0, −2) with parallel
+/// derivatives of different length (tangent only), (1, −1) with a corner.
+/// The joint at (2, 0) is C¹.
+fn oval(dx: f64, back: DVec2) -> Profile {
+    let back = back * OV;
+    let p = |x: f64, y: f64| DVec2::new(x + dx, y) * OV;
+    Profile {
+        plane: Frame::front(),
+        curves: vec![
+            bezier([p(0.0, 0.0), p(0.0, 1.0), p(2.0, 1.0), p(2.0, 0.0)]),
+            bezier([
+                p(2.0, 0.0),
+                p(2.0, -1.0),
+                back + DVec2::X * dx * OV,
+                p(0.0, 0.0),
+            ]),
+        ],
+    }
+}
+
+/// The polyline length of a profile's curves.
+fn perimeter(p: &Profile) -> f64 {
+    p.curves
+        .iter()
+        .map(|c| {
+            spline_samples(c, 20_000)
+                .windows(2)
+                .map(|w| (w[1] - w[0]).length())
+                .sum::<f64>()
+        })
+        .sum()
+}
+
+#[test]
+fn a_smooth_joint_between_extruded_spline_pieces_is_no_crease() {
+    let h = 0.5 * OV;
+    for (back, seams) in [
+        (DVec2::new(0.0, -1.0), 2.0),
+        (DVec2::new(0.0, -2.0), 1.0),
+        (DVec2::new(1.0, -1.0), 1.0),
+    ] {
+        let profile = oval(0.0, back);
+        let b = k()
+            .extrude(
+                &profile,
+                &ExtrudeSpec {
+                    distance: h,
+                    symmetric: false,
+                },
+            )
+            .unwrap();
+        assert!(k().validate(&b).is_empty());
+        assert_watertight(&k().tessellate(&b, &TessellationOptions::default()).unwrap());
+        if back == DVec2::new(0.0, -1.0) {
+            // Area 2 · ∫ y dx over the upper Bézier = 2 · 36/30.
+            let m = k().mass_properties(&b, 1e-12).unwrap();
+            assert_close(m.volume, 2.4 * OV * OV * h, 1e-10, "oval prism");
+        }
+        // Where the pieces join with equal derivatives the side is one
+        // smooth wall; a tangent joint of unequal speed and a corner are
+        // edges, as is every rim.
+        let (seam, crease) = seam_and_crease_length(&b);
+        assert_close(seam, seams * h, 1e-12, &format!("seams, back {back}"));
+        let rims = 2.0 * perimeter(&profile);
+        assert_close(crease, rims + (2.0 - seams) * h, 1e-4, "creases");
+    }
+}
+
+#[test]
+fn a_smooth_joint_between_revolved_spline_pieces_is_no_crease() {
+    for (back, crease_at_joint) in [
+        (DVec2::new(0.0, -1.0), false),
+        (DVec2::new(1.0, -1.0), true),
+    ] {
+        // The oval 1 to 3 from the axis; its (0, 0) joint turns at radius 1.
+        let b = revolve_z(oval(1.0, back), TAU);
+        assert!(k().validate(&b).is_empty());
+        assert_watertight(&k().tessellate(&b, &TessellationOptions::default()).unwrap());
+        let (_, crease) = seam_and_crease_length(&b);
+        let expect = if crease_at_joint { TAU * OV } else { 0.0 };
+        assert!(
+            (crease - expect).abs() <= 1e-4 * TAU * OV,
+            "back {back}: creases {crease} vs {expect}"
+        );
+    }
+}

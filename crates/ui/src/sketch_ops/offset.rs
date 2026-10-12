@@ -46,19 +46,6 @@ enum Node {
     Point(SketchId),
 }
 
-/// The ends of a line, arc, elliptical arc, conic or spline.
-fn ends(g: &Geometry<SketchId>) -> Option<(SketchId, SketchId)> {
-    match g {
-        Geometry::Line { start, end }
-        | Geometry::Arc { start, end, .. }
-        | Geometry::EllipticalArc { start, end, .. }
-        | Geometry::Conic { start, end, .. } => Some((*start, *end)),
-        Geometry::ControlSpline { control: p, .. }
-        | Geometry::InterpolatedSpline { through: p, .. } => Some((*p.first()?, *p.last()?)),
-        _ => None,
-    }
-}
-
 /// The chain through `start` (design note 0007 §10.1): curves of the same
 /// kind (construction or not) joined end to end through points where
 /// exactly two of them end. Splines, elliptical arcs and conics end a chain
@@ -95,7 +82,7 @@ pub fn chain(sketch: &SketchData, start: SketchId) -> Result<Chain, String> {
         if e.construction != construction {
             continue;
         }
-        let Some((a, b)) = ends(&e.geometry) else {
+        let Some((a, b)) = e.geometry.end_points() else {
             continue;
         };
         end_points.insert(e.id, (a, b));

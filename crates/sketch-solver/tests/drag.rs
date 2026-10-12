@@ -224,6 +224,7 @@ fn a_point_on_a_fixed_spline_goes_to_the_nearest_point() {
     let sp = b.entity(Geometry::ControlSpline {
         control: ctrl,
         degree: 3,
+        periodic: false,
     });
     let p = b.point(2.0, 0.2);
     b.c(Constraint::PointOnCurve {

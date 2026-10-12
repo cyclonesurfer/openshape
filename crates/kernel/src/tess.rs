@@ -60,12 +60,15 @@ pub(crate) struct BrepTess {
 }
 
 /// Per edge of `brep`: true where two pieces of one surface meet with the
-/// same orientation, as where a periodic face is split (ADR 0008), or where
-/// one face uses the edge twice. Such an edge bounds faces but is no crease
+/// same orientation, as where a periodic face is split (ADR 0008), where
+/// one face uses the edge twice, or where a sweep's faces from two profile
+/// curves meet along the track of a point at which the curves join with
+/// equal first derivatives (pieces of one C¹ curve, as a closed spline
+/// cut in two; [`swept_join`]). Such an edge bounds faces but is no crease
 /// in the shape, so displays hide it.
 ///
-/// The test ([`same_surface`]) errs towards showing an edge: surfaces it
-/// cannot prove identical count as different, so a real crease is never
+/// The tests err towards showing an edge: surfaces they cannot prove to
+/// continue one another count as different, so a real crease is never
 /// hidden.
 pub(crate) fn seams(brep: &Brep) -> Vec<bool> {
     let mut uses: Vec<Vec<usize>> = vec![Vec::new(); brep.edges.len()];
@@ -77,11 +80,121 @@ pub(crate) fn seams(brep: &Brep) -> Vec<bool> {
         }
     }
     uses.iter()
-        .map(|u| match u.as_slice() {
-            [a, b] => a == b || same_surface(&brep.faces[*a], &brep.faces[*b]),
+        .enumerate()
+        .map(|(e, u)| match u.as_slice() {
+            [a, b] if a == b => true,
+            [a, b] => {
+                let (fa, fb) = (&brep.faces[*a], &brep.faces[*b]);
+                swept_join(brep, e, fa, fb).unwrap_or_else(|| same_surface(fa, fb))
+            }
             _ => false,
         })
         .collect()
+}
+
+/// For an edge shared by two faces of one sweep (extrusions along one
+/// direction, or revolutions about one axis) traced by a point where one
+/// face's profile curve ends and the other's starts: `Some(true)` if the
+/// curves have equal first derivatives there, so the surfaces continue one
+/// another with no crease; `Some(false)` if not. `None` when the faces and
+/// the edge are not such a pair (the caller then compares the surfaces).
+///
+/// Equal parametric derivatives (not just parallel tangents) are what the
+/// pieces of one C¹ curve have where it was cut, so a tangent joint between
+/// two different curves (a line and an arc, say) stays a visible edge, as
+/// tangent edges are elsewhere.
+fn swept_join(brep: &Brep, edge: usize, a: &Face, b: &Face) -> Option<bool> {
+    if a.forward != b.forward {
+        return None;
+    }
+    let e = &brep.edges[edge];
+    let p = brep.vertices[e.v0.idx()].point;
+    let ends = |c: &Curve3| match c {
+        Curve3::Nurbs(n) => {
+            let (t0, t1) = n.domain();
+            let d0 = n.derivatives(t0, 1);
+            let d1 = n.derivatives(t1, 1);
+            Some([(d0[0], d0[1]), (d1[0], d1[1])])
+        }
+        _ => None,
+    };
+    match (&a.surface, &b.surface) {
+        (
+            Surface::Extrusion {
+                curve: ca, dir: da, ..
+            },
+            Surface::Extrusion {
+                curve: cb, dir: db, ..
+            },
+        ) => {
+            if !parallel(*da, *db) {
+                return None;
+            }
+            let (ea, eb) = (ends(ca)?, ends(cb)?);
+            let axis = da.normalize_or_zero();
+            let scale = 1.0 + p.length() + ea[0].0.length().max(eb[0].0.length());
+            // On the edge's ruling through `p`.
+            let on_edge = |q: DVec3| {
+                let r = q - p;
+                (r - axis * r.dot(axis)).length() <= SAME * scale
+            };
+            let joined = |(qa, _): (DVec3, DVec3), (qb, _): (DVec3, DVec3)| {
+                on_edge(qa) && on_edge(qb) && near(qa, qb, scale)
+            };
+            let same = |x: DVec3, y: DVec3| (x - y).length() <= SAME * x.length().max(y.length());
+            if joined(ea[1], eb[0]) {
+                Some(same(ea[1].1, eb[0].1))
+            } else if joined(eb[1], ea[0]) {
+                Some(same(eb[1].1, ea[0].1))
+            } else {
+                None
+            }
+        }
+        (
+            Surface::Revolution {
+                frame: fa,
+                profile: pa,
+            },
+            Surface::Revolution {
+                frame: fb,
+                profile: pb,
+            },
+        ) => {
+            let scale = 1.0 + fa.origin.length().max(fb.origin.length()) + p.length();
+            let off = fb.origin - fa.origin;
+            if !parallel(fa.z, fb.z) || (off - fa.z * off.dot(fa.z)).length() > SAME * scale {
+                return None;
+            }
+            let (ea, eb) = (ends(pa)?, ends(pb)?);
+            // A point and derivative in the frame that turns with the
+            // meridian plane: (distance from the axis, height), and the
+            // derivative's radial, axial and turning parts.
+            let meridian = |(q, d): (DVec3, DVec3)| {
+                let r = q - fa.origin;
+                let h = r.dot(fa.z);
+                let radial = r - fa.z * h;
+                let rho = radial.length();
+                if rho <= SAME * scale {
+                    return None;
+                }
+                let x = radial / rho;
+                Some((
+                    DVec3::new(rho, h, 0.0),
+                    DVec3::new(d.dot(x), d.dot(fa.z), d.dot(fa.z.cross(x))),
+                ))
+            };
+            let (mp, _) = meridian((p, DVec3::ZERO))?;
+            let joined = |x: (DVec3, DVec3), y: (DVec3, DVec3)| {
+                let (Some((qa, da)), Some((qb, db))) = (meridian(x), meridian(y)) else {
+                    return None;
+                };
+                (near(qa, mp, scale) && near(qb, mp, scale))
+                    .then(|| (da - db).length() <= SAME * da.length().max(db.length()))
+            };
+            joined(ea[1], eb[0]).or_else(|| joined(eb[1], ea[0]))
+        }
+        _ => None,
+    }
 }
 
 /// Relative tolerance for comparing surface data built from the same

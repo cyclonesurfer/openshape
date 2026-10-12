@@ -1,7 +1,9 @@
 //! Non-rational B-spline machinery for sketch splines (Piegl & Tiller,
 //! *The NURBS Book*, 2nd ed.): knot span search (A2.1), basis functions and
-//! their derivatives (A2.2, A2.3), clamped uniform knots, and global
-//! interpolation with knots by averaging (eq. 9.8, A9.1).
+//! their derivatives (A2.2, A2.3), clamped uniform knots, global
+//! interpolation with knots by averaging (eq. 9.8, A9.1), knot insertion
+//! (A5.1), and smooth closed (periodic) splines as exact clamped
+//! equivalents (ADR 0016).
 //!
 //! A sketch spline is a fixed linear map from its referenced point entities
 //! to its curve: `C(t) = Σ_k w_k(t) P_k`. For a control-point spline the
@@ -21,11 +23,18 @@ pub(crate) struct SplineMap {
     pub degree: usize,
     /// Clamped knot vector on `[0, 1]`.
     pub knots: Vec<f64>,
-    /// For an interpolated spline, `inv[(j, k)]`: weight of through-point
-    /// `k` in control point `j`. `None`: the points are the control points.
+    /// `inv[(j, k)]`: weight of referenced point `k` in control point `j`
+    /// (an interpolated or a periodic spline). `None`: the referenced
+    /// points are the control points.
     pub inv: Option<Matrix>,
-    /// Number of referenced points (= number of control points).
+    /// Number of control points of the clamped curve.
     pub count: usize,
+    /// Number of referenced points (`count` unless periodic, where the
+    /// clamped form has more control points than the sketch references).
+    pub refs: usize,
+    /// Closed smoothly (ADR 0016): the curve is periodic, its parameter
+    /// wraps, and the last referenced point is the first again.
+    pub periodic: bool,
     /// Interior knots of multiplicity ≥ degree, ascending: where the first
     /// derivative may jump (corners of a degree-1 spline).
     pub kinks: Vec<f64>,
@@ -61,6 +70,8 @@ impl SplineMap {
             knots,
             inv: None,
             count,
+            refs: count,
+            periodic: false,
         })
     }
 
@@ -117,6 +128,155 @@ impl SplineMap {
             knots,
             inv: Some(inv),
             count,
+            refs: count,
+            periodic: false,
+        })
+    }
+
+    /// A smooth closed control-point spline (ADR 0016) of degree `degree`
+    /// on `refs` referenced points, the last being the first again: the
+    /// uniform periodic B-spline on the wrapped polygon `P₀ … P_{n−1}, P₀ …
+    /// P_{p−1}` (`n = refs − 1`; Piegl & Tiller §12.2), as the clamped
+    /// spline on `n + p` control points that it equals on one period. The
+    /// domain's end knots are raised to multiplicity `p` by Boehm insertion
+    /// (P&T A5.1), which makes the curve's ends control points; the knots
+    /// outside the domain then no longer act on it and are clamped.
+    pub fn control_periodic(refs: usize, degree: usize) -> Result<Self, SplineError> {
+        if !(2..=5).contains(&degree) {
+            return Err(SplineError::Shape(format!(
+                "a smooth closed spline has degree 2 to 5, not {degree}"
+            )));
+        }
+        let n = refs.saturating_sub(1);
+        if n < degree + 1 {
+            return Err(SplineError::Shape(format!(
+                "a smooth closed spline of degree {degree} needs at least {} distinct control points, got {n}",
+                degree + 1
+            )));
+        }
+        let p = degree;
+        // The wrapped polygon, each point as its weights over the
+        // referenced points, on the uniform knots 0, 1, …, n + 2p.
+        let mut rows: Vec<Vec<f64>> = (0..n + p)
+            .map(|j| {
+                let mut w = vec![0.0; refs];
+                w[j % n] = 1.0;
+                w
+            })
+            .collect();
+        let mut knots: Vec<f64> = (0..=n + 2 * p).map(|i| i as f64).collect();
+        for u in [p as f64, (n + p) as f64] {
+            for _ in 1..p {
+                insert_knot(&mut knots, &mut rows, p, u);
+            }
+        }
+        // C(p) is control point p − 1 and C(n + p) is control point
+        // 2p + n − 2 (a knot of multiplicity p at index s ends the curve
+        // on control point s − p).
+        let mut rows: Vec<Vec<f64>> = rows.drain(p - 1..=2 * p + n - 2).collect();
+        // The same combination of the same point at both ends: the curve
+        // closes exactly, not to rounding.
+        let last = rows.len() - 1;
+        rows[last] = rows[0].clone();
+        let controls = n + p;
+        let mut inv = Matrix::zeros(controls, refs);
+        for (j, row) in rows.iter().enumerate() {
+            for (k, w) in row.iter().enumerate() {
+                inv[(j, k)] = *w;
+            }
+        }
+        let knots = clamped_uniform_knots(controls, p);
+        match_end_derivatives(&mut inv, &knots, p);
+        Ok(SplineMap {
+            degree: p,
+            kinks: kinks(&knots, p),
+            knots,
+            inv: Some(inv),
+            count: controls,
+            refs,
+            periodic: true,
+        })
+    }
+
+    /// A smooth closed through-point spline (ADR 0016) through `n =
+    /// params.len() − 1` distinct points at `params` (first 0, last 1; the
+    /// last referenced point is the first again): the periodic cubic
+    /// spline with knots at the parameters (de Boor, *A Practical Guide to
+    /// Splines*, rev. ed. 2001), as the clamped cubic on the knots `0⁴,
+    /// t₁ … t_{n−1}, 1⁴`. Its `n + 3` control points satisfy the `n + 1`
+    /// interpolation conditions and equal first and second derivatives at
+    /// 0 and 1.
+    pub fn interpolated_periodic(params: &[f64]) -> Result<Self, SplineError> {
+        let refs = params.len();
+        if refs < 4 {
+            return Err(SplineError::Shape(format!(
+                "a smooth closed spline needs at least 3 distinct points, got {}",
+                refs.saturating_sub(1)
+            )));
+        }
+        check_params(params)?;
+        let p = 3;
+        let n = refs - 1;
+        let controls = n + p;
+        let mut knots = vec![0.0; p + 1];
+        knots.extend_from_slice(&params[1..n]);
+        knots.extend(std::iter::repeat_n(1.0, p + 1));
+        let mut a = Matrix::zeros(controls, controls);
+        let row = |a: &mut Matrix, i: usize, t: f64, order: usize, sign: f64| {
+            let span = find_span(controls - 1, p, t, &knots);
+            let d = ders_basis_funs(span, t, p, order, &knots);
+            for (r, v) in d[order].iter().enumerate() {
+                a[(i, span - p + r)] += sign * v;
+            }
+        };
+        for (i, &t) in params.iter().enumerate() {
+            row(&mut a, i, t, 0, 1.0);
+        }
+        for order in 1..=2 {
+            let i = n + order;
+            row(&mut a, i, 0.0, order, 1.0);
+            row(&mut a, i, 1.0, order, -1.0);
+        }
+        let cod = CompleteOrthogonal::new(&a, 1e-13);
+        if cod.rank() < controls {
+            return Err(SplineError::Params(
+                "the interpolation system is singular".to_string(),
+            ));
+        }
+        // Right-hand sides: interpolation row i takes referenced point i,
+        // the closing row (i = n) the first point; the derivative rows are
+        // zero.
+        let mut inv = Matrix::zeros(controls, refs);
+        let mut e = vec![0.0; controls];
+        for k in 0..n {
+            e.iter_mut().for_each(|v| *v = 0.0);
+            e[k] = 1.0;
+            if k == 0 {
+                e[n] = 1.0;
+            }
+            let x = cod.solve(&e);
+            inv.col_mut(k).copy_from_slice(&x);
+        }
+        if !inv.is_finite() {
+            return Err(SplineError::Params(
+                "the interpolation system is singular".to_string(),
+            ));
+        }
+        // The ends are the first point, exactly.
+        for k in 0..refs {
+            let w = if k == 0 { 1.0 } else { 0.0 };
+            inv[(0, k)] = w;
+            inv[(controls - 1, k)] = w;
+        }
+        match_end_derivatives(&mut inv, &knots, p);
+        Ok(SplineMap {
+            degree: p,
+            kinks: kinks(&knots, p),
+            knots,
+            inv: Some(inv),
+            count: controls,
+            refs,
+            periodic: true,
         })
     }
 
@@ -128,8 +288,13 @@ impl SplineMap {
     }
 
     /// Weights and their first and (if `ders ≥ 2`) second derivatives.
+    /// `t` is clamped to `[0, 1]`, or wrapped into it when periodic.
     pub fn weights_ders(&self, t: f64, ders: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-        let t = t.clamp(0.0, 1.0);
+        let t = if self.periodic {
+            t.rem_euclid(1.0)
+        } else {
+            t.clamp(0.0, 1.0)
+        };
         let span = find_span(self.count - 1, self.degree, t, &self.knots);
         self.weights_in_span(span, t, ders)
     }
@@ -154,9 +319,9 @@ impl SplineMap {
     fn weights_in_span(&self, span: usize, t: f64, ders: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         let p = self.degree;
         let d = ders_basis_funs(span, t, p, ders.min(p), &self.knots);
-        let mut w = vec![0.0; self.count];
-        let mut w1 = vec![0.0; self.count];
-        let mut w2 = vec![0.0; self.count];
+        let mut w = vec![0.0; self.refs];
+        let mut w1 = vec![0.0; self.refs];
+        let mut w2 = vec![0.0; self.refs];
         for r in 0..=p {
             let j = span - p + r;
             match &self.inv {
@@ -170,7 +335,7 @@ impl SplineMap {
                     }
                 }
                 Some(inv) => {
-                    for k in 0..self.count {
+                    for k in 0..self.refs {
                         let c = inv[(j, k)];
                         w[k] += d[0][r] * c;
                         if d.len() > 1 {
@@ -194,7 +359,7 @@ impl SplineMap {
                 w[j] = 1.0;
                 w
             }
-            Some(inv) => (0..self.count).map(|k| inv[(j, k)]).collect(),
+            Some(inv) => (0..self.refs).map(|k| inv[(j, k)]).collect(),
         }
     }
 
@@ -218,6 +383,51 @@ pub(crate) fn combine(w: &[f64], pts: &[DVec2]) -> DVec2 {
         y += wk * pk.y;
     }
     DVec2::new(x, y)
+}
+
+/// Makes a closed clamped spline's first derivative at its end equal the
+/// one at its start exactly, not just to rounding (ADR 0016): the
+/// second-to-last control row (`inv` maps referenced points to control
+/// points, one row per control point; the last row is the first already)
+/// is set from the first two, by `C′(0) = p (P₁ − P₀)/(u_{p+1} − u₁)` and
+/// `C′(1) = p (P_m − P_{m−1})/(u_{m+p} − u_m)` (Piegl & Tiller eq. 3.7).
+/// The periodic constructions make the two equal mathematically, so this
+/// moves the row by rounding only; a display can then tell the seam is
+/// smooth by comparing the derivatives exactly.
+fn match_end_derivatives(inv: &mut Matrix, knots: &[f64], p: usize) {
+    let m = inv.rows() - 1;
+    let r = (knots[m + p] - knots[m]) / (knots[p + 1] - knots[1]);
+    for k in 0..inv.cols() {
+        inv[(m - 1, k)] = inv[(m, k)] - r * (inv[(1, k)] - inv[(0, k)]);
+    }
+}
+
+/// Inserts knot `u` once into the B-spline of degree `p` on `knots` whose
+/// control points are `rows` (each a vector of weights), in place (Boehm
+/// insertion, Piegl & Tiller A5.1 with r = 1). `u` must lie inside the
+/// knot range with multiplicity below `p`.
+fn insert_knot(knots: &mut Vec<f64>, rows: &mut Vec<Vec<f64>>, p: usize, u: f64) {
+    // The last span index k with knots[k] ≤ u, and u's multiplicity s.
+    let k = knots.iter().rposition(|&x| x <= u).unwrap_or(0);
+    let s = knots.iter().filter(|&&x| x == u).count();
+    let mut out = Vec::with_capacity(rows.len() + 1);
+    for i in 0..=rows.len() {
+        if i + p <= k {
+            out.push(rows[i].clone());
+        } else if i + s <= k {
+            let alpha = (u - knots[i]) / (knots[i + p] - knots[i]);
+            let row = rows[i]
+                .iter()
+                .zip(&rows[i - 1])
+                .map(|(a, b)| alpha * a + (1.0 - alpha) * b)
+                .collect();
+            out.push(row);
+        } else {
+            out.push(rows[i - 1].clone());
+        }
+    }
+    knots.insert(k + 1, u);
+    *rows = out;
 }
 
 /// Checks that interpolation parameters are finite, strictly increasing,
@@ -486,6 +696,132 @@ mod tests {
         assert!(SplineMap::interpolated(&[0.1, 1.0]).is_err());
         assert!(SplineMap::interpolated(&[0.0, 0.9]).is_err());
         assert!(SplineMap::interpolated(&[0.0, f64::NAN, 1.0]).is_err());
+    }
+
+    /// The uniform periodic B-spline of degree `p` on the closed polygon
+    /// `pts` at `t ∈ [0, 1]`, by de Boor's algorithm on the wrapped polygon
+    /// and the integer knots (written independently of the map).
+    fn periodic_point(pts: &[DVec2], p: usize, t: f64) -> DVec2 {
+        let n = pts.len();
+        let u = p as f64 + t * n as f64;
+        let k = (u.floor() as usize).min(n + p - 1);
+        let mut d: Vec<DVec2> = (0..=p).map(|j| pts[(j + k - p) % n]).collect();
+        for r in 1..=p {
+            for j in (r..=p).rev() {
+                let i = (j + k - p) as f64;
+                let alpha = (u - i) / (p + 1 - r) as f64;
+                d[j] = d[j - 1] * (1.0 - alpha) + d[j] * alpha;
+            }
+        }
+        d[p]
+    }
+
+    fn closed_polygon() -> Vec<DVec2> {
+        vec![
+            DVec2::new(0.0, 0.0),
+            DVec2::new(3.0, -0.5),
+            DVec2::new(4.0, 2.0),
+            DVec2::new(1.5, 3.5),
+            DVec2::new(-1.0, 2.0),
+        ]
+    }
+
+    #[test]
+    fn a_periodic_control_spline_is_the_wrapped_uniform_spline() {
+        let poly = closed_polygon();
+        let mut refs = poly.clone();
+        refs.push(poly[0]);
+        for p in 2..=4 {
+            let m = SplineMap::control_periodic(refs.len(), p).unwrap();
+            assert_eq!(m.count, poly.len() + p);
+            assert!(m.kinks.is_empty());
+            for i in 0..=200 {
+                let t = i as f64 / 200.0;
+                let (w, _) = m.weights(t);
+                let c = combine(&w, &refs);
+                let e = periodic_point(&poly, p, t);
+                assert!((c - e).length() < 1e-13, "p={p} t={t}: {c} vs {e}");
+            }
+            // Closed exactly, and the parameter wraps.
+            let ctrl = m.control_points(&refs);
+            assert_eq!(ctrl[0], ctrl[ctrl.len() - 1]);
+            let (a, _) = m.weights(0.25);
+            let (b, _) = m.weights(1.25);
+            let (c, _) = m.weights(-0.75);
+            assert_eq!(a, b);
+            assert_eq!(a, c);
+        }
+    }
+
+    #[test]
+    fn periodic_splines_are_smooth_through_the_seam() {
+        let poly = closed_polygon();
+        let mut refs = poly.clone();
+        refs.push(poly[0]);
+        let params = [0.0, 0.15, 0.4, 0.55, 0.8, 1.0];
+        let maps = [
+            SplineMap::control_periodic(refs.len(), 3).unwrap(),
+            SplineMap::control_periodic(refs.len(), 2).unwrap(),
+            SplineMap::interpolated_periodic(&params).unwrap(),
+        ];
+        for (k, m) in maps.iter().enumerate() {
+            // The start, and the end of the period from its last piece (the
+            // public evaluation wraps 1 to 0).
+            let (w0, d0, dd0) = m.weights_ders(0.0, 2);
+            let (w1, d1, dd1) = m.weights_in_span(m.count - 1, 1.0, 2);
+            assert_eq!(combine(&w0, &refs), combine(&w1, &refs), "map {k}: closed");
+            let (a, b) = (combine(&d0, &refs), combine(&d1, &refs));
+            assert!(
+                (a - b).length() < 1e-12 * a.length(),
+                "map {k}: C′ {a} vs {b}"
+            );
+            // A quadratic is C1 at its knots, a cubic C2.
+            if m.degree >= 3 {
+                let (a2, b2) = (combine(&dd0, &refs), combine(&dd1, &refs));
+                assert!(
+                    (a2 - b2).length() < 1e-11 * a2.length(),
+                    "map {k}: C″ {a2} vs {b2}"
+                );
+            }
+            // A clamped spline on the same points has a corner there.
+            let open = SplineMap::control(refs.len(), 3).unwrap();
+            let (_, o0, _) = open.weights_ders(0.0, 1);
+            let (_, o1, _) = open.weights_in_span(open.count - 1, 1.0, 1);
+            let (oa, ob) = (combine(&o0, &refs), combine(&o1, &refs));
+            assert!(oa.perp_dot(ob).abs() > 0.1 * oa.length() * ob.length());
+        }
+    }
+
+    #[test]
+    fn a_periodic_interpolated_spline_passes_through_its_points() {
+        let poly = closed_polygon();
+        let mut refs = poly.clone();
+        refs.push(poly[0]);
+        let params = [0.0, 0.15, 0.4, 0.55, 0.8, 1.0];
+        let m = SplineMap::interpolated_periodic(&params).unwrap();
+        assert_eq!((m.degree, m.count, m.refs), (3, 8, 6));
+        for (t, q) in params.iter().zip(&refs) {
+            let (w, _) = m.weights(*t);
+            assert!((combine(&w, &refs) - *q).length() < 1e-13, "{t}");
+        }
+        let ctrl = m.control_points(&refs);
+        assert_eq!(ctrl[0], poly[0]);
+        assert_eq!(ctrl[ctrl.len() - 1], poly[0]);
+        // The repeated point carries no weight of its own.
+        for j in 0..m.count {
+            assert_eq!(m.control_weights(j)[poly.len()], 0.0);
+        }
+    }
+
+    #[test]
+    fn periodic_definitions_are_checked() {
+        assert!(SplineMap::control_periodic(4, 3).is_err()); // 3 points, degree 3
+        assert!(SplineMap::control_periodic(4, 2).is_ok());
+        assert!(SplineMap::control_periodic(5, 1).is_err());
+        assert!(SplineMap::control_periodic(9, 6).is_err());
+        assert!(SplineMap::interpolated_periodic(&[0.0, 0.5, 1.0]).is_err());
+        assert!(SplineMap::interpolated_periodic(&[0.0, 0.3, 0.6, 1.0]).is_ok());
+        assert!(SplineMap::interpolated_periodic(&[0.0, 0.6, 0.3, 1.0]).is_err());
     }
 
     #[test]

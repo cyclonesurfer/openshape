@@ -365,7 +365,9 @@ impl SketchDef {
             SketchEdit::SetSplineParams { entity, params } => {
                 let id = r(*entity);
                 match &mut self.entity_mut(id)?.geometry {
-                    Geometry::InterpolatedSpline { through, params: p } => {
+                    Geometry::InterpolatedSpline {
+                        through, params: p, ..
+                    } => {
                         check_params(params, through.len())?;
                         *p = params.clone();
                         Ok(())
@@ -486,7 +488,11 @@ fn check_geometry(g: &Geometry<SketchId>) -> Result<(), String> {
         {
             Err("an arc needs three distinct points".into())
         }
-        Geometry::ControlSpline { control, degree } => {
+        Geometry::ControlSpline {
+            control,
+            degree,
+            periodic: false,
+        } => {
             if !(1..=5).contains(degree) {
                 Err("spline degree must be 1 to 5".into())
             } else if control.len() < *degree as usize + 1 {
@@ -498,7 +504,40 @@ fn check_geometry(g: &Geometry<SketchId>) -> Result<(), String> {
                 Ok(())
             }
         }
-        Geometry::InterpolatedSpline { through, params } => check_params(params, through.len()),
+        // A smooth closed spline ends on its first point (ADR 0016).
+        Geometry::ControlSpline {
+            control,
+            degree,
+            periodic: true,
+        } => {
+            let distinct = control.len().saturating_sub(1);
+            if !(2..=5).contains(degree) {
+                Err("a smooth closed spline has degree 2 to 5".into())
+            } else if control.first() != control.last() {
+                Err("a smooth closed spline must end on its first point".into())
+            } else if distinct < *degree as usize + 1 {
+                Err(format!(
+                    "a smooth closed spline of degree {degree} needs {} distinct control points",
+                    degree + 1
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Geometry::InterpolatedSpline {
+            through,
+            params,
+            periodic,
+        } => {
+            check_params(params, through.len())?;
+            if *periodic && through.first() != through.last() {
+                Err("a smooth closed spline must end on its first point".into())
+            } else if *periodic && through.len() < 4 {
+                Err("a smooth closed spline needs at least 3 distinct points".into())
+            } else {
+                Ok(())
+            }
+        }
         Geometry::Ellipse {
             center,
             major,

@@ -694,6 +694,69 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     t.app.camera.target = DVec3::new(-0.011, 0.002, 0.002);
     t.app.camera.distance *= 0.4;
     save("28-text-extruded.png", &t.settle()?)?;
+
+    // Smooth closed splines (ADR 0016) in a new part: a control-point
+    // spline with the pointer back on its first point (the closed curve
+    // previewed), both kinds closed, then both extruded.
+    let mut model = Model::new();
+    let sketch = model.add_sketch(PlaneRef::Top);
+    let mut c = AppDriver::new(size, 1.0, model)?;
+    c.app.enter_sketch(sketch);
+    c.settle()?;
+    c.app
+        .run(crate::commands::Command::Tool(Tool::ControlSpline));
+    let cam = [
+        (-70.0, -10.0),
+        (-62.0, 34.0),
+        (-30.0, 40.0),
+        (-12.0, 8.0),
+        (-26.0, -30.0),
+    ];
+    for (x, y) in cam {
+        c.click(on_plane(&c, x, y)?)?;
+    }
+    c.hover(on_plane(&c, cam[0].0, cam[0].1)?)?;
+    save("29-closed-spline-closing.png", &c.settle()?)?;
+    c.click(on_plane(&c, cam[0].0, cam[0].1)?)?;
+    c.app.run(crate::commands::Command::Tool(Tool::Spline));
+    let blob = [(20.0, -20.0), (44.0, 30.0), (70.0, 18.0), (64.0, -24.0)];
+    for (x, y) in blob {
+        c.click(on_plane(&c, x, y)?)?;
+    }
+    c.click(on_plane(&c, blob[0].0, blob[0].1)?)?;
+    c.app.run(crate::commands::Command::Tool(Tool::Select));
+    c.hover(on_plane(&c, 90.0, -60.0)?)?;
+    save("30-closed-splines.png", &c.settle()?)?;
+    c.app.run(crate::commands::Command::FinishSketch);
+    let inside: Vec<DVec2> = c
+        .app
+        .model()
+        .sketch_result(sketch)
+        .and_then(|r| r.regions.as_ref().ok())
+        .map(|r| {
+            r.arrangement
+                .regions
+                .iter()
+                .map(|r| r.interior_point)
+                .collect()
+        })
+        .unwrap_or_default();
+    if inside.len() != 2 {
+        return Err(format!("expected 2 closed regions, found {}", inside.len()));
+    }
+    let view = ScreenMap::new(&c.app.camera, Frame::top(), c.app.layout().graphics);
+    let mut pick = ProfilePick::new(SweepKind::Extrude);
+    for p in inside {
+        let at = view.to_screen(p).ok_or("a region is off screen")?;
+        pick.click(c.app.model(), &view, at);
+    }
+    pick.distance = "12".into();
+    let solids = pick.build()?;
+    c.app.model_mut().add_feature("Extrude 1", solids);
+    c.app
+        .set_view(openshape_ui_kit::view_cube::CubeTarget::HOME);
+    c.app.camera.distance *= 0.6;
+    save("31-closed-splines-extruded.png", &c.settle()?)?;
     Ok(written)
 }
 

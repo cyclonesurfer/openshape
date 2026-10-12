@@ -121,7 +121,11 @@ fn every_kind() -> (Sketch<u32>, Vec<u32>, u32, u32) {
         .iter()
         .map(|&(x, y)| b.point(x, y))
         .collect();
-    let control = b.entity(Geometry::ControlSpline { control, degree: 2 });
+    let control = b.entity(Geometry::ControlSpline {
+        control,
+        degree: 2,
+        periodic: false,
+    });
     let through: Vec<u32> = [(1.5, 3.0), (1.9, 3.3), (2.3, 3.1)]
         .iter()
         .map(|&(x, y)| b.point(x, y))
@@ -129,6 +133,7 @@ fn every_kind() -> (Sketch<u32>, Vec<u32>, u32, u32) {
     let through = b.entity(Geometry::InterpolatedSpline {
         through,
         params: vec![0.0, 0.4, 1.0],
+        periodic: false,
     });
     (
         b.build(),

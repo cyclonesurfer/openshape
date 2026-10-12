@@ -514,14 +514,23 @@ impl<K: SketchKey> Index<K> {
                     rhos.push(*rho);
                     EntKind::Conic(Cnc { p0, p1, p2, k })
                 }
-                Geometry::ControlSpline { control, degree } => {
+                Geometry::ControlSpline {
+                    control,
+                    degree,
+                    periodic,
+                } => {
                     let pts = control
                         .iter()
                         .map(|k| point(id, k, "control point"))
                         .collect::<Result<Vec<_>, _>>()?;
                     let deg = usize::try_from(*degree).unwrap_or(usize::MAX);
-                    let map =
-                        SplineMap::control(pts.len(), deg).map_err(|err| spline_err(id, err))?;
+                    let map = if *periodic {
+                        closes_on_first(id, &pts)?;
+                        SplineMap::control_periodic(pts.len(), deg)
+                    } else {
+                        SplineMap::control(pts.len(), deg)
+                    }
+                    .map_err(|err| spline_err(id, err))?;
                     splines.push(SplineEnt {
                         map,
                         points: pts,
@@ -529,7 +538,11 @@ impl<K: SketchKey> Index<K> {
                     });
                     EntKind::Spline(splines.len() - 1)
                 }
-                Geometry::InterpolatedSpline { through, params } => {
+                Geometry::InterpolatedSpline {
+                    through,
+                    params,
+                    periodic,
+                } => {
                     let pts = through
                         .iter()
                         .map(|k| point(id, k, "through point"))
@@ -546,7 +559,13 @@ impl<K: SketchKey> Index<K> {
                             pts.len()
                         )));
                     }
-                    let map = SplineMap::interpolated(params).map_err(|err| spline_err(id, err))?;
+                    let map = if *periodic {
+                        closes_on_first(id, &pts)?;
+                        SplineMap::interpolated_periodic(params)
+                    } else {
+                        SplineMap::interpolated(params)
+                    }
+                    .map_err(|err| spline_err(id, err))?;
                     splines.push(SplineEnt {
                         map,
                         points: pts,
@@ -1297,6 +1316,7 @@ impl<K: SketchKey> Index<K> {
                 (EntKind::Spline(a), EntKind::Spline(b)) => {
                     let (a, b) = (&self.splines[a], &self.splines[b]);
                     if a.map.degree != b.map.degree
+                        || a.map.periodic != b.map.periodic
                         || a.points.len() != b.points.len()
                         || a.params != b.params
                     {
@@ -1412,6 +1432,9 @@ impl<K: SketchKey> Index<K> {
                 cn,
                 start: end(cn.p0, cn.p2)?,
             },
+            EntKind::Spline(s) if self.splines[s].map.periodic => {
+                return Err(closed_refused(id, curve))
+            }
             EntKind::Spline(s) => {
                 let def = &self.splines[s];
                 if def.map.degree < 2 {
@@ -1488,6 +1511,7 @@ impl<K: SketchKey> Index<K> {
                 ))),
                 (false, false) => Err(not_end()),
             },
+            EntKind::Spline(s) if self.splines[s].map.periodic => Err(closed_refused(id, curve)),
             EntKind::Spline(s) => {
                 let pts = &self.splines[s].points;
                 let first = at(pts[0]);
@@ -1649,6 +1673,25 @@ fn conic_tangency(id: &dyn Debug) -> SolveError {
 fn text_refused(id: &dyn Debug, curve: &dyn Debug) -> SolveError {
     invalid(format!(
         "constraint {id:?}: {curve:?} is text; constrain its box's corners or lines instead"
+    ))
+}
+
+/// Checks that a smooth closed spline's point list ends on its first
+/// point (ADR 0016).
+fn closes_on_first<K: SketchKey>(id: &K, pts: &[usize]) -> Result<(), SolveError> {
+    if pts.len() < 2 || pts[0] != pts[pts.len() - 1] {
+        return Err(invalid(format!(
+            "entity {id:?}: a smooth closed spline must end on its first point"
+        )));
+    }
+    Ok(())
+}
+
+/// A tangency or curvature joint at a smooth closed spline, which has no
+/// end points (ADR 0016).
+fn closed_refused(id: &dyn Debug, curve: &dyn Debug) -> SolveError {
+    invalid(format!(
+        "constraint {id:?}: {curve:?} is a smooth closed spline and has no end points"
     ))
 }
 

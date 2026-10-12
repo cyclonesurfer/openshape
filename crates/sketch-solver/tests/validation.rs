@@ -100,6 +100,7 @@ fn base() -> Base {
     let spline = b.entity(Geometry::ControlSpline {
         control: ctrl.clone(),
         degree: 3,
+        periodic: false,
     });
     let p = b.point(5.0, -5.0);
     Base {
@@ -267,6 +268,7 @@ fn bad_entities_are_invalid() {
                 Geometry::ControlSpline {
                     control: b.ctrl.clone(),
                     degree,
+                    periodic: false,
                 },
             )
         });
@@ -278,6 +280,7 @@ fn bad_entities_are_invalid() {
             Geometry::ControlSpline {
                 control: b.ctrl[..3].to_vec(),
                 degree: 3,
+                periodic: false,
             },
         )
     });
@@ -288,6 +291,7 @@ fn bad_entities_are_invalid() {
             Geometry::ControlSpline {
                 control: vec![b.ctrl[0], b.circle, b.ctrl[2], b.ctrl[3]],
                 degree: 3,
+                periodic: false,
             },
         )
     });
@@ -297,7 +301,14 @@ fn bad_entities_are_invalid() {
     let interp = |through: Vec<u32>, params: Vec<f64>| {
         with_entity(move |b| {
             let through = through.into_iter().map(|i| b.ctrl[i as usize]).collect();
-            (b.spline, Geometry::InterpolatedSpline { through, params })
+            (
+                b.spline,
+                Geometry::InterpolatedSpline {
+                    through,
+                    params,
+                    periodic: false,
+                },
+            )
         })
     };
     expect_invalid(&interp(vec![0], vec![0.0]), "at least 2 points");
@@ -559,6 +570,7 @@ fn bad_references_are_invalid() {
     let closed = bs.b.entity(Geometry::ControlSpline {
         control: vec![pts[0], pts[1], pts[2], pts[0]],
         degree: 2,
+        periodic: false,
     });
     let (l, ls, _) = bs.b.line(0.0, -2.0, -1.0, -2.0);
     bs.b.coincident(ls, pts[0]);
@@ -881,7 +893,15 @@ fn garbage(seed: u64) -> Sketch<u32> {
                 };
                 let control: Vec<u32> = (0..n).map(|_| j.pick(&points, n_pts)).collect();
                 let e = vec![control[0], control[n - 1]];
-                (Geometry::ControlSpline { control, degree }, 2, e)
+                (
+                    Geometry::ControlSpline {
+                        control,
+                        degree,
+                        periodic: j.r.chance(0.25),
+                    },
+                    2,
+                    e,
+                )
             }
             10 => {
                 let (center, major) = j.pair(&points, n_pts);
@@ -939,7 +959,15 @@ fn garbage(seed: u64) -> Sketch<u32> {
                 let m = if j.r.chance(j.h) { n + 1 } else { n };
                 let through: Vec<u32> = (0..m).map(|_| j.pick(&points, n_pts)).collect();
                 let e = vec![through[0], through[m - 1]];
-                (Geometry::InterpolatedSpline { through, params }, 2, e)
+                (
+                    Geometry::InterpolatedSpline {
+                        through,
+                        params,
+                        periodic: j.r.chance(0.25),
+                    },
+                    2,
+                    e,
+                )
             }
         };
         let id = key(&mut j, &mut next);
