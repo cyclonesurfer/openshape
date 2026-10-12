@@ -108,6 +108,8 @@ impl OpenShapeApp {
             Some(Selection::Part(f) | Selection::Feature(f)) => Some(f),
             _ => None,
         };
+        // An open dialog's feature shows as selected.
+        let previewed = self.model.preview().map(|p| p.feature());
         let mut out: Vec<MeshData> = self
             .model
             .meshes()
@@ -115,7 +117,7 @@ impl OpenShapeApp {
             .zip(self.model.mesh_owners())
             .filter(|(_, f)| !self.hidden_parts.contains(f))
             .map(|(m, f)| {
-                if Some(*f) == selected {
+                if Some(*f) == selected || Some(*f) == previewed {
                     MeshData {
                         color: tint(m.color, self.theme.selection, SELECTION_TINT),
                         edge_color: Some(rgba(self.theme.selection)),
@@ -203,7 +205,7 @@ impl OpenShapeApp {
             .iter()
             .copied()
             .zip(self.model.meshes())
-            .filter(|(f, _)| !self.hidden_parts.contains(f))
+            .filter(|(f, _)| !self.hidden_parts.contains(f) && *f != crate::PREVIEW_FEATURE)
             .collect();
         let part = pick_mesh(visible.iter().map(|(_, m)| *m), o, d).map(|(i, t)| (visible[i].0, t));
         let h = self.plane_half();

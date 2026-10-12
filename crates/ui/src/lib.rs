@@ -78,6 +78,35 @@ pub fn to_mesh_data(mesh: &BodyMesh, color: [f32; 4]) -> MeshData {
     out
 }
 
+/// The id under which a new feature's preview regenerates ([`FeaturePreview`]):
+/// no op ever gets it (the largest Lamport time of the largest replica).
+pub const PREVIEW_FEATURE: FeatureId = FeatureId(OpId {
+    lamport: u64::MAX,
+    replica: ReplicaId(u64::MAX),
+});
+
+/// What an open feature dialog would make, shown in the regenerated model
+/// without being in the document (ADR 0013): view state, like the edit
+/// point, so nothing is recorded until the dialog is accepted.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FeaturePreview {
+    /// A new feature, regenerated as [`PREVIEW_FEATURE`] where
+    /// [`Model::add_feature`] would insert it (at the rollback bar).
+    New(Feature),
+    /// New values for an existing feature.
+    Edit(FeatureId, Feature),
+}
+
+impl FeaturePreview {
+    /// The feature whose regeneration shows the preview.
+    pub fn feature(&self) -> FeatureId {
+        match self {
+            FeaturePreview::New(_) => PREVIEW_FEATURE,
+            FeaturePreview::Edit(id, _) => *id,
+        }
+    }
+}
+
 /// The application model: document session, kernel, and regenerated parts.
 pub struct Model {
     session: Session,
@@ -91,6 +120,8 @@ pub struct Model {
     /// The feature being edited: the model shows the history up to and
     /// including it.
     edit_point: Option<FeatureId>,
+    /// An open dialog's feature, shown as if applied.
+    preview: Option<FeaturePreview>,
     /// Incremented whenever the display meshes change.
     pub generation: u64,
 }
@@ -120,6 +151,7 @@ impl Model {
                 max_angle: 12f64.to_radians(),
             },
             edit_point: None,
+            preview: None,
             generation: 0,
         };
         m.regenerate();
@@ -139,10 +171,18 @@ impl Model {
         std::fs::write(path, bytes).map_err(|e| e.to_string())
     }
 
-    /// Exports all parts as binary STL in millimetres.
+    /// Exports the document's parts (the history up to the rollback bar,
+    /// not an editor's view of it) as binary STL in millimetres.
     pub fn export_stl(&self, path: &Path) -> Result<(), String> {
+        let fresh;
+        let result = if self.edit_point.is_none() && self.preview.is_none() {
+            &self.result
+        } else {
+            fresh = regenerate(&self.kernel, self.studio());
+            &fresh
+        };
         let mut meshes = Vec::new();
-        for b in &self.result.bodies {
+        for b in &result.bodies {
             meshes.push(
                 self.kernel
                     .tessellate(&b.body, &self.tessellation)
@@ -481,15 +521,52 @@ impl Model {
     /// document's bar does not move); `None` shows the history up to the
     /// rollback bar again. Regenerates when this changes.
     pub fn set_edit_point(&mut self, feature: Option<FeatureId>) {
-        if self.edit_point != feature {
-            self.edit_point = feature;
-            self.regenerate();
-        }
+        self.set_view(feature, self.preview.clone());
     }
 
     /// The feature being edited, see [`Model::set_edit_point`].
     pub fn edit_point(&self) -> Option<FeatureId> {
         self.edit_point
+    }
+
+    /// Shows an open dialog's feature as if it were applied (`None`: as
+    /// the document has it). Regenerates when this changes; returns whether
+    /// it did.
+    pub fn set_preview(&mut self, preview: Option<FeaturePreview>) -> bool {
+        self.set_view(self.edit_point, preview)
+    }
+
+    /// Sets both the edit point ([`Model::set_edit_point`]) and the
+    /// preview ([`Model::set_preview`]), regenerating once if either
+    /// changed; returns whether it did.
+    pub fn set_view(
+        &mut self,
+        edit_point: Option<FeatureId>,
+        preview: Option<FeaturePreview>,
+    ) -> bool {
+        if self.edit_point == edit_point && self.preview == preview {
+            return false;
+        }
+        self.edit_point = edit_point;
+        self.preview = preview;
+        self.regenerate();
+        true
+    }
+
+    /// Forgets the preview without regenerating, for a dialog being
+    /// accepted: the op it applies regenerates the model.
+    pub fn clear_preview(&mut self) {
+        self.preview = None;
+    }
+
+    /// The preview shown, see [`Model::set_preview`].
+    pub fn preview(&self) -> Option<&FeaturePreview> {
+        self.preview.as_ref()
+    }
+
+    /// How the previewed feature regenerated.
+    pub fn preview_status(&self) -> Option<&FeatureStatus> {
+        self.status(self.preview.as_ref()?.feature())
     }
 
     /// Regenerates all parts and rebuilds display meshes.
@@ -502,6 +579,27 @@ impl Model {
             {
                 studio.rollback = InsertAt::After(f);
             }
+        }
+        match &self.preview {
+            Some(FeaturePreview::New(feature)) => {
+                let at = studio.rollback_index();
+                studio.features.insert(
+                    at,
+                    FeatureEntry {
+                        id: PREVIEW_FEATURE,
+                        name: String::new(),
+                        suppressed: false,
+                        feature: feature.clone(),
+                    },
+                );
+                studio.rollback = InsertAt::After(PREVIEW_FEATURE);
+            }
+            Some(FeaturePreview::Edit(id, feature)) => {
+                if let Some(i) = studio.index_of(*id) {
+                    studio.features[i].feature = feature.clone();
+                }
+            }
+            None => {}
         }
         self.result = regenerate(&self.kernel, &studio);
         let mut meshes = Vec::new();

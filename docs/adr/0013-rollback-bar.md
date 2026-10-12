@@ -70,3 +70,10 @@ concurrent deletes of the last two tabs keep one.
   the document's bar does not move, nothing is recorded, and closing the
   editor shows the whole active history again. A toggle to preview the
   final result while editing is not implemented yet.
+* An open feature dialog's values are previewed live the same way, as view
+  state (`Model::set_preview`): the edited feature regenerates with the
+  dialog's definition, or a new one is inserted at the bar under a
+  reserved id (`PREVIEW_FEATURE`) that no op can have. Nothing is recorded
+  until the dialog is accepted, Cancel leaves no trace in the log, and STL
+  export regenerates the document itself when an edit point or preview is
+  shown, so an unaccepted value is never exported.

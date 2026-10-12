@@ -8,6 +8,7 @@ use egui::{
 };
 use openshape_core_model::sketch::DistanceKind;
 use openshape_core_model::ModelOp;
+use openshape_features::FeatureStatus;
 use openshape_ui_kit::palette::{PaletteEntry, PaletteOutcome};
 use openshape_ui_kit::{icon_button, paint_icon, Icon, Theme};
 
@@ -120,6 +121,14 @@ fn field(ui: &mut Ui, theme: &Theme, label: &str, text: &mut String, unit: &str)
 }
 
 impl OpenShapeApp {
+    /// Why the open dialog's previewed feature does not regenerate.
+    fn preview_failure(&self) -> Option<String> {
+        match self.model.preview_status()? {
+            FeatureStatus::Failed(e) => Some(e.clone()),
+            _ => None,
+        }
+    }
+
     fn dialog_anchor(&self) -> Pos2 {
         self.layout.graphics.min + Vec2::new(12.0, 12.0)
     }
@@ -142,6 +151,10 @@ impl OpenShapeApp {
             None => d.template.label().to_string(),
         };
         let icon = Command::Template(d.template).icon().unwrap_or(Icon::Box);
+        let live = match d.build() {
+            Ok(_) => self.preview_failure(),
+            Err(e) => Some(e),
+        };
         let (mut action, rect) = floating_dialog(
             ctx,
             &theme,
@@ -169,7 +182,7 @@ impl OpenShapeApp {
                             }
                         }
                     });
-                if let Some(e) = &d.error {
+                if let Some(e) = live.as_ref().or(d.error.as_ref()) {
                     ui.add_space(4.0);
                     ui.colored_label(theme.danger, e);
                 }
@@ -182,6 +195,7 @@ impl OpenShapeApp {
         match action {
             DialogAction::Accept => match d.build() {
                 Ok(feature) => {
+                    self.model.clear_preview();
                     let element = self.model.studio_id();
                     match d.editing {
                         Some(id) => self.actions.push(Action::Apply(ModelOp::EditFeature {
@@ -191,7 +205,11 @@ impl OpenShapeApp {
                         })),
                         None => {
                             let name = self.model.next_name(feature.type_name());
-                            let first = self.model.meshes().is_empty();
+                            let first = self
+                                .model
+                                .mesh_owners()
+                                .iter()
+                                .all(|f| *f == crate::PREVIEW_FEATURE);
                             let id = self.model.add_feature(&name, feature);
                             self.selection = Some(Selection::Feature(id));
                             self.fit_pending = first;
@@ -222,6 +240,11 @@ impl OpenShapeApp {
             SweepKind::Revolve => Icon::Revolve,
         };
         let picked = p.picked(&self.model).len();
+        let live = match p.build() {
+            Ok(_) => self.preview_failure(),
+            Err(e) if p.ready() => Some(e),
+            Err(_) => None,
+        };
         let (action, rect) = floating_dialog(
             ctx,
             &theme,
@@ -282,7 +305,7 @@ impl OpenShapeApp {
                             field(ui, &theme, "Angle", &mut p.angle, "°");
                         }
                     });
-                if let Some(e) = &p.error {
+                if let Some(e) = live.as_ref().or(p.error.as_ref()) {
                     ui.add_space(4.0);
                     ui.colored_label(theme.danger, e);
                 }
@@ -297,6 +320,7 @@ impl OpenShapeApp {
         match action {
             DialogAction::Accept => match p.build() {
                 Ok(feature) => {
+                    self.model.clear_preview();
                     let element = self.model.studio_id();
                     match p.editing {
                         Some(id) => self.actions.push(Action::Apply(ModelOp::EditFeature {
@@ -306,7 +330,11 @@ impl OpenShapeApp {
                         })),
                         None => {
                             let name = self.model.next_name(feature.type_name());
-                            let first = self.model.meshes().is_empty();
+                            let first = self
+                                .model
+                                .mesh_owners()
+                                .iter()
+                                .all(|f| *f == crate::PREVIEW_FEATURE);
                             let id = self.model.add_feature(&name, feature);
                             self.selection = Some(Selection::Feature(id));
                             self.fit_pending = first;

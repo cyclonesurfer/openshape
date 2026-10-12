@@ -8,9 +8,9 @@ use openshape_app::app::Selection;
 use openshape_app::commands::{Command, Mode};
 use openshape_app::screenshots::{demo_model, AppDriver};
 use openshape_app::sketch_mode::{annotations, normal_view, ScreenMap, SketchDisplay};
-use openshape_app::Model;
-use openshape_core_model::{DVec3, FeatureId, InsertAt, ModelOp};
-use openshape_kernel::Frame;
+use openshape_app::{Model, PREVIEW_FEATURE};
+use openshape_core_model::{DVec3, Feature, FeatureId, InsertAt, ModelOp};
+use openshape_kernel::{Frame, Kernel};
 use openshape_render::{Camera, Projection, RgbaImage};
 
 const SIZE: [u32; 2] = [1280, 800];
@@ -474,6 +474,82 @@ fn dragging_a_dimension_label_in_the_viewport() {
     assert!(d.app.enabled(Command::ResetLabels));
     d.app.run(Command::ResetLabels);
     assert!(d.app.model().sketch_def(sketch).unwrap().labels.is_empty());
+}
+
+/// The volume of the body `feature` made, as regenerated now.
+fn volume(d: &AppDriver, feature: FeatureId) -> f64 {
+    let m = d.app.model();
+    let b = m
+        .bodies()
+        .bodies
+        .iter()
+        .find(|b| b.feature == feature)
+        .expect("the feature made a body");
+    m.kernel().mass_properties(&b.body, 1e-9).unwrap().volume
+}
+
+#[test]
+fn a_new_feature_dialog_previews_its_values_live() {
+    use openshape_app::dialogs::Template;
+    let mut d = driver(Model::new());
+    let ops = d.app.model().session().log().len();
+    d.app.run(Command::Template(Template::Box));
+    d.frame().unwrap();
+    // Shown as soon as the dialog opens, with its default values.
+    assert_eq!(d.app.model().mesh_owners(), &[PREVIEW_FEATURE]);
+    assert!((volume(&d, PREVIEW_FEATURE) - 40e-3 * 30e-3 * 20e-3).abs() < 1e-12);
+    // One frame after a value changes, the preview has it.
+    d.app.feature_dialog_mut().unwrap().fields[0].text = "80 mm".into();
+    d.frame().unwrap();
+    assert!((volume(&d, PREVIEW_FEATURE) - 80e-3 * 30e-3 * 20e-3).abs() < 1e-12);
+    // A value that does not parse shows nothing new.
+    d.app.feature_dialog_mut().unwrap().fields[1].text = "30 deg".into();
+    d.frame().unwrap();
+    assert!(d.app.model().meshes().is_empty());
+    assert_eq!(d.app.model().session().log().len(), ops, "nothing recorded");
+    // Cancelling leaves no trace.
+    d.key(Key::Escape, Modifiers::NONE).unwrap();
+    d.settle().unwrap();
+    assert!(d.app.feature_dialog().is_none());
+    assert!(d.app.model().meshes().is_empty());
+    assert_eq!(d.app.model().session().log().len(), ops);
+    // Accepting makes the feature the preview showed.
+    d.app.run(Command::Template(Template::Box));
+    d.frame().unwrap();
+    d.app.feature_dialog_mut().unwrap().fields[2].text = "5 mm".into();
+    d.frame().unwrap();
+    d.key(Key::Enter, Modifiers::NONE).unwrap();
+    d.settle().unwrap();
+    let ids = feature_ids(&d);
+    assert_eq!(ids.len(), 1);
+    assert_eq!(d.app.model().mesh_owners(), &[ids[0]]);
+    assert!(d.app.model().preview().is_none());
+    assert!((volume(&d, ids[0]) - 40e-3 * 30e-3 * 5e-3).abs() < 1e-12);
+}
+
+#[test]
+fn editing_an_extrude_previews_the_new_depth_until_cancelled() {
+    let (mut d, _, extrude) = demo();
+    let before = d.app.model().studio().clone();
+    let ops = d.app.model().session().log().len();
+    let v = volume(&d, extrude);
+    d.app.edit_feature(extrude);
+    d.frame().unwrap();
+    let depth = match &d.app.model().feature(extrude).unwrap().feature {
+        Feature::Extrude { distance, .. } => *distance,
+        f => panic!("{f:?}"),
+    };
+    d.app.profile_pick_mut().unwrap().distance = format!("{}", depth * 2e3);
+    d.frame().unwrap();
+    assert!(
+        (volume(&d, extrude) - 2.0 * v).abs() < 1e-9 * v,
+        "previewed"
+    );
+    assert_eq!(d.app.model().studio(), &before, "the document is unchanged");
+    d.key(Key::Escape, Modifiers::NONE).unwrap();
+    d.settle().unwrap();
+    assert!((volume(&d, extrude) - v).abs() < 1e-12);
+    assert_eq!(d.app.model().session().log().len(), ops);
 }
 
 #[test]

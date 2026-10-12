@@ -84,7 +84,11 @@ application shell done; sketch editing tools next.
     sketches and planes), and messages;
   - floating feature dialogs with accept and cancel in their header; Enter
     accepts, Escape cancels; editing a feature shows the history up to it
-    and greys the features after it (ADR 0013);
+    and greys the features after it (ADR 0013); the dialog's values are
+    previewed live (the feature regenerated as if applied, highlighted, a
+    regeneration failure shown in the dialog), with nothing recorded until
+    it is accepted, and STL export always writes the document, never an
+    editor's view of it;
   - element tabs: add, switch, rename (double-click), delete;
   - right-drag orbits, middle-drag or Ctrl+right-drag pans, the wheel
     zooms, in both Part Studio and sketch mode.
@@ -269,8 +273,8 @@ application shell done; sketch editing tools next.
   curves yet), and splines can be trimmed only whole: their pieces are not
   exact splines of the sketch's two kinds (§7.5).
 - Shell gaps: features reorder with Move up/down but not by dragging rows;
-  feature dialogs do not preview the result live, and there is
-  no toggle to see the final model while editing; parts highlight when
+  there is no toggle to see the final model while editing, and a
+  new feature's preview is not listed in the feature list; parts highlight when
   selected but not on hover; there is no box selection of parts; shortcuts
   are not remappable; only the light theme exists; File > Open and Save use
   a text path prompt, not a native file picker.
@@ -300,7 +304,10 @@ application shell done; sketch editing tools next.
 
 ## Next steps
 
-1. Live preview in feature dialogs.
+1. The rest of the Phase 2 sketcher that needs no faces: ellipses and
+   elliptical arcs, control-point splines, conics, transform (move, rotate,
+   scale a selection), the curvature constraint, text. Project/convert,
+   intersection curves and pierce wait for Phase 3 faces.
 2. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.
 3. Phase 3 groundwork: design notes for curve/surface intersection, booleans

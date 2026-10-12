@@ -33,7 +33,7 @@ item is delivered in the phase noted.
 - [x] Constraint solver (Newton/LM with DOF analysis, over/under-constraint diagnostics; design note 0005)
 - [x] Property tests over random constraint systems; fuzzing (constructive and garbage-input proptests)
 - [x] Region detection from arbitrary sketch curves (intersections) feeding extrude/revolve (design note 0006)
-- [ ] Sketch tools and constraints (see §2 below; core set done, editing tools pending)
+- [ ] Sketch tools and constraints (see §2 below; core set and editing tools done; ellipses, conics, control-point splines, transform, text and curvature pending; project/convert, intersection curves and pierce need Phase 3 faces)
 - [x] Application shell in the common parametric-CAD layout with our own look (ADR 0012), driven end to end by offscreen UI tests
 
 ## Phase 3 — Booleans and core features
@@ -98,7 +98,7 @@ Sketch tools
 Sketch constraints
 - [ ] Coincident ✔, concentric ✔, parallel ✔, perpendicular ✔, horizontal ✔, vertical ✔, tangent ✔, equal ✔, midpoint ✔, normal ✔, pierce, symmetric ✔, fix ✔, curvature
 - [x] Dimensions: linear (aligned, horizontal, vertical), angular, radial, diameter; typed with units
-- [ ] Inference while drawing (horizontal/vertical, point, curve and origin snaps ✔; parallel, perpendicular, tangent pending); colour-coded DOF state ✔
+- [x] Inference while drawing (horizontal/vertical, parallel, perpendicular, tangent; point, curve and origin snaps); colour-coded DOF state
 
 Features
 - [ ] Extrude: blind ✔, symmetric ✔, from picked sketch regions ✔, up-to, through-all, draft, second direction, thin

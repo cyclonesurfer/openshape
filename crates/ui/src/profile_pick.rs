@@ -204,6 +204,14 @@ impl ProfilePick {
         }
     }
 
+    /// True once the profile (and a revolve's axis) is picked: the dialog's
+    /// fields then make a feature or say why not.
+    pub fn ready(&self) -> bool {
+        self.sketch.is_some()
+            && !self.regions.is_empty()
+            && (self.kind == SweepKind::Extrude || self.axis.is_some())
+    }
+
     /// The feature the dialog describes.
     pub fn build(&self) -> Result<Feature, String> {
         let sketch = self.sketch.ok_or("Pick at least one sketch region")?;

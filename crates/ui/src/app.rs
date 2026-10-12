@@ -26,7 +26,7 @@ use crate::graphics::Viewport;
 use crate::planes::StdPlane;
 use crate::profile_pick::{ProfilePick, SweepKind};
 use crate::sketch_mode::{normal_view, SketchDisplay, SketchEditor, Tool};
-use crate::Model;
+use crate::{FeaturePreview, Model};
 
 /// An axis-aligned box `(min, max)` in model space.
 pub(crate) type Bounds = ([f32; 3], [f32; 3]);
@@ -335,6 +335,11 @@ impl OpenShapeApp {
         self.dialog.as_ref()
     }
 
+    /// The open template dialog, for scripted edits.
+    pub fn feature_dialog_mut(&mut self) -> Option<&mut FeatureDialog> {
+        self.dialog.as_mut()
+    }
+
     /// True while the command palette is open.
     pub fn palette_open(&self) -> bool {
         self.palette.is_some()
@@ -555,10 +560,27 @@ impl OpenShapeApp {
             .or(self.dialog.as_ref().and_then(|d| d.editing))
     }
 
-    /// Makes the model show the history up to the edited feature.
-    fn sync_edit_point(&mut self) {
+    /// What the open feature dialog would make, while its values build a
+    /// feature.
+    pub fn dialog_preview(&self) -> Option<FeaturePreview> {
+        let (editing, built) = match (&self.dialog, &self.pick) {
+            (Some(d), _) => (d.editing, d.build()),
+            (None, Some(p)) => (p.editing, p.build()),
+            (None, None) => return None,
+        };
+        let feature = built.ok()?;
+        Some(match editing {
+            Some(id) => FeaturePreview::Edit(id, feature),
+            None => FeaturePreview::New(feature),
+        })
+    }
+
+    /// Makes the model show the history up to the edited feature, with the
+    /// open dialog's feature as if applied; returns whether it changed.
+    fn sync_edit_point(&mut self) -> bool {
         let point = self.editing();
-        self.model.set_edit_point(point);
+        let preview = self.dialog_preview();
+        self.model.set_view(point, preview)
     }
 
     /// Enters sketch mode on a sketch feature, looking straight at its plane.
@@ -951,7 +973,10 @@ impl OpenShapeApp {
         self.command_palette(&ctx);
         self.floating_dialogs(&ctx);
         self.apply_actions();
-        self.sync_edit_point();
+        // The view was drawn before the dialogs changed: draw it again.
+        if self.sync_edit_point() {
+            ctx.request_repaint();
+        }
     }
 }
 

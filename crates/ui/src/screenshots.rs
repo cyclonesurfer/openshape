@@ -441,6 +441,15 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     d.hover(on_plane(&d, 120.0, -80.0)?)?;
     save("15-placed-labels.png", &d.settle()?)?;
     d.app.run(crate::commands::Command::CancelSketch);
+    // Editing the extrude: a new depth typed and previewed before OK.
+    d.app.edit_feature(extrude);
+    if let Some(p) = d.app.profile_pick_mut() {
+        p.distance = "30".into();
+    }
+    d.app
+        .set_view(openshape_ui_kit::view_cube::CubeTarget::HOME);
+    save("16-extrude-preview.png", &d.settle()?)?;
+    d.key(Key::Escape, Modifiers::NONE)?;
     Ok(written)
 }
 
