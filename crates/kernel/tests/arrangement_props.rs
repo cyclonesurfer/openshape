@@ -19,7 +19,10 @@ fn vec2(lo: f64, hi: f64) -> impl Strategy<Value = DVec2> {
     (lo..hi, lo..hi).prop_map(|(x, y)| v(x, y))
 }
 
-/// Counter-clockwise star-shaped polygon about `c`.
+/// A polygon with vertices in angular order about `c`: star-shaped about
+/// `c` and counter-clockwise when every angular gap is under π, which
+/// jittered triangles need not be (they may leave `c` outside and run
+/// clockwise; the oracle takes either direction).
 fn star(c: DVec2, pts: &[(f64, f64)]) -> Vec<DVec2> {
     let n = pts.len();
     pts.iter()

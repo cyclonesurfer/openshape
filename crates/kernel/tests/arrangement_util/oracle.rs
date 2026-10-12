@@ -19,10 +19,11 @@ use openshape_kernel::{DVec2, ProfileCurve};
 
 use super::{circle, line};
 
-/// A simple closed shape, boundary counter-clockwise.
+/// A simple closed shape.
 #[derive(Clone, Debug)]
 pub enum Shape {
-    /// Simple polygon, counter-clockwise.
+    /// Simple polygon, in either direction ([`Shapes::new`] runs every
+    /// boundary counter-clockwise).
     Poly(Vec<DVec2>),
     /// Circle.
     Circle(DVec2, f64),
@@ -171,6 +172,22 @@ impl Shape {
         }
     }
 
+    /// The same shape with its boundary counter-clockwise.
+    fn counter_clockwise(self) -> Shape {
+        match self {
+            Shape::Poly(mut p) => {
+                let twice_area: f64 = (0..p.len())
+                    .map(|i| p[i].perp_dot(p[(i + 1) % p.len()]))
+                    .sum();
+                if twice_area < 0.0 {
+                    p.reverse();
+                }
+                Shape::Poly(p)
+            }
+            c => c,
+        }
+    }
+
     /// The shape scaled about the origin.
     pub fn scaled(&self, s: f64) -> Shape {
         match self {
@@ -201,6 +218,8 @@ pub struct Shapes {
 impl Shapes {
     /// Computes the union boundary of `shapes`.
     pub fn new(shapes: Vec<Shape>) -> Shapes {
+        // The union is traced along counter-clockwise boundaries.
+        let shapes: Vec<Shape> = shapes.into_iter().map(Shape::counter_clockwise).collect();
         struct Piece {
             e: Elem,
             t0: f64,
