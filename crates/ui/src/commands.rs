@@ -301,6 +301,7 @@ impl Command {
                 ConstraintTool::Parallel => Icon::Parallel,
                 ConstraintTool::Perpendicular => Icon::Perpendicular,
                 ConstraintTool::Tangent => Icon::Tangent,
+                ConstraintTool::Curvature => Icon::Curvature,
                 ConstraintTool::Equal => Icon::Equal,
                 ConstraintTool::Midpoint => Icon::Midpoint,
                 ConstraintTool::Concentric => Icon::Concentric,

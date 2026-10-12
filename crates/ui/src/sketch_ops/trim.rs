@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::TAU;
 
 use glam::DVec2;
-use openshape_core_model::sketch::{Constraint, Geometry, TangentKind};
+use openshape_core_model::sketch::{Constraint, Geometry};
 use openshape_core_model::{SketchData, SketchEdit, SketchId};
 use openshape_features::kernel_curve;
 use openshape_kernel::{Kernel, ProfileCurve};
@@ -635,31 +635,19 @@ impl<'a> Rewrite<'a> {
             .live()
             .filter(|c| {
                 c.constraint.referenced().contains(&p)
-                    || matches!(c.constraint, Constraint::Tangent {
-                        a, b, kind: TangentKind::AtPoint { point } }
-                        if (a == t || b == t) && self.same_point(point, p))
+                    || c.constraint.joint().is_some_and(|(a, b, point)| {
+                        (a == t || b == t) && self.same_point(point, p)
+                    })
             })
             .map(|c| (c.id, c.constraint.clone()))
             .collect();
         for (id, c) in affected {
-            match c {
-                // Two other curves tangent where they met the target stay
-                // tangent at the joint that remains.
-                Constraint::Tangent {
-                    a,
-                    b,
-                    kind: TangentKind::AtPoint { point },
-                } if point == p && a != t && b != t && !neighbours.is_empty() => {
-                    self.replace(
-                        id,
-                        Constraint::Tangent {
-                            a,
-                            b,
-                            kind: TangentKind::AtPoint {
-                                point: neighbours[0],
-                            },
-                        },
-                    );
+            match c.joint() {
+                // Two other curves tangent (or curvature continuous) where
+                // they met the target stay so at the joint that remains.
+                Some((a, b, point)) if point == p && a != t && b != t && !neighbours.is_empty() => {
+                    let moved = c.map_keys(|k| if k == p { neighbours[0] } else { k });
+                    self.replace(id, moved);
                 }
                 _ => self.drop(id),
             }
@@ -723,26 +711,26 @@ impl<'a> Rewrite<'a> {
             },
         };
         let curve = self.batch.entity(geometry, construction);
-        let moved: Vec<(SketchId, Constraint<SketchId>)> = self
-            .live()
-            .filter_map(|c| {
-                let joint = matches!(c.constraint, Constraint::Tangent {
-                    a, b, kind: TangentKind::AtPoint { point } }
-                    if (a == t || b == t) && self.same_point(point, end));
-                (joint || c.constraint.referenced().contains(&end)).then(|| {
-                    let m = c.constraint.map_keys(|k| {
-                        if k == end {
-                            new_end
-                        } else if joint && k == t {
-                            curve
-                        } else {
-                            k
-                        }
+        let moved: Vec<(SketchId, Constraint<SketchId>)> =
+            self.live()
+                .filter_map(|c| {
+                    let joint = c.constraint.joint().is_some_and(|(a, b, point)| {
+                        (a == t || b == t) && self.same_point(point, end)
                     });
-                    (c.id, m)
+                    (joint || c.constraint.referenced().contains(&end)).then(|| {
+                        let m = c.constraint.map_keys(|k| {
+                            if k == end {
+                                new_end
+                            } else if joint && k == t {
+                                curve
+                            } else {
+                                k
+                            }
+                        });
+                        (c.id, m)
+                    })
                 })
-            })
-            .collect();
+                .collect();
         for (id, m) in moved {
             self.replace(id, m);
         }
@@ -766,6 +754,7 @@ impl<'a> Rewrite<'a> {
         let tangent = |x: SketchId| {
             self.sketch.constraints.iter().any(|c| {
                 matches!(c.constraint, Constraint::Tangent { a, b, .. }
+                    | Constraint::Curvature { a, b, .. }
                     if (a == curve && b == x) || (a == x && b == curve))
             })
         };

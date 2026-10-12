@@ -125,7 +125,10 @@ zero-radius circle) is reported as `Degenerate` instead of producing NaN.
    * J Δ = −r is solved in the weighted minimum-norm least-squares sense:
      minimize ‖W^{1/2} Δ‖ among the least-squares solutions, using QR with
      column pivoting of J W^{−1/2} and a complete orthogonal decomposition.
-     Weights are 1, except for dragged points (§7). Images of derived
+     Weights are 1, except for dragged points (§7) and the points of a
+     spline held by a curvature constraint, which weigh 1e-3 and move at
+     most a quarter of the sketch size per step (design note 0010 §4.1).
+     Images of derived
      constraints (design note 0007 §9) weigh nothing: the step is the limit
      of the weighted step as their weight goes to zero, computed exactly.
      With N an orthonormal basis of the left null space of the image

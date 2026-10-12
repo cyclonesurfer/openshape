@@ -387,6 +387,106 @@ fn end_tangent(s: &Sketch<u32>, k: u32, key: u32) -> DVec2 {
     }
 }
 
+/// Which end of curve `k` is joined to point `key`: true for its start
+/// (the end that is `key` or joined to it by coincident constraints; else
+/// the nearer end).
+fn joined_at_start(s: &Sketch<u32>, key: u32, first: u32, last: u32) -> bool {
+    let joined = |q: u32| coincident_class(s, key).contains(&q);
+    match (joined(first), joined(last)) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => (pos(s, first) - pos(s, key)).length() <= (pos(s, last) - pos(s, key)).length(),
+    }
+}
+
+/// The unit tangent pointing away from the joint at point `key` along curve
+/// `k`, and the signed curvature for travel that way (positive turning
+/// left), each from its own closed form (design note 0010 §6): lines 0;
+/// arcs ±1/r; elliptical arcs `|A×B|/‖E′(θ)‖³` at the point's θ; conics
+/// from the quotient rule on the rational form; splines from the
+/// derivative control points of Piegl & Tiller eq. 3.8 applied twice.
+pub fn away_curvature(s: &Sketch<u32>, k: u32, key: u32) -> (DVec2, f64) {
+    let curv = |d1: DVec2, d2: DVec2| (d1.normalize(), d1.perp_dot(d2) / d1.length().powi(3));
+    match s.entity(k).unwrap().geometry.clone() {
+        Geometry::Line { start, end } => {
+            let (a, b) = line(s, k);
+            let d = if joined_at_start(s, key, start, end) {
+                b - a
+            } else {
+                a - b
+            };
+            (d.normalize(), 0.0)
+        }
+        Geometry::Arc { center, start, end } => {
+            let c = pos(s, center);
+            let r = (pos(s, start) - c).length();
+            let q = pos(s, key);
+            if joined_at_start(s, key, start, end) {
+                ((q - c).perp().normalize(), 1.0 / r)
+            } else {
+                (-(q - c).perp().normalize(), -1.0 / r)
+            }
+        }
+        Geometry::EllipticalArc { start, end, .. } => {
+            let (_, a, b) = ell(s, k);
+            let u = unit_frame(s, k, pos(s, key)).normalize();
+            // E′(θ) with cos θ = u.x, sin θ = u.y; the arc runs
+            // counter-clockwise, which is increasing θ when A × B > 0.
+            let mut t = b * u.x - a * u.y;
+            if a.perp_dot(b) < 0.0 {
+                t = -t;
+            }
+            let k_ccw = a.perp_dot(b).abs() / t.length().powi(3);
+            if joined_at_start(s, key, start, end) {
+                (t.normalize(), k_ccw)
+            } else {
+                (-t.normalize(), -k_ccw)
+            }
+        }
+        Geometry::Conic { start, end, .. } => {
+            let ([p0, p1, p2], rho) = cnc(s, k);
+            let w = rho / (1.0 - rho);
+            // From the joint's end: C = N/D, N = (1−t)²P₀ + 2t(1−t)wP₁ +
+            // t²P₂, D = (1−t)² + 2t(1−t)w + t², at t = 0 where D = 1:
+            // C′ = N′ − P₀D′, C″ = N″ − 2C′D′ − P₀D″.
+            let (q0, q2) = if joined_at_start(s, key, start, end) {
+                (p0, p2)
+            } else {
+                (p2, p0)
+            };
+            let (n1, n2) = (-2.0 * q0 + 2.0 * w * p1, 2.0 * q0 - 4.0 * w * p1 + 2.0 * q2);
+            let (dd1, dd2) = (2.0 * w - 2.0, 4.0 - 4.0 * w);
+            let c1 = n1 - q0 * dd1;
+            let c2 = n2 - 2.0 * c1 * dd1 - q0 * dd2;
+            curv(c1, c2)
+        }
+        Geometry::ControlSpline { .. } | Geometry::InterpolatedSpline { .. } => {
+            let ResolvedCurve::Spline {
+                degree,
+                knots,
+                points,
+            } = resolved(s, k)
+            else {
+                unreachable!()
+            };
+            let refs = s.entity(k).unwrap().geometry.referenced_points();
+            let (mut u, mut p) = (knots.clone(), points.clone());
+            if !joined_at_start(s, key, refs[0], refs[refs.len() - 1]) {
+                // The reversed curve, t ↦ 1 − t.
+                u = knots.iter().rev().map(|x| 1.0 - x).collect();
+                p.reverse();
+            }
+            // Q_i = p(P_{i+1} − P_i)/(u_{i+p+1} − u_{i+1}); C′(0) = Q₀ and
+            // C″(0) = (p − 1)(Q₁ − Q₀)/(u_{p+1} − u₂).
+            let q = |i: usize| (p[i + 1] - p[i]) * (degree as f64 / (u[i + degree + 1] - u[i + 1]));
+            let c1 = q(0);
+            let c2 = (q(1) - q(0)) * ((degree as f64 - 1.0) / (u[degree + 1] - u[2]));
+            curv(c1, c2)
+        }
+        _ => panic!("no end curvature"),
+    }
+}
+
 /// The points joined to `key` by chains of coincident constraints
 /// (including `key`).
 fn coincident_class(s: &Sketch<u32>, key: u32) -> Vec<u32> {
@@ -470,6 +570,19 @@ pub fn violation(s: &Sketch<u32>, c: &Constraint<u32>) -> (f64, bool) {
             let q = p(*a) - s0;
             let refl = s0 + d * (2.0 * q.dot(d)) - q;
             ((refl - p(*b)).length(), false)
+        }
+        Constraint::Curvature { a, b, point } => {
+            // As a length: how far the tangents away from the joint are
+            // from opposite (a smooth joint; a cusp counts as 2) times the
+            // sketch size, and the curvature mismatch for travel through
+            // the joint times the size squared, the gap it opens over the
+            // sketch.
+            let (ta, ka) = away_curvature(s, *a, *point);
+            let (tb, kb) = away_curvature(s, *b, *point);
+            let l = size(s);
+            let turn = (ta + tb).length() * l;
+            let gap = (ka + kb).abs() * l * l;
+            (turn.max(gap), false)
         }
         Constraint::Tangent { a, b, kind } => match kind {
             TangentKind::AtPoint { point } => {

@@ -133,6 +133,11 @@ fn relabel<F: Fn(u32) -> u64>(s: &Sketch<u32>, f: F) -> Sketch<u64> {
                 TangentKind::CircleCircle { internal } => TangentKind::CircleCircle { internal },
             },
         },
+        C::Curvature { a, b, point } => C::Curvature {
+            a: f(a),
+            b: f(b),
+            point: f(point),
+        },
         C::Normal { line, curve } => C::Normal {
             line: f(line),
             curve: f(curve),

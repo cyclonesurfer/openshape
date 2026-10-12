@@ -19,8 +19,8 @@ use crate::conic;
 use crate::diagnose::{conflicts, diagnose, CompDiag, FREE_TOL};
 use crate::ellipse;
 use crate::eq::{EqKind, Rhs, VecExpr};
-use crate::index::{Circ, Con, Ell, EntKind, Index, OCurve, OEq, MAX_MAGNITUDE};
-use crate::model::{Geometry, Sketch, SketchKey, RHO_MIN};
+use crate::index::{Circ, Con, CurvSide, Ell, EntKind, Index, OCurve, OEq, MAX_MAGNITUDE};
+use crate::model::{Constraint, Geometry, Sketch, SketchKey, RHO_MIN};
 use crate::newton::{
     equation_tol, solve_component, CompSystem, LengthTol, Region, RANK_TOL, REACH,
 };
@@ -37,6 +37,10 @@ const DRAG_WEIGHT: f64 = 1e6;
 /// Metric weight of hidden curve parameters: they move freely, the points
 /// they place carry the cost of moving.
 const PARAM_WEIGHT: f64 = 1e-4;
+/// Metric weight of the points of a spline held by a curvature constraint:
+/// the spline takes up the change and the curve it meets keeps its shape
+/// (design note 0010 §4.1).
+const G2_SPLINE_WEIGHT: f64 = 1e-3;
 
 /// A failure before any solving: every entity is reported free and no
 /// constraint is counted.
@@ -188,15 +192,31 @@ enum NullBlock {
 }
 
 pub(crate) fn solve<K: SketchKey>(sketch: &Sketch<K>, options: &SolveOptions<K>) -> Solution<K> {
-    solve_inner(sketch, options, true)
+    let first = solve_inner(sketch, options, true, true);
+    // Splines under curvature constraints give first; if that finds no
+    // solution, every curve gives alike (design note 0010 §4.1).
+    let g2 = sketch
+        .constraints
+        .iter()
+        .any(|c| matches!(c.constraint, Constraint::Curvature { .. }));
+    if g2 && matches!(first.status, SolveStatus::Failed(_)) {
+        let second = solve_inner(sketch, options, true, false);
+        if !matches!(second.status, SolveStatus::Failed(_)) {
+            return second;
+        }
+    }
+    first
 }
 
 /// The pipeline; `attribute` enables the search for the constraint that
-/// collapses a curve ([`Part::attribute`], which solves without it).
+/// collapses a curve ([`Part::attribute`], which solves without it), and
+/// `spline_first` makes the splines that curvature constraints hold weigh
+/// [`G2_SPLINE_WEIGHT`].
 fn solve_inner<K: SketchKey>(
     sketch: &Sketch<K>,
     options: &SolveOptions<K>,
     attribute: bool,
+    spline_first: bool,
 ) -> Solution<K> {
     let index = match Index::new(sketch) {
         Ok(i) => i,
@@ -245,6 +265,25 @@ fn solve_inner<K: SketchKey>(
     }
     for k in 0..prob.params.len() {
         slot_w[prob.param_slot(k)] = PARAM_WEIGHT;
+    }
+    if spline_first {
+        for con in &cons {
+            let Con::CurvatureAt(sides, _) = con else {
+                continue;
+            };
+            for side in sides {
+                let CurvSide::Spline { spline, .. } = *side else {
+                    continue;
+                };
+                for &p in &index.splines[spline].points {
+                    for s in [2 * p, 2 * p + 1] {
+                        if !dragged[s] {
+                            slot_w[s] = G2_SPLINE_WEIGHT;
+                        }
+                    }
+                }
+            }
+        }
     }
     // Conic shapes are plain numbers, not scaled (design note 0009 §4.1).
     let to_scaled = |s: usize, a: f64| -> f64 {
@@ -1469,7 +1508,7 @@ impl<K: SketchKey> Part<'_, K> {
                 .filter(|&&c| c != j)
                 .map(|&c| sketch.constraints[c].clone())
                 .collect();
-            let out = solve_inner(&part, &part_options, false);
+            let out = solve_inner(&part, &part_options, false, true);
             iterations += out.iterations;
             if !matches!(out.status, SolveStatus::Solved | SolveStatus::Redundant) {
                 continue;

@@ -565,6 +565,57 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     d.click(on_plane(&d, 6.0, 32.0)?)?;
     d.hover(on_plane(&d, 120.0, -80.0)?)?;
     save("24-moved-copy.png", &d.settle()?)?;
+    // Bottom left: an arc turning down to its end, a spline drawn on from
+    // it bending the other way, then the two made curvature continuous (the
+    // spline turned round, the arc unchanged, the joint marked C).
+    d.app.run(crate::commands::Command::Tool(Tool::CenterArc));
+    d.click(on_plane(&d, -70.0, -44.0)?)?;
+    d.click(on_plane(&d, -76.0, -44.0)?)?;
+    d.hover(on_plane(&d, -74.2, -48.2)?)?;
+    d.click(on_plane(&d, -70.0, -50.0)?)?;
+    d.app
+        .run(crate::commands::Command::Tool(Tool::ControlSpline));
+    for (x, y) in [
+        (-70.0, -50.0),
+        (-63.0, -48.0),
+        (-57.0, -52.0),
+        (-50.0, -47.0),
+    ] {
+        d.click(on_plane(&d, x, y)?)?;
+    }
+    d.key(Key::Enter, Modifiers::NONE)?;
+    d.app.run(crate::commands::Command::Tool(Tool::Select));
+    let joined: Vec<_> = d
+        .app
+        .model()
+        .sketch_def(sketch)
+        .map(|def| {
+            let last = |pick: fn(&Geometry<_>) -> bool| {
+                def.sketch
+                    .entities
+                    .iter()
+                    .rev()
+                    .find(|e| pick(&e.geometry))
+                    .map(|e| e.id)
+            };
+            [
+                last(|g| matches!(g, Geometry::ControlSpline { .. })),
+                last(|g| matches!(g, Geometry::Arc { .. })),
+            ]
+            .into_iter()
+            .flatten()
+            .collect()
+        })
+        .unwrap_or_default();
+    if let Some(ed) = d.app.sketch_editor_mut() {
+        ed.selection = joined;
+    }
+    d.app.run(crate::commands::Command::Constrain(
+        crate::sketch_mode::ConstraintTool::Curvature,
+    ));
+    d.app.select(None);
+    d.hover(on_plane(&d, 120.0, -80.0)?)?;
+    save("25-curvature.png", &d.settle()?)?;
     d.app.run(crate::commands::Command::CancelSketch);
     Ok(written)
 }

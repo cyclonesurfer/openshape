@@ -397,6 +397,7 @@ pub fn glyph(c: &Constraint<SketchId>) -> &'static str {
         Constraint::Concentric { .. } => "◎",
         Constraint::Symmetric { .. } => "S",
         Constraint::Tangent { .. } => "T",
+        Constraint::Curvature { .. } => "C",
         Constraint::Normal { .. } => "N",
         Constraint::Fix { .. } => "F",
         Constraint::Mirror { .. } => "↔",
@@ -431,7 +432,8 @@ fn glyph_anchors(c: &Constraint<SketchId>) -> Vec<SketchId> {
         | Constraint::Equal { a, b }
         | Constraint::Concentric { a, b }
         | Constraint::Symmetric { a, b, .. }
-        | Constraint::Tangent { a, b, .. } => vec![*a, *b],
+        | Constraint::Tangent { a, b, .. }
+        | Constraint::Curvature { a, b, .. } => vec![*a, *b],
         _ => Vec::new(),
     }
 }
@@ -1744,6 +1746,8 @@ pub enum ConstraintTool {
     Perpendicular,
     /// Two curves tangent.
     Tangent,
+    /// A spline and a curve curvature continuous at a shared end.
+    Curvature,
     /// Equal lengths or radii.
     Equal,
     /// A point at a line's midpoint.
@@ -1760,13 +1764,14 @@ pub enum ConstraintTool {
 
 impl ConstraintTool {
     /// Every constraint tool, in toolbar order.
-    pub const ALL: [ConstraintTool; 12] = [
+    pub const ALL: [ConstraintTool; 13] = [
         ConstraintTool::Coincident,
         ConstraintTool::Horizontal,
         ConstraintTool::Vertical,
         ConstraintTool::Parallel,
         ConstraintTool::Perpendicular,
         ConstraintTool::Tangent,
+        ConstraintTool::Curvature,
         ConstraintTool::Equal,
         ConstraintTool::Midpoint,
         ConstraintTool::Concentric,
@@ -1784,6 +1789,7 @@ impl ConstraintTool {
             ConstraintTool::Parallel => "Parallel",
             ConstraintTool::Perpendicular => "Perpendicular",
             ConstraintTool::Tangent => "Tangent",
+            ConstraintTool::Curvature => "Curvature",
             ConstraintTool::Equal => "Equal",
             ConstraintTool::Midpoint => "Midpoint",
             ConstraintTool::Concentric => "Concentric",
@@ -1803,6 +1809,7 @@ impl ConstraintTool {
             ConstraintTool::Parallel => "two or more lines",
             ConstraintTool::Perpendicular => "two lines",
             ConstraintTool::Tangent => "two curves (not two lines)",
+            ConstraintTool::Curvature => "a spline and a curve sharing an end point",
             ConstraintTool::Equal => "two or more lines, or two or more circles and arcs",
             ConstraintTool::Midpoint => "a point and a line",
             ConstraintTool::Concentric => "two circles or arcs",
@@ -2051,8 +2058,64 @@ pub fn constraints_for(
             };
             vec![C::Tangent { a, b, kind }]
         }
+        ConstraintTool::Curvature if ids.len() == 2 && !kinds.contains(&Kind::Point) => {
+            let (a, b) = (ids[0], ids[1]);
+            if !kinds.contains(&Kind::Spline) {
+                return Err("Curvature continuity needs a spline on at least one side".into());
+            }
+            let ends = |id: SketchId| !end_points(sketch, id).is_empty();
+            if !ends(a) || !ends(b) {
+                return Err("A full circle or ellipse has no end to join".into());
+            }
+            // Degree 1: a control spline of degree 1, or an interpolated
+            // one through two points (degree min(3, points − 1)).
+            let straight = |id: SketchId| match sketch.entity(id).map(|e| &e.geometry) {
+                Some(Geometry::ControlSpline { degree, .. }) => *degree == 1,
+                Some(Geometry::InterpolatedSpline { through, .. }) => through.len() == 2,
+                _ => false,
+            };
+            if straight(a) || straight(b) {
+                return Err("A degree-1 spline is straight at its ends; use Tangent".into());
+            }
+            let Some(point) = shared_end(sketch, a, b) else {
+                return Err("Curvature continuity needs the curves to share an end point".into());
+            };
+            vec![C::Curvature { a, b, point }]
+        }
         _ => return need(),
     })
+}
+
+/// The tangencies at a shared point that new curvature constraints `cs`
+/// make redundant: on the same two curves at the same or a coincident
+/// point.
+fn replaced_tangencies(sketch: &SketchData, cs: &[Constraint<SketchId>]) -> Vec<SketchId> {
+    let same = |p: SketchId, q: SketchId| {
+        p == q
+            || sketch.constraints.iter().any(|c| {
+                matches!(c.constraint, Constraint::Coincident { a, b }
+                    if (a == p && b == q) || (a == q && b == p))
+            })
+    };
+    sketch
+        .constraints
+        .iter()
+        .filter(|e| {
+            let Constraint::Tangent {
+                a,
+                b,
+                kind: TangentKind::AtPoint { point },
+            } = e.constraint
+            else {
+                return false;
+            };
+            cs.iter().any(|c| {
+                matches!(*c, Constraint::Curvature { a: x, b: y, point: q }
+                    if ((x == a && y == b) || (x == b && y == a)) && same(point, q))
+            })
+        })
+        .map(|e| e.id)
+        .collect()
 }
 
 /// The dimension a selection gets (value not yet measured), or why none.
@@ -4359,11 +4422,25 @@ impl SketchEditor {
         match constraints_for(tool, &self.selection, &d.sketch) {
             Ok(cs) => {
                 let mut b = Batch::default();
+                // Curvature continuity implies the tangency it replaces
+                // (design note 0010 §5).
+                let replaced = replaced_tangencies(&d.sketch, &cs);
+                if !replaced.is_empty() {
+                    b.edits.push(SketchEdit::Delete {
+                        items: replaced.clone(),
+                    });
+                }
                 for c in cs {
                     b.constraint(c);
                 }
                 if self.commit(model, b.edits).is_some() {
                     self.selection.clear();
+                    if !replaced.is_empty() {
+                        let solved = self.message.take().unwrap_or_default();
+                        let note =
+                            "Replaced the tangency there, which curvature continuity implies.";
+                        self.message = Some(format!("{note} {solved}").trim_end().to_string());
+                    }
                 }
             }
             Err(e) => self.message = Some(e),

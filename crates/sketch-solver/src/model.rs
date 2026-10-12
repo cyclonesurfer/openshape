@@ -361,6 +361,19 @@ pub enum Constraint<K> {
         /// How they touch.
         kind: TangentKind<K>,
     },
+    /// Two curves meet at `point` with one tangent line and one curvature
+    /// (G2, design note 0010): a spline (degree ≥ 2) and a line, arc,
+    /// elliptical arc, conic arc or another such spline, sharing the end
+    /// point `point` as [`TangentKind::AtPoint`] does. Implies tangency.
+    Curvature {
+        /// First curve.
+        a: K,
+        /// Second curve.
+        b: K,
+        /// The shared point entity (an end point of both curves, or one of
+        /// two coincident end points).
+        point: K,
+    },
     /// A line is normal to a circular (passes through its centre).
     Normal {
         /// The line.
@@ -589,6 +602,11 @@ impl<K: SketchKey> Constraint<K> {
                     },
                 },
             },
+            C::Curvature { a, b, point } => C::Curvature {
+                a: f(*a),
+                b: f(*b),
+                point: f(*point),
+            },
             C::Normal { line, curve } => C::Normal {
                 line: f(*line),
                 curve: f(*curve),
@@ -722,6 +740,20 @@ impl<K: SketchKey> Constraint<K> {
         }
     }
 
+    /// For a constraint holding two curves at a shared end point (a
+    /// tangency at a point, curvature continuity): `(a, b, point)`.
+    pub fn joint(&self) -> Option<(K, K, K)> {
+        match *self {
+            Constraint::Tangent {
+                a,
+                b,
+                kind: TangentKind::AtPoint { point },
+            }
+            | Constraint::Curvature { a, b, point } => Some((a, b, point)),
+            _ => None,
+        }
+    }
+
     /// Every entity key this constraint references, in a fixed order.
     pub fn referenced(&self) -> Vec<K> {
         match self {
@@ -744,6 +776,7 @@ impl<K: SketchKey> Constraint<K> {
                 TangentKind::AtPoint { point } => vec![*a, *b, *point],
                 _ => vec![*a, *b],
             },
+            Constraint::Curvature { a, b, point } => vec![*a, *b, *point],
             Constraint::Normal { line, curve } => vec![*line, *curve],
             Constraint::Fix { point, .. } => vec![*point],
             Constraint::Radius { curve, .. }
@@ -870,6 +903,11 @@ mod tests {
                 a: 1,
                 b: 2,
                 kind: TangentKind::CircleCircle { internal: true },
+            },
+            Constraint::Curvature {
+                a: 1,
+                b: 2,
+                point: 3,
             },
             Constraint::Normal { line: 1, curve: 2 },
             Constraint::Fix {

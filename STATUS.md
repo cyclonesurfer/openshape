@@ -1,8 +1,8 @@
 # OpenShape status
 
 Updated 2026-10-12, Phase 2 (sketcher): core sketcher, the application
-shell, the editing tools, ellipses, conics and transform done; curvature
-and text next.
+shell, the editing tools, ellipses, conics, transform and curvature
+continuity done; text next.
 
 ## What works
 
@@ -47,8 +47,9 @@ and text next.
 - **Sketch solver** (`openshape-sketch-solver`, on the deterministic
   `openshape-linalg`): points, lines, circles, arcs, through-point and
   control-point splines, ellipses and elliptical arcs (design note 0008),
-  conic arcs with their ρ (design note 0009) under 15 geometric constraint
-  kinds and 6 dimension kinds. Weighted
+  conic arcs with their ρ (design note 0009) under 16 geometric constraint
+  kinds (curvature continuity the latest, design note 0010) and 6
+  dimension kinds. Weighted
   minimum-norm Gauss–Newton with Levenberg–Marquardt fallback and
   continuation (design note 0005, §9 lists what changed while building it).
   Reports degrees of freedom, free entities, redundant and conflicting
@@ -202,11 +203,27 @@ and text next.
   so; 422 refused with the reason (243 held by kept constraints, 176
   identities or copies onto the original, 3 that would collapse a line
   joined to the selection).
+  Curvature continuity (G2, design note 0010) joins a spline to a line,
+  arc, elliptical arc, conic or another spline at a shared end: one
+  tangent line, the away tangents opposite (a cusp is never accepted), and
+  equal curvature through the joint. The spline adapts and the other curve
+  keeps its shape: the spline's points weigh 1e-3 in the solver's step
+  metric, under a trust region of a quarter of the sketch size per step;
+  only if that finds no solution does every curve give. Corners from 10°
+  to 179° solve. Measured over 11,000 joints of every kind with every
+  point moved by up to 15 % of the sketch size: 30 fail (0.27 %), all
+  reported, none wrong; the other curve's curvature at the joint ends
+  within 25 % of where it would without the constraint in 98.3 % of
+  joints. Before the spline-first rule the same joints failed 1.0 % of
+  the time and the solver flattened an ellipse a hundredfold in 10 % of
+  elliptical joints. The tool replaces a tangency it implies, the joint
+  shows "C", and trim and split hand the constraint on to the piece at
+  the joint.
   Every edit is one undoable op; Cancel
   undoes the whole sketch session. The editor is UI-toolkit independent and
   tested end to end by driving it with screen clicks.
 - **UI kit** (`openshape-ui-kit`): the application's look in one place
-  (ADR 0012): theme tokens with pinned contrast ratios, 80 original icons
+  (ADR 0012): theme tokens with pinned contrast ratios, 81 original icons
   drawn in code, a view cube, the command palette and search field, and an
   offscreen egui renderer used for screenshots and UI tests.
 - **I/O** (`openshape-io`): STL export, ASCII and binary.
@@ -301,6 +318,21 @@ and text next.
   shots showed sketches drawn over the parts that hide them (they are now
   rendered in 3D with depth).
 
+- Curvature continuity, 2026-10-12, on Mesa lavapipe: fmt, clippy with
+  `-D warnings`, 717 tests and `cargo deny` pass. The solver tests
+  check every joint against curvatures computed in the test from closed
+  forms (Piegl & Tiller's end derivatives for splines, the quotient rule
+  for conics, |A×B|/‖E′‖³ for ellipses), independent of the solver's
+  equations; a deterministic statistics test bounds the failure rate and
+  how often the other curve changes shape. Measuring found two defects
+  before they shipped, both fixed: with every point weighing the same the
+  solver met a wrongly bent spline by flattening the curve it joins (an
+  arc's radius tripled; ellipses squashed), and an elliptical arc drawn
+  with its minor axis on the other side, the same curve, failed 255 times
+  in 2,000 against 13 (now 9 against 9). Two rare random-input test
+  failures on main (an ellipse gradient checked with too coarse a
+  difference step, and a rectangle drawn thinner than the trim's cut gap)
+  were fixed separately.
 - Transform, 2026-10-12, on Mesa lavapipe: fmt, clippy with
   `-D warnings`, 703 tests and `cargo deny` pass. Besides the fuzz above,
   14 end-to-end tests drive the three tools by clicks and typed values
@@ -339,7 +371,12 @@ and text next.
 
 ## Not yet / known limits
 
-- Sketch tools not done: text and use/project; the curvature constraint.
+- Sketch tools not done: text and use/project.
+  Curvature continuity fails on 0.27 % of heavily perturbed joints
+  (mostly a spline meeting an interpolated spline), reported, never
+  wrong; where the spline alone cannot reach the joint's curvature the
+  other curve gives too (a conic may flatten) unless it is dimensioned.
+  There is no curvature comb display yet.
   Transform has no on-screen manipulator (drag handles): the selection
   moves by clicked points or typed values.
   Conics cannot yet be trimmed, extended or split (refused with a message;
@@ -408,8 +445,9 @@ and text next.
 
 ## Next steps
 
-1. The rest of the Phase 2 sketcher that needs no faces: the curvature
-   constraint, text, smooth closed splines, and trim/extend/split of ellipses and conics. Project/convert,
+1. The rest of the Phase 2 sketcher that needs no faces: text, smooth
+   closed splines, trim/extend/split of ellipses and conics, and a
+   curvature comb display. Project/convert,
    intersection curves and pierce wait for Phase 3 faces.
 2. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.

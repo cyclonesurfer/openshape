@@ -33,7 +33,7 @@ item is delivered in the phase noted.
 - [x] Constraint solver (Newton/LM with DOF analysis, over/under-constraint diagnostics; design note 0005)
 - [x] Property tests over random constraint systems; fuzzing (constructive and garbage-input proptests)
 - [x] Region detection from arbitrary sketch curves (intersections) feeding extrude/revolve (design note 0006)
-- [ ] Sketch tools and constraints (see §2 below; core set, editing tools, ellipses, conics and transform done; text and curvature pending; project/convert, intersection curves and pierce need Phase 3 faces)
+- [ ] Sketch tools and constraints (see §2 below; core set, editing tools, ellipses, conics, transform and curvature done; text pending; project/convert, intersection curves and pierce need Phase 3 faces)
 - [x] Application shell in the common parametric-CAD layout with our own look (ADR 0012), driven end to end by offscreen UI tests
 
 ## Phase 3 — Booleans and core features
@@ -96,7 +96,7 @@ Sketch tools
 - [ ] Use/project/convert, offset ✔, trim ✔, extend ✔, split ✔, sketch fillet ✔, mirror ✔, linear/circular sketch patterns ✔, transform (move/rotate/scale, copy) ✔, intersection curves
 
 Sketch constraints
-- [ ] Coincident ✔, concentric ✔, parallel ✔, perpendicular ✔, horizontal ✔, vertical ✔, tangent ✔, equal ✔, midpoint ✔, normal ✔, pierce, symmetric ✔, fix ✔, curvature
+- [ ] Coincident ✔, concentric ✔, parallel ✔, perpendicular ✔, horizontal ✔, vertical ✔, tangent ✔, equal ✔, midpoint ✔, normal ✔, pierce, symmetric ✔, fix ✔, curvature ✔
 - [x] Dimensions: linear (aligned, horizontal, vertical), angular, radial, diameter, a conic's ρ; typed with units
 - [x] Inference while drawing (horizontal/vertical, parallel, perpendicular, tangent; point, curve and origin snaps); colour-coded DOF state
 

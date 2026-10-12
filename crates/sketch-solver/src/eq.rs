@@ -258,6 +258,29 @@ pub(crate) enum EqKind {
         /// Cross (parallel) or dot (perpendicular).
         mode: PairMode,
     },
+    /// The signed angle θ from one curve's tangent away from a shared
+    /// point to the other's is `value` (π: a smooth joint, design note
+    /// 0010 §4): `sin(θ − value)`, with the branch checked like an angle
+    /// dimension's (`cos(θ − value) > 0`), so a cusp is never a solution,
+    /// and `value` moved from the start's angle by continuation like an
+    /// angle dimension's.
+    AwayAngle {
+        /// First side (its `D₁`).
+        a: CurvTerm,
+        /// Second side.
+        b: CurvTerm,
+        /// The angle (radians).
+        value: f64,
+    },
+    /// Equal curvature through a smooth joint (design note 0010 §4):
+    /// `κ_a + κ_b`, with `κ = cross(D₁, D₂)/‖D₁‖³` of each side the
+    /// curvature for travel away from the joint.
+    Curvature {
+        /// First side.
+        a: CurvTerm,
+        /// Second side.
+        b: CurvTerm,
+    },
     /// `C(t)_axis − p_axis` for a point on a conic arc (design note 0009
     /// §4.2): `C(t) = Σ Rₖ(t) Pₖ`, the rational quadratic Bézier with
     /// middle weight `e^u`.
@@ -295,6 +318,9 @@ pub(crate) enum EqKind {
 pub(crate) enum TanDir {
     /// A linear combination of points.
     Lin(VecExpr),
+    /// A linear combination of points turned a quarter turn
+    /// counter-clockwise: `(−y, x)`.
+    Perp(VecExpr),
     /// The tangent of the ellipse on centre `c` and axis ends `m`, `n` at
     /// its point `p`, written without a parameter (design note 0008 §4.4):
     /// with `w = p − c`, `A = m − c`, `B = n − c`,
@@ -325,6 +351,16 @@ impl TanDir {
                     }
                 }
                 Some(e.eval(v))
+            }
+            TanDir::Perp(e) => {
+                if let Some(j) = jac {
+                    for &(p, c) in &e.0 {
+                        j.push((2 * p, 0.0, c));
+                        j.push((2 * p + 1, -c, 0.0));
+                    }
+                }
+                let (x, y) = e.eval(v);
+                Some((-y, x))
             }
             &TanDir::Ellipse { c, m, n, p } => {
                 let pt = |q: usize| [v[2 * q], v[2 * q + 1]];
@@ -379,9 +415,103 @@ impl TanDir {
     /// The points referenced.
     fn points(&self) -> Vec<usize> {
         match self {
-            TanDir::Lin(e) => e.points().collect(),
+            TanDir::Lin(e) | TanDir::Perp(e) => e.points().collect(),
             &TanDir::Ellipse { c, m, n, p } => vec![c, m, n, p],
         }
+    }
+}
+
+/// One side of an [`EqKind::Curvature`] (design note 0010 §4): vectors
+/// `D₁`, the tangent pointing away from the joint, and `D₂`, such that
+/// `κ = cross(D₁, D₂)/‖D₁‖³` is the curve's signed curvature for travel
+/// away from the joint.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CurvTerm {
+    /// `D₁` up to `sign`; an ellipse's tangent also up to the sign of
+    /// `cross(A, B)`, which turns its θ direction counter-clockwise.
+    pub d1: TanDir,
+    /// `+1` or `−1`.
+    pub sign: f64,
+    /// `D₂`, times `e^{−2u}/2` when `shape` is a conic's shape slot `u`.
+    pub d2: VecExpr,
+    /// A conic's shape slot.
+    pub shape: Option<usize>,
+}
+
+/// A [`CurvTerm`] evaluated.
+struct CurvVal {
+    /// `D₁`.
+    d1: (f64, f64),
+    /// Jacobian columns `(slot, ∂D₁x/∂slot, ∂D₁y/∂slot)`.
+    jac: Vec<(usize, f64, f64)>,
+    /// `D₂ = f·V`: the vector `V`.
+    raw: (f64, f64),
+    /// The factor `f`.
+    f: f64,
+}
+
+impl CurvTerm {
+    /// A spline at its start (`end == false`) or end: `D₁ = ±C′`, `D₂ = C″`
+    /// there, linear in its points (Piegl & Tiller A2.3).
+    pub fn spline(def: &SplineDef, end: bool) -> Self {
+        let (_, w1, w2) = def.map.weights_ders(if end { 1.0 } else { 0.0 }, 2);
+        let expr = |w: &[f64]| {
+            VecExpr(
+                def.points
+                    .iter()
+                    .zip(w)
+                    .filter(|(_, c)| **c != 0.0)
+                    .map(|(&q, &c)| (q, c))
+                    .collect(),
+            )
+        };
+        CurvTerm {
+            d1: TanDir::Lin(expr(&w1)),
+            sign: if end { -1.0 } else { 1.0 },
+            d2: expr(&w2),
+            shape: None,
+        }
+    }
+
+    fn eval(&self, v: &[f64], want: bool) -> Option<CurvVal> {
+        let mut jac = Vec::new();
+        let (x, y) = self.d1.eval(v, want.then_some(&mut jac))?;
+        let mut sign = self.sign;
+        if let TanDir::Ellipse { c, m, n, .. } = self.d1 {
+            let (ax, ay) = (v[2 * m] - v[2 * c], v[2 * m + 1] - v[2 * c + 1]);
+            let (bx, by) = (v[2 * n] - v[2 * c], v[2 * n + 1] - v[2 * c + 1]);
+            let hand = ax * by - ay * bx;
+            if hand == 0.0 || !hand.is_finite() {
+                return None;
+            }
+            sign *= hand.signum();
+        }
+        if sign < 0.0 {
+            for j in &mut jac {
+                j.1 = -j.1;
+                j.2 = -j.2;
+            }
+        }
+        let f = match self.shape {
+            Some(u) => 0.5 * (-2.0 * v[u]).exp(),
+            None => 1.0,
+        };
+        if !f.is_finite() {
+            return None;
+        }
+        Some(CurvVal {
+            d1: (sign * x, sign * y),
+            jac,
+            raw: self.d2.eval(v),
+            f,
+        })
+    }
+
+    /// The points referenced.
+    fn points(&self) -> Vec<usize> {
+        let mut p = self.d1.points();
+        p.extend(self.d2.points());
+        p
     }
 }
 
@@ -590,7 +720,14 @@ impl EqKind {
             }
             EqKind::TanDirs { a, b, .. } => {
                 for d in [a, b] {
-                    if let TanDir::Lin(e) = d {
+                    if let TanDir::Lin(e) | TanDir::Perp(e) = d {
+                        out.push(e);
+                    }
+                }
+            }
+            EqKind::AwayAngle { a, b, .. } | EqKind::Curvature { a, b } => {
+                for t in [a, b] {
+                    if let TanDir::Lin(e) | TanDir::Perp(e) = &t.d1 {
                         out.push(e);
                     }
                 }
@@ -879,6 +1016,74 @@ impl EqKind {
                     lever: na.min(nb),
                 })
             }
+            EqKind::AwayAngle { a, b, value } => {
+                let want = grad.is_some();
+                let ca = a.eval(v, want)?;
+                let cb = b.eval(v, want)?;
+                let (na, nb) = (norm(ca.d1.0, ca.d1.1), norm(cb.d1.0, cb.d1.1));
+                if na.is_nan() || nb.is_nan() || na <= degen || nb <= degen {
+                    return None;
+                }
+                let (ax, ay) = ca.d1;
+                let (bx, by) = cb.d1;
+                let nn = na * nb;
+                let cr = ax * by - ay * bx;
+                let dt = ax * bx + ay * by;
+                // sin(θ − v) = (cos v·cross − sin v·dot)/(‖a‖‖b‖).
+                let (cv, sv) = cos_sin(*value);
+                let (cc, cd) = (cv, -sv);
+                let r = (cc * cr + cd * dt) / nn;
+                if let Some(g) = grad {
+                    // As DirPair's: the normalization contributes −r·a/‖a‖².
+                    let gax = (cc * by + cd * bx) / nn - r * ax / (na * na);
+                    let gay = (-cc * bx + cd * by) / nn - r * ay / (na * na);
+                    let gbx = (-cc * ay + cd * ax) / nn - r * bx / (nb * nb);
+                    let gby = (cc * ax + cd * ay) / nn - r * by / (nb * nb);
+                    for &(s, jx, jy) in &ca.jac {
+                        g.push((s, gax * jx + gay * jy));
+                    }
+                    for &(s, jx, jy) in &cb.jac {
+                        g.push((s, gbx * jx + gby * jy));
+                    }
+                }
+                Some(Eval {
+                    r,
+                    lever: na.min(nb),
+                })
+            }
+            EqKind::Curvature { a, b } => {
+                let want = grad.is_some();
+                let mut grad = grad;
+                let mut r = 0.0;
+                for t in [a, b] {
+                    let c = t.eval(v, want)?;
+                    let n = norm(c.d1.0, c.d1.1);
+                    if n.is_nan() || n <= degen {
+                        return None;
+                    }
+                    let n3 = n * n * n;
+                    let (d1x, d1y) = c.d1;
+                    let (d2x, d2y) = (c.f * c.raw.0, c.f * c.raw.1);
+                    let k = (d1x * d2y - d1y * d2x) / n3;
+                    r += k;
+                    if let Some(g) = grad.as_deref_mut() {
+                        // ∂κ/∂D₁ = (D₂y, −D₂x)/n³ − 3κ·D₁/n²,
+                        // ∂κ/∂D₂ = (−D₁y, D₁x)/n³, D₂ = f·V with
+                        // ∂f/∂u = −2f for a conic's shape u.
+                        let g1x = d2y / n3 - 3.0 * k * d1x / (n * n);
+                        let g1y = -d2x / n3 - 3.0 * k * d1y / (n * n);
+                        for &(s, jx, jy) in &c.jac {
+                            g.push((s, g1x * jx + g1y * jy));
+                        }
+                        let (g2x, g2y) = (-d1y / n3, d1x / n3);
+                        t.d2.push_grad(c.f * g2x, c.f * g2y, g);
+                        if let Some(u) = t.shape {
+                            g.push((u, -2.0 * c.f * (g2x * c.raw.0 + g2y * c.raw.1)));
+                        }
+                    }
+                }
+                Some(Eval { r, lever: inf })
+            }
             EqKind::SplinePoint { spline, t, p, axis } => {
                 let def = &splines[*spline];
                 let (w, dw) = def.map.weights(v[*t]);
@@ -905,9 +1110,22 @@ impl EqKind {
         }
     }
 
-    /// For an angle dimension, `cos(θ − v)` (positive on the intended
-    /// branch); `None` for other equations or degenerate directions.
+    /// For an angle dimension or an [`EqKind::AwayAngle`], `cos(θ − v)`
+    /// (positive on the intended branch); `None` for other equations or
+    /// degenerate directions.
     pub fn angle_cos(&self, v: &[f64], degen: f64) -> Option<f64> {
+        if let EqKind::AwayAngle { a, b, value } = self {
+            let ca = a.eval(v, false)?;
+            let cb = b.eval(v, false)?;
+            let (na, nb) = (norm(ca.d1.0, ca.d1.1), norm(cb.d1.0, cb.d1.1));
+            if !(na > degen && nb > degen) {
+                return None;
+            }
+            let cr = ca.d1.0 * cb.d1.1 - ca.d1.1 * cb.d1.0;
+            let dt = ca.d1.0 * cb.d1.0 + ca.d1.1 * cb.d1.1;
+            let (cv, sv) = cos_sin(*value);
+            return Some((dt * cv + cr * sv) / (na * nb));
+        }
         if let EqKind::DirPair {
             a,
             b,
@@ -929,8 +1147,16 @@ impl EqKind {
         }
     }
 
-    /// The signed angle `θ ∈ (−π, π]` from `a` to `b` of an angle equation.
+    /// The signed angle `θ ∈ (−π, π]` from `a` to `b` of an angle equation
+    /// or an [`EqKind::AwayAngle`].
     pub fn angle_theta(&self, v: &[f64]) -> Option<f64> {
+        if let EqKind::AwayAngle { a, b, .. } = self {
+            let ca = a.eval(v, false)?;
+            let cb = b.eval(v, false)?;
+            let (ax, ay) = ca.d1;
+            let (bx, by) = cb.d1;
+            return Some(signed_angle(ax * by - ay * bx, ax * bx + ay * by));
+        }
         if let EqKind::DirPair {
             a,
             b,
@@ -1016,12 +1242,33 @@ impl EqKind {
                 points.extend(a.points());
                 points.extend(b.points());
             }
+            EqKind::AwayAngle { a, b, .. } => {
+                for t in [a, b] {
+                    points.extend(t.d1.points());
+                }
+            }
+            EqKind::Curvature { a, b } => {
+                for t in [a, b] {
+                    points.extend(t.points());
+                    slots.extend(t.shape);
+                }
+            }
         }
         for p in points {
             slots.push(2 * p);
             slots.push(2 * p + 1);
         }
         slots
+    }
+}
+
+/// `(cos v, sin v)`, exactly `(−1, 0)` at `v = π` (a smooth joint's
+/// residual is then exactly the normalized cross product).
+fn cos_sin(v: f64) -> (f64, f64) {
+    if v == std::f64::consts::PI {
+        (-1.0, 0.0)
+    } else {
+        (v.cos(), v.sin())
     }
 }
 
@@ -1125,6 +1372,7 @@ mod tests {
 
     /// One equation of every kind and variant the builder produces.
     fn all_equations() -> Vec<(&'static str, EqKind)> {
+        let sp = splines();
         let d01 = VecExpr::diff(1, 0);
         let d23 = VecExpr::diff(3, 2);
         let arc_r = RTerm::Norm(VecExpr::diff(4, 5));
@@ -1437,6 +1685,97 @@ mod tests {
                     mode: PairMode::Cross,
                 },
             ),
+            (
+                "curvature: control spline start and a line",
+                EqKind::Curvature {
+                    a: CurvTerm::spline(&sp[0], false),
+                    b: CurvTerm {
+                        d1: TanDir::Lin(VecExpr::diff(0, 1)),
+                        sign: -1.0,
+                        d2: VecExpr(Vec::new()),
+                        shape: None,
+                    },
+                },
+            ),
+            (
+                "curvature: an arc's end and an interpolated spline's end",
+                EqKind::Curvature {
+                    a: CurvTerm {
+                        d1: TanDir::Perp(VecExpr::diff(1, 0)),
+                        sign: -1.0,
+                        d2: VecExpr::diff(0, 1),
+                        shape: None,
+                    },
+                    b: CurvTerm::spline(&sp[1], true),
+                },
+            ),
+            (
+                "curvature: control spline end and an elliptical arc",
+                EqKind::Curvature {
+                    a: CurvTerm::spline(&sp[0], true),
+                    b: CurvTerm {
+                        d1: TanDir::Ellipse {
+                            c: 0,
+                            m: 5,
+                            n: 2,
+                            p: 4,
+                        },
+                        sign: 1.0,
+                        d2: VecExpr::diff(0, 4),
+                        shape: None,
+                    },
+                },
+            ),
+            (
+                "curvature: a conic's end and an interpolated spline's start",
+                EqKind::Curvature {
+                    a: CurvTerm {
+                        d1: TanDir::Lin(VecExpr::diff(5, 0)),
+                        sign: 1.0,
+                        d2: VecExpr::diff(4, 5),
+                        shape: Some(12),
+                    },
+                    b: CurvTerm::spline(&sp[1], false),
+                },
+            ),
+            (
+                "curvature: two splines",
+                EqKind::Curvature {
+                    a: CurvTerm::spline(&sp[1], false),
+                    b: CurvTerm::spline(&sp[0], true),
+                },
+            ),
+            (
+                "smooth joint: an arc's end and a spline's end",
+                EqKind::AwayAngle {
+                    value: std::f64::consts::PI,
+                    a: CurvTerm {
+                        d1: TanDir::Perp(VecExpr::diff(1, 0)),
+                        sign: -1.0,
+                        d2: VecExpr::diff(0, 1),
+                        shape: None,
+                    },
+                    b: CurvTerm::spline(&sp[0], true),
+                },
+            ),
+            (
+                "smooth joint: an elliptical arc and a spline",
+                EqKind::AwayAngle {
+                    value: 2.0,
+                    a: CurvTerm {
+                        d1: TanDir::Ellipse {
+                            c: 0,
+                            m: 5,
+                            n: 2,
+                            p: 4,
+                        },
+                        sign: -1.0,
+                        d2: VecExpr::diff(0, 4),
+                        shape: None,
+                    },
+                    b: CurvTerm::spline(&sp[1], false),
+                },
+            ),
         ]
     }
 
@@ -1541,6 +1880,8 @@ mod tests {
                     | EqKind::DirPair { .. }
                     | EqKind::EllipseSupport { .. }
                     | EqKind::TanDirs { .. }
+                    | EqKind::AwayAngle { .. }
+                    | EqKind::Curvature { .. }
             );
             let out = eq.eval(&v, &sp, 1e-9, None);
             assert_eq!(out.is_none(), divides, "{name}");

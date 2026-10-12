@@ -22,7 +22,9 @@
 //! * **Armijo backtracking** on `½‖r‖²` (c = 1e-4, halving down to 2⁻²⁰;
 //!   Nocedal & Wright §3.1). Trial points must be admissible: finite, radii
 //!   positive, and geometry within [`REACH`] sketch extents of the centre
-//!   and the ±1e6 m coordinate limit.
+//!   and the ±1e6 m coordinate limit. The search starts at the fraction of
+//!   the step that moves no light point (weight below 1: a spline held by
+//!   a curvature constraint) by more than [`LIGHT_STEP`].
 //! * **Levenberg–Marquardt fallback** when the line search fails: steps from
 //!   `(JᵀJ + μW) h = −Jᵀr`, solved as an augmented least-squares problem,
 //!   with the gain-ratio update of μ of Madsen, Nielsen & Tingleff, *Methods
@@ -70,6 +72,17 @@ const TOL_ANGLE: f64 = 1e-12;
 /// line search treats such steps like inadmissible ones (a trust region on
 /// the directions; cf. Nocedal & Wright §4).
 pub(crate) const MAX_TURN: f64 = std::f64::consts::FRAC_PI_4;
+
+/// The largest move of a light point (a point of a spline held by a
+/// curvature constraint, weighing much less than 1) in one step, as a
+/// fraction of the sketch size. A light unknown's minimum-norm step is
+/// larger than a unit-weight one's by about the inverse square root of its
+/// weight, so the linearization it extrapolates is trusted over a
+/// correspondingly smaller region (a trust region on the light points, cf.
+/// Nocedal & Wright §4; design note 0010 §4.1). Without it the first step
+/// can throw a spline's points across the sketch into a loop from which
+/// the solve settles on a flattened neighbour.
+pub(crate) const LIGHT_STEP: f64 = 0.25;
 
 /// Foot-point restarts allowed per Gauss–Newton run (see
 /// `CompSystem::reproject`).
@@ -749,6 +762,20 @@ fn bounded_step(
 
 /// The largest step fraction in `(0, 1]` that moves no hidden parameter
 /// past a corner of its spline, and the corners reached at that fraction.
+/// The largest fraction of `step` that moves no light point coordinate by
+/// more than [`LIGHT_STEP`] (1 if none would).
+fn light_limit(sys: &CompSystem<'_>, step: &[f64]) -> f64 {
+    let most = (0..step.len())
+        .filter(|&k| sys.weights[k] < 1.0 && !sys.is_param[k])
+        .map(|k| step[k].abs())
+        .fold(0.0f64, f64::max);
+    if most > LIGHT_STEP {
+        LIGHT_STEP / most
+    } else {
+        1.0
+    }
+}
+
 fn corner_limit(sys: &CompSystem<'_>, u: &[f64], step: &[f64]) -> (f64, Vec<(usize, f64)>) {
     let mut alpha = 1.0f64;
     let mut hits: Vec<(usize, f64, f64)> = Vec::new();
@@ -819,7 +846,12 @@ fn armijo(
     }
     // Stop at the first spline corner crossed: the linear model holds only
     // up to it.
-    let (alpha0, corners) = corner_limit(sys, u, step);
+    let (mut alpha0, mut corners) = corner_limit(sys, u, step);
+    let light = light_limit(sys, step);
+    if light < alpha0 {
+        alpha0 = light;
+        corners.clear();
+    }
     let mut alpha = alpha0;
     for _ in 0..=20 {
         let mut trial: Vec<f64> = u.iter().zip(step).map(|(a, d)| a + alpha * d).collect();
@@ -1019,7 +1051,8 @@ impl CompSystem<'_> {
                     EqKind::DirPair {
                         mode: PairMode::AngleSin { value },
                         ..
-                    },
+                    }
+                    | EqKind::AwayAngle { value, .. },
                 ) => {
                     *value = if s >= 1.0 {
                         *target
@@ -1104,7 +1137,8 @@ pub(crate) fn solve_component(
                 EqKind::DirPair {
                     mode: PairMode::AngleSin { value },
                     ..
-                } => k.angle_theta(&sys.v).map(|t| (t, *value)),
+                }
+                | EqKind::AwayAngle { value, .. } => k.angle_theta(&sys.v).map(|t| (t, *value)),
                 _ => None,
             })
             .collect()

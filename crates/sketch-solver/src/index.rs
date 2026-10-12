@@ -106,6 +106,47 @@ pub(crate) enum TanSide {
     },
 }
 
+/// One side of a curvature constraint (design note 0010 §4): the curve
+/// and which of its ends is at the joint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CurvSide {
+    /// A line; `start` if the joint is at `l.s`.
+    Line {
+        /// The line.
+        l: LineRef,
+        /// The joint is at its start.
+        start: bool,
+    },
+    /// An arc on centre `c`.
+    Arc {
+        /// Centre point index.
+        c: usize,
+        /// The joint is at its start.
+        start: bool,
+    },
+    /// An elliptical arc.
+    Ellipse {
+        /// The ellipse.
+        el: Ell,
+        /// The joint is at its start.
+        start: bool,
+    },
+    /// A conic arc.
+    Conic {
+        /// The conic.
+        cn: Cnc,
+        /// The joint is at its start `p0`.
+        start: bool,
+    },
+    /// A spline of degree ≥ 2.
+    Spline {
+        /// Spline index.
+        spline: usize,
+        /// True for the end at parameter 1.
+        end: bool,
+    },
+}
+
 /// A validated constraint over internal indices.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Con {
@@ -127,6 +168,8 @@ pub(crate) enum Con {
     Concentric(Circ, Circ),
     Symmetric(usize, usize, LineRef),
     TangentAt(TanSide, TanSide, usize),
+    /// A smooth joint with equal curvature at the shared point.
+    CurvatureAt([CurvSide; 2], usize),
     TangentLC(LineRef, Circ, bool),
     TangentLE(LineRef, Ell, bool),
     TangentCC(Circ, Circ, bool),
@@ -716,6 +759,21 @@ impl<K: SketchKey> Index<K> {
                     },
                 }
             }
+            Constraint::Curvature { a, b, point } => {
+                distinct(a, b)?;
+                let ka = self.kind_of(id, a)?;
+                let kb = self.kind_of(id, b)?;
+                let p = self.point(id, point)?;
+                let ca = self.curv_side(id, a, ka, p, coincident)?;
+                let cb = self.curv_side(id, b, kb, p, coincident)?;
+                if !matches!(ca, CurvSide::Spline { .. }) && !matches!(cb, CurvSide::Spline { .. })
+                {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: curvature continuity needs a spline on at least one side"
+                    )));
+                }
+                Con::CurvatureAt([ca, cb], p)
+            }
             Constraint::Normal { line, curve } => {
                 Con::Normal(self.line(id, line)?, self.circular(id, curve)?)
             }
@@ -1239,6 +1297,79 @@ impl<K: SketchKey> Index<K> {
             )));
         }
         Ok(d)
+    }
+
+    /// One side of a curvature constraint at point `p` (design note 0010
+    /// §3): which end of `curve` is at `p`.
+    fn curv_side(
+        &self,
+        id: &dyn Debug,
+        curve: &K,
+        kind: EntKind,
+        p: usize,
+        coincident: &[usize],
+    ) -> Result<CurvSide, SolveError> {
+        let at = |q: usize| q == p || coincident[q] == coincident[p];
+        let end = |s: usize, e: usize| {
+            match (at(s), at(e)) {
+            (true, false) => Ok(true),
+            (false, true) => Ok(false),
+            (true, true) => Err(invalid(format!(
+                "constraint {id:?}: both ends of {curve:?} are at the joint; the end is ambiguous"
+            ))),
+            (false, false) => Err(invalid(format!(
+                "constraint {id:?}: the joint is not an end point of {curve:?} (nor coincident with one)"
+            ))),
+        }
+        };
+        Ok(match kind {
+            EntKind::Line(l) => CurvSide::Line {
+                l,
+                start: end(l.s, l.e)?,
+            },
+            EntKind::Circular(Circ::Arc { c, s, e }) => CurvSide::Arc {
+                c,
+                start: end(s, e)?,
+            },
+            EntKind::Ellipse(el) => match el.arc {
+                Some((s, e)) => CurvSide::Ellipse {
+                    el,
+                    start: end(s, e)?,
+                },
+                None => {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: {curve:?} is an ellipse and has no end points"
+                    )))
+                }
+            },
+            EntKind::Conic(cn) => CurvSide::Conic {
+                cn,
+                start: end(cn.p0, cn.p2)?,
+            },
+            EntKind::Spline(s) => {
+                let def = &self.splines[s];
+                if def.map.degree < 2 {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: {curve:?} has degree 1 and is straight at its ends; curvature continuity needs degree 2 or more"
+                    )));
+                }
+                let pts = &def.points;
+                CurvSide::Spline {
+                    spline: s,
+                    end: !end(pts[0], pts[pts.len() - 1])?,
+                }
+            }
+            EntKind::Circular(Circ::Circle { .. }) => {
+                return Err(invalid(format!(
+                    "constraint {id:?}: {curve:?} is a circle and has no end points"
+                )))
+            }
+            EntKind::Point(_) => {
+                return Err(invalid(format!(
+                    "constraint {id:?}: entity {curve:?} must be a curve"
+                )))
+            }
+        })
     }
 
     fn tan_side(

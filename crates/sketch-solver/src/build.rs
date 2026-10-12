@@ -5,8 +5,10 @@
 use glam::DVec2;
 
 use crate::conic;
-use crate::eq::{EqKind, PairMode, RTerm, Rhs, SplineDef, TanDir, VecExpr};
-use crate::index::{Circ, Cnc, Con, Ell, Index, LineRef, OCurve, OEq, OffsetCon, TanSide};
+use crate::eq::{CurvTerm, EqKind, PairMode, RTerm, Rhs, SplineDef, TanDir, VecExpr};
+use crate::index::{
+    Circ, Cnc, Con, CurvSide, Ell, Index, LineRef, OCurve, OEq, OffsetCon, TanSide,
+};
 use crate::model::{DistanceKind, SketchKey};
 
 /// Lengths are divided by `l` after subtracting the centre `(cx, cy)` from
@@ -361,6 +363,69 @@ impl Builder<'_> {
         }
     }
 
+    /// The tangency row at shared point `p` (design note 0005 §4).
+    fn tangent_at(&mut self, owner: usize, a: TanSide, b: TanSide, p: usize) {
+        let (da, ta) = self.tan_dir(a, p);
+        let (db, tb) = self.tan_dir(b, p);
+        // Tangent vs tangent and normal vs normal: parallel (cross);
+        // tangent vs normal: perpendicular (dot).
+        let mode = if ta == tb {
+            PairMode::Cross
+        } else {
+            PairMode::Dot
+        };
+        let kind = match (da, db) {
+            (TanDir::Lin(a), TanDir::Lin(b)) => EqKind::DirPair { a, b, mode },
+            (a, b) => EqKind::TanDirs { a, b, mode },
+        };
+        self.push(owner, kind, true, None);
+    }
+
+    /// One side of the curvature row at shared point `p` (design note 0010
+    /// §4).
+    fn curv_term(&self, side: CurvSide, p: usize) -> CurvTerm {
+        let sign = |away: bool| if away { 1.0 } else { -1.0 };
+        match side {
+            CurvSide::Line { l, start } => CurvTerm {
+                d1: TanDir::Lin(Self::dir(l)),
+                sign: sign(start),
+                d2: VecExpr(Vec::new()),
+                shape: None,
+            },
+            CurvSide::Arc { c, start } => CurvTerm {
+                d1: TanDir::Perp(VecExpr::diff(p, c)),
+                sign: sign(start),
+                d2: VecExpr::diff(c, p),
+                shape: None,
+            },
+            CurvSide::Ellipse { el, start } => CurvTerm {
+                d1: TanDir::Ellipse {
+                    c: el.c,
+                    m: el.m,
+                    n: el.n,
+                    p,
+                },
+                sign: sign(start),
+                d2: VecExpr::diff(el.c, p),
+                shape: None,
+            },
+            CurvSide::Conic { cn, start } => {
+                let (near, far) = if start {
+                    (cn.p0, cn.p2)
+                } else {
+                    (cn.p2, cn.p0)
+                };
+                CurvTerm {
+                    d1: TanDir::Lin(VecExpr::diff(cn.p1, near)),
+                    sign: 1.0,
+                    d2: VecExpr::diff(far, cn.p1),
+                    shape: Some(self.shape_base + cn.k),
+                }
+            }
+            CurvSide::Spline { spline, end } => CurvTerm::spline(&self.splines[spline], end),
+        }
+    }
+
     /// `q` is the mirror image of `p` about line `l`: their midpoint is on
     /// the line and `q − p` is normal to it.
     fn symmetric(&mut self, owner: usize, p: usize, q: usize, l: LineRef) {
@@ -595,21 +660,20 @@ impl Builder<'_> {
                 self.equal_slots(owner, self.y(ca), self.y(cb));
             }
             Con::Symmetric(p, q, l) => self.symmetric(owner, p, q, l),
-            Con::TangentAt(a, b, p) => {
-                let (da, ta) = self.tan_dir(a, p);
-                let (db, tb) = self.tan_dir(b, p);
-                // Tangent vs tangent and normal vs normal: parallel (cross);
-                // tangent vs normal: perpendicular (dot).
-                let mode = if ta == tb {
-                    PairMode::Cross
-                } else {
-                    PairMode::Dot
-                };
-                let kind = match (da, db) {
-                    (TanDir::Lin(a), TanDir::Lin(b)) => EqKind::DirPair { a, b, mode },
-                    (a, b) => EqKind::TanDirs { a, b, mode },
-                };
-                self.push(owner, kind, true, None);
+            Con::TangentAt(a, b, p) => self.tangent_at(owner, a, b, p),
+            Con::CurvatureAt([ca, cb], p) => {
+                let (a, b) = (self.curv_term(ca, p), self.curv_term(cb, p));
+                self.push(
+                    owner,
+                    EqKind::AwayAngle {
+                        a: a.clone(),
+                        b: b.clone(),
+                        value: std::f64::consts::PI,
+                    },
+                    true,
+                    None,
+                );
+                self.push(owner, EqKind::Curvature { a, b }, false, None);
             }
             Con::TangentLC(l, c, left) => {
                 let r = self.radius(c);
