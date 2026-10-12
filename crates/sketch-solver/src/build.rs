@@ -987,6 +987,26 @@ impl Builder<'_> {
     }
 }
 
+/// Each point's coincidence class: the smallest point index coincident
+/// with it through the sketch's coincidences.
+fn coincidence_classes(n_points: usize, cons: &[Con]) -> Vec<usize> {
+    fn find(uf: &mut [usize], mut x: usize) -> usize {
+        while uf[x] != x {
+            uf[x] = uf[uf[x]];
+            x = uf[x];
+        }
+        x
+    }
+    let mut uf: Vec<usize> = (0..n_points).collect();
+    for c in cons {
+        if let Con::Coincident(p, q) = *c {
+            let (rp, rq) = (find(&mut uf, p), find(&mut uf, q));
+            uf[rp.max(rq)] = rp.min(rq);
+        }
+    }
+    (0..n_points).map(|p| find(&mut uf, p)).collect()
+}
+
 /// Builds the residual system with the given scaling.
 pub(crate) fn build<K: SketchKey>(index: &Index<K>, cons: &[Con], scale: Scale) -> Problem {
     let n_points = index.points.len();
@@ -1040,8 +1060,11 @@ pub(crate) fn build<K: SketchKey>(index: &Index<K>, cons: &[Con], scale: Scale) 
     }
     // Every ellipse keeps its axes perpendicular and every elliptical arc
     // its ends on its ellipse (design note 0008 §4.1–4.2), except derived
-    // images, whose source's equations imply theirs. An end that is an
-    // axis end lies on the ellipse by definition.
+    // images, whose source's equations imply theirs. An end coincident
+    // with a point already on the same ellipse lies there through that
+    // point: an axis end (on it by definition), or an end of another arc
+    // of it, as where the pieces of a split arc meet (0008 §8). The
+    // ellipse is the same when its three points are, up to coincidence.
     let derived_ellipses: std::collections::BTreeSet<usize> = cons
         .iter()
         .flat_map(|c| match c {
@@ -1050,6 +1073,17 @@ pub(crate) fn build<K: SketchKey>(index: &Index<K>, cons: &[Con], scale: Scale) 
             _ => Vec::new(),
         })
         .collect();
+    let class = coincidence_classes(n_points, cons);
+    let mut held = std::collections::BTreeSet::new();
+    for (i, k) in index.kinds.iter().enumerate() {
+        if let crate::index::EntKind::Ellipse(el) = *k {
+            if !derived_ellipses.contains(&i) {
+                let key = (class[el.c], class[el.m], class[el.n]);
+                held.insert((class[el.m], key));
+                held.insert((class[el.n], key));
+            }
+        }
+    }
     for (i, k) in index.kinds.iter().enumerate() {
         let crate::index::EntKind::Ellipse(el) = *k else {
             continue;
@@ -1069,8 +1103,9 @@ pub(crate) fn build<K: SketchKey>(index: &Index<K>, cons: &[Con], scale: Scale) 
             sub: None,
         });
         if let Some((s, e)) = el.arc {
+            let key = (class[el.c], class[el.m], class[el.n]);
             for q in [s, e] {
-                if q != el.m && q != el.n {
+                if held.insert((class[q], key)) {
                     b.on_ellipse(None, Some(i), q, el);
                 }
             }

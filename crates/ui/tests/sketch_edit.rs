@@ -833,6 +833,12 @@ enum Shape {
     Circle(DVec2, f64),
     /// Centre, radius, start angle, sweep.
     Arc(DVec2, f64, f64, f64),
+    /// Centre, first semi-axis, the second's length over the first's
+    /// (negative: on its right).
+    Ellipse(DVec2, DVec2, f64),
+    /// As an ellipse, then the start anomaly and the extent, counter-
+    /// clockwise in the plane.
+    EllipticalArc(DVec2, DVec2, f64, f64, f64),
 }
 
 fn shape() -> impl Strategy<Value = Shape> {
@@ -844,7 +850,25 @@ fn shape() -> impl Strategy<Value = Shape> {
         1 => (p(), 3.0..30.0f64).prop_map(|(c, r)| Shape::Circle(c, r)),
         1 => (p(), 3.0..30.0f64, 0.0..TAU, 0.3..6.0f64)
             .prop_map(|(c, r, a, s)| Shape::Arc(c, r, a, s)),
+        1 => (p(), axis(), ratio()).prop_map(|(c, a, k)| Shape::Ellipse(c, a, k)),
+        1 => (p(), axis(), ratio(), 0.0..TAU, 0.3..6.0f64)
+            .prop_map(|(c, a, k, t, s)| Shape::EllipticalArc(c, a, k, t, s)),
     ]
+}
+
+/// A random first semi-axis (millimetres).
+fn axis() -> impl Strategy<Value = DVec2> {
+    (3.0..30.0f64, 0.0..TAU).prop_map(|(r, a)| DVec2::from_angle(a) * r)
+}
+
+/// A random second-to-first semi-axis ratio, either handedness.
+fn ratio() -> impl Strategy<Value = f64> {
+    prop_oneof![0.2..1.5f64, -1.5..-0.2f64]
+}
+
+/// The ellipse's point at anomaly `t` (millimetres).
+fn ellipse_at(c: DVec2, a: DVec2, k: f64, t: f64) -> DVec2 {
+    c + a * t.cos() + a.perp() * k * t.sin()
 }
 
 /// Adds the shapes as one batch.
@@ -868,6 +892,33 @@ fn add_shapes(m: &mut Model, f: FeatureId, shapes: &[Shape]) {
             Shape::Arc(c, r, a, sweep) => {
                 let at = |t: f64| (*c + DVec2::from_angle(t) * *r) * MM;
                 b.arc(*c * MM, at(*a), at(a + sweep), false);
+            }
+            Shape::Ellipse(c, a, k) | Shape::EllipticalArc(c, a, k, ..) => {
+                let center = b.point(*c * MM);
+                let major = b.point((*c + *a) * MM);
+                let minor = b.point((*c + a.perp() * *k) * MM);
+                let geometry = match s {
+                    Shape::EllipticalArc(.., t, sweep) => {
+                        // Counter-clockwise in the plane: anomaly increases
+                        // that way when the second axis is on the left.
+                        let at = |t: f64| ellipse_at(*c, *a, *k, t) * MM;
+                        let start = b.point(at(*t));
+                        let end = b.point(at(t + k.signum() * sweep));
+                        Geometry::EllipticalArc {
+                            center,
+                            major,
+                            minor,
+                            start,
+                            end,
+                        }
+                    }
+                    _ => Geometry::Ellipse {
+                        center,
+                        major,
+                        minor,
+                    },
+                };
+                b.entity(geometry, false);
             }
         }
     }
@@ -946,6 +997,12 @@ enum Built {
     /// Lines joined end to end by coincidences.
     Chain(Vec<DVec2>),
     Circle(DVec2, f64),
+    /// By the ellipse tool: centre, first axis end, second axis extent,
+    /// with construction semi-axes.
+    Ellipse(DVec2, DVec2, DVec2),
+    /// By the elliptical arc tool: the ellipse's three clicks, then the
+    /// start and end anomalies.
+    EllipticalArc(DVec2, DVec2, DVec2, f64, f64),
 }
 
 fn built() -> impl Strategy<Value = Built> {
@@ -956,6 +1013,9 @@ fn built() -> impl Strategy<Value = Built> {
         (p(), p(), 3u32..9).prop_map(|(c, v, n)| Built::Polygon(c, v, n)),
         proptest::collection::vec(p(), 2..5).prop_map(Built::Chain),
         (p(), 3.0..30.0f64).prop_map(|(c, r)| Built::Circle(c, r)),
+        (p(), p(), p()).prop_map(|(c, m, q)| Built::Ellipse(c, m, q)),
+        (p(), p(), p(), 0.0..TAU, 0.3..6.0f64)
+            .prop_map(|(c, m, q, t, s)| Built::EllipticalArc(c, m, q, t, s)),
     ]
 }
 
@@ -995,6 +1055,23 @@ fn add_built(m: &mut Model, f: FeatureId, s: &Built) {
             );
             Ok(())
         }
+        Built::Ellipse(c, mj, q) => shapes::ellipse(&mut b, &free(*c), &free(*mj), *q * MM, false),
+        Built::EllipticalArc(c, mj, q, t, sweep) => match shapes::ellipse_axes(*c, *mj, *q) {
+            Some((a, n)) => {
+                let at = |t: f64| free(shapes::ellipse_point(*c, a, n, t));
+                shapes::elliptical_arc(
+                    &mut b,
+                    &free(*c),
+                    &free(*mj),
+                    *q * MM,
+                    &at(*t),
+                    &at(t + sweep),
+                    *sweep,
+                    false,
+                )
+            }
+            None => return,
+        },
     };
     if made.is_ok() {
         m.edit_sketch(f, b.edits).unwrap();
@@ -1072,16 +1149,9 @@ fn edit_randomly(
         let near = along(&curve, t);
         let sketch = r.solution.sketch.clone();
         let planned = match op {
-            0 => trim::cuts(m.kernel(), &curves, target, &Default::default())
+            0 => trim::cuts(m.kernel(), &sketch, &curves, target)
                 .and_then(|k| trim::trim(&sketch, &k, near)),
-            1 => trim::extend(
-                m.kernel(),
-                &sketch,
-                &curves,
-                target,
-                near,
-                &Default::default(),
-            ),
+            1 => trim::extend(m.kernel(), &sketch, &curves, target, near),
             _ => trim::split(&sketch, &curves, target, near),
         };
         let plan = match planned {

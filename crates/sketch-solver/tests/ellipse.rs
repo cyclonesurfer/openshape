@@ -249,6 +249,69 @@ fn arcs_continue_tangentially_into_lines_and_other_arcs() {
 }
 
 #[test]
+fn arcs_of_one_ellipse_meet_at_a_coincidence_without_redundancy() {
+    // The pieces of a split arc (design note 0008 §8): two arcs on the same
+    // centre and axis points, the first's end coincident with the second's
+    // start. Each end is on the ellipse; the joint only once.
+    let mut b = B::new();
+    let [k1, kc, km, kn, _, e1] = arc(&mut b, DVec2::ZERO, DVec2::new(0.6, 0.2), 0.5, 0.3, 1.4);
+    let a = DVec2::new(0.6, 0.2);
+    let bb = a.perp() * 0.5;
+    let at = |t: f64| a * t.cos() + bb * t.sin();
+    let (p, q) = (at(1.4), at(2.9));
+    let s2 = b.point(p.x, p.y);
+    let e2 = b.point(q.x, q.y);
+    let k2 = b.entity(Geometry::EllipticalArc {
+        center: kc,
+        major: km,
+        minor: kn,
+        start: s2,
+        end: e2,
+    });
+    b.coincident(e1, s2);
+    let s = solve(&b.build(), &opts());
+    assert_eq!(s.status, SolveStatus::Solved, "{:?}", s.status);
+    assert!(s.redundant.is_empty(), "{:?}", s.redundant);
+    // The ellipse's 5, the first arc's ends, the second's far end.
+    assert_eq!(s.dof, 5 + 3);
+    assert_satisfied(&s.sketch);
+    for k in [k1, k2] {
+        assert!(matches!(
+            resolved(&s.sketch, k),
+            ResolvedCurve::EllipticalArc { .. }
+        ));
+    }
+    // Dragged, the joint stays on the ellipse.
+    let mut o = opts();
+    o.drag = vec![(s2, DVec2::new(-0.3, 0.6))];
+    let s = solve(&s.sketch, &o);
+    assert_eq!(s.status, SolveStatus::Solved, "{:?}", s.status);
+    assert!(common::dist_to_ellipse(&s.sketch, k1, pos(&s.sketch, e1)) < 1e-12);
+    assert!((pos(&s.sketch, e1) - pos(&s.sketch, s2)).length() < 1e-12);
+
+    // An end made coincident with an axis end lies on the ellipse through
+    // it: not redundant either.
+    let mut b = B::new();
+    let [_, _, km, _, ks, _] = arc(&mut b, DVec2::ZERO, DVec2::new(0.6, 0.0), 0.5, 0.2, 2.0);
+    b.coincident(ks, km);
+    let s = solve(&b.build(), &opts());
+    assert_eq!(s.status, SolveStatus::Solved, "{:?}", s.status);
+    assert!(s.redundant.is_empty());
+    assert_eq!(s.dof, 5 + 1);
+    assert!((pos(&s.sketch, ks) - pos(&s.sketch, km)).length() < 1e-12);
+
+    // A point-on-curve constraint at the joint says it again: redundant.
+    let mut b = B::new();
+    let [k1, _, _, _, _, e1] = arc(&mut b, DVec2::ZERO, DVec2::new(0.6, 0.2), 0.5, 0.3, 1.4);
+    b.c(Constraint::PointOnCurve {
+        point: e1,
+        curve: k1,
+    });
+    let s = solve(&b.build(), &opts());
+    assert_eq!(s.redundant.len(), 1, "{:?}", s.status);
+}
+
+#[test]
 fn what_ellipses_do_not_take_is_refused() {
     let mut b = B::new();
     let (k, kc, ..) = ellipse(&mut b, DVec2::ZERO, DVec2::new(0.5, 0.0), 0.5);

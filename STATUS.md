@@ -2,8 +2,8 @@
 
 Updated 2026-10-12, Phase 2 (sketcher): core sketcher, the application
 shell, the editing tools, ellipses, conics, transform, curvature
-continuity, text and smooth closed splines done; ellipse and conic
-trimming next.
+continuity, text, smooth closed splines and ellipse trimming done;
+conic trimming next.
 
 ## What works
 
@@ -144,17 +144,20 @@ trimming next.
   wants them (stored per dimension as an offset from what it measures, so
   they move with the geometry; one undo step per drag; a command returns
   them to automatic placement; design note 0007 §12). Trim (a piece between crossings; an
-  uncrossed curve is deleted; a circle cut twice becomes an arc), extend (a
-  line along its ray, an arc around its circle, to the next curve) and split
-  (design note 0007 §7): cut ends are put on the crossing curve, the far end
+  uncrossed curve is deleted; a circle or ellipse cut twice becomes an arc
+  or elliptical arc on the same points), extend (a line along its ray, an
+  arc around its circle, an elliptical arc around its ellipse, to the next
+  curve) and split (design note 0007 §7; ellipses 0008 §8.1, where an
+  ellipse's own semi-axes do not cut it): cut ends are put on the crossing curve, the far end
   of a trimmed middle piece moves to a new curve with every constraint it
   had (tangencies included), curves that met at a moved end stay joined,
   and only constraints that no longer mean anything (a moved end's, a
   segment's length) are removed and counted; each edit is refused rather
   than committed if the sketch would stop solving or gain a redundant
-  constraint. Fuzzed on random lines, arcs, circles, rectangles, slots,
-  polygons and joined chains (12,000 sketches, about 15,000 edits, every
-  one solved with nothing unplanned moving). Sketch fillet rounds the
+  constraint. Fuzzed on random lines, arcs, circles, ellipses, elliptical
+  arcs, rectangles, slots, polygons and joined chains (12,000 sketches,
+  about 15,000 edits, every one solved with nothing unplanned moving; a
+  2,000-case run with ellipses committed 1,469 ellipse edits). Sketch fillet rounds the
   corner of two lines or arcs with a tangent arc of the radius typed in the
   sketch dialog (line–line, line–arc, arc–arc; the centre from the curves'
   offsets); constraints on the corner, a filleted line's length and
@@ -310,9 +313,14 @@ trimming next.
 - Second machine, 2026-10-12, commit 4de454a: AMD Radeon RX 7600 (RADV
   NAVI33, Mesa 26.2.4, Fedora 44, rustup Rust 1.99): every step passed,
   780 of 780 tests, so the sRGB test's bound holds on RADV (on this card;
-  the 8060S re-run is still to come). Demo 12/12; 1080p benchmark 0.215
+  and on the 8060S, below). Demo 12/12; 1080p benchmark 0.215
   ms mean, 0.301 ms p99 (4,660 fps); 1,000 instances 0.9 ms per frame
   steady including readback.
+- 8060S re-run, 2026-10-12, commit 9cbfe98, on Fedora's Rust 1.95:
+  every step passed, 780 of 780 tests (so the sRGB bound holds on RADV
+  STRIX_HALO too), demo 12/12; 1080p benchmark 0.154 ms mean, 0.184 ms
+  p99 (6,470 fps); 1,000 instances 0.3 ms per frame steady including
+  readback. Both real GPUs are now fully green.
 - The windowed app ran on a desktop for the first time on 2026-10-12, on
   an AMD RX 7600 (RADV NAVI33) under GNOME on Wayland, with the 3D view's
   brightness right. Its title bar was winit's bare fallback frame (GNOME
@@ -478,9 +486,7 @@ trimming next.
   right-to-left reordering of mixed scripts and no text on a curve; its
   letters cannot be trimmed or constrained individually. A word extruded
   in one feature makes one part with a solid per letter (each feature
-  makes its own part until booleans). A spline split a rounding step from
-  one of its knots keeps a near-zero knot span; integration merges such
-  spans, but the split itself should snap to the knot (nurbs crate).
+  makes its own part until booleans).
   Curvature continuity fails on 0.27 % of heavily perturbed joints
   (mostly a spline meeting an interpolated spline), reported, never
   wrong; where the spline alone cannot reach the joint's curvature the
@@ -494,11 +500,9 @@ trimming next.
   end is refused; a conic cannot be offset (its offset is not a conic).
   The ρ label reads "ρ 0.42"; in the app's font at 13 points ρ looks much
   like a p.
-  Ellipses cannot yet be trimmed, extended or split (refused with a
-  message; every piece is an exact elliptical arc, so this is planned
-  work, design note 0008 §8), nor made tangent to a circle, an arc or
-  another ellipse except at a shared end point (no closed form; §4.5), so
-  a sketch fillet at an elliptical arc's end is refused too. An ellipse
+  Ellipses cannot be made tangent to a circle, an arc or another ellipse
+  except at a shared end point (no closed form; design note 0008 §4.5),
+  so a sketch fillet at an elliptical arc's end is refused too. An ellipse
   cannot be offset (its offset is not a conic). Radius, diameter, equal
   and concentric do not apply to ellipses; their semi-axes are lines to
   dimension instead.
@@ -546,12 +550,10 @@ trimming next.
 ## Next steps
 
 1. The rest of the Phase 2 sketcher that needs no faces:
-   trim/extend/split of ellipses and conics, and a curvature comb
-   display. Project/convert,
+   trim/extend/split of conics (design note 0009 §8), and a curvature
+   comb display. Project/convert,
    intersection curves and pierce wait for Phase 3 faces.
-2. Re-run `scripts/gpu-check.sh` on the 8060S (docs/huginn-tasks.md
-   prompt 1): its render tests did not run on 2026-10-12. Check the new
-   title bar on GNOME.
+2. Check the new title bar on GNOME (on Pat's desktop).
 3. Phase 3 groundwork: design notes for curve/surface intersection, booleans
    and persistent naming; make the kernel's tessellation and profile checks
    adapt to local feature size.

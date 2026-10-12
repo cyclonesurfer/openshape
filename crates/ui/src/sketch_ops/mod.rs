@@ -189,19 +189,8 @@ pub fn deletion(sketch: &SketchData, selected: &BTreeSet<SketchId>) -> Vec<Sketc
 /// centre to its axis ends (design note 0008 §7), a text's box (ADR 0015).
 fn semi_axes(sketch: &SketchData, selected: &BTreeSet<SketchId>) -> Vec<SketchId> {
     let axes_of = |g: &Geometry<SketchId>| match *g {
-        Geometry::Ellipse {
-            center,
-            major,
-            minor,
-        }
-        | Geometry::EllipticalArc {
-            center,
-            major,
-            minor,
-            ..
-        } => Some(vec![(center, major), (center, minor)]),
         Geometry::Text { corners: c, .. } => Some((0..4).map(|i| (c[i], c[(i + 1) % 4])).collect()),
-        _ => None,
+        _ => ellipse_axes(g).map(Vec::from),
     };
     let (mut going, mut kept) = (BTreeSet::new(), BTreeSet::new());
     for e in &sketch.entities {
@@ -220,6 +209,44 @@ fn semi_axes(sketch: &SketchData, selected: &BTreeSet<SketchId>) -> Vec<SketchId
             e.construction
                 && matches!(e.geometry, Geometry::Line { start, end }
                     if going.contains(&(start, end)) && !kept.contains(&(start, end)))
+        })
+        .map(|e| e.id)
+        .collect()
+}
+
+/// The (centre, axis end) point pairs of an ellipse's or elliptical arc's
+/// two semi-axes.
+fn ellipse_axes(g: &Geometry<SketchId>) -> Option<[(SketchId, SketchId); 2]> {
+    match *g {
+        Geometry::Ellipse {
+            center,
+            major,
+            minor,
+        }
+        | Geometry::EllipticalArc {
+            center,
+            major,
+            minor,
+            ..
+        } => Some([(center, major), (center, minor)]),
+        _ => None,
+    }
+}
+
+/// The construction semi-axes of ellipse or elliptical arc `curve`, the
+/// lines from its centre to its axis ends that its tool drew with it
+/// (design note 0008 §7). They are part of how it is drawn and meet it
+/// only at its axis ends, so they do not cut it (0008 §8).
+pub fn own_axes(sketch: &SketchData, curve: SketchId) -> BTreeSet<SketchId> {
+    let Some(axes) = sketch.entity(curve).and_then(|e| ellipse_axes(&e.geometry)) else {
+        return BTreeSet::new();
+    };
+    sketch
+        .entities
+        .iter()
+        .filter(|e| {
+            e.construction
+                && matches!(e.geometry, Geometry::Line { start, end } if axes.contains(&(start, end)))
         })
         .map(|e| e.id)
         .collect()

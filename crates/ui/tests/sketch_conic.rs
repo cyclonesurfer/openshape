@@ -596,8 +596,8 @@ fn editing_tools_that_cannot_handle_conics_say_so() {
     let q = openshape_sketch_solver::conic::point(c.0, c.1, 0.3) / MM;
     for (tool, says) in [
         (Tool::Trim, "Trimming conics is not built yet"),
-        (Tool::Extend, "Only lines and arcs can be extended"),
-        (Tool::Split, "Only lines and arcs can be split"),
+        (Tool::Extend, "Conics cannot be extended yet"),
+        (Tool::Split, "Conics cannot be split yet"),
         (Tool::Offset, "its offset is not a conic"),
     ] {
         ed.set_tool(tool);

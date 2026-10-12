@@ -378,6 +378,30 @@ pub fn eccentric_anomaly(c: DVec2, a: DVec2, b: DVec2, p: DVec2) -> f64 {
     (v.dot(b) / b.length_squared()).atan2(v.dot(a) / a.length_squared())
 }
 
+/// The eccentric anomaly of the point of an ellipse (centre `c`,
+/// perpendicular semi-axes `a`, `b`) closest to `p`, for a `p` near it:
+/// Newton's method on the distance's derivative, from `p`'s
+/// [`eccentric_anomaly`], which is already close.
+pub fn closest_anomaly(c: DVec2, a: DVec2, b: DVec2, p: DVec2) -> f64 {
+    let mut t = eccentric_anomaly(c, a, b, p);
+    for _ in 0..8 {
+        let (sin, cos) = t.sin_cos();
+        let e = c + a * cos + b * sin - p;
+        let d1 = b * cos - a * sin;
+        let d2 = -(a * cos + b * sin);
+        let (f, fp) = (d1.dot(e), d2.dot(e) + d1.length_squared());
+        if fp <= 0.0 || fp.is_nan() {
+            break;
+        }
+        let step = f / fp;
+        t -= step;
+        if step.abs() <= 1e-15 {
+            break;
+        }
+    }
+    t
+}
+
 /// Points of the elliptical arc from anomaly `t0` over the signed `sweep`.
 pub fn ellipse_polyline(c: DVec2, a: DVec2, b: DVec2, t0: f64, sweep: f64) -> Vec<DVec2> {
     let n = ((sweep.abs() / 3.75f64.to_radians()).ceil() as usize).clamp(4, 96);

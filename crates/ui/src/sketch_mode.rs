@@ -1288,27 +1288,14 @@ fn onto_curve(d: &SketchDisplay, id: SketchId, p: DVec2) -> DVec2 {
     }
 }
 
+/// Cuts found for trim, with the sketch and solved curves they were found
+/// in.
+type FoundCuts = (SketchData, Vec<(SketchId, ResolvedCurve)>, Cuts);
+
 /// The point of an ellipse closest to `p`, for a `p` near it (a point of
-/// its drawn polyline): Newton's method on the distance's derivative from
-/// `p`'s eccentric anomaly, which is already close.
+/// its drawn polyline).
 fn closest_on_ellipse(c: DVec2, a: DVec2, b: DVec2, p: DVec2) -> DVec2 {
-    let mut t = shapes::eccentric_anomaly(c, a, b, p);
-    for _ in 0..8 {
-        let (sin, cos) = t.sin_cos();
-        let e = c + a * cos + b * sin - p;
-        let d1 = b * cos - a * sin;
-        let d2 = -(a * cos + b * sin);
-        let (f, fp) = (d1.dot(e), d2.dot(e) + d1.length_squared());
-        if fp <= 0.0 || fp.is_nan() {
-            break;
-        }
-        let step = f / fp;
-        t -= step;
-        if step.abs() <= 1e-15 {
-            break;
-        }
-    }
-    shapes::ellipse_point(c, a, b, t)
+    shapes::ellipse_point(c, a, b, shapes::closest_anomaly(c, a, b, p))
 }
 
 /// Snaps `pos` to a point, the origin or a curve of `d`.
@@ -2464,8 +2451,9 @@ pub struct SketchEditor {
     pub message: Option<String>,
     /// What the trim, extend or split tool would do at the pointer.
     pub curve_edit: Option<CurveEdit>,
-    /// The last cuts found for trim, with the curves they were found in.
-    cuts: Option<(Vec<(SketchId, ResolvedCurve)>, Cuts)>,
+    /// The last cuts found for trim, with the sketch and curves they were
+    /// found in.
+    cuts: Option<FoundCuts>,
     /// The mirror tool's line, once chosen.
     pub mirror_axis: Option<SketchId>,
     /// What the mirror tool mirrors about the first line clicked: the
@@ -3466,22 +3454,20 @@ impl SketchEditor {
         }
         let curves: Vec<(SketchId, ResolvedCurve)> =
             d.curves.iter().map(|c| (c.id, c.curve.clone())).collect();
-        // Letters cut curves, but no end can be held on them.
-        let texts = text::texts(&d.sketch);
         match self.tool {
             Tool::Trim => {
                 // Finding cuts intersects the curve with every other one;
                 // reuse them while the pointer stays on the same curve.
                 let fresh = !matches!(&self.cuts,
-                    Some((c, k)) if k.target == target && *c == curves);
+                    Some((s, c, k)) if k.target == target && *c == curves && *s == d.sketch);
                 if fresh {
-                    let k = trim::cuts(model.kernel(), &curves, target, &texts)?;
-                    self.cuts = Some((curves, k));
+                    let k = trim::cuts(model.kernel(), &d.sketch, &curves, target)?;
+                    self.cuts = Some((d.sketch.clone(), curves, k));
                 }
-                let (_, k) = self.cuts.as_ref().expect("cuts were just found");
+                let (_, _, k) = self.cuts.as_ref().expect("cuts were just found");
                 trim::trim(&d.sketch, k, at)
             }
-            Tool::Extend => trim::extend(model.kernel(), &d.sketch, &curves, target, at, &texts),
+            Tool::Extend => trim::extend(model.kernel(), &d.sketch, &curves, target, at),
             Tool::Split => trim::split(&d.sketch, &curves, target, at),
             _ => Err("not a curve editing tool".into()),
         }

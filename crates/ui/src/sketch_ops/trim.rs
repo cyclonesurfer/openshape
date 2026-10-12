@@ -1,6 +1,8 @@
 //! Trim, extend and split (design note 0007 §7): cut a curve where the
 //! other curves of the sketch meet it, and keep every constraint that still
-//! means the same thing.
+//! means the same thing. Every piece of a line, circle or ellipse is a line,
+//! arc or elliptical arc on the same points, so cuts are exact (design note
+//! 0008 §8).
 //!
 //! The planners are pure: they read the sketch and its solved curves and
 //! return one edit batch ([`Plan`]) for the editor to commit. Where a cut
@@ -18,7 +20,8 @@ use openshape_features::kernel_curve;
 use openshape_kernel::{Kernel, ProfileCurve};
 use openshape_sketch_solver::ResolvedCurve;
 
-use super::{coincidence_classes, deletion, Batch, UnionFind};
+use super::shapes::{closest_anomaly, eccentric_anomaly, ellipse_point};
+use super::{coincidence_classes, deletion, own_axes, text, Batch, UnionFind};
 
 /// Cuts closer than this to one another, or to the cut curve's ends, are
 /// one cut (metres): a piece a micron long is not a piece anyone meant.
@@ -31,9 +34,11 @@ pub const TANGENT_SIN: f64 = 1e-2;
 /// Where other curves cut a curve.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cut {
-    /// Parameter along the cut curve (the arrangement's conventions: a
-    /// line's fraction, the angle travelled along an arc from its start, a
-    /// circle's angle from +x).
+    /// Parameter along the cut curve: a line's fraction, the angle
+    /// travelled along an arc from its start, a circle's angle from +x (the
+    /// arrangement's conventions), and the eccentric anomaly turned
+    /// counter-clockwise in the plane from an elliptical arc's start or an
+    /// ellipse's first axis end.
     pub t: f64,
     /// The point.
     pub point: DVec2,
@@ -84,14 +89,15 @@ pub enum Preview {
     },
 }
 
-/// Finds where the other curves cut `target` (`curves` are the sketch's
-/// solved curves, construction geometry included). Curves in `loose` cut
-/// but cannot hold a cut end (a text's letters, ADR 0015).
+/// Finds where the other curves of `sketch` cut `target` (`curves` are its
+/// solved curves, construction geometry included). A text's letters cut
+/// but cannot hold a cut end (ADR 0015); an ellipse's own semi-axes do not
+/// cut it ([`own_axes`]).
 pub fn cuts(
     kernel: &(impl Kernel + ?Sized),
+    sketch: &SketchData,
     curves: &[(SketchId, ResolvedCurve)],
     target: SketchId,
-    loose: &BTreeSet<SketchId>,
 ) -> Result<Cuts, String> {
     let curve = curves
         .iter()
@@ -100,9 +106,11 @@ pub fn cuts(
         .ok_or("the curve no longer exists")?;
     let a = kernel_curve(&curve).map_err(|e| e.to_string())?;
     let ends = end_points(&curve);
+    let loose = text::texts(sketch);
+    let own = own_axes(sketch, target);
     let mut raw = Vec::new();
     for (id, c) in curves {
-        if *id == target {
+        if *id == target || own.contains(id) {
             continue;
         }
         for x in contacts(kernel, &a, c)? {
@@ -110,7 +118,13 @@ pub fn cuts(
                 (x.point - s).length() <= CUT_GAP || (x.point - e).length() <= CUT_GAP
             });
             if !at_end {
-                raw.push(x.cut(*id, loose));
+                let mut cut = x.cut(*id, &loose);
+                // The kernel's parameter on an ellipse's rational form runs
+                // the same way as the anomaly, but not evenly.
+                if let ResolvedCurve::Ellipse { .. } | ResolvedCurve::EllipticalArc { .. } = curve {
+                    cut.t = turned_to(&curve, cut.point).expect("an ellipse");
+                }
+                raw.push(cut);
             }
         }
     }
@@ -122,8 +136,13 @@ pub fn cuts(
             _ => out.push(c),
         }
     }
-    if matches!(curve, ResolvedCurve::Circle { .. }) && out.len() >= 2 {
-        // The first and last cut of a circle can meet across its seam.
+    if matches!(
+        curve,
+        ResolvedCurve::Circle { .. } | ResolvedCurve::Ellipse { .. }
+    ) && out.len() >= 2
+    {
+        // The first and last cut of a closed curve can meet across its
+        // seam.
         if (out[0].point - out[out.len() - 1].point).length() <= CUT_GAP {
             let last = out.pop().expect("two cuts");
             merge(&mut out[0], last);
@@ -247,13 +266,36 @@ pub fn trim(sketch: &SketchData, cuts: &Cuts, near: DVec2) -> Result<Plan, Strin
     }
     match (geometry, &cuts.curve) {
         (Geometry::Circle { center, .. }, ResolvedCurve::Circle { .. }) => {
-            trim_circle(sketch, cuts, *center, near)
+            let center = *center;
+            trim_closed(sketch, cuts, near, "A circle", |start, end| Geometry::Arc {
+                center,
+                start,
+                end,
+            })
         }
-        (Geometry::Line { start, end }, _) | (Geometry::Arc { start, end, .. }, _) => {
-            let center = match geometry {
-                Geometry::Arc { center, .. } => Some(*center),
-                _ => None,
-            };
+        (
+            &Geometry::Ellipse {
+                center,
+                major,
+                minor,
+            },
+            ResolvedCurve::Ellipse { .. },
+        ) => trim_closed(sketch, cuts, near, "An ellipse", |start, end| {
+            Geometry::EllipticalArc {
+                center,
+                major,
+                minor,
+                start,
+                end,
+            }
+        }),
+        (
+            Geometry::Line { start, end }
+            | Geometry::Arc { start, end, .. }
+            | Geometry::EllipticalArc { start, end, .. },
+            _,
+        ) => {
+            let carrier = Carrier::of(geometry).ok_or("this curve cannot be trimmed")?;
             let tn = param(&cuts.curve, near);
             let i = cuts.cuts.iter().filter(|c| c.t < tn).count();
             let mut r = Rewrite::new(sketch, t);
@@ -275,12 +317,12 @@ pub fn trim(sketch: &SketchData, cuts: &Cuts, near: DVec2) -> Result<Plan, Strin
                 // A middle piece: the curve keeps the part before it; a new
                 // curve takes the part after it and the old end.
                 let (lo, hi) = (&cuts.cuts[i - 1], &cuts.cuts[i]);
-                let d = r.continuation(*end, center, hi.point)?;
+                let d = r.continuation(*end, carrier, hi.point)?;
                 r.moves.push((*end, lo.point));
                 r.attach(*end, lo);
                 r.attach(d.start, hi);
-                match center {
-                    None => {
+                match carrier {
+                    Carrier::Line => {
                         r.pending.push(Constraint::PointOnCurve {
                             point: d.start,
                             curve: t,
@@ -290,7 +332,9 @@ pub fn trim(sketch: &SketchData, cuts: &Cuts, near: DVec2) -> Result<Plan, Strin
                             curve: t,
                         });
                     }
-                    Some(_) => r.pending.push(Constraint::Equal { a: t, b: d.curve }),
+                    Carrier::Circle(_) => r.pending.push(Constraint::Equal { a: t, b: d.curve }),
+                    // The new piece's own points define its ellipse.
+                    Carrier::Ellipse { .. } => {}
                 }
                 Ok(r.finish(Preview::Piece(piece(&cuts.curve, lo.t, hi.t))))
             }
@@ -298,11 +342,6 @@ pub fn trim(sketch: &SketchData, cuts: &Cuts, near: DVec2) -> Result<Plan, Strin
         (Geometry::ControlSpline { .. } | Geometry::InterpolatedSpline { .. }, _) => Err(
             "A spline can only be trimmed whole: its pieces are not exact splines of the \
              sketch's kinds (design note 0007 §7.5). Delete it, or redraw it in pieces"
-                .into(),
-        ),
-        (Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. }, _) => Err(
-            "Trimming ellipses is not built yet (design note 0008 §8): delete the ellipse, \
-             or draw an elliptical arc"
                 .into(),
         ),
         (Geometry::Conic { .. }, _) => Err(
@@ -314,20 +353,22 @@ pub fn trim(sketch: &SketchData, cuts: &Cuts, near: DVec2) -> Result<Plan, Strin
     }
 }
 
-/// A circle cut at two or more places becomes an arc on the same centre
-/// point with every constraint of the circle (they all use the full
-/// circle).
-fn trim_circle(
+/// A closed curve (circle or ellipse) cut at two or more places becomes an
+/// arc of it (`arc(start, end)`, on the same defining points) with every
+/// constraint of the closed curve: they all use the full curve. `noun`
+/// names the curve in the refusal.
+fn trim_closed(
     sketch: &SketchData,
     cuts: &Cuts,
-    center: SketchId,
     near: DVec2,
+    noun: &str,
+    arc: impl FnOnce(SketchId, SketchId) -> Geometry<SketchId>,
 ) -> Result<Plan, String> {
     let k = cuts.cuts.len();
     if k < 2 {
-        return Err(
-            "A circle needs two crossings to trim: one crossing leaves nothing to cut away".into(),
-        );
+        return Err(format!(
+            "{noun} needs two crossings to trim: one crossing leaves nothing to cut away"
+        ));
     }
     let t = cuts.target;
     let tn = param(&cuts.curve, near);
@@ -342,9 +383,7 @@ fn trim_circle(
     let construction = sketch.entity(t).is_some_and(|e| e.construction);
     let start = r.batch.point(hi.point);
     let end = r.batch.point(lo.point);
-    let arc = r
-        .batch
-        .entity(Geometry::Arc { center, start, end }, construction);
+    let arc = r.batch.entity(arc(start, end), construction);
     for c in &sketch.constraints {
         if c.constraint.referenced().contains(&t) {
             let moved = c.constraint.map_keys(|k| if k == t { arc } else { k });
@@ -357,16 +396,15 @@ fn trim_circle(
     Ok(r.finish(Preview::Piece(piece(&cuts.curve, lo.t, hi.t))))
 }
 
-/// Plans extending the end of line or arc `target` nearest `near` to the
-/// first curve beyond it (design note 0007 §7.3); the new end is not held
-/// on a curve in `loose` (see [`cuts`]).
+/// Plans extending the end of line, arc or elliptical arc `target`
+/// nearest `near` to the first curve beyond it (design note 0007 §7.3); the
+/// new end is not held on a text's letters (see [`cuts`]).
 pub fn extend(
     kernel: &(impl Kernel + ?Sized),
     sketch: &SketchData,
     curves: &[(SketchId, ResolvedCurve)],
     target: SketchId,
     near: DVec2,
-    loose: &BTreeSet<SketchId>,
 ) -> Result<Plan, String> {
     let curve = curves
         .iter()
@@ -378,24 +416,24 @@ pub fn extend(
         .ok_or("the curve no longer exists")?
         .geometry
     {
-        Geometry::Line { start, end } | Geometry::Arc { start, end, .. } => (*start, *end),
-        _ => return Err("Only lines and arcs can be extended".into()),
+        Geometry::Line { start, end }
+        | Geometry::Arc { start, end, .. }
+        | Geometry::EllipticalArc { start, end, .. } => (*start, *end),
+        g => return Err(cannot("extended", g)),
     };
-    let (s, e) = end_points(&curve).ok_or("Only lines and arcs can be extended")?;
+    let (s, e) = end_points(&curve).ok_or("this curve has no ends to extend")?;
     let at_end = (near - e).length() <= (near - s).length();
     let (p, from, other) = if at_end { (end, e, s) } else { (start, s, e) };
-    // The way the end can go: a long ray, or the rest of the arc's circle.
-    let (proxy, length) = match &curve {
+    // The way the end can go: a long ray, or the rest of the arc's circle
+    // or ellipse, starting at the end.
+    let proxy = match &curve {
         ResolvedCurve::Line { .. } => {
             let d = (from - other).normalize();
             let reach = 4.0 * extent(curves).max(from.length()).max(1e-3);
-            (
-                ProfileCurve::Line {
-                    start: from,
-                    end: from + d * reach,
-                },
-                reach,
-            )
+            ProfileCurve::Line {
+                start: from,
+                end: from + d * reach,
+            }
         }
         ResolvedCurve::Arc {
             center,
@@ -407,7 +445,7 @@ pub fn extend(
             if rest * radius <= 2.0 * CUT_GAP {
                 return Err("The arc is already a full circle".into());
             }
-            let proxy = if at_end {
+            if at_end {
                 ProfileCurve::Arc {
                     center: *center,
                     radius: *radius,
@@ -421,57 +459,63 @@ pub fn extend(
                     start_angle: *start_angle,
                     sweep_angle: -rest,
                 }
-            };
-            (proxy, *radius)
+            }
         }
-        _ => return Err("Only lines and arcs can be extended".into()),
+        ResolvedCurve::EllipticalArc {
+            center,
+            major,
+            minor,
+            start_param,
+            sweep_param,
+        } => {
+            let rest = TAU - sweep_param.abs();
+            if rest * major.length().min(minor.length()) <= 2.0 * CUT_GAP {
+                return Err("The elliptical arc is already a full ellipse".into());
+            }
+            let h = sweep_param.signum();
+            let (t0, sweep) = if at_end {
+                (start_param + sweep_param, h * rest)
+            } else {
+                (*start_param, -h * rest)
+            };
+            ProfileCurve::elliptical_arc(*center, *major, *minor, t0, sweep)
+                .map_err(|e| e.to_string())?
+        }
+        _ => return Err("this curve has no ends to extend".into()),
     };
-    // The nearest contact beyond the end (not the arc's own other end).
+    // The nearest contact beyond the end (not the curve's own other end),
+    // by the parameter along the proxy, which runs away from the end.
+    let own = own_axes(sketch, target);
+    let loose = text::texts(sketch);
     let mut best: Option<(f64, Cut)> = None;
     for (id, c) in curves {
-        if *id == target {
+        if *id == target || own.contains(id) {
             continue;
         }
         for x in contacts(kernel, &proxy, c)? {
-            let dist = x.t * length;
-            if dist <= CUT_GAP || (x.point - other).length() <= CUT_GAP {
+            if (x.point - from).length() <= CUT_GAP || (x.point - other).length() <= CUT_GAP {
                 continue;
             }
             match &mut best {
                 Some((_, b)) if (b.point - x.point).length() <= CUT_GAP => {
-                    merge(b, x.cut(*id, loose))
+                    merge(b, x.cut(*id, &loose))
                 }
-                Some((d, _)) if *d <= dist => {}
-                _ => best = Some((dist, x.cut(*id, loose))),
+                Some((t, _)) if *t <= x.t => {}
+                _ => best = Some((x.t, x.cut(*id, &loose))),
             }
         }
     }
-    let (dist, cut) = best.ok_or("Nothing to extend to: no curve lies beyond this end")?;
+    let (_, cut) = best.ok_or("Nothing to extend to: no curve lies beyond this end")?;
     let mut r = Rewrite::new(sketch, target);
     r.drop_segment_measures();
     r.detach(p)?;
     r.moves.push((p, cut.point));
     r.attach(p, &cut);
-    let preview = match &curve {
-        ResolvedCurve::Arc {
-            center,
-            radius,
-            start_angle,
-            sweep_angle,
-        } => {
-            let turn = dist / radius;
-            ResolvedCurve::Arc {
-                center: *center,
-                radius: *radius,
-                start_angle: if at_end {
-                    start_angle + sweep_angle
-                } else {
-                    start_angle - turn
-                },
-                sweep_angle: turn,
-            }
-        }
-        _ => ResolvedCurve::Line {
+    // The piece added, from the old end to the cut.
+    let preview = match turned_to(&curve, cut.point) {
+        Some(turned) if at_end => piece(&curve, span(&curve), turned),
+        Some(turned) => piece(&curve, turned - TAU, 0.0),
+        None => ResolvedCurve::Line {
             start: from,
             end: cut.point,
         },
@@ -479,8 +523,8 @@ pub fn extend(
     Ok(r.finish(Preview::Piece(preview)))
 }
 
-/// Plans splitting line or arc `target` at its point nearest `near` into
-/// two curves joined there (design note 0007 §7.4).
+/// Plans splitting line, arc or elliptical arc `target` at its point
+/// nearest `near` into two curves joined there (design note 0007 §7.4).
 pub fn split(
     sketch: &SketchData,
     curves: &[(SketchId, ResolvedCurve)],
@@ -492,36 +536,121 @@ pub fn split(
         .find(|(id, _)| *id == target)
         .map(|(_, c)| c.clone())
         .ok_or("the curve no longer exists")?;
-    let (end, center) = match &sketch
+    let geometry = &sketch
         .entity(target)
         .ok_or("the curve no longer exists")?
-        .geometry
-    {
-        Geometry::Line { end, .. } => (*end, None),
-        Geometry::Arc { end, center, .. } => (*end, Some(*center)),
-        Geometry::Circle { .. } => {
-            return Err("A circle has no ends to split between; trim it instead".into())
-        }
-        _ => return Err("Only lines and arcs can be split".into()),
+        .geometry;
+    let (end, carrier) = match (geometry, Carrier::of(geometry)) {
+        (
+            Geometry::Line { end, .. }
+            | Geometry::Arc { end, .. }
+            | Geometry::EllipticalArc { end, .. },
+            Some(carrier),
+        ) => (*end, carrier),
+        (g, _) => return Err(cannot("split", g)),
     };
-    let (s, e) = end_points(&curve).ok_or("Only lines and arcs can be split")?;
+    let (s, e) = end_points(&curve).ok_or("this curve has no ends to split between")?;
     let q = point_at(&curve, param(&curve, near));
     if (q - s).length() <= CUT_GAP || (q - e).length() <= CUT_GAP {
         return Err("Too close to an end to split".into());
     }
     let mut r = Rewrite::new(sketch, target);
     r.drop_segment_measures();
-    let d = r.continuation(end, center, q)?;
+    let d = r.continuation(end, carrier, q)?;
     r.moves.push((end, q));
+    // An arc's new piece shares its centre and has its own radius; an
+    // elliptical arc's shares its ellipse, which holds the joint once
+    // (design note 0008 §8).
     r.pending
         .push(Constraint::Coincident { a: end, b: d.start });
-    if center.is_none() {
+    if carrier == Carrier::Line {
         r.pending.push(Constraint::PointOnCurve {
             point: d.end,
             curve: target,
         });
     }
     Ok(r.finish(Preview::Point(q)))
+}
+
+/// Why `g` cannot be `verb` ("extended", "split").
+fn cannot(verb: &str, g: &Geometry<SketchId>) -> String {
+    let closed = match g {
+        Geometry::Circle { .. } => Some("A circle"),
+        Geometry::Ellipse { .. } => Some("An ellipse"),
+        _ => None,
+    };
+    if let Some(noun) = closed {
+        return if verb == "split" {
+            format!("{noun} has no ends to split between; trim it instead")
+        } else {
+            format!("{noun} has no ends to extend")
+        };
+    }
+    match g {
+        Geometry::ControlSpline { .. } | Geometry::InterpolatedSpline { .. } => format!(
+            "A spline cannot be {verb}: its pieces and extensions are not exact splines of the \
+             sketch's kinds (design note 0007 §7.5)"
+        ),
+        Geometry::Conic { .. } => {
+            format!("Conics cannot be {verb} yet (design note 0009 §8)")
+        }
+        _ => format!("Only lines, arcs and elliptical arcs can be {verb}"),
+    }
+}
+
+/// What a cut curve lies on, which a new piece of it shares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Carrier {
+    /// A line: a new piece is held on it by constraints.
+    Line,
+    /// An arc's circle: a new piece shares the centre point.
+    Circle(SketchId),
+    /// An elliptical arc's ellipse: a new piece shares its three points,
+    /// which define the ellipse.
+    Ellipse {
+        center: SketchId,
+        major: SketchId,
+        minor: SketchId,
+    },
+}
+
+impl Carrier {
+    fn of(g: &Geometry<SketchId>) -> Option<Carrier> {
+        match *g {
+            Geometry::Line { .. } => Some(Carrier::Line),
+            Geometry::Arc { center, .. } => Some(Carrier::Circle(center)),
+            Geometry::EllipticalArc {
+                center,
+                major,
+                minor,
+                ..
+            } => Some(Carrier::Ellipse {
+                center,
+                major,
+                minor,
+            }),
+            _ => None,
+        }
+    }
+
+    /// A piece from `start` to `end` on it.
+    fn piece(self, start: SketchId, end: SketchId) -> Geometry<SketchId> {
+        match self {
+            Carrier::Line => Geometry::Line { start, end },
+            Carrier::Circle(center) => Geometry::Arc { center, start, end },
+            Carrier::Ellipse {
+                center,
+                major,
+                minor,
+            } => Geometry::EllipticalArc {
+                center,
+                major,
+                minor,
+                start,
+                end,
+            },
+        }
+    }
 }
 
 /// A curve added after the cut, see [`Rewrite::continuation`].
@@ -697,11 +826,11 @@ impl<'a> Rewrite<'a> {
     /// Adds the curve that continues the target from `at` to its old end
     /// `end`, which hands every constraint over to the new curve's end (and
     /// a tangency at that end over to the new curve). Arcs share the
-    /// target's centre point.
+    /// target's centre point, elliptical arcs its three ellipse points.
     fn continuation(
         &mut self,
         end: SketchId,
-        center: Option<SketchId>,
+        carrier: Carrier,
         at: DVec2,
     ) -> Result<Continuation, String> {
         self.check_own(end)?;
@@ -710,18 +839,9 @@ impl<'a> Rewrite<'a> {
         let construction = self.sketch.entity(t).is_some_and(|e| e.construction);
         let start = self.batch.point(at);
         let new_end = self.batch.point(old);
-        let geometry = match center {
-            Some(center) => Geometry::Arc {
-                center,
-                start,
-                end: new_end,
-            },
-            None => Geometry::Line {
-                start,
-                end: new_end,
-            },
-        };
-        let curve = self.batch.entity(geometry, construction);
+        let curve = self
+            .batch
+            .entity(carrier.piece(start, new_end), construction);
         let moved: Vec<(SketchId, Constraint<SketchId>)> =
             self.live()
                 .filter_map(|c| {
@@ -827,37 +947,122 @@ fn end_points(c: &ResolvedCurve) -> Option<(DVec2, DVec2)> {
     }
 }
 
-/// The parameter of the point of a line, arc or circle nearest `p`.
+/// The parameter ([`Cut::t`]) of the point of a line, arc, circle, ellipse
+/// or elliptical arc nearest `p`, for a `p` near it.
 fn param(c: &ResolvedCurve, p: DVec2) -> f64 {
     match c {
         ResolvedCurve::Line { start, end } => {
             let v = *end - *start;
             ((p - *start).dot(v) / v.length_squared()).clamp(0.0, 1.0)
         }
-        ResolvedCurve::Arc {
-            center,
-            start_angle,
-            sweep_angle,
-            ..
-        } => {
-            let phi = ((p - *center).to_angle() - start_angle).rem_euclid(TAU);
-            if phi <= *sweep_angle {
-                phi
-            } else if phi - sweep_angle < TAU - phi {
-                *sweep_angle
-            } else {
-                0.0
-            }
+        ResolvedCurve::Arc { sweep_angle, .. } => {
+            on_span(turned_to(c, p).expect("an arc"), *sweep_angle)
         }
         ResolvedCurve::Circle { center, .. } => (p - *center).to_angle().rem_euclid(TAU),
-        ResolvedCurve::Spline { .. }
-        | ResolvedCurve::Ellipse { .. }
-        | ResolvedCurve::EllipticalArc { .. }
-        | ResolvedCurve::Conic { .. } => 0.0,
+        ResolvedCurve::Ellipse {
+            center,
+            major,
+            minor,
+        } => turned(c, closest_anomaly(*center, *major, *minor, p)),
+        ResolvedCurve::EllipticalArc {
+            center,
+            major,
+            minor,
+            sweep_param,
+            ..
+        } => on_span(
+            turned(c, closest_anomaly(*center, *major, *minor, p)),
+            sweep_param.abs(),
+        ),
+        ResolvedCurve::Spline { .. } | ResolvedCurve::Conic { .. } => 0.0,
     }
 }
 
-/// The point of a line, arc or circle at parameter `t`.
+/// `phi` (turned from an arc's start, in [0, 2π)) where it is on the arc
+/// of extent `span`, else the nearer end by angle.
+fn on_span(phi: f64, span: f64) -> f64 {
+    if phi <= span {
+        phi
+    } else if phi - span < TAU - phi {
+        span
+    } else {
+        0.0
+    }
+}
+
+/// The angle (arcs) or eccentric anomaly (ellipses, elliptical arcs)
+/// turned counter-clockwise in the plane from the curve's start to point
+/// `p` on it (or on its full circle or ellipse), in [0, 2π). The start of a
+/// full ellipse is its first axis end.
+fn turned_to(c: &ResolvedCurve, p: DVec2) -> Option<f64> {
+    match c {
+        ResolvedCurve::Arc {
+            center,
+            start_angle,
+            ..
+        } => Some(((p - *center).to_angle() - start_angle).rem_euclid(TAU)),
+        ResolvedCurve::Ellipse {
+            center,
+            major,
+            minor,
+        }
+        | ResolvedCurve::EllipticalArc {
+            center,
+            major,
+            minor,
+            ..
+        } => Some(turned(c, eccentric_anomaly(*center, *major, *minor, p))),
+        _ => None,
+    }
+}
+
+/// The anomaly turned counter-clockwise in the plane from an ellipse's
+/// (or elliptical arc's) start to its point at anomaly `theta`, in
+/// [0, 2π); see [`anomaly`].
+fn turned(c: &ResolvedCurve, theta: f64) -> f64 {
+    let (t0, h) = anomaly_frame(c);
+    (h * (theta - t0)).rem_euclid(TAU)
+}
+
+/// The eccentric anomaly of an ellipse's (or elliptical arc's) point
+/// turned `phi` counter-clockwise in the plane from its start.
+fn anomaly(c: &ResolvedCurve, phi: f64) -> f64 {
+    let (t0, h) = anomaly_frame(c);
+    t0 + h * phi
+}
+
+/// An ellipse's start anomaly (0, the first axis end; an arc's start) and
+/// the way anomaly runs in the plane: 1 counter-clockwise, −1 clockwise.
+fn anomaly_frame(c: &ResolvedCurve) -> (f64, f64) {
+    match c {
+        ResolvedCurve::Ellipse { major, minor, .. } => (
+            0.0,
+            if major.perp_dot(*minor) < 0.0 {
+                -1.0
+            } else {
+                1.0
+            },
+        ),
+        ResolvedCurve::EllipticalArc {
+            start_param,
+            sweep_param,
+            ..
+        } => (*start_param, sweep_param.signum()),
+        _ => (0.0, 1.0),
+    }
+}
+
+/// An arc's or elliptical arc's extent in its parameter ([`Cut::t`]).
+fn span(c: &ResolvedCurve) -> f64 {
+    match c {
+        ResolvedCurve::Arc { sweep_angle, .. } => *sweep_angle,
+        ResolvedCurve::EllipticalArc { sweep_param, .. } => sweep_param.abs(),
+        _ => 1.0,
+    }
+}
+
+/// The point of a line, arc, circle, ellipse or elliptical arc at
+/// parameter `t` ([`Cut::t`]).
 fn point_at(c: &ResolvedCurve, t: f64) -> DVec2 {
     match c {
         ResolvedCurve::Line { start, end } => start.lerp(*end, t),
@@ -868,15 +1073,25 @@ fn point_at(c: &ResolvedCurve, t: f64) -> DVec2 {
             ..
         } => *center + DVec2::from_angle(start_angle + t) * *radius,
         ResolvedCurve::Circle { center, radius } => *center + DVec2::from_angle(t) * *radius,
+        ResolvedCurve::Ellipse {
+            center,
+            major,
+            minor,
+        }
+        | ResolvedCurve::EllipticalArc {
+            center,
+            major,
+            minor,
+            ..
+        } => ellipse_point(*center, *major, *minor, anomaly(c, t)),
         ResolvedCurve::Spline { points, .. } => points[0],
         ResolvedCurve::Conic { start, .. } => *start,
-        ResolvedCurve::Ellipse { center, major, .. }
-        | ResolvedCurve::EllipticalArc { center, major, .. } => *center + *major,
     }
 }
 
-/// The piece of a line, arc or circle between parameters `a` and `b`
-/// (counter-clockwise from `a` to `b` on a circle).
+/// The piece of a line, arc, circle, ellipse or elliptical arc between
+/// parameters `a` and `b` (counter-clockwise from `a` to `b` on a closed
+/// curve).
 fn piece(c: &ResolvedCurve, a: f64, b: f64) -> ResolvedCurve {
     match c {
         ResolvedCurve::Line { .. } => ResolvedCurve::Line {
@@ -900,10 +1115,34 @@ fn piece(c: &ResolvedCurve, a: f64, b: f64) -> ResolvedCurve {
             start_angle: a,
             sweep_angle: (b - a).rem_euclid(TAU),
         },
-        ResolvedCurve::Spline { .. }
-        | ResolvedCurve::Ellipse { .. }
-        | ResolvedCurve::EllipticalArc { .. }
-        | ResolvedCurve::Conic { .. } => c.clone(),
+        ResolvedCurve::Ellipse {
+            center,
+            major,
+            minor,
+        } => {
+            let (_, h) = anomaly_frame(c);
+            ResolvedCurve::EllipticalArc {
+                center: *center,
+                major: *major,
+                minor: *minor,
+                start_param: anomaly(c, a),
+                sweep_param: h * (b - a).rem_euclid(TAU),
+            }
+        }
+        ResolvedCurve::EllipticalArc {
+            center,
+            major,
+            minor,
+            sweep_param,
+            ..
+        } => ResolvedCurve::EllipticalArc {
+            center: *center,
+            major: *major,
+            minor: *minor,
+            start_param: anomaly(c, a.min(b)),
+            sweep_param: sweep_param.signum() * (b - a).abs(),
+        },
+        ResolvedCurve::Spline { .. } | ResolvedCurve::Conic { .. } => c.clone(),
     }
 }
 

@@ -6,6 +6,7 @@ mod common;
 
 use common::*;
 use openshape_app::sketch_mode::{ConstraintTool, SnapTarget, Tool};
+use openshape_app::sketch_ops::trim::Preview;
 use openshape_app::Model;
 use openshape_core_model::sketch::{Constraint, Geometry, TangentKind};
 use openshape_core_model::{DVec2, FeatureId, SketchId};
@@ -600,9 +601,8 @@ fn editing_tools_that_cannot_handle_ellipses_say_so() {
     let before = m.sketch_def(f).unwrap().sketch.clone();
     let (bx, by) = nominal(15.0, 270.0);
     for (tool, says) in [
-        (Tool::Trim, "Trimming ellipses is not built yet"),
-        (Tool::Extend, "Only lines and arcs can be extended"),
-        (Tool::Split, "Only lines and arcs can be split"),
+        (Tool::Extend, "An ellipse has no ends to extend"),
+        (Tool::Split, "An ellipse has no ends to split between"),
         (Tool::Offset, "its offset is not an ellipse"),
     ] {
         ed.set_tool(tool);
@@ -689,4 +689,441 @@ fn deleting_an_ellipse_takes_its_axes_and_points() {
     assert_eq!(count(&m, f, is_ellipse), 1);
     assert_eq!(construction(&m, f), 1);
     assert_eq!(status(&m, f), SolveStatus::Solved);
+}
+
+/// The anomaly where the nominal ellipse meets the vertical line at `x` mm,
+/// on its upper half (the lower one is its negative).
+fn crossing(x: f64) -> f64 {
+    ((x - 10.0) / 30.0).acos()
+}
+
+/// The elliptic segment (ab/2)(Δ − sin Δ) of an arc of extent `sweep`.
+fn segment(e: &Solved, sweep: f64) -> f64 {
+    0.5 * ab(e) * (sweep - sweep.sin())
+}
+
+/// The solved elliptical arcs as (id, start anomaly, signed sweep), in
+/// entity order.
+fn arcs(m: &Model, f: FeatureId) -> Vec<(SketchId, f64, f64)> {
+    curves(m, f, true)
+        .into_iter()
+        .filter_map(|(id, c)| match c {
+            ResolvedCurve::EllipticalArc {
+                start_param,
+                sweep_param,
+                ..
+            } => Some((id, start_param, sweep_param)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Angles of clicked geometry agree to this (radians): clicks carry
+/// errors around 1e-8 m ([`CLICKED`]), on curves some 10 mm across.
+const TURN: f64 = 1e-5;
+
+/// `a` and `b` are the same angle, modulo whole turns, to [`TURN`].
+fn same_angle(a: f64, b: f64) -> bool {
+    let d = (a - b).rem_euclid(TAU);
+    d.min(TAU - d) < TURN
+}
+
+/// The (centre, major, minor, start, end) points of an elliptical arc.
+fn arc_points(m: &Model, f: FeatureId, id: SketchId) -> [SketchId; 5] {
+    match m.sketch_def(f).unwrap().sketch.entity(id).unwrap().geometry {
+        Geometry::EllipticalArc {
+            center,
+            major,
+            minor,
+            start,
+            end,
+        } => [center, major, minor, start, end],
+        ref g => panic!("{g:?}"),
+    }
+}
+
+/// The solved position of point `id`.
+fn solved_point(m: &Model, f: FeatureId, id: SketchId) -> DVec2 {
+    m.sketch_result(f)
+        .unwrap()
+        .solution
+        .sketch
+        .point(id)
+        .unwrap()
+}
+
+fn redundant(m: &Model, f: FeatureId) -> usize {
+    m.sketch_result(f).unwrap().solution.redundant.len()
+}
+
+#[test]
+fn trimming_an_ellipse_leaves_an_elliptical_arc_on_its_points() {
+    for b in [15.0, -15.0] {
+        // Clicked on the left piece (180°), and on the right one next to
+        // the first axis end (20°), where its own semi-axis touches it: the
+        // semi-axes do not cut their ellipse.
+        for (click_at, kept_left) in [(180.0, false), (20.0, true)] {
+            let (mut m, mut ed, map) = setup();
+            let f = ed.feature;
+            draw_ellipse(&mut m, &mut ed, b);
+            draw(
+                &mut m,
+                &mut ed,
+                &map,
+                Tool::Line,
+                &[(0.0, -30.0), (0.0, 40.0)],
+            );
+            let line = ids(&m, f, |g| matches!(g, Geometry::Line { .. }))[2];
+            let Geometry::Ellipse {
+                center,
+                major,
+                minor,
+            } = m.sketch_def(f).unwrap().sketch.entities[3].geometry
+            else {
+                panic!("the ellipse comes after its three points")
+            };
+            let before = dof(&m, f);
+            let ops = m.session().log().len();
+
+            ed.set_tool(Tool::Trim);
+            let (x, y) = nominal(b, click_at);
+            click(&mut m, &mut ed, &map, x, y);
+            ed.set_tool(Tool::Select);
+            assert_eq!(m.session().log().len(), ops + 1, "one undo step");
+            assert_eq!(count(&m, f, |g| matches!(g, Geometry::Ellipse { .. })), 0);
+            let arcs = arcs(&m, f);
+            assert_eq!(arcs.len(), 1, "{:?}", ed.message);
+            let [c, ma, mi, s, e] = arc_points(&m, f, arcs[0].0);
+            assert_eq!([c, ma, mi], [center, major, minor], "the same ellipse");
+            assert_eq!(construction(&m, f), 2, "the semi-axes stay");
+            for p in [s, e] {
+                let on = Constraint::PointOnCurve {
+                    point: p,
+                    curve: line,
+                };
+                assert_eq!(
+                    constraints(&m, f, |k| *k == on),
+                    1,
+                    "{p:?} held on the line"
+                );
+            }
+            assert_eq!(status(&m, f), SolveStatus::Solved);
+            assert_eq!(redundant(&m, f), 0);
+            // Two ends, each held on the line.
+            assert_eq!(dof(&m, f), before);
+
+            // The kept arc runs counter-clockwise in the plane between the
+            // crossings, on the side not clicked.
+            let el = ellipses(&m, f).remove(0);
+            let (t0, sweep) = el.3.unwrap();
+            let cut = crossing(0.0);
+            let span = if kept_left {
+                TAU - 2.0 * cut
+            } else {
+                2.0 * cut
+            };
+            assert!((sweep.abs() - span).abs() < TURN, "{sweep} vs {span}");
+            let mid = point(&el, t0 + 0.5 * sweep);
+            assert_eq!(mid.x < 0.0, kept_left, "{mid}");
+            assert!(el.1.perp_dot(el.2) * sweep > 0.0, "counter-clockwise");
+
+            // Exactly the elliptic segment, as a region and extruded.
+            let areas = region_areas(&m, f);
+            assert_eq!(areas.len(), 1, "{areas:?}");
+            let exact = segment(&el, sweep.abs());
+            assert!(near(areas[0], exact, 1e-11), "{areas:?} vs {exact}");
+            let inside = if kept_left { (-5.0, 5.0) } else { (20.0, 5.0) };
+            let x = extrude(&mut m, &map, &[inside], "10 mm");
+            let v = volume(&m, x);
+            assert!(near(v, exact * 10.0 * MM, 1e-9), "{v}");
+
+            assert!(m.undo() && m.undo());
+            assert_eq!(count(&m, f, |g| matches!(g, Geometry::Ellipse { .. })), 1);
+        }
+    }
+}
+
+#[test]
+fn an_ellipse_needs_two_crossings_and_an_uncut_one_goes() {
+    let (mut m, mut ed, map) = setup();
+    let f = ed.feature;
+    draw_ellipse(&mut m, &mut ed, 15.0);
+    // A line from outside to the centre crosses it once.
+    draw(
+        &mut m,
+        &mut ed,
+        &map,
+        Tool::Line,
+        &[(-40.0, 30.0), (10.0, 5.0)],
+    );
+    let before = m.sketch_def(f).unwrap().sketch.clone();
+    let (x, y) = nominal(15.0, 270.0);
+    let message = act(&mut m, &mut ed, Tool::Trim, x, y);
+    assert!(
+        message.contains("An ellipse needs two crossings"),
+        "{message}"
+    );
+    assert_eq!(m.sketch_def(f).unwrap().sketch, before);
+
+    // Only its own semi-axes touch it: trimming deletes it with its axes
+    // and points.
+    let (mut m, mut ed, _) = setup();
+    let f = ed.feature;
+    draw_ellipse(&mut m, &mut ed, 15.0);
+    act(&mut m, &mut ed, Tool::Trim, x, y);
+    assert_eq!(m.sketch_def(f).unwrap().sketch.entities.len(), 0);
+}
+
+/// Uses `tool` once at a plane point (millimetres) and returns its message.
+fn act(
+    m: &mut Model,
+    ed: &mut openshape_app::sketch_mode::SketchEditor,
+    tool: Tool,
+    x: f64,
+    y: f64,
+) -> String {
+    let map = view();
+    ed.set_tool(tool);
+    click(m, ed, &map, x, y);
+    ed.set_tool(Tool::Select);
+    ed.message.clone().unwrap_or_default()
+}
+
+/// The arc of the nominal ellipse from 30° to 150° crossed by vertical
+/// lines at x = 0 and 20 mm (anomalies 109.47° and 70.53°).
+fn crossed_arc() -> (Model, openshape_app::sketch_mode::SketchEditor) {
+    let (mut m, mut ed, map) = setup();
+    draw_arc(&mut m, &mut ed, 15.0, 30.0, &[90.0], 150.0);
+    for x in [0.0, 20.0] {
+        draw(&mut m, &mut ed, &map, Tool::Line, &[(x, -30.0), (x, 40.0)]);
+    }
+    (m, ed)
+}
+
+#[test]
+fn trimming_an_elliptical_arc_moves_an_end_or_leaves_two_arcs() {
+    // The end piece: the end moves to the crossing at x = 0.
+    let (mut m, mut ed) = crossed_arc();
+    let f = ed.feature;
+    let arc = arcs(&m, f)[0].0;
+    let [.., end] = arc_points(&m, f, arc);
+    let before = dof(&m, f);
+    let (x, y) = nominal(15.0, 140.0);
+    ed.set_tool(Tool::Trim);
+    hover(&m, &mut ed, &view(), x, y);
+    // The preview is the piece that goes, from 109.47° to 150°.
+    match ed.curve_edit.clone().unwrap().plan.unwrap().preview {
+        Preview::Piece(ResolvedCurve::EllipticalArc {
+            start_param,
+            sweep_param,
+            ..
+        }) => {
+            assert!(same_angle(start_param, crossing(0.0)), "{start_param}");
+            assert!((sweep_param - (150f64.to_radians() - crossing(0.0))).abs() < TURN);
+        }
+        p => panic!("{p:?}"),
+    }
+    act(&mut m, &mut ed, Tool::Trim, x, y);
+    let a = arcs(&m, f);
+    assert_eq!(a.len(), 1);
+    assert!(same_angle(a[0].1, FRAC_PI_6));
+    assert!(
+        (a[0].2 - (crossing(0.0) - FRAC_PI_6)).abs() < TURN,
+        "{}",
+        a[0].2
+    );
+    let line = ids(&m, f, |g| matches!(g, Geometry::Line { .. }))[2];
+    let on = Constraint::PointOnCurve {
+        point: end,
+        curve: line,
+    };
+    assert_eq!(constraints(&m, f, |k| *k == on), 1);
+    assert_eq!(status(&m, f), SolveStatus::Solved);
+    assert_eq!(redundant(&m, f), 0);
+    assert_eq!(dof(&m, f), before - 1, "the end is held on the line");
+
+    // A middle piece: two arcs on the same three ellipse points, and no
+    // constraint needed to keep them on one ellipse.
+    let (mut m, mut ed) = crossed_arc();
+    let f = ed.feature;
+    let arc = arcs(&m, f)[0].0;
+    let [c, ma, mi, start, end] = arc_points(&m, f, arc);
+    let old_end = solved_point(&m, f, end);
+    let before = dof(&m, f);
+    let n_constraints = constraints(&m, f, |_| true);
+    let (x, y) = nominal(15.0, 90.0);
+    act(&mut m, &mut ed, Tool::Trim, x, y);
+    let a = arcs(&m, f);
+    assert_eq!(a.len(), 2, "{:?}", ed.message);
+    let first = arc_points(&m, f, a[0].0);
+    let second = arc_points(&m, f, a[1].0);
+    assert_eq!(first[..3], [c, ma, mi]);
+    assert_eq!(second[..3], [c, ma, mi]);
+    assert_eq!(
+        (first[3], first[4]),
+        (start, end),
+        "the arc keeps its points"
+    );
+    assert!(
+        (solved_point(&m, f, second[4]) - old_end).length() < 1e-12,
+        "the new arc ends where the arc did"
+    );
+    assert_eq!(
+        constraints(&m, f, |_| true),
+        n_constraints + 2,
+        "the two cut ends held on the lines, nothing else"
+    );
+    assert_eq!(construction(&m, f), 2);
+    assert_eq!(status(&m, f), SolveStatus::Solved);
+    assert_eq!(redundant(&m, f), 0);
+    assert_eq!(dof(&m, f), before);
+    assert!(same_angle(a[0].1, FRAC_PI_6));
+    assert!((a[0].2 - (crossing(20.0) - FRAC_PI_6)).abs() < TURN);
+    assert!(same_angle(a[1].1, crossing(0.0)));
+    assert!((a[1].2 - (150f64.to_radians() - crossing(0.0))).abs() < TURN);
+}
+
+#[test]
+fn splitting_an_elliptical_arc_joins_two_arcs_of_one_ellipse() {
+    for b in [15.0, -15.0] {
+        let (mut m, mut ed, map) = setup();
+        let f = ed.feature;
+        // Over the top either way: for the left-handed ellipse the anomaly
+        // runs from −30° to −150°.
+        let (from, via, to) = if b > 0.0 {
+            (30.0, 90.0, 150.0)
+        } else {
+            (-30.0, -90.0, -150.0)
+        };
+        draw_arc(&mut m, &mut ed, b, from, &[via], to);
+        let arc = arcs(&m, f)[0].0;
+        let [c, ma, mi, start, end] = arc_points(&m, f, arc);
+        let old_end = solved_point(&m, f, end);
+        let before = dof(&m, f);
+        let ops = m.session().log().len();
+        let (x, y) = nominal(b, via + 10.0);
+        act(&mut m, &mut ed, Tool::Split, x, y);
+        assert_eq!(m.session().log().len(), ops + 1);
+        let a = arcs(&m, f);
+        assert_eq!(a.len(), 2, "{:?}", ed.message);
+        let first = arc_points(&m, f, a[0].0);
+        let second = arc_points(&m, f, a[1].0);
+        assert_eq!(first[..3], [c, ma, mi]);
+        assert_eq!(second[..3], [c, ma, mi]);
+        assert_eq!((first[3], first[4]), (start, end));
+        assert!((solved_point(&m, f, second[4]) - old_end).length() < 1e-12);
+        let joint = Constraint::Coincident {
+            a: first[4],
+            b: second[3],
+        };
+        assert_eq!(constraints(&m, f, |k| *k == joint), 1);
+        assert_eq!(status(&m, f), SolveStatus::Solved);
+        assert_eq!(redundant(&m, f), 0, "the joint is on the ellipse once");
+        assert_eq!(dof(&m, f), before + 1, "the joint slides along the ellipse");
+        let el = ellipses(&m, f);
+        let q = point(&el[0], el[0].3.unwrap().0 + el[0].3.unwrap().1);
+        let (qx, qy) = nominal(b, via + 10.0);
+        assert!((q - DVec2::new(qx, qy) * MM).length() < 1e-7, "{q}");
+
+        // Together they bound the segment the arc did.
+        let (s, t) = (ends(&el[0]).0, ends(&el[1]).1);
+        draw(
+            &mut m,
+            &mut ed,
+            &map,
+            Tool::Line,
+            &[(s.x / MM, s.y / MM), (t.x / MM, t.y / MM)],
+        );
+        let areas = region_areas(&m, f);
+        assert_eq!(areas.len(), 1, "{areas:?}");
+        let sweep = el[0].3.unwrap().1.abs() + el[1].3.unwrap().1.abs();
+        assert!((sweep - TAU / 3.0).abs() < TURN);
+        assert!(near(areas[0], segment(&el[0], sweep), 1e-11), "{areas:?}");
+
+        // Dragging the joint slides it along the ellipse; both pieces
+        // follow.
+        let (jx, jy) = (q.x / MM, q.y / MM);
+        ed.drag_start(&mut m, &map, at(&map, jx, jy));
+        ed.drag_to(&m, &map, at(&map, jx + 8.0, jy + 3.0));
+        ed.drag_end(&mut m, &map, at(&map, jx + 8.0, jy + 3.0));
+        assert_eq!(status(&m, f), SolveStatus::Solved);
+        let el = ellipses(&m, f);
+        let (j0, j1) = (ends(&el[0]).1, ends(&el[1]).0);
+        assert!((j0 - j1).length() < 1e-12);
+        assert!((j0 - q).length() > 1e-3, "it moved");
+    }
+}
+
+#[test]
+fn extending_an_elliptical_arc_follows_its_ellipse() {
+    let (mut m, mut ed, map) = setup();
+    let f = ed.feature;
+    draw_arc(&mut m, &mut ed, 15.0, 30.0, &[90.0], 150.0);
+    // Below the centre, crossing the ellipse at anomalies −41.81° and
+    // 221.81°.
+    draw(
+        &mut m,
+        &mut ed,
+        &map,
+        Tool::Line,
+        &[(-40.0, -5.0), (60.0, -5.0)],
+    );
+    let low = (-10.0f64 / 15.0).asin();
+    let line = ids(&m, f, |g| matches!(g, Geometry::Line { .. }))[2];
+    let arc = arcs(&m, f)[0].0;
+    let [.., start, end] = arc_points(&m, f, arc);
+    let before = dof(&m, f);
+
+    // From the start, clockwise past the first axis end (where the
+    // semi-axis touches, which does not stop it) to the line.
+    let (x, y) = nominal(15.0, 35.0);
+    ed.set_tool(Tool::Extend);
+    hover(&m, &mut ed, &map, x, y);
+    match ed.curve_edit.clone().unwrap().plan.unwrap().preview {
+        Preview::Piece(ResolvedCurve::EllipticalArc {
+            start_param,
+            sweep_param,
+            ..
+        }) => {
+            assert!(same_angle(start_param, low), "{start_param}");
+            assert!(
+                (sweep_param - (FRAC_PI_6 - low)).abs() < TURN,
+                "{sweep_param}"
+            );
+        }
+        p => panic!("{p:?}"),
+    }
+    act(&mut m, &mut ed, Tool::Extend, x, y);
+    let a = arcs(&m, f);
+    assert!(same_angle(a[0].1, low), "{}", a[0].1);
+    let on = |p| Constraint::PointOnCurve {
+        point: p,
+        curve: line,
+    };
+    assert_eq!(constraints(&m, f, |k| *k == on(start)), 1);
+    assert_eq!(dof(&m, f), before - 1);
+
+    // The end, counter-clockwise past 180° to the line.
+    let (x, y) = nominal(15.0, 145.0);
+    act(&mut m, &mut ed, Tool::Extend, x, y);
+    assert_eq!(constraints(&m, f, |k| *k == on(end)), 1);
+    assert_eq!(status(&m, f), SolveStatus::Solved);
+    assert_eq!(redundant(&m, f), 0);
+    let el = ellipses(&m, f).remove(0);
+    let (t0, sweep) = el.3.unwrap();
+    let span = PI - 2.0 * low;
+    assert!(same_angle(t0, low));
+    assert!((sweep - span).abs() < TURN, "{sweep}");
+    // The arc and the line between its ends bound the segment.
+    let areas = region_areas(&m, f);
+    assert_eq!(areas.len(), 1, "{areas:?}");
+    assert!(near(areas[0], segment(&el, sweep), 1e-11), "{areas:?}");
+
+    // With nothing beyond the end (the semi-axis touching the rest of the
+    // ellipse at its first axis end does not count), it is refused.
+    let (mut m, mut ed, _) = setup();
+    draw_arc(&mut m, &mut ed, 15.0, 30.0, &[90.0], 150.0);
+    let (x, y) = nominal(15.0, 145.0);
+    let message = act(&mut m, &mut ed, Tool::Extend, x, y);
+    assert!(message.contains("Nothing to extend to"), "{message}");
 }

@@ -110,7 +110,8 @@ inverse θ = atan2(B·(p − c)/‖B‖², A·(p − c)/‖A‖²) is used.
 This is `PointOnCurve(p, ellipse or elliptical arc)` (on the full ellipse,
 as `PointOnCurve` on an arc means its full circle), and it is also how an
 elliptical arc holds its own `start` and `end`, with two hidden parameters
-the arc owns.
+the arc owns. An end coincident with a point already on the same ellipse
+is not held again (§8.1).
 
 ### 4.3 Line tangent to an ellipse
 
@@ -238,11 +239,7 @@ this form when an exchange format needs them (Phase 4).
 * Trim, extend and split: every piece of an ellipse is an elliptical arc on
   the same centre and axis points, so cuts are exact; the kernel finds the
   cut points on the rational form (0007 §6), and each cut's eccentric angle
-  comes from its position in the axis frame. Built in a second step;
-  refused with a message until then (trim says trimming ellipses is not
-  built yet; extend and split say they take lines and arcs). An ellipse
-  that nothing touches is deleted by trim, as any uncut curve; one drawn
-  by the tool is always touched by its own semi-axes, so trim refuses it.
+  comes from its position in the axis frame. As built in §8.1.
 * Fillet: needs tangency with a circle (§4.5); refused, naming the
   elliptical arc, until that exists.
 * Offset: refused, the offset is not a conic (Farouki & Neff).
@@ -254,6 +251,66 @@ this form when an exchange format needs them (Phase 4).
   ellipses (§5).
 * Line inference: a line drawn from an elliptical arc's end along its
   tangent is made tangent there, as from a circular arc's.
+
+### 8.1 As built (trim, extend, split)
+
+* **Parameters.** A cut's parameter on an ellipse is its eccentric
+  anomaly (§4.2's exact inverse, as the cut point is on the curve)
+  turned counter-clockwise in the plane from the first axis end, and on
+  an elliptical arc from its start, in [0, 2π). Pieces are then ordered,
+  chosen and previewed exactly as on a circle or a circular arc, for
+  either handedness. The kernel's own parameter on the rational form runs
+  the same way but not evenly, so it is only used to find the points.
+* **Own semi-axes do not cut.** The construction lines the tool drew from
+  the centre to the axis ends (§7) are part of how the ellipse is drawn
+  and touch it only at its axis ends. Counted as cutters they would stop
+  every trim and extension at those two points, which nobody drawing a
+  line across an ellipse means. Every other curve cuts as usual,
+  construction lines included, and the semi-axes of one ellipse cut
+  another.
+* **Trim.** An ellipse needs two crossings (else refused, naming it); it
+  becomes an elliptical arc on its own three points, which takes every
+  constraint on the ellipse: they all use the full ellipse (point on
+  curve, tangency to a line, images). An elliptical arc's end piece moves
+  that end to the cut and holds it on the cutter (0007 §7.4a). A middle
+  piece leaves a second arc on the same three points from the far cut to
+  the old end, which takes over the old end's constraints; the shared
+  points define the ellipse, so, unlike a circular arc's piece, it needs
+  no equal-radius constraint. An ellipse nothing else cuts is deleted
+  with its semi-axes and points, as any uncut curve.
+* **Extend.** An elliptical arc's end runs on around the rest of its
+  ellipse (counter-clockwise from its end, clockwise from its start) to
+  the first curve met, the arc's own other end and semi-axes not
+  counted. An ellipse has no ends to extend, and an arc whose gap is
+  under about 2 µm is refused as already whole.
+* **Split.** An elliptical arc splits at the pointer's closest point
+  (Newton's method from the eccentric anomaly) into two arcs on the same
+  three points joined by a coincidence. The two ends at the joint each
+  have their own equations putting them on the one ellipse, and with the
+  coincidence the normal component of that is said twice: one row short
+  of full rank, so the edit was refused as redundant. The solver now
+  holds an elliptical arc's end on its ellipse once per coincidence
+  class: an end coincident with a point already on the same ellipse (an
+  axis end, or another arc's end, the ellipse being the same when its
+  three points are, up to coincidence) gets no equations of its own. The
+  equations dropped are implied, so degrees of freedom are unchanged; a
+  user's point-on-curve constraint at such a joint is still reported
+  redundant, as it says again what the arcs say. An ellipse cannot be
+  split at one point (no ends): trim it.
+* **Tests.** `crates/ui/tests/sketch_ellipse.rs` drives each edit through
+  the editor for both handednesses: the pieces kept, their shared points,
+  the constraints added and removed, degrees of freedom, no redundancy,
+  the hover previews, one undo step, and exact elliptic segment areas
+  (ab/2)(Δ − sin Δ) of the regions left (1e-11 relative) and of their
+  extrusions; the semi-axes must not stop a trim or an extension. The
+  solver test checks the joint rule (no redundancy, DOF 5 + 3, dragging
+  keeps the joint on the ellipse) and fails without it. The trim fuzz
+  (`crates/ui/tests/sketch_edit.rs`) now also draws random ellipses and
+  elliptical arcs of either handedness, directly and through the tools'
+  own builders with their semi-axes: in a 2,000-case run per property,
+  1,469 ellipse edits committed (374 ellipse trims, 431 arc trims, 456
+  splits, 208 extensions), every one solved, without redundancy, with
+  nothing unplanned moving.
 
 ## 9. Tests
 
