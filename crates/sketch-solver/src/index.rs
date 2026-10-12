@@ -57,6 +57,20 @@ impl Circ {
     }
 }
 
+/// An ellipse or elliptical arc over point indices (design note 0008 §3):
+/// `E(θ) = c + cos θ·(m − c) + sin θ·(n − c)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Ell {
+    /// Centre.
+    pub c: usize,
+    /// End of the first (major) semi-axis.
+    pub m: usize,
+    /// End of the second (minor) semi-axis.
+    pub n: usize,
+    /// Start and end of an elliptical arc (`None` for a full ellipse).
+    pub arc: Option<(usize, usize)>,
+}
+
 /// One side of a tangency at a shared point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TanSide {
@@ -67,6 +81,8 @@ pub(crate) enum TanSide {
         /// Centre point index.
         c: usize,
     },
+    /// An elliptical arc: its tangent at the shared point.
+    Ellipse(Ell),
     /// A spline at its first (`end == false`) or last control point.
     SplineEnd {
         /// Spline index.
@@ -83,6 +99,7 @@ pub(crate) enum Con {
     OnLine(usize, LineRef),
     OnCirc(usize, Circ),
     OnSpline(usize, usize),
+    OnEllipse(usize, Ell),
     Horizontal(LineRef),
     Vertical(LineRef),
     HPoints(usize, usize),
@@ -96,6 +113,7 @@ pub(crate) enum Con {
     Symmetric(usize, usize, LineRef),
     TangentAt(TanSide, TanSide, usize),
     TangentLC(LineRef, Circ, bool),
+    TangentLE(LineRef, Ell, bool),
     TangentCC(Circ, Circ, bool),
     Normal(LineRef, Circ),
     Fix(usize, DVec2),
@@ -189,6 +207,9 @@ pub(crate) struct Derived {
     /// Entity positions of the image arcs, whose implicit equation the
     /// derived equations imply.
     pub arcs: Vec<usize>,
+    /// Entity positions of the image ellipses and elliptical arcs, whose
+    /// implicit equations the derived equations imply.
+    pub ellipses: Vec<usize>,
 }
 
 /// A copy turned by less than this from a whole number of turns (radians,
@@ -208,6 +229,9 @@ pub(crate) struct Pattern {
     /// Entity positions of the image arcs, whose implicit equation the
     /// pattern's equations imply.
     pub arcs: Vec<usize>,
+    /// Entity positions of the image ellipses and elliptical arcs, whose
+    /// implicit equations the pattern's equations imply.
+    pub ellipses: Vec<usize>,
 }
 
 /// What an entity is, over internal indices.
@@ -219,6 +243,8 @@ pub(crate) enum EntKind {
     Line(LineRef),
     /// A circle or an arc.
     Circular(Circ),
+    /// An ellipse or an elliptical arc.
+    Ellipse(Ell),
     /// Spline index.
     Spline(usize),
 }
@@ -341,6 +367,32 @@ impl<K: SketchKey> Index<K> {
                         )));
                     }
                     EntKind::Circular(Circ::Arc { c, s, e: t })
+                }
+                Geometry::Ellipse {
+                    center,
+                    major,
+                    minor,
+                } => {
+                    let el = ellipse_points(id, &point, center, major, minor)?;
+                    EntKind::Ellipse(el)
+                }
+                Geometry::EllipticalArc {
+                    center,
+                    major,
+                    minor,
+                    start,
+                    end,
+                } => {
+                    let mut el = ellipse_points(id, &point, center, major, minor)?;
+                    let s = point(id, start, "start")?;
+                    let t = point(id, end, "end")?;
+                    if s == el.c || t == el.c || s == t {
+                        return Err(invalid(format!(
+                            "entity {id:?}: an elliptical arc needs distinct start and end points, neither its centre"
+                        )));
+                    }
+                    el.arc = Some((s, t));
+                    EntKind::Ellipse(el)
                 }
                 Geometry::ControlSpline { control, degree } => {
                     let pts = control
@@ -490,6 +542,14 @@ impl<K: SketchKey> Index<K> {
                         Con::OnCirc(p, cc)
                     }
                     EntKind::Spline(s) => Con::OnSpline(p, s),
+                    EntKind::Ellipse(el) => {
+                        if el.c == p {
+                            return Err(invalid(format!(
+                                "constraint {id:?}: the centre of {curve:?} cannot lie on it"
+                            )));
+                        }
+                        Con::OnEllipse(p, el)
+                    }
                     EntKind::Point(_) => {
                         return Err(invalid(format!(
                             "constraint {id:?}: entity {curve:?} must be a curve"
@@ -561,15 +621,24 @@ impl<K: SketchKey> Index<K> {
                         | (EntKind::Circular(cc), EntKind::Line(l)) => {
                             Con::TangentLC(l, cc, *center_left)
                         }
+                        (EntKind::Line(l), EntKind::Ellipse(el))
+                        | (EntKind::Ellipse(el), EntKind::Line(l)) => {
+                            Con::TangentLE(l, el, *center_left)
+                        }
                         _ => {
                             return Err(invalid(format!(
-                                "constraint {id:?}: line-circle tangency needs a line and a circle or arc"
+                                "constraint {id:?}: line-circle tangency needs a line and a circle, arc, ellipse or elliptical arc"
                             )))
                         }
                     },
                     TangentKind::CircleCircle { internal } => match (ka, kb) {
                         (EntKind::Circular(x), EntKind::Circular(y)) => {
                             Con::TangentCC(x, y, *internal)
+                        }
+                        (EntKind::Ellipse(_), _) | (_, EntKind::Ellipse(_)) => {
+                            return Err(invalid(format!(
+                                "constraint {id:?}: tangency of an ellipse with a circle or another ellipse is not supported yet; make them tangent at a shared end point instead"
+                            )))
                         }
                         _ => {
                             return Err(invalid(format!(
@@ -777,6 +846,7 @@ impl<K: SketchKey> Index<K> {
             out.radii.extend(d.radii);
             out.entities.extend(d.entities);
             out.arcs.extend(d.arcs);
+            out.ellipses.extend(d.ellipses);
         }
         let mut images = BTreeSet::new();
         if let Some(&(_, i)) = out.entities.iter().find(|&&(_, i)| !images.insert(i)) {
@@ -1017,6 +1087,14 @@ impl<K: SketchKey> Index<K> {
                     point_pairs.extend([(c, c2), (s, s2), (e, e2)]);
                     d.arcs.push(ei);
                 }
+                (EntKind::Ellipse(a), EntKind::Ellipse(b)) if a.arc.is_some() == b.arc.is_some() => {
+                    point_pairs.extend([(a.c, b.c), (a.m, b.m), (a.n, b.n)]);
+                    if let (Some((s, e)), Some((s2, e2))) = (a.arc, b.arc) {
+                        let (s, e) = if reverses { (e, s) } else { (s, e) };
+                        point_pairs.extend([(s, s2), (e, e2)]);
+                    }
+                    d.ellipses.push(ei);
+                }
                 (EntKind::Spline(a), EntKind::Spline(b)) => {
                     let (a, b) = (&self.splines[a], &self.splines[b]);
                     if a.map.degree != b.map.degree
@@ -1107,6 +1185,13 @@ impl<K: SketchKey> Index<K> {
             EntKind::Circular(Circ::Circle { .. }) => Err(invalid(format!(
                 "constraint {id:?}: {curve:?} is a circle and has no end points; use line-circle or circle-circle tangency"
             ))),
+            EntKind::Ellipse(el) => match el.arc {
+                Some((s, e)) if at(s) || at(e) => Ok(TanSide::Ellipse(el)),
+                Some(_) => Err(not_end()),
+                None => Err(invalid(format!(
+                    "constraint {id:?}: {curve:?} is an ellipse and has no end points; use line-ellipse tangency"
+                ))),
+            },
             EntKind::Spline(s) => {
                 let pts = &self.splines[s].points;
                 let first = at(pts[0]);
@@ -1233,6 +1318,25 @@ impl<K: SketchKey> Index<K> {
         }
         Ok(out)
     }
+}
+
+/// The centre and axis ends of an ellipse entity, distinct.
+fn ellipse_points<K: SketchKey>(
+    id: &K,
+    point: &dyn Fn(&K, &K, &str) -> Result<usize, SolveError>,
+    center: &K,
+    major: &K,
+    minor: &K,
+) -> Result<Ell, SolveError> {
+    let c = point(id, center, "centre")?;
+    let m = point(id, major, "major axis end")?;
+    let n = point(id, minor, "minor axis end")?;
+    if c == m || c == n || m == n {
+        return Err(invalid(format!(
+            "entity {id:?}: an ellipse needs distinct centre and axis end points"
+        )));
+    }
+    Ok(Ell { c, m, n, arc: None })
 }
 
 fn spline_err<K: SketchKey>(id: &K, e: SplineError) -> SolveError {

@@ -107,7 +107,7 @@ fn off_by(s: &SketchData, d: f64, pieces: &[(SketchId, SketchId, bool)]) -> f64 
 
 /// The kernel's profile curve of a solved sketch curve.
 fn profile(c: &ResolvedCurve) -> ProfileCurve {
-    openshape_features::kernel_curve(c)
+    openshape_features::kernel_curve(c).expect("a valid curve")
 }
 
 /// True if two of the images cross or touch anywhere but at an end point

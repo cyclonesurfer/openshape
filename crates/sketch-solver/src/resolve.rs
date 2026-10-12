@@ -5,6 +5,7 @@ use std::fmt;
 
 use glam::DVec2;
 
+use crate::ellipse;
 use crate::eq::signed_angle;
 use crate::index::{Circ, Con, EntKind, Index, LineRef};
 use crate::model::{Constraint, DistanceKind, Sketch, SketchKey};
@@ -60,6 +61,51 @@ pub(crate) fn resolve_curves<K: SketchKey>(
                     radius,
                     start_angle: a0,
                     sweep_angle: sweep,
+                }
+            }
+            EntKind::Ellipse(el) => {
+                let center = pos(el.c);
+                let (major, minor) = (pos(el.m) - center, pos(el.n) - center);
+                let turn = major.perp_dot(minor);
+                if major == DVec2::ZERO || minor == DVec2::ZERO {
+                    return Err(SolveError::Degenerate(format!(
+                        "ellipse {id:?} has an axis of zero length"
+                    )));
+                }
+                if turn == 0.0 || turn.is_nan() {
+                    return Err(SolveError::Degenerate(format!(
+                        "ellipse {id:?} has parallel axes"
+                    )));
+                }
+                match el.arc {
+                    None => ResolvedCurve::Ellipse {
+                        center,
+                        major,
+                        minor,
+                    },
+                    Some((s, e)) => {
+                        let t0 = ellipse::param_of(center, major, minor, pos(s));
+                        let t1 = ellipse::param_of(center, major, minor, pos(e));
+                        // Counter-clockwise in the plane is increasing θ
+                        // when the minor axis is left of the major one.
+                        let sweep = if turn > 0.0 {
+                            (t1 - t0).rem_euclid(TAU)
+                        } else {
+                            -(t0 - t1).rem_euclid(TAU)
+                        };
+                        if !(sweep.abs() > 0.0 && sweep.abs() < TAU) {
+                            return Err(SolveError::Degenerate(format!(
+                                "elliptical arc {id:?} ends where it starts"
+                            )));
+                        }
+                        ResolvedCurve::EllipticalArc {
+                            center,
+                            major,
+                            minor,
+                            start_param: t0,
+                            sweep_param: sweep,
+                        }
+                    }
                 }
             }
             EntKind::Spline(s) => {

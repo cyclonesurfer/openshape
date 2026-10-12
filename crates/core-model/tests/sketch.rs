@@ -207,6 +207,94 @@ fn deleting_a_point_cascades_to_curves_and_constraints() {
 }
 
 #[test]
+fn ellipses_are_checked_and_deleted_with_their_points() {
+    let mut s = Session::new_document(ReplicaId(1));
+    let f = new_sketch(&mut s);
+    let ellipse = |index: u32, g: Geometry<SketchId>| {
+        SketchEdit::AddEntity(Entity {
+            id: SketchId::new_in_batch(index),
+            geometry: g,
+            construction: false,
+        })
+    };
+    let b = SketchId::new_in_batch;
+    let op = edit(
+        &mut s,
+        f,
+        vec![
+            point(0, 0.0, 0.0),
+            point(1, 2.0, 0.0),
+            point(2, 0.0, 1.0),
+            point(3, 2.0, 0.0),
+            point(4, 0.0, 1.0),
+            ellipse(
+                5,
+                Geometry::Ellipse {
+                    center: b(0),
+                    major: b(1),
+                    minor: b(2),
+                },
+            ),
+            ellipse(
+                6,
+                Geometry::EllipticalArc {
+                    center: b(0),
+                    major: b(1),
+                    minor: b(2),
+                    start: b(3),
+                    end: b(4),
+                },
+            ),
+        ],
+    );
+    assert!(s.document().conflicts.is_empty());
+    assert_eq!(sketch(&s, f).sketch.entities.len(), 7);
+    let id = |index| SketchId { op, index };
+    // Repeated points are refused, each edit on its own.
+    for g in [
+        Geometry::Ellipse {
+            center: id(0),
+            major: id(0),
+            minor: id(2),
+        },
+        Geometry::Ellipse {
+            center: id(0),
+            major: id(1),
+            minor: id(1),
+        },
+        Geometry::EllipticalArc {
+            center: id(0),
+            major: id(1),
+            minor: id(2),
+            start: id(3),
+            end: id(3),
+        },
+        Geometry::EllipticalArc {
+            center: id(0),
+            major: id(1),
+            minor: id(2),
+            start: id(0),
+            end: id(4),
+        },
+    ] {
+        let before = sketch(&s, f);
+        let n = s.document().conflicts.len();
+        edit(&mut s, f, vec![ellipse(0, g.clone())]);
+        assert_eq!(sketch(&s, f), before, "{g:?}");
+        assert_eq!(s.document().conflicts.len(), n + 1, "{g:?}");
+    }
+    // Deleting the minor end deletes both curves that use it.
+    edit(&mut s, f, vec![SketchEdit::Delete { items: vec![id(2)] }]);
+    let d = sketch(&s, f);
+    assert_eq!(d.sketch.entities.len(), 4);
+    assert!(d
+        .sketch
+        .entities
+        .iter()
+        .all(|e| matches!(e.geometry, Geometry::Point { .. })));
+}
+
+#[test]
 fn a_batch_is_one_undo_step() {
     let mut s = Session::new_document(ReplicaId(1));
     let f = new_sketch(&mut s);

@@ -4,8 +4,8 @@
 
 use glam::DVec2;
 
-use crate::eq::{EqKind, PairMode, RTerm, Rhs, SplineDef, VecExpr};
-use crate::index::{Circ, Con, Index, LineRef, OCurve, OEq, OffsetCon, TanSide};
+use crate::eq::{EqKind, PairMode, RTerm, Rhs, SplineDef, TanDir, VecExpr};
+use crate::index::{Circ, Con, Ell, Index, LineRef, OCurve, OEq, OffsetCon, TanSide};
 use crate::model::{DistanceKind, SketchKey};
 
 /// Lengths are divided by `l` after subtracting the centre `(cx, cy)` from
@@ -63,9 +63,10 @@ pub(crate) enum Sub {
 pub(crate) struct Equation {
     /// The residual.
     pub kind: EqKind,
-    /// Constraint position, or `None` for an implicit arc equation.
+    /// Constraint position, or `None` for an implicit equation of an arc,
+    /// ellipse or elliptical arc.
     pub owner: Option<usize>,
-    /// Entity position of the arc, for implicit equations.
+    /// Entity position of the arc or ellipse, for implicit equations.
     pub arc: Option<usize>,
     /// True if the residual is an angle (sine/cosine), false for lengths.
     pub angular: bool,
@@ -73,11 +74,22 @@ pub(crate) struct Equation {
     pub sub: Option<Sub>,
 }
 
-/// A hidden curve parameter of a point-on-spline constraint.
+/// The curve a hidden parameter runs along.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ParamCurve {
+    /// A spline (by index): the parameter lies in `[0, 1]`.
+    Spline(usize),
+    /// An ellipse: the parameter is its eccentric anomaly, periodic and
+    /// unbounded (design note 0008 §4.2).
+    Ellipse(Ell),
+}
+
+/// A hidden curve parameter placing a point on a curve: a point-on-spline
+/// or point-on-ellipse constraint, or an elliptical arc's own end.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Param {
-    /// Spline index.
-    pub spline: usize,
+    /// The curve.
+    pub curve: ParamCurve,
     /// The point on it.
     pub point: usize,
 }
@@ -120,6 +132,16 @@ impl Problem {
         slot >= 2 * self.n_points + self.n_circles
     }
 
+    /// True for hidden parameters confined to `[0, 1]` (on splines; an
+    /// ellipse's parameter is periodic and unbounded).
+    pub fn is_bounded_param(&self, slot: usize) -> bool {
+        self.is_param(slot)
+            && matches!(
+                self.params[slot - 2 * self.n_points - self.n_circles].curve,
+                ParamCurve::Spline(_)
+            )
+    }
+
     /// True for circle-radius slots.
     pub fn is_radius(&self, slot: usize) -> bool {
         slot >= 2 * self.n_points && !self.is_param(slot)
@@ -148,11 +170,20 @@ pub(crate) fn scale_of<K: SketchKey>(
         add(*p);
     }
     for k in &index.kinds {
-        if let crate::index::EntKind::Circular(Circ::Circle { c, r }) = k {
-            let center = index.positions[*c];
-            let rad = index.radius(*r);
-            add(center - DVec2::splat(rad));
-            add(center + DVec2::splat(rad));
+        match *k {
+            crate::index::EntKind::Circular(Circ::Circle { c, r }) => {
+                let center = index.positions[c];
+                let rad = index.radius(r);
+                add(center - DVec2::splat(rad));
+                add(center + DVec2::splat(rad));
+            }
+            crate::index::EntKind::Ellipse(el) => {
+                // The vertices opposite the axis ends.
+                let p = &index.positions;
+                add(p[el.c] * 2.0 - p[el.m]);
+                add(p[el.c] * 2.0 - p[el.n]);
+            }
+            _ => {}
         }
     }
     let mut max_dim = 0.0f64;
@@ -239,10 +270,48 @@ impl Builder<'_> {
         }
     }
 
-    fn tan_dir(&self, side: TanSide, p: usize) -> (VecExpr, bool) {
+    /// A hidden parameter placing `p` on ellipse `el`, with its two
+    /// equations (design note 0008 §4.2), owned by constraint `owner` or,
+    /// for an elliptical arc's own ends, implicit to entity `ent`.
+    fn on_ellipse(&mut self, owner: Option<usize>, ent: Option<usize>, p: usize, el: Ell) {
+        let t = 2 * self.n_points + self.n_circles + self.params.len();
+        self.params.push(Param {
+            curve: ParamCurve::Ellipse(el),
+            point: p,
+        });
+        for axis in 0..2 {
+            self.eqs.push(Equation {
+                kind: EqKind::EllipsePoint {
+                    c: el.c,
+                    m: el.m,
+                    n: el.n,
+                    t,
+                    p,
+                    axis,
+                },
+                owner,
+                arc: ent,
+                angular: false,
+                sub: None,
+            });
+        }
+    }
+
+    /// The direction of one side of a tangency at point `p`, and whether it
+    /// is a tangent (true) or a normal.
+    fn tan_dir(&self, side: TanSide, p: usize) -> (TanDir, bool) {
         match side {
-            TanSide::Line(l) => (Self::dir(l), true),
-            TanSide::Arc { c } => (VecExpr::diff(p, c), false),
+            TanSide::Ellipse(el) => (
+                TanDir::Ellipse {
+                    c: el.c,
+                    m: el.m,
+                    n: el.n,
+                    p,
+                },
+                true,
+            ),
+            TanSide::Line(l) => (TanDir::Lin(Self::dir(l)), true),
+            TanSide::Arc { c } => (TanDir::Lin(VecExpr::diff(p, c)), false),
             TanSide::SplineEnd { spline, end } => {
                 let def = &self.splines[spline];
                 let n = def.map.count;
@@ -258,7 +327,7 @@ impl Builder<'_> {
                         (c != 0.0).then_some((q, c))
                     })
                     .collect();
-                (VecExpr(terms), true)
+                (TanDir::Lin(VecExpr(terms)), true)
             }
         }
     }
@@ -370,10 +439,11 @@ impl Builder<'_> {
                     None,
                 )
             }
+            Con::OnEllipse(p, el) => self.on_ellipse(Some(owner), None, p, el),
             Con::OnSpline(p, s) => {
                 let t = 2 * self.n_points + self.n_circles + self.params.len();
                 self.params.push(Param {
-                    spline: s,
+                    curve: ParamCurve::Spline(s),
                     point: p,
                 });
                 for axis in 0..2 {
@@ -490,7 +560,11 @@ impl Builder<'_> {
                 } else {
                     PairMode::Dot
                 };
-                self.push(owner, EqKind::DirPair { a: da, b: db, mode }, true, None);
+                let kind = match (da, db) {
+                    (TanDir::Lin(a), TanDir::Lin(b)) => EqKind::DirPair { a, b, mode },
+                    (a, b) => EqKind::TanDirs { a, b, mode },
+                };
+                self.push(owner, kind, true, None);
             }
             Con::TangentLC(l, c, left) => {
                 let r = self.radius(c);
@@ -507,6 +581,18 @@ impl Builder<'_> {
                     None,
                 );
             }
+            Con::TangentLE(l, el, left) => self.push(
+                owner,
+                EqKind::EllipseSupport {
+                    dir: Self::dir(l),
+                    v: VecExpr::diff(el.c, l.s),
+                    a: VecExpr::diff(el.m, el.c),
+                    b: VecExpr::diff(el.n, el.c),
+                    sign: if left { 1.0 } else { -1.0 },
+                },
+                false,
+                None,
+            ),
             Con::TangentCC(a, b, internal) => {
                 let (ra, rb) = (self.radius(a), self.radius(b));
                 let rhs = if internal {
@@ -809,6 +895,44 @@ pub(crate) fn build<K: SketchKey>(index: &Index<K>, cons: &[Con], scale: Scale) 
                 angular: false,
                 sub: None,
             });
+        }
+    }
+    // Every ellipse keeps its axes perpendicular and every elliptical arc
+    // its ends on its ellipse (design note 0008 §4.1–4.2), except derived
+    // images, whose source's equations imply theirs. An end that is an
+    // axis end lies on the ellipse by definition.
+    let derived_ellipses: std::collections::BTreeSet<usize> = cons
+        .iter()
+        .flat_map(|c| match c {
+            Con::Mirror(_, d) => d.ellipses.clone(),
+            Con::LinearPattern(_, pt) | Con::CircularPattern(_, _, pt) => pt.ellipses.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
+    for (i, k) in index.kinds.iter().enumerate() {
+        let crate::index::EntKind::Ellipse(el) = *k else {
+            continue;
+        };
+        if derived_ellipses.contains(&i) {
+            continue;
+        }
+        b.eqs.push(Equation {
+            kind: EqKind::DirPair {
+                a: VecExpr::diff(el.m, el.c),
+                b: VecExpr::diff(el.n, el.c),
+                mode: PairMode::Dot,
+            },
+            owner: None,
+            arc: Some(i),
+            angular: true,
+            sub: None,
+        });
+        if let Some((s, e)) = el.arc {
+            for q in [s, e] {
+                if q != el.m && q != el.n {
+                    b.on_ellipse(None, Some(i), q, el);
+                }
+            }
         }
     }
     for (pos, con) in cons.iter().enumerate() {

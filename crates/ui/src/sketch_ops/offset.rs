@@ -46,10 +46,12 @@ enum Node {
     Point(SketchId),
 }
 
-/// The ends of a line, arc or spline.
+/// The ends of a line, arc, elliptical arc or spline.
 fn ends(g: &Geometry<SketchId>) -> Option<(SketchId, SketchId)> {
     match g {
-        Geometry::Line { start, end } | Geometry::Arc { start, end, .. } => Some((*start, *end)),
+        Geometry::Line { start, end }
+        | Geometry::Arc { start, end, .. }
+        | Geometry::EllipticalArc { start, end, .. } => Some((*start, *end)),
         Geometry::ControlSpline { control: p, .. }
         | Geometry::InterpolatedSpline { through: p, .. } => Some((*p.first()?, *p.last()?)),
         _ => None,
@@ -58,8 +60,8 @@ fn ends(g: &Geometry<SketchId>) -> Option<(SketchId, SketchId)> {
 
 /// The chain through `start` (design note 0007 §10.1): curves of the same
 /// kind (construction or not) joined end to end through points where
-/// exactly two of them end. Splines end a chain (they cannot be offset); a
-/// circle is a chain of its own. The chain runs in `start`'s direction.
+/// exactly two of them end. Splines and elliptical arcs end a chain (they
+/// cannot be offset); a circle is a chain of its own. The chain runs in `start`'s direction.
 pub fn chain(sketch: &SketchData, start: SketchId) -> Result<Chain, String> {
     let e = sketch.entity(start).ok_or("The curve no longer exists")?;
     match e.geometry {
@@ -72,6 +74,9 @@ pub fn chain(sketch: &SketchData, start: SketchId) -> Result<Chain, String> {
         Geometry::Line { .. } | Geometry::Arc { .. } => {}
         Geometry::ControlSpline { .. } | Geometry::InterpolatedSpline { .. } => {
             return Err("A spline cannot be offset: its offset is not a spline".into())
+        }
+        Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. } => {
+            return Err("An ellipse cannot be offset: its offset is not an ellipse".into())
         }
         Geometry::Point { .. } => return Err("Click a line, arc or circle to offset".into()),
     }
@@ -163,7 +168,9 @@ pub fn side_and_distance(curve: &ResolvedCurve, at: DVec2) -> Option<(f64, bool)
             let r = (at - center).length();
             Some(((r - radius).abs(), r < radius))
         }
-        ResolvedCurve::Spline { .. } => None,
+        ResolvedCurve::Spline { .. }
+        | ResolvedCurve::Ellipse { .. }
+        | ResolvedCurve::EllipticalArc { .. } => None,
     }
 }
 

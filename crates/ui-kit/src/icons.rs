@@ -138,6 +138,12 @@ pub enum Icon {
     /// A smooth curve pulled towards four dotted control points joined by a
     /// dashed control polygon (a control-point spline).
     ControlSpline,
+    /// A wide ellipse with a dot at its centre and a dashed semi-major
+    /// axis.
+    Ellipse,
+    /// An arc over the top of a wide ellipse with a dot at its centre and
+    /// each end, the centre joined to the right end by a dashed semi-axis.
+    EllipticalArc,
     /// A rectangle with a dot at its centre and one corner, joined by a
     /// dashed half-diagonal.
     CenterRectangle,
@@ -256,6 +262,8 @@ impl Icon {
         Icon::Point,
         Icon::Spline,
         Icon::ControlSpline,
+        Icon::Ellipse,
+        Icon::EllipticalArc,
         Icon::CenterRectangle,
         Icon::AlignedRectangle,
         Icon::TangentArc,
@@ -335,6 +343,8 @@ impl Icon {
             Icon::Point => "Point",
             Icon::Spline => "Spline",
             Icon::ControlSpline => "Control-point spline",
+            Icon::Ellipse => "Ellipse",
+            Icon::EllipticalArc => "Elliptical arc",
             Icon::CenterRectangle => "Center rectangle",
             Icon::AlignedRectangle => "Aligned rectangle",
             Icon::TangentArc => "Tangent arc",
@@ -1023,6 +1033,23 @@ fn draw(pen: &Pen<'_>, icon: Icon) {
             pen.poly(&curve);
             for q in ctrl {
                 pen.dot(q, 1.7);
+            }
+        }
+        Icon::Ellipse => {
+            let c = (12.0, 12.0);
+            let mut outline = ellipse_arc(c, 9.5, 6.0, 0.0, 360.0);
+            outline.pop();
+            pen.closed(&outline);
+            pen.dashed(c, (21.5, 12.0), 2.6, 1.6);
+            pen.dot(c, 1.6);
+        }
+        Icon::EllipticalArc => {
+            let (c, rx, ry) = ((12.0, 15.0), 8.0, 6.5);
+            pen.poly(&ellipse_arc(c, rx, ry, 0.0, 200.0));
+            pen.dashed(c, (20.0, 15.0), 2.6, 1.6);
+            pen.dot(c, 1.6);
+            for a in [0.0, 200.0] {
+                pen.dot(on_ellipse(c, rx, ry, a), 1.9);
             }
         }
         Icon::CenterRectangle => {

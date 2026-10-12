@@ -21,7 +21,7 @@ use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
 
 use crate::geom::{Curve3, Surface};
 use crate::topo::{Brep, Face};
-use crate::KernelError;
+use crate::{KernelError, Tolerance};
 
 /// Tessellation controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -276,6 +276,65 @@ fn singular_dir(s: &Surface, uv: DVec2) -> Option<bool> {
     }
 }
 
+/// The parameter direction (`true` for u) and domain of a surface swept
+/// from a closed NURBS curve (its two ends one point): an extrusion of one,
+/// or a revolution of one.
+fn closed_direction(s: &Surface) -> Option<(bool, f64, f64)> {
+    let (along_u, curve) = match s {
+        Surface::Extrusion {
+            curve: Curve3::Nurbs(n),
+            ..
+        } => (true, n),
+        Surface::Revolution {
+            profile: Curve3::Nurbs(n),
+            ..
+        } => (false, n),
+        _ => return None,
+    };
+    let (a, b) = curve.domain();
+    // The test profile normalization uses to split closed splines (at the
+    // default tolerance), so every surface built from a split curve is seen.
+    let closed = (curve.point(a) - curve.point(b)).length() <= Tolerance::default().linear;
+    closed.then_some((along_u, a, b))
+}
+
+/// On a surface swept from a closed curve, boundary points over the
+/// curve's closure point project to either end of its domain. A face never
+/// runs across the closure point (it is a vertex of the profile), so each
+/// such point belongs at the end of the domain on the face's side: the end
+/// nearer the mean parameter of the loop's other points. Without this the
+/// parameter-space boundary can jump across the whole domain and cross
+/// itself.
+fn unwrap_closure(s: &Surface, samples: &mut [Sample]) {
+    let Some((along_u, a, b)) = closed_direction(s) else {
+        return;
+    };
+    let get = |uv: DVec2| if along_u { uv.x } else { uv.y };
+    let eps = 1e-6 * (b - a);
+    let at_end = |t: f64| (t - a).abs() <= eps || (b - t).abs() <= eps;
+    let (mut sum, mut n) = (0.0, 0usize);
+    for smp in samples.iter() {
+        let t = get(smp.uv);
+        if !at_end(t) {
+            sum += t;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return;
+    }
+    let end = if sum / n as f64 > 0.5 * (a + b) { b } else { a };
+    for smp in samples.iter_mut() {
+        if at_end(get(smp.uv)) {
+            if along_u {
+                smp.uv.x = end;
+            } else {
+                smp.uv.y = end;
+            }
+        }
+    }
+}
+
 fn face_loops_uv(
     brep: &Brep,
     face: &Face,
@@ -297,7 +356,7 @@ fn face_loops_uv(
         if pts.len() < 3 {
             return Err("loop has fewer than three boundary samples".into());
         }
-        let raw: Vec<Sample> = pts
+        let mut raw: Vec<Sample> = pts
             .iter()
             .map(|&p| {
                 let (u, v) = s.project(p);
@@ -307,6 +366,7 @@ fn face_loops_uv(
                 }
             })
             .collect();
+        unwrap_closure(s, &mut raw);
         // Split singular points into two parameter-space points.
         let n = raw.len();
         let mut fixed: Vec<Sample> = Vec::with_capacity(n + 4);

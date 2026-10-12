@@ -59,6 +59,32 @@ pub enum Geometry<K> {
         /// Degree, 1 to 5.
         degree: u32,
     },
+    /// A full ellipse `E(θ) = c + cos θ·A + sin θ·B` with semi-axes
+    /// `A = major − center` and `B = minor − center` (design note 0008 §3).
+    /// The solver keeps `A ⟂ B`; nothing forces `‖A‖ ≥ ‖B‖`.
+    Ellipse {
+        /// Centre point entity.
+        center: K,
+        /// Point entity at the end of the first (major) semi-axis.
+        major: K,
+        /// Point entity at the end of the second (minor) semi-axis.
+        minor: K,
+    },
+    /// An arc of the ellipse on `center`, `major` and `minor` (as
+    /// [`Geometry::Ellipse`]), running counter-clockwise in the sketch plane
+    /// from `start` to `end`; the solver keeps both on the ellipse.
+    EllipticalArc {
+        /// Centre point entity.
+        center: K,
+        /// Point entity at the end of the first (major) semi-axis.
+        major: K,
+        /// Point entity at the end of the second (minor) semi-axis.
+        minor: K,
+        /// Start point entity.
+        start: K,
+        /// End point entity.
+        end: K,
+    },
     /// A cubic B-spline interpolating `through` (at least 2 point entities)
     /// at the fixed, strictly increasing parameters `params` (first 0, last
     /// 1). Its control points are derived (P&T A9.1, knots by averaging), so
@@ -79,6 +105,18 @@ impl<K: SketchKey> Geometry<K> {
             Geometry::Line { start, end } => vec![*start, *end],
             Geometry::Circle { center, .. } => vec![*center],
             Geometry::Arc { center, start, end } => vec![*center, *start, *end],
+            Geometry::Ellipse {
+                center,
+                major,
+                minor,
+            } => vec![*center, *major, *minor],
+            Geometry::EllipticalArc {
+                center,
+                major,
+                minor,
+                start,
+                end,
+            } => vec![*center, *major, *minor, *start, *end],
             Geometry::ControlSpline { control, .. } => control.clone(),
             Geometry::InterpolatedSpline { through, .. } => through.clone(),
         }
@@ -103,6 +141,28 @@ impl<K: SketchKey> Geometry<K> {
             },
             Geometry::Arc { center, start, end } => Geometry::Arc {
                 center: f(*center),
+                start: f(*start),
+                end: f(*end),
+            },
+            Geometry::Ellipse {
+                center,
+                major,
+                minor,
+            } => Geometry::Ellipse {
+                center: f(*center),
+                major: f(*major),
+                minor: f(*minor),
+            },
+            Geometry::EllipticalArc {
+                center,
+                major,
+                minor,
+                start,
+                end,
+            } => Geometry::EllipticalArc {
+                center: f(*center),
+                major: f(*major),
+                minor: f(*minor),
                 start: f(*start),
                 end: f(*end),
             },
@@ -140,13 +200,15 @@ pub enum TangentKind<K> {
         /// two coincident end points).
         point: K,
     },
-    /// A line and a circle or arc touch; the centre stays on the recorded
-    /// side of the line (left when looking from start to end).
+    /// A line and a circle, arc, ellipse or elliptical arc touch; the centre
+    /// stays on the recorded side of the line (left when looking from start
+    /// to end).
     LineCircle {
         /// True if the centre is on the left of the line.
         center_left: bool,
     },
-    /// Two circles or arcs touch, from outside or inside.
+    /// Two circles or arcs touch, from outside or inside (not ellipses yet:
+    /// design note 0008 §4.5).
     CircleCircle {
         /// True for internal tangency (one inside the other).
         internal: bool,
@@ -177,7 +239,8 @@ pub enum Constraint<K> {
         b: K,
     },
     /// A point lies on a curve (on a line's infinite extension, on a
-    /// circular's full circle, on a spline within its domain).
+    /// circular's full circle, on an ellipse or elliptical arc's full
+    /// ellipse, on a spline within its domain).
     PointOnCurve {
         /// The point.
         point: K,
@@ -322,11 +385,12 @@ pub enum Constraint<K> {
     /// Derived geometry (design note 0007 §9): each image entity is the
     /// mirror image of its source about the line `axis`, and moves with it.
     ///
-    /// A pair is two points, lines, circles or arcs, or two splines of the
-    /// same form (control splines of one degree, or interpolated splines
-    /// with the same parameters) with as many points. Each image point is
-    /// the reflection of the corresponding source point, except that a
-    /// reflection reverses the sense of rotation, so an image arc starts at
+    /// A pair is two points, lines, circles, arcs, ellipses or elliptical
+    /// arcs, or two splines of the same form (control splines of one
+    /// degree, or interpolated splines with the same parameters) with as
+    /// many points. Each image point is the reflection of the corresponding
+    /// source point, except that a reflection reverses the sense of
+    /// rotation, so an image arc (circular or elliptical) starts at
     /// the reflection of its source's end and ends at the reflection of its
     /// start; an image circle has its source's radius. A source point on
     /// the axis may be shared with the image (the point is then held on the
@@ -372,8 +436,9 @@ pub enum Constraint<K> {
     /// source moved by `k` times the vector of the line `direction` (from
     /// its start to its end), and moves with it.
     ///
-    /// A copy `(source, image, k)`, k ≥ 1, is two points, lines, circles
-    /// or arcs, or two splines of the same form with as many points; each
+    /// A copy `(source, image, k)`, k ≥ 1, is two points, lines, circles,
+    /// arcs, ellipses or elliptical arcs, or two splines of the same form
+    /// with as many points; each
     /// image point is its source point moved, an image arc keeps its
     /// source's start and end, an image circle its radius. Images add no
     /// degrees of freedom. Deleting a source or an image removes its copy;
@@ -827,6 +892,18 @@ mod tests {
             Geometry::InterpolatedSpline {
                 through: vec![1, 2],
                 params: vec![0.0, 1.0],
+            },
+            Geometry::Ellipse {
+                center: 1,
+                major: 2,
+                minor: 3,
+            },
+            Geometry::EllipticalArc {
+                center: 1,
+                major: 2,
+                minor: 3,
+                start: 4,
+                end: 5,
             },
         ];
         for g in &geometry {

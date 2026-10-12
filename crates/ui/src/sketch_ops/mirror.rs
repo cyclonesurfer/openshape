@@ -54,13 +54,21 @@ impl Axis {
         self.at + self.dir * (2.0 * v.dot(self.dir)) - v
     }
 
+    /// The reflection of the vector `v` (a direction, not a position).
+    pub fn reflect_vector(&self, v: DVec2) -> DVec2 {
+        self.dir * (2.0 * v.dot(self.dir)) - v
+    }
+
     /// The distance of `p` from the (infinite) line.
     pub fn distance(&self, p: DVec2) -> f64 {
         self.dir.perp_dot(p - self.at).abs()
     }
 
     /// The reflection of a solved curve; arcs keep running counter-clockwise
-    /// (from the image of the end to the image of the start).
+    /// (from the image of the end to the image of the start). An ellipse's
+    /// image has the images of its semi-axes, so the same eccentric anomaly
+    /// gives the image point, with the opposite handedness: an elliptical
+    /// arc's image starts where its source ends, with the opposite sweep.
     pub fn reflect_curve(&self, c: &ResolvedCurve) -> ResolvedCurve {
         match c {
             ResolvedCurve::Line { start, end } => ResolvedCurve::Line {
@@ -86,6 +94,28 @@ impl Axis {
                     sweep_angle: *sweep_angle,
                 }
             }
+            ResolvedCurve::Ellipse {
+                center,
+                major,
+                minor,
+            } => ResolvedCurve::Ellipse {
+                center: self.reflect(*center),
+                major: self.reflect_vector(*major),
+                minor: self.reflect_vector(*minor),
+            },
+            ResolvedCurve::EllipticalArc {
+                center,
+                major,
+                minor,
+                start_param,
+                sweep_param,
+            } => ResolvedCurve::EllipticalArc {
+                center: self.reflect(*center),
+                major: self.reflect_vector(*major),
+                minor: self.reflect_vector(*minor),
+                start_param: start_param + sweep_param,
+                sweep_param: -sweep_param,
+            },
             ResolvedCurve::Spline {
                 degree,
                 knots,
@@ -274,6 +304,33 @@ pub fn mirror(
                     end: t,
                 }
             }
+            Geometry::Ellipse {
+                center,
+                major,
+                minor,
+            } => Geometry::Ellipse {
+                center: map(*center)?,
+                major: map(*major)?,
+                minor: map(*minor)?,
+            },
+            Geometry::EllipticalArc {
+                center,
+                major,
+                minor,
+                start,
+                end,
+            } => {
+                // As for arcs: the image runs from the image of the end.
+                let (c, m, n) = (map(*center)?, map(*major)?, map(*minor)?);
+                let (s, t) = (map(*end)?, map(*start)?);
+                Geometry::EllipticalArc {
+                    center: c,
+                    major: m,
+                    minor: n,
+                    start: s,
+                    end: t,
+                }
+            }
             Geometry::ControlSpline { control, degree } => Geometry::ControlSpline {
                 control: control.iter().map(|p| map(*p)).collect::<Result<_, _>>()?,
                 degree: *degree,
@@ -377,6 +434,32 @@ fn own_image(sketch: &SketchData, g: &Geometry<SketchId>, line: &Axis) -> Result
         Geometry::Arc { center, start, end } => {
             let (c, s, e) = (at(*center)?, at(*start)?, at(*end)?);
             same(line.reflect(c), c) && same(line.reflect(s), e)
+        }
+        Geometry::Ellipse {
+            center,
+            major,
+            minor,
+        } => {
+            // Symmetric about the line: the centre on it and each axis end
+            // reflected onto itself or onto the opposite vertex (the line is
+            // an axis of the ellipse).
+            let c = at(*center)?;
+            let fixed = |q: DVec2| same(line.reflect(q), q) || same(line.reflect(q), 2.0 * c - q);
+            same(line.reflect(c), c) && fixed(at(*major)?) && fixed(at(*minor)?)
+        }
+        Geometry::EllipticalArc {
+            center,
+            major,
+            minor,
+            start,
+            end,
+        } => {
+            let c = at(*center)?;
+            let fixed = |q: DVec2| same(line.reflect(q), q) || same(line.reflect(q), 2.0 * c - q);
+            same(line.reflect(c), c)
+                && fixed(at(*major)?)
+                && fixed(at(*minor)?)
+                && same(line.reflect(at(*start)?), at(*end)?)
         }
         Geometry::ControlSpline { control: pts, .. }
         | Geometry::InterpolatedSpline { through: pts, .. } => {

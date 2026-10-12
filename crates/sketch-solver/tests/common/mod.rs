@@ -118,6 +118,49 @@ pub fn circ(s: &Sketch<u32>, k: u32) -> (DVec2, f64) {
     }
 }
 
+/// (centre, first semi-axis, second semi-axis) of an ellipse or
+/// elliptical arc.
+pub fn ell(s: &Sketch<u32>, k: u32) -> (DVec2, DVec2, DVec2) {
+    match s.entity(k).unwrap().geometry {
+        Geometry::Ellipse {
+            center,
+            major,
+            minor,
+        }
+        | Geometry::EllipticalArc {
+            center,
+            major,
+            minor,
+            ..
+        } => {
+            let c = pos(s, center);
+            (c, pos(s, major) - c, pos(s, minor) - c)
+        }
+        _ => panic!("not an ellipse"),
+    }
+}
+
+/// `q` in the ellipse's frame scaled to the unit circle: `(x/a, y/b)` with
+/// `x`, `y` the coordinates along the (perpendicular) axes.
+fn unit_frame(s: &Sketch<u32>, k: u32, q: DVec2) -> DVec2 {
+    let (c, a, b) = ell(s, k);
+    let w = q - c;
+    DVec2::new(w.dot(a) / a.length_squared(), w.dot(b) / b.length_squared())
+}
+
+/// Distance of `q` from an ellipse to first order (Sampson's distance
+/// `|F|/‖∇F‖` of `F = x²/a² + y²/b² − 1` in the axis frame): exact enough
+/// for violations near zero, independent of the solver's parameter.
+pub fn dist_to_ellipse(s: &Sketch<u32>, k: u32, q: DVec2) -> f64 {
+    let (c, a, b) = ell(s, k);
+    let (la, lb) = (a.length(), b.length());
+    let w = q - c;
+    let (x, y) = (w.dot(a) / la, w.dot(b) / lb);
+    let f = x * x / (la * la) + y * y / (lb * lb) - 1.0;
+    let g = DVec2::new(2.0 * x / (la * la), 2.0 * y / (lb * lb)).length();
+    f.abs() / g
+}
+
 /// (start, end) of a line.
 pub fn line(s: &Sketch<u32>, k: u32) -> (DVec2, DVec2) {
     match s.entity(k).unwrap().geometry {
@@ -256,6 +299,14 @@ fn end_tangent(s: &Sketch<u32>, k: u32, key: u32) -> DVec2 {
             (b - a).normalize()
         }
         Geometry::Arc { center, .. } => (p - pos(s, center)).perp().normalize(),
+        Geometry::EllipticalArc { .. } => {
+            // Perpendicular to the implicit equation's gradient
+            // (x/a², y/b²) in the axis frame.
+            let (_, a, b) = ell(s, k);
+            let u = unit_frame(s, k, p);
+            let grad = a.normalize() * (u.x / a.length()) + b.normalize() * (u.y / b.length());
+            grad.perp().normalize()
+        }
         Geometry::ControlSpline { .. } | Geometry::InterpolatedSpline { .. } => {
             let ResolvedCurve::Spline { points, .. } = resolved(s, k) else {
                 unreachable!()
@@ -315,6 +366,9 @@ pub fn violation(s: &Sketch<u32>, c: &Constraint<u32>) -> (f64, bool) {
                     let (cc, r) = circ(s, *curve);
                     (((q - cc).length() - r).abs(), false)
                 }
+                Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. } => {
+                    (dist_to_ellipse(s, *curve, q), false)
+                }
                 _ => (dist_to_spline(s, *curve, q), false),
             }
         }
@@ -373,6 +427,30 @@ pub fn violation(s: &Sketch<u32>, c: &Constraint<u32>) -> (f64, bool) {
                     (*b, *a)
                 };
                 let (s0, s1) = line(s, l);
+                if let Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. } =
+                    s.entity(k).unwrap().geometry
+                {
+                    // In the frame where the ellipse is the unit circle the
+                    // line must be at distance 1 from the centre, on the
+                    // recorded side (an affine map keeps tangency and sides).
+                    // With p = c + [a b]·q, the line n̂·p = k is
+                    // ([a b]ᵀn̂)·q = k − n̂·c, so a unit-frame distance D is
+                    // D·‖[a b]ᵀn̂‖ in the plane: the gap in metres is the
+                    // unit-frame gap times that norm (not times the longer
+                    // axis, which overstates it by up to the axis ratio).
+                    let (c, a, b) = ell(s, k);
+                    let (q0, q1) = (unit_frame(s, k, s0), unit_frame(s, k, s1));
+                    let d = q1 - q0;
+                    let dist = d.perp_dot(-q0).abs() / d.length();
+                    let side = (s1 - s0).perp_dot(c - s0) > 0.0;
+                    let gap = if side == *center_left {
+                        (dist - 1.0).abs()
+                    } else {
+                        dist + 1.0
+                    };
+                    let n = (s1 - s0).perp().normalize();
+                    return (gap * DVec2::new(a.dot(n), b.dot(n)).length(), false);
+                }
                 let (cc, r) = circ(s, k);
                 let d = s1 - s0;
                 let signed = d.perp_dot(cc - s0) / d.length();
@@ -440,6 +518,13 @@ pub fn violation(s: &Sketch<u32>, c: &Constraint<u32>) -> (f64, bool) {
                 let (ps, pi) = (gs.referenced_points(), gi.referenced_points());
                 let ps = match gs {
                     Geometry::Arc { center, start, end } => vec![*center, *end, *start],
+                    Geometry::EllipticalArc {
+                        center,
+                        major,
+                        minor,
+                        start,
+                        end,
+                    } => vec![*center, *major, *minor, *end, *start],
                     _ => ps,
                 };
                 assert_eq!(ps.len(), pi.len(), "mirror pair of different kinds");
@@ -547,6 +632,21 @@ pub fn worst(s: &Sketch<u32>, scale: f64) -> (f64, String) {
             let v = ((pos(s, end) - c).length() - (pos(s, start) - c).length()).abs() / scale;
             if v.is_nan() || v > w.0 {
                 w = (v, format!("arc {:?} radius mismatch", e.id));
+            }
+        }
+        if let Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. } = e.geometry {
+            let (_, a, b) = ell(s, e.id);
+            let v = a.normalize().dot(b.normalize()).abs();
+            if v.is_nan() || v > w.0 {
+                w = (v, format!("ellipse {:?} axes not perpendicular", e.id));
+            }
+        }
+        if let Geometry::EllipticalArc { start, end, .. } = e.geometry {
+            for q in [start, end] {
+                let v = dist_to_ellipse(s, e.id, pos(s, q)) / scale;
+                if v.is_nan() || v > w.0 {
+                    w = (v, format!("elliptical arc {:?} end off its ellipse", e.id));
+                }
             }
         }
     }

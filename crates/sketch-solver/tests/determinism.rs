@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::gen::{generate, perturb};
+use common::gen::{generate_with, perturb};
 use common::{bits, B};
 use openshape_sketch_solver::{
     solve, Constraint, ConstraintEntry, DVec2, Entity, Geometry, Sketch, SketchKey, Solution,
@@ -64,6 +64,28 @@ fn relabel<F: Fn(u32) -> u64>(s: &Sketch<u32>, f: F) -> Sketch<u64> {
         Geometry::InterpolatedSpline { through, params } => Geometry::InterpolatedSpline {
             through: through.into_iter().map(&f).collect(),
             params,
+        },
+        Geometry::Ellipse {
+            center,
+            major,
+            minor,
+        } => Geometry::Ellipse {
+            center: f(center),
+            major: f(major),
+            minor: f(minor),
+        },
+        Geometry::EllipticalArc {
+            center,
+            major,
+            minor,
+            start,
+            end,
+        } => Geometry::EllipticalArc {
+            center: f(center),
+            major: f(major),
+            minor: f(minor),
+            start: f(start),
+            end: f(end),
         },
     };
     use Constraint as C;
@@ -227,6 +249,23 @@ fn mixed() -> Sketch<u32> {
         curve: arc,
         value: 1.1,
     });
+    // An elliptical arc, off its implicit equations, tangent to the first
+    // line and ending where the circular arc starts.
+    let [ec, em, en, es, ee] =
+        [(4.0, 3.0), (5.5, 3.1), (3.9, 3.8), (5.4, 3.3), (3.5, 3.6)].map(|(x, y)| b.point(x, y));
+    let el = b.entity(Geometry::EllipticalArc {
+        center: ec,
+        major: em,
+        minor: en,
+        start: es,
+        end: ee,
+    });
+    b.c(Constraint::Tangent {
+        a: l0,
+        b: el,
+        kind: TangentKind::LineCircle { center_left: true },
+    });
+    b.coincident(ee, b1);
     b.build()
 }
 
@@ -291,9 +330,10 @@ proptest! {
         motifs in 1usize..8,
         e in -4i32..=3,
         amount in 0.0f64..0.4,
+        ellipses in any::<bool>(),
     ) {
         let scale = 10f64.powi(e);
-        let g = generate(seed, motifs, scale, DVec2::new(0.3, -0.2));
+        let g = generate_with(seed, motifs, scale, DVec2::new(0.3, -0.2), ellipses);
         let s = perturb(&g.sketch, seed ^ 0x9e37, amount, scale);
         let a = solve(&s, &opts());
         let b = solve(&s, &opts());

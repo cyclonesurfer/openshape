@@ -96,7 +96,7 @@ pub fn cuts(
         .find(|(id, _)| *id == target)
         .map(|(_, c)| c.clone())
         .ok_or("the curve no longer exists")?;
-    let a = kernel_curve(&curve);
+    let a = kernel_curve(&curve).map_err(|e| e.to_string())?;
     let ends = end_points(&curve);
     let mut raw = Vec::new();
     for (id, c) in curves {
@@ -169,7 +169,9 @@ fn contacts(
     a: &ProfileCurve,
     b: &ResolvedCurve,
 ) -> Result<Vec<Contact>, String> {
-    let b = kernel_curve(b);
+    let Ok(b) = kernel_curve(b) else {
+        return Ok(Vec::new());
+    };
     if kernel.curve_point(&b, 0.0).is_err() {
         return Ok(Vec::new());
     }
@@ -289,6 +291,11 @@ pub fn trim(sketch: &SketchData, cuts: &Cuts, near: DVec2) -> Result<Plan, Strin
         (Geometry::ControlSpline { .. } | Geometry::InterpolatedSpline { .. }, _) => Err(
             "A spline can only be trimmed whole: its pieces are not exact splines of the \
              sketch's kinds (design note 0007 §7.5). Delete it, or redraw it in pieces"
+                .into(),
+        ),
+        (Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. }, _) => Err(
+            "Trimming ellipses is not built yet (design note 0008 §8): delete the ellipse, \
+             or draw an elliptical arc"
                 .into(),
         ),
         _ => Err("this curve cannot be trimmed".into()),
@@ -800,6 +807,16 @@ fn end_points(c: &ResolvedCurve) -> Option<(DVec2, DVec2)> {
             *center + DVec2::from_angle(*start_angle) * *radius,
             *center + DVec2::from_angle(start_angle + sweep_angle) * *radius,
         )),
+        ResolvedCurve::EllipticalArc {
+            center,
+            major,
+            minor,
+            start_param,
+            sweep_param,
+        } => {
+            let at = |t: f64| *center + *major * t.cos() + *minor * t.sin();
+            Some((at(*start_param), at(start_param + sweep_param)))
+        }
         _ => None,
     }
 }
@@ -827,7 +844,9 @@ fn param(c: &ResolvedCurve, p: DVec2) -> f64 {
             }
         }
         ResolvedCurve::Circle { center, .. } => (p - *center).to_angle().rem_euclid(TAU),
-        ResolvedCurve::Spline { .. } => 0.0,
+        ResolvedCurve::Spline { .. }
+        | ResolvedCurve::Ellipse { .. }
+        | ResolvedCurve::EllipticalArc { .. } => 0.0,
     }
 }
 
@@ -843,6 +862,8 @@ fn point_at(c: &ResolvedCurve, t: f64) -> DVec2 {
         } => *center + DVec2::from_angle(start_angle + t) * *radius,
         ResolvedCurve::Circle { center, radius } => *center + DVec2::from_angle(t) * *radius,
         ResolvedCurve::Spline { points, .. } => points[0],
+        ResolvedCurve::Ellipse { center, major, .. }
+        | ResolvedCurve::EllipticalArc { center, major, .. } => *center + *major,
     }
 }
 
@@ -871,7 +892,9 @@ fn piece(c: &ResolvedCurve, a: f64, b: f64) -> ResolvedCurve {
             start_angle: a,
             sweep_angle: (b - a).rem_euclid(TAU),
         },
-        ResolvedCurve::Spline { .. } => c.clone(),
+        ResolvedCurve::Spline { .. }
+        | ResolvedCurve::Ellipse { .. }
+        | ResolvedCurve::EllipticalArc { .. } => c.clone(),
     }
 }
 
@@ -895,6 +918,23 @@ fn extent(curves: &[(SketchId, ResolvedCurve)]) -> f64 {
                 add(*center + DVec2::splat(*radius));
             }
             ResolvedCurve::Spline { points, .. } => points.iter().for_each(|p| add(*p)),
+            ResolvedCurve::Ellipse {
+                center,
+                major,
+                minor,
+            }
+            | ResolvedCurve::EllipticalArc {
+                center,
+                major,
+                minor,
+                ..
+            } => {
+                // The box of the ellipse: its half-widths are the norms of
+                // the axes' x and y components.
+                let half = DVec2::new(major.x.hypot(minor.x), major.y.hypot(minor.y));
+                add(*center - half);
+                add(*center + half);
+            }
         }
     }
     if lo.x <= hi.x {

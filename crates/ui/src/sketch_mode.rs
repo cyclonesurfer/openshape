@@ -211,6 +211,14 @@ pub fn sample_curve(c: &ProfileCurve) -> Vec<DVec2> {
     c.sample(segments(c)).unwrap_or_default()
 }
 
+/// Points along a resolved sketch curve (empty if it has no kernel curve,
+/// e.g. a degenerate ellipse).
+pub fn sample_resolved(c: &ResolvedCurve) -> Vec<DVec2> {
+    kernel_curve(c)
+        .map(|k| sample_curve(&k))
+        .unwrap_or_default()
+}
+
 /// One sketch curve as drawn.
 #[derive(Clone, Debug)]
 pub struct DisplayCurve {
@@ -286,7 +294,7 @@ impl SketchDisplay {
             .map(|(id, construction, c)| DisplayCurve {
                 id: *id,
                 construction: *construction,
-                polyline: sample_curve(&kernel_curve(c)),
+                polyline: sample_resolved(c),
                 curve: c.clone(),
             })
             .collect();
@@ -1174,8 +1182,42 @@ fn onto_curve(d: &SketchDisplay, id: SketchId, p: DVec2) -> DVec2 {
                 p
             }
         }
+        Some(ResolvedCurve::Ellipse {
+            center,
+            major,
+            minor,
+        })
+        | Some(ResolvedCurve::EllipticalArc {
+            center,
+            major,
+            minor,
+            ..
+        }) => closest_on_ellipse(*center, *major, *minor, p),
         _ => p,
     }
+}
+
+/// The point of an ellipse closest to `p`, for a `p` near it (a point of
+/// its drawn polyline): Newton's method on the distance's derivative from
+/// `p`'s eccentric anomaly, which is already close.
+fn closest_on_ellipse(c: DVec2, a: DVec2, b: DVec2, p: DVec2) -> DVec2 {
+    let mut t = shapes::eccentric_anomaly(c, a, b, p);
+    for _ in 0..8 {
+        let (sin, cos) = t.sin_cos();
+        let e = c + a * cos + b * sin - p;
+        let d1 = b * cos - a * sin;
+        let d2 = -(a * cos + b * sin);
+        let (f, fp) = (d1.dot(e), d2.dot(e) + d1.length_squared());
+        if fp <= 0.0 || fp.is_nan() {
+            break;
+        }
+        let step = f / fp;
+        t -= step;
+        if step.abs() <= 1e-15 {
+            break;
+        }
+    }
+    shapes::ellipse_point(c, a, b, t)
 }
 
 /// Snaps `pos` to a point, the origin or a curve of `d`.
@@ -1336,20 +1378,27 @@ pub enum Tool {
     CircularPattern,
     /// A B-spline shaped by clicked control points.
     ControlSpline,
+    /// Ellipse from its centre, the end of one axis and the other axis's
+    /// extent.
+    Ellipse,
+    /// Elliptical arc: the ellipse's three clicks, then its start and end.
+    EllipticalArc,
 }
 
 impl Tool {
     /// Every tool, in toolbar order.
-    pub const ALL: [Tool; 22] = [
+    pub const ALL: [Tool; 24] = [
         Tool::Select,
         Tool::Line,
         Tool::Rectangle,
         Tool::CenterRectangle,
         Tool::AlignedRectangle,
         Tool::Circle,
+        Tool::Ellipse,
         Tool::Arc,
         Tool::CenterArc,
         Tool::TangentArc,
+        Tool::EllipticalArc,
         Tool::Slot,
         Tool::Polygon,
         Tool::Point,
@@ -1374,13 +1423,16 @@ impl Tool {
                 Tool::CenterRectangle,
                 Tool::AlignedRectangle,
             ],
-            Tool::Arc | Tool::CenterArc | Tool::TangentArc => {
-                &[Tool::Arc, Tool::CenterArc, Tool::TangentArc]
-            }
+            Tool::Arc | Tool::CenterArc | Tool::TangentArc | Tool::EllipticalArc => &[
+                Tool::Arc,
+                Tool::CenterArc,
+                Tool::TangentArc,
+                Tool::EllipticalArc,
+            ],
             Tool::Trim | Tool::Extend | Tool::Split => &[Tool::Trim, Tool::Extend, Tool::Split],
             Tool::Select => &[Tool::Select],
             Tool::Line => &[Tool::Line],
-            Tool::Circle => &[Tool::Circle],
+            Tool::Circle | Tool::Ellipse => &[Tool::Circle, Tool::Ellipse],
             Tool::Slot => &[Tool::Slot],
             Tool::Polygon => &[Tool::Polygon],
             Tool::Point => &[Tool::Point],
@@ -1419,6 +1471,8 @@ impl Tool {
             Tool::Offset => "Offset",
             Tool::LinearPattern => "Linear pattern",
             Tool::CircularPattern => "Circular pattern",
+            Tool::Ellipse => "Ellipse",
+            Tool::EllipticalArc => "Elliptical arc",
         }
     }
 
@@ -1460,7 +1514,9 @@ impl Tool {
             | Tool::Offset
             | Tool::LinearPattern
             | Tool::CircularPattern
-            | Tool::ControlSpline => return None,
+            | Tool::ControlSpline
+            | Tool::Ellipse
+            | Tool::EllipticalArc => return None,
         })
     }
 
@@ -1519,6 +1575,11 @@ impl Tool {
             }
             (Tool::LinearPattern, _) => "Click where the step to the first copy ends",
             (Tool::CircularPattern, _) => "Select curves or points, then click the centre",
+            (Tool::Ellipse | Tool::EllipticalArc, 0) => "Click the centre",
+            (Tool::Ellipse | Tool::EllipticalArc, 1) => "Click the end of the first axis",
+            (Tool::Ellipse, _) | (Tool::EllipticalArc, 2) => "Click to set the second axis",
+            (Tool::EllipticalArc, 3) => "Click the start point on the ellipse",
+            (Tool::EllipticalArc, _) => "Move around the ellipse and click the end point",
         }
     }
 }
@@ -1644,6 +1705,8 @@ enum Kind {
     Circle,
     Arc,
     Spline,
+    /// An ellipse or an elliptical arc.
+    Ellipse,
 }
 
 impl Kind {
@@ -1659,15 +1722,16 @@ fn kind(sketch: &SketchData, id: SketchId) -> Option<Kind> {
         Geometry::Circle { .. } => Kind::Circle,
         Geometry::Arc { .. } => Kind::Arc,
         Geometry::ControlSpline { .. } | Geometry::InterpolatedSpline { .. } => Kind::Spline,
+        Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. } => Kind::Ellipse,
     })
 }
 
-/// The end points of a curve (none for a circle).
+/// The end points of a curve (none for a circle or an ellipse).
 fn end_points(sketch: &SketchData, id: SketchId) -> Vec<SketchId> {
     match &sketch.entity(id).map(|e| &e.geometry) {
-        Some(Geometry::Line { start, end }) | Some(Geometry::Arc { start, end, .. }) => {
-            vec![*start, *end]
-        }
+        Some(Geometry::Line { start, end })
+        | Some(Geometry::Arc { start, end, .. })
+        | Some(Geometry::EllipticalArc { start, end, .. }) => vec![*start, *end],
         Some(Geometry::ControlSpline { control: p, .. })
         | Some(Geometry::InterpolatedSpline { through: p, .. }) => {
             p.first().into_iter().chain(p.last()).copied().collect()
@@ -1692,6 +1756,17 @@ fn shared_end(sketch: &SketchData, a: SketchId, b: SketchId) -> Option<SketchId>
     ea.iter()
         .find(|p| eb.iter().any(|q| coincident(**p, *q)))
         .copied()
+}
+
+/// The centre of a circle, arc, ellipse or elliptical arc.
+fn centre_of(sketch: &SketchData, id: SketchId) -> Option<DVec2> {
+    match sketch.entity(id)?.geometry {
+        Geometry::Circle { center, .. }
+        | Geometry::Arc { center, .. }
+        | Geometry::Ellipse { center, .. }
+        | Geometry::EllipticalArc { center, .. } => sketch.point(center),
+        _ => None,
+    }
 }
 
 fn center_radius(sketch: &SketchData, id: SketchId) -> Option<(DVec2, f64)> {
@@ -1836,10 +1911,15 @@ pub fn constraints_for(
                     sketch.point(ends[0]).ok_or("missing point")?,
                     sketch.point(ends[1]).ok_or("missing point")?,
                 );
-                let (c, _) = center_radius(sketch, circ).ok_or("missing centre")?;
+                let c = centre_of(sketch, circ).ok_or("missing centre")?;
                 TangentKind::LineCircle {
                     center_left: (e - s).perp_dot(c - s) > 0.0,
                 }
+            } else if kinds.contains(&Kind::Ellipse) {
+                return Err(
+                    "An ellipse can be tangent to a line, or to a curve at a shared end point"
+                        .into(),
+                );
             } else {
                 let (c1, r1) = center_radius(sketch, a).ok_or("missing centre")?;
                 let (c2, r2) = center_radius(sketch, b).ok_or("missing centre")?;
@@ -2389,6 +2469,24 @@ impl SketchEditor {
             }
             self.last_angle = Some(a);
         }
+        if self.tool == Tool::EllipticalArc && self.clicks.len() == 4 {
+            if let Some((a, b)) =
+                shapes::ellipse_axes(self.clicks[0].at, self.clicks[1].at, self.clicks[2].at)
+            {
+                let c = self.clicks[0].at;
+                let t = shapes::eccentric_anomaly(c, a, b, s.at);
+                let last = self
+                    .last_angle
+                    .unwrap_or_else(|| shapes::eccentric_anomaly(c, a, b, self.clicks[3].at));
+                // Wrap the step into (−π, π].
+                let mut step = (t - last).rem_euclid(TAU);
+                if step > PI {
+                    step -= TAU;
+                }
+                self.turn += step;
+                self.last_angle = Some(t);
+            }
+        }
         if self.tool.is_pattern() {
             self.curve_edit = self.plan_pattern(model, &d, s);
         }
@@ -2835,7 +2933,7 @@ impl SketchEditor {
                             candidates.push((w, Inference::Parallel(curve)));
                         }
                     }
-                    Some(Kind::Arc) | Some(Kind::Spline) => {
+                    Some(Kind::Arc) | Some(Kind::Spline) | Some(Kind::Ellipse) => {
                         if let Some(w) = d
                             .curve(curve)
                             .and_then(|c| leaving_direction(&c.curve, at_end))
@@ -2901,6 +2999,36 @@ impl SketchEditor {
                     arc_points(c[0].at, r, a0, self.turn.clamp(-TAU, TAU)),
                     vec![c[0].at, cur.at],
                 ]
+            }
+            (Tool::Ellipse | Tool::EllipticalArc, 1) => vec![vec![c[0].at, cur.at]],
+            (Tool::Ellipse | Tool::EllipticalArc, n @ 2..=4) => {
+                let (centre, m) = (c[0].at, c[1].at);
+                let extent = if n == 2 { cur.at } else { c[2].at };
+                let Some((a, b)) = shapes::ellipse_axes(centre, m, extent) else {
+                    return vec![vec![centre, m]];
+                };
+                let axes = vec![centre + b, centre, m];
+                let along = |p: DVec2| {
+                    shapes::ellipse_point(centre, a, b, shapes::eccentric_anomaly(centre, a, b, p))
+                };
+                match n {
+                    2 | 3 => {
+                        let mut out = vec![shapes::ellipse_polyline(centre, a, b, 0.0, TAU), axes];
+                        if n == 3 {
+                            // Where the arc will start.
+                            out.push(vec![centre, along(cur.at)]);
+                        }
+                        out
+                    }
+                    _ => {
+                        let t0 = shapes::eccentric_anomaly(centre, a, b, c[3].at);
+                        vec![
+                            shapes::ellipse_polyline(centre, a, b, t0, self.turn.clamp(-TAU, TAU)),
+                            axes,
+                            vec![along(c[3].at), centre, along(cur.at)],
+                        ]
+                    }
+                }
             }
             (Tool::CenterRectangle, 1) => {
                 let k = shapes::centre_rectangle_corners(c[0].at, cur.at);
@@ -3290,6 +3418,60 @@ impl SketchEditor {
                     self.clicks.push(s);
                     if closes {
                         self.finish(model);
+                    }
+                }
+            }
+            Tool::Ellipse | Tool::EllipticalArc => {
+                let arc = self.tool == Tool::EllipticalArc;
+                match self.clicks.len() {
+                    0 => self.clicks.push(s),
+                    1 => {
+                        if distinct(&self.clicks[0], &s) {
+                            self.clicks.push(s);
+                        }
+                    }
+                    2 if !arc => {
+                        let mut b = Batch::default();
+                        let made = shapes::ellipse(
+                            &mut b,
+                            &self.clicks[0],
+                            &self.clicks[1],
+                            s.at,
+                            construction,
+                        );
+                        self.commit_shape(model, made.map(|()| b.edits));
+                    }
+                    2 => {
+                        if shapes::ellipse_axes(self.clicks[0].at, self.clicks[1].at, s.at)
+                            .is_some()
+                        {
+                            self.clicks.push(s);
+                        } else {
+                            self.message = Some(
+                                "The second axis has no length: click away from the first axis"
+                                    .into(),
+                            );
+                        }
+                    }
+                    3 => {
+                        self.clicks.push(s);
+                        self.turn = 0.0;
+                        self.last_angle = None;
+                    }
+                    _ => {
+                        let mut b = Batch::default();
+                        let c = &self.clicks;
+                        let made = shapes::elliptical_arc(
+                            &mut b,
+                            &c[0],
+                            &c[1],
+                            c[2].at,
+                            &c[3],
+                            &s,
+                            self.turn,
+                            construction,
+                        );
+                        self.commit_shape(model, made.map(|()| b.edits));
                     }
                 }
             }

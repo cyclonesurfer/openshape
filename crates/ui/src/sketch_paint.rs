@@ -7,13 +7,13 @@
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 use openshape_core_model::sketch::Geometry;
 use openshape_core_model::{DVec2, SketchId};
-use openshape_features::{kernel_curve, EntityState};
+use openshape_features::EntityState;
 use openshape_sketch_solver::SolveStatus;
 use openshape_ui_kit::Theme;
 
 use crate::sketch_mode::{
-    annotations, sample_curve, Annotation, CurveEdit, Pick, ScreenMap, SketchDisplay, SketchEditor,
-    SnapTarget, Tool,
+    annotations, sample_resolved, Annotation, CurveEdit, Pick, ScreenMap, SketchDisplay,
+    SketchEditor, SnapTarget, Tool,
 };
 use crate::sketch_ops::trim::Preview;
 
@@ -155,7 +155,7 @@ pub fn paint_editor(
     if let Some(CurveEdit { plan: Ok(plan), .. }) = &editor.curve_edit {
         match &plan.preview {
             Preview::Piece(c) => {
-                let pts = sample_curve(&kernel_curve(c));
+                let pts = sample_resolved(c);
                 let (color, dashed) = match editor.tool {
                     Tool::Trim => (theme.danger, false),
                     _ => (theme.preselect, true),
@@ -171,7 +171,7 @@ pub fn paint_editor(
             }
             Preview::Shapes { curves, points } => {
                 for c in curves {
-                    let pts = sample_curve(&kernel_curve(c));
+                    let pts = sample_resolved(c);
                     stroke_polyline(painter, map, &pts, Stroke::new(HALO, k.halo), false);
                     stroke_polyline(painter, map, &pts, Stroke::new(2.0, theme.preselect), true);
                 }

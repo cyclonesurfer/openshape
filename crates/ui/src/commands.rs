@@ -286,6 +286,8 @@ impl Command {
                 Tool::Offset => Icon::Offset,
                 Tool::LinearPattern => Icon::LinearPattern,
                 Tool::CircularPattern => Icon::CircularPattern,
+                Tool::Ellipse => Icon::Ellipse,
+                Tool::EllipticalArc => Icon::EllipticalArc,
             },
             Command::Construction => Icon::Construction,
             Command::Constrain(c) => match c {

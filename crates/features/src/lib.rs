@@ -8,6 +8,8 @@
 
 pub mod regions;
 
+use std::f64::consts::TAU;
+
 use openshape_core_model::{
     CurveDef, Feature, FeatureId, PartStudio, PlaneRef, ProfileDef, ProfileSource, RegionKey,
     RevolveAxis, SketchDef, SketchId,
@@ -167,9 +169,13 @@ pub fn profile(def: &ProfileDef) -> Result<Profile, KernelError> {
     Ok(Profile { plane, curves })
 }
 
-/// Converts a solved sketch curve to a kernel curve.
-pub fn kernel_curve(c: &ResolvedCurve) -> ProfileCurve {
-    match c {
+/// Converts a solved sketch curve to a kernel curve. Ellipses and
+/// elliptical arcs become exact rational quadratic splines
+/// ([`ProfileCurve::elliptical_arc`]), a full ellipse running
+/// counter-clockwise from its major end. Fails only for a degenerate
+/// ellipse, which [`resolve_curves`] never returns.
+pub fn kernel_curve(c: &ResolvedCurve) -> Result<ProfileCurve, KernelError> {
+    Ok(match c {
         ResolvedCurve::Line { start, end } => ProfileCurve::Line {
             start: *start,
             end: *end,
@@ -189,6 +195,27 @@ pub fn kernel_curve(c: &ResolvedCurve) -> ProfileCurve {
             start_angle: *start_angle,
             sweep_angle: *sweep_angle,
         },
+        ResolvedCurve::Ellipse {
+            center,
+            major,
+            minor,
+        } => {
+            // θ increases counter-clockwise when the minor axis is left of
+            // the major one.
+            let sweep = if major.perp_dot(*minor) < 0.0 {
+                -TAU
+            } else {
+                TAU
+            };
+            ProfileCurve::elliptical_arc(*center, *major, *minor, 0.0, sweep)?
+        }
+        ResolvedCurve::EllipticalArc {
+            center,
+            major,
+            minor,
+            start_param,
+            sweep_param,
+        } => ProfileCurve::elliptical_arc(*center, *major, *minor, *start_param, *sweep_param)?,
         ResolvedCurve::Spline {
             degree,
             knots,
@@ -199,7 +226,7 @@ pub fn kernel_curve(c: &ResolvedCurve) -> ProfileCurve {
             points: points.clone(),
             weights: None,
         },
-    }
+    })
 }
 
 /// Solves a sketch feature and computes its regions.
@@ -265,11 +292,12 @@ fn sketch_regions<K: Kernel>(
     kernel: &K,
     curves: &[(SketchId, bool, ResolvedCurve)],
 ) -> Result<SketchRegions, String> {
-    let (owners, kcurves): (Vec<SketchId>, Vec<ProfileCurve>) = curves
-        .iter()
-        .filter(|(_, construction, _)| !construction)
-        .map(|(id, _, c)| (*id, kernel_curve(c)))
-        .unzip();
+    let mut owners = Vec::new();
+    let mut kcurves = Vec::new();
+    for (id, _, c) in curves.iter().filter(|(_, construction, _)| !construction) {
+        owners.push(*id);
+        kcurves.push(kernel_curve(c).map_err(|e| e.to_string())?);
+    }
     let arrangement = kernel.sketch_regions(&kcurves).map_err(|e| e.to_string())?;
     let keys = regions::region_keys(&arrangement, &owners);
     Ok(SketchRegions {

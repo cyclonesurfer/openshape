@@ -14,10 +14,11 @@ use std::collections::BTreeMap;
 use glam::DVec2;
 use openshape_linalg::{dot, norm2, residual, select_columns_in_order, CompleteOrthogonal, Matrix};
 
-use crate::build::{build, scale_of, Problem, Scale, DEGENERATE};
+use crate::build::{build, scale_of, ParamCurve, Problem, Scale, DEGENERATE};
 use crate::diagnose::{conflicts, diagnose, CompDiag, FREE_TOL};
+use crate::ellipse;
 use crate::eq::EqKind;
-use crate::index::{Circ, Con, EntKind, Index, OCurve, OEq, MAX_MAGNITUDE};
+use crate::index::{Circ, Con, Ell, EntKind, Index, OCurve, OEq, MAX_MAGNITUDE};
 use crate::model::{Geometry, Sketch, SketchKey};
 use crate::newton::{
     equation_tol, solve_component, CompSystem, LengthTol, Region, RANK_TOL, REACH,
@@ -73,6 +74,7 @@ fn entity_slots<K: SketchKey>(index: &Index<K>, prob: &Problem, ent: usize) -> V
             v
         }
         EntKind::Circular(Circ::Arc { c, s, e }) => [pt(c), pt(s), pt(e)].concat(),
+        EntKind::Ellipse(_) => entity_points(index, ent).into_iter().flat_map(pt).collect(),
         EntKind::Spline(s) => index.splines[s]
             .points
             .iter()
@@ -89,7 +91,12 @@ fn degenerate_message<K: SketchKey>(sketch: &Sketch<K>, prob: &Problem, eq: usiz
             "constraint {:?} needs a direction that has zero length (a zero-length line, coincident points or a zero-radius arc)",
             sketch.constraints[c].id
         ),
-        (None, Some(a)) => format!("arc {:?} has zero radius", sketch.entities[a].id),
+        (None, Some(a)) => match sketch.entities[a].geometry {
+            Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. } => {
+                format!("ellipse {:?} has an axis of zero length", sketch.entities[a].id)
+            }
+            _ => format!("arc {:?} has zero radius", sketch.entities[a].id),
+        },
         _ => "degenerate geometry".to_string(),
     }
 }
@@ -250,7 +257,14 @@ fn solve_inner<K: SketchKey>(
     }
     // Hidden curve parameters start at the closest point.
     for (k, par) in prob.params.iter().enumerate() {
-        let t = prob.splines[par.spline].closest_param(&v, par.point);
+        let t = match par.curve {
+            ParamCurve::Spline(s) => prob.splines[s].closest_param(&v, par.point),
+            ParamCurve::Ellipse(el) => {
+                let at = |q: usize| DVec2::new(v[2 * q], v[2 * q + 1]);
+                let c = at(el.c);
+                ellipse::closest_param(c, at(el.m) - c, at(el.n) - c, at(par.point))
+            }
+        };
         v[prob.param_slot(k)] = t;
     }
     let mut u_global: Vec<f64> = red
@@ -312,15 +326,22 @@ fn solve_inner<K: SketchKey>(
 
     // Degenerate geometry at the start: arcs without a radius, and
     // directions that constraints need.
+    let span = |a: usize, b: usize| (v[2 * b] - v[2 * a]).hypot(v[2 * b + 1] - v[2 * a + 1]);
+    let gone = |x: f64| x.is_nan() || x <= prob.degen;
     for (i, k) in index.kinds.iter().enumerate() {
-        if let EntKind::Circular(Circ::Arc { c, s, .. }) = *k {
-            let (dx, dy) = (v[2 * s] - v[2 * c], v[2 * s + 1] - v[2 * c + 1]);
-            let radius = dx.hypot(dy);
-            if radius.is_nan() || radius <= prob.degen {
-                let msg = format!("arc {:?} has zero radius", sketch.entities[i].id);
-                return early_failure(sketch, SolveError::Degenerate(msg));
+        let msg = match *k {
+            EntKind::Circular(Circ::Arc { c, s, .. }) if gone(span(c, s)) => {
+                format!("arc {:?} has zero radius", sketch.entities[i].id)
             }
-        }
+            EntKind::Ellipse(el) if gone(span(el.c, el.m)) || gone(span(el.c, el.n)) => {
+                format!(
+                    "ellipse {:?} has an axis of zero length",
+                    sketch.entities[i].id
+                )
+            }
+            _ => continue,
+        };
+        return early_failure(sketch, SolveError::Degenerate(msg));
     }
     for (i, e) in prob.eqs.iter().enumerate() {
         if matches!(red.status[i], Status::General | Status::Demoted)
@@ -648,6 +669,8 @@ fn solve_inner<K: SketchKey>(
                 let kind = match index.kinds[ent] {
                     EntKind::Line(_) => "line",
                     EntKind::Circular(Circ::Circle { .. }) => "circle",
+                    EntKind::Ellipse(Ell { arc: None, .. }) => "ellipse",
+                    EntKind::Ellipse(_) => "elliptical arc",
                     _ => "arc",
                 };
                 let msg = format!("{kind} {:?} {}", sketch.entities[ent].id, how.says());
@@ -866,6 +889,13 @@ fn entity_points<K: SketchKey>(index: &Index<K>, ent: usize) -> Vec<usize> {
         EntKind::Line(l) => vec![l.s, l.e],
         EntKind::Circular(Circ::Circle { c, .. }) => vec![c],
         EntKind::Circular(Circ::Arc { c, s, e }) => vec![c, s, e],
+        EntKind::Ellipse(el) => {
+            let mut v = vec![el.c, el.m, el.n];
+            if let Some((s, e)) = el.arc {
+                v.extend([s, e]);
+            }
+            v
+        }
         EntKind::Spline(s) => index.splines[s].points.clone(),
     }
 }
@@ -920,6 +950,9 @@ enum Collapse {
     Length,
     /// A circle or arc without a radius.
     Radius,
+    /// An ellipse or elliptical arc with an axis of zero length (the
+    /// major axis when `true`).
+    Axis(bool),
     /// An arc whose end has come onto its start.
     Closed,
 }
@@ -930,6 +963,7 @@ impl Collapse {
         match self {
             Collapse::Length => "has zero length",
             Collapse::Radius => "has zero radius",
+            Collapse::Axis(_) => "has an axis of zero length",
             Collapse::Closed => "ends where it starts",
         }
     }
@@ -965,6 +999,13 @@ fn collapsed<K: SketchKey>(
             {
                 Collapse::Closed
             }
+            EntKind::Ellipse(el) if short(el.c, el.m) => Collapse::Axis(true),
+            EntKind::Ellipse(el) if short(el.c, el.n) => Collapse::Axis(false),
+            EntKind::Ellipse(Ell {
+                arc: Some((s, e)), ..
+            }) if short(s, e) && input.is_some_and(|(at, d)| (at[e] - at[s]).length() > d) => {
+                Collapse::Closed
+            }
             _ => continue,
         };
         out.push((ent, how));
@@ -991,6 +1032,15 @@ fn collapse_rows<K: SketchKey>(
         (EntKind::Circular(Circ::Circle { r, .. }), _) => vec![vec![(prob.radius_slot(r), 1.0)]],
         (EntKind::Circular(Circ::Arc { s, e, .. }), Collapse::Closed) => between(s, e),
         (EntKind::Circular(Circ::Arc { c, s, .. }), _) => between(c, s),
+        (EntKind::Ellipse(el), Collapse::Axis(major)) => {
+            between(el.c, if major { el.m } else { el.n })
+        }
+        (
+            EntKind::Ellipse(Ell {
+                arc: Some((s, e)), ..
+            }),
+            Collapse::Closed,
+        ) => between(s, e),
         _ => Vec::new(),
     }
 }

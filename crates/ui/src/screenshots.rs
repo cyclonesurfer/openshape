@@ -465,6 +465,37 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     d.key(Key::Enter, Modifiers::NONE)?;
     d.hover(on_plane(&d, 120.0, -80.0)?)?;
     save("18-control-spline.png", &d.settle()?)?;
+    // Right of the plate: an ellipse at an angle, then an elliptical arc
+    // being drawn the long way round (the pointer turned from its start
+    // through the top), then finished.
+    d.app.run(crate::commands::Command::Tool(Tool::Ellipse));
+    for (x, y) in [(62.0, 24.0), (75.0, 30.0), (60.0, 32.0)] {
+        d.click(on_plane(&d, x, y)?)?;
+    }
+    d.app
+        .run(crate::commands::Command::Tool(Tool::EllipticalArc));
+    for (x, y) in [(62.0, -28.0), (76.0, -28.0), (62.0, -19.0)] {
+        d.click(on_plane(&d, x, y)?)?;
+    }
+    let on = |deg: f64| {
+        let t = deg.to_radians();
+        (62.0 + 14.0 * t.cos(), -28.0 + 9.0 * t.sin())
+    };
+    let (x, y) = on(-30.0);
+    d.click(on_plane(&d, x, y)?)?;
+    for deg in [0.0, 40.0, 80.0, 120.0, 150.0] {
+        let (x, y) = on(deg);
+        d.hover(on_plane(&d, x, y)?)?;
+    }
+    save("19-elliptical-arc-drawing.png", &d.settle()?)?;
+    for deg in [180.0, 210.0] {
+        let (x, y) = on(deg);
+        d.hover(on_plane(&d, x, y)?)?;
+    }
+    let (x, y) = on(210.0);
+    d.click(on_plane(&d, x, y)?)?;
+    d.hover(on_plane(&d, 120.0, -80.0)?)?;
+    save("20-ellipses.png", &d.settle()?)?;
     d.app.run(crate::commands::Command::CancelSketch);
     Ok(written)
 }

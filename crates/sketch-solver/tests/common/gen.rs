@@ -4,7 +4,7 @@
 //! parallel lines, tangent circles, points on curves…), constraints are
 //! added that hold, and dimensions are measured from the geometry.
 
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use openshape_sketch_solver::{
     measure, resolve_curves, Constraint, DVec2, DistanceKind, Geometry, ResolvedCurve, Sketch,
@@ -514,6 +514,106 @@ impl G {
         });
     }
 
+    /// An ellipse or elliptical arc of either handedness, with a point on
+    /// it, a line tangent to it, or a line leaving an arc's end along its
+    /// tangent; sometimes construction lines along its semi-axes (which
+    /// the dimensions motif may then dimension).
+    /// An eccentric anomaly in [0, 2π) at least 0.3 from a multiple of π/2.
+    fn off_vertex(&mut self) -> f64 {
+        self.rng.int(4) as f64 * FRAC_PI_2 + self.rng.range(0.3, FRAC_PI_2 - 0.3)
+    }
+
+    fn ellipses(&mut self) {
+        let c = self.rng.pt() * 0.5;
+        let u = self.rng.dir();
+        let la = self.rng.range(0.3, 0.7);
+        let lb = la * self.rng.range(0.3, 0.9);
+        let a = u * la;
+        let b = if self.rng.chance(0.3) {
+            -u.perp() * lb
+        } else {
+            u.perp() * lb
+        };
+        let at = |t: f64| c + a * t.cos() + b * t.sin();
+        let tangent = |t: f64| b * t.cos() - a * t.sin();
+        let (kc, km, kn) = (self.point(c), self.point(c + a), self.point(c + b));
+        // Counter-clockwise in the plane is increasing θ when b is left
+        // of a.
+        let ccw = a.perp_dot(b) > 0.0;
+        let arc = self.rng.chance(0.6);
+        let (k, end) = if arc {
+            // Ends at least 0.3 rad from a vertex, where the tangent's
+            // direction does not depend on the other axis's length (a fold
+            // when an angle or a tangency holds that direction).
+            let t0 = self.off_vertex();
+            let t1 = loop {
+                let t1 = self.off_vertex();
+                let sweep = if ccw { t1 - t0 } else { t0 - t1 }.rem_euclid(TAU);
+                if (0.6..=4.5).contains(&sweep) {
+                    break if ccw { t0 + sweep } else { t0 - sweep };
+                }
+            };
+            let (ks, ke) = (self.point(at(t0)), self.point(at(t1)));
+            let k = self.b.entity(Geometry::EllipticalArc {
+                center: kc,
+                major: km,
+                minor: kn,
+                start: ks,
+                end: ke,
+            });
+            (k, Some((ke, t1)))
+        } else {
+            let k = self.b.entity(Geometry::Ellipse {
+                center: kc,
+                major: km,
+                minor: kn,
+            });
+            (k, None)
+        };
+        match (self.rng.int(3), end) {
+            (0, Some((ke, t1))) => {
+                let d = tangent(t1).normalize();
+                let ll = self.len();
+                let (l, ls, _) = self.line(at(t1), at(t1) + d * ll);
+                self.con(Constraint::Coincident { a: ke, b: ls });
+                self.con(Constraint::Tangent {
+                    a: k,
+                    b: l,
+                    kind: TangentKind::AtPoint { point: ls },
+                });
+            }
+            (1, _) => {
+                // A line touching the full ellipse at θ, centred on it, at
+                // least 0.3 rad from a vertex: touching at a vertex, the
+                // tangency does not depend on the other axis's length (its
+                // derivative vanishes), a fold where that axis is otherwise
+                // free.
+                let t = self.off_vertex();
+                let d = tangent(t).normalize();
+                let (h0, h1) = (self.rng.range(0.3, 0.8), self.rng.range(0.3, 0.8));
+                let (l, _, _) = self.line(at(t) - d * h0, at(t) + d * h1);
+                self.con(Constraint::Tangent {
+                    a: l,
+                    b: k,
+                    kind: TangentKind::LineCircle {
+                        center_left: d.perp_dot(c - at(t)) > 0.0,
+                    },
+                });
+            }
+            _ => {
+                let t = self.rng.range(-PI, PI);
+                let q = self.point(at(t));
+                self.con(Constraint::PointOnCurve { point: q, curve: k });
+            }
+        }
+        if self.rng.chance(0.5) {
+            let l = self.b.line_between(kc, km);
+            self.lines.push(l);
+            let l2 = self.b.line_between(kc, kn);
+            self.lines.push(l2);
+        }
+    }
+
     fn aligned_points(&mut self) {
         if self.points.is_empty() {
             return;
@@ -597,6 +697,19 @@ pub fn control_knots(n: usize, p: usize) -> Vec<f64> {
 /// `scale` and shifted by `offset · scale`. Dimension values and fixed
 /// positions are measured from the final geometry.
 pub fn generate(seed: u64, motifs: usize, scale: f64, offset: DVec2) -> Generated {
+    generate_with(seed, motifs, scale, offset, false)
+}
+
+/// As [`generate`], with ellipses and elliptical arcs among the motifs
+/// when `ellipses` (without, the sketches are those of [`generate`], so
+/// existing seeds keep their sketches).
+pub fn generate_with(
+    seed: u64,
+    motifs: usize,
+    scale: f64,
+    offset: DVec2,
+    ellipses: bool,
+) -> Generated {
     let mut g = G {
         b: B::new(),
         rng: Rng(seed),
@@ -605,8 +718,10 @@ pub fn generate(seed: u64, motifs: usize, scale: f64, offset: DVec2) -> Generate
         circulars: Vec::new(),
         circles: Vec::new(),
     };
+    let kinds = if ellipses { 10 } else { 9 };
     for _ in 0..motifs {
-        match g.rng.int(9) {
+        match g.rng.int(kinds) {
+            9 => g.ellipses(),
             0 => g.polygon(),
             1 => g.rectangle(),
             2 => g.line_pair(),

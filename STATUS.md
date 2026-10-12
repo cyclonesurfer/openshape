@@ -1,7 +1,8 @@
 # OpenShape status
 
-Updated 2026-10-12, Phase 2 (sketcher): core sketcher and the new
-application shell done; sketch editing tools next.
+Updated 2026-10-12, Phase 2 (sketcher): core sketcher, the application
+shell, the editing tools and ellipses done; conics, transform, curvature
+and text next.
 
 ## What works
 
@@ -25,7 +26,7 @@ application shell done; sketch editing tools next.
     closed loops, manifold edge use, edges on their surfaces, Euler–Poincaré,
     outward orientation. Every operation validates its output.
   - Box, extrude (blind, symmetric; multi-region profiles with holes; lines,
-    arcs, circles, splines) and revolve (full and partial, profiles touching
+    arcs, circles, splines, ellipses as exact rational quadratics) and revolve (full and partial, profiles touching
     the axis, offset axes). Periodic faces split at ≤ π (ADR 0008).
   - Surface classification: plane, cylinder, cone, sphere, torus, extrusion,
     revolution, NURBS.
@@ -44,8 +45,8 @@ application shell done; sketch editing tools next.
   topologically and re-found after sketch edits (design note 0006 §5).
 - **Sketch solver** (`openshape-sketch-solver`, on the deterministic
   `openshape-linalg`): points, lines, circles, arcs, through-point and
-  control-point splines under 15 geometric constraint kinds and 5
-  dimension kinds. Weighted
+  control-point splines, ellipses and elliptical arcs (design note 0008)
+  under 15 geometric constraint kinds and 5 dimension kinds. Weighted
   minimum-norm Gauss–Newton with Levenberg–Marquardt fallback and
   continuation (design note 0005, §9 lists what changed while building it).
   Reports degrees of freedom, free entities, redundant and conflicting
@@ -98,7 +99,14 @@ application shell done; sketch editing tools next.
   rectangles, circle, 3-point, centre and tangent arcs, slot, regular
   polygon (3 to 64 sides), point, through-point and control-point splines
   (the control polygon shown dashed; clicking the first point again closes
-  the curve, with a corner there), construction
+  the curve, with a corner there), ellipse and elliptical arc (design note
+  0008: centre, axis end, then the other axis's extent, with
+  construction semi-axes that can be dimensioned like any line; an arc's
+  ends are clicked anywhere around it and it runs the way the pointer
+  turned; both handednesses; a line can be made tangent to an ellipse and
+  curves tangent at an elliptical arc's end; mirror and both patterns
+  copy them; the kernel receives them exactly, so an ellipse's region is
+  πab and its extrusion πab·h to rounding), construction
   toggle (design note 0007 §4; each shape's degrees of freedom and the
   absence of redundant constraints are tested); 12
   constraint tools and dimensions (length, distance aligned/horizontal/
@@ -168,7 +176,7 @@ application shell done; sketch editing tools next.
   undoes the whole sketch session. The editor is UI-toolkit independent and
   tested end to end by driving it with screen clicks.
 - **UI kit** (`openshape-ui-kit`): the application's look in one place
-  (ADR 0012): theme tokens with pinned contrast ratios, 73 original icons
+  (ADR 0012): theme tokens with pinned contrast ratios, 76 original icons
   drawn in code, a view cube, the command palette and search field, and an
   offscreen egui renderer used for screenshots and UI tests.
 - **I/O** (`openshape-io`): STL export, ASCII and binary.
@@ -263,10 +271,35 @@ application shell done; sketch editing tools next.
   shots showed sketches drawn over the parts that hide them (they are now
   rendered in 3D with depth).
 
+- Ellipses, 2026-10-12, on Mesa lavapipe: fmt, clippy with `-D warnings`,
+  646 tests and `cargo deny` pass. The kernel tests check every curve
+  point against the ellipse's implicit equation, exact areas of full
+  ellipses, sectors and segments (1e-12 relative), elliptic cylinders,
+  prolate and oblate spheroids and elliptic tori against closed forms;
+  the editor tests were checked against deliberate defects (swapping the
+  handedness rule, dropping the exact snap) and fail on each. Writing
+  them found a kernel defect that predates ellipses: an extruded closed
+  spline (an ellipse, or a closed control-point spline) could fail to
+  mesh, because boundary samples at the curve's closure point landed on
+  the wrong end of the periodic parameter range. They are now put on the
+  face's side; three of the new tests fail without the fix.
+
 ## Not yet / known limits
 
-- Sketch editing tools are not done: ellipses, conics, text, use/project
-  and transform.
+- Sketch tools not done: conics, text, use/project and transform; the
+  curvature constraint.
+  Ellipses cannot yet be trimmed, extended or split (refused with a
+  message; every piece is an exact elliptical arc, so this is planned
+  work, design note 0008 §8), nor made tangent to a circle, an arc or
+  another ellipse except at a shared end point (no closed form; §4.5), so
+  a sketch fillet at an elliptical arc's end is refused too. An ellipse
+  cannot be offset (its offset is not a conic). Radius, diameter, equal
+  and concentric do not apply to ellipses; their semi-axes are lines to
+  dimension instead.
+  The ellipse solver fails more often than the rest of the solver from
+  far-off starts (§9 of the note: about 8 in 100,000 random sketches
+  perturbed by up to 5% of their size, against 0 without ellipses),
+  always reporting the failure, never a wrong result.
   A spline closed on its first point meets itself with a corner: a smooth
   (periodic) closed spline is not expressible in the sketch yet (design
   note 0007 §4).
@@ -309,9 +342,9 @@ application shell done; sketch editing tools next.
 
 ## Next steps
 
-1. The rest of the Phase 2 sketcher that needs no faces: ellipses and
-   elliptical arcs, conics, transform (move, rotate, scale a selection),
-   the curvature constraint, text, smooth closed splines. Project/convert,
+1. The rest of the Phase 2 sketcher that needs no faces: conics,
+   transform (move, rotate, scale a selection), the curvature constraint,
+   text, smooth closed splines, and trim/extend/split of ellipses. Project/convert,
    intersection curves and pierce wait for Phase 3 faces.
 2. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.

@@ -11,6 +11,7 @@ pub mod model;
 
 mod build;
 mod diagnose;
+pub mod ellipse;
 mod eq;
 mod index;
 mod newton;
@@ -180,6 +181,32 @@ pub enum ResolvedCurve {
         /// Counter-clockwise sweep, in (0, 2π).
         sweep_angle: f64,
     },
+    /// Full ellipse `center + cos θ·major + sin θ·minor`, θ ∈ [0, 2π)
+    /// (design note 0008 §3): `major` and `minor` are the semi-axis vectors.
+    Ellipse {
+        /// Centre.
+        center: DVec2,
+        /// First (major) semi-axis.
+        major: DVec2,
+        /// Second (minor) semi-axis.
+        minor: DVec2,
+    },
+    /// Elliptical arc: the points `center + cos θ·major + sin θ·minor` for
+    /// θ from `start_param` to `start_param + sweep_param`, which run
+    /// counter-clockwise in the plane (`sweep_param` is negative when
+    /// `major × minor < 0`).
+    EllipticalArc {
+        /// Centre.
+        center: DVec2,
+        /// First (major) semi-axis.
+        major: DVec2,
+        /// Second (minor) semi-axis.
+        minor: DVec2,
+        /// Eccentric anomaly of the start point.
+        start_param: f64,
+        /// Signed extent of the eccentric anomaly, 0 < |sweep| < 2π.
+        sweep_param: f64,
+    },
     /// Non-rational clamped B-spline.
     Spline {
         /// Degree.
@@ -195,7 +222,8 @@ pub enum ResolvedCurve {
 /// skipped), with its key and construction flag, in entity order.
 ///
 /// Arcs run counter-clockwise from the start point's angle to the end
-/// point's angle, with the radius of the start point. Control-point splines
+/// point's angle, with the radius of the start point. Elliptical arcs run
+/// counter-clockwise between their end points' eccentric anomalies. Control-point splines
 /// get clamped uniform knots on `[0, 1]`; interpolated splines are cubic
 /// (quadratic through 3 points, a straight segment through 2) with knots by
 /// averaging (Piegl & Tiller eq. 9.8, A9.1). Zero-length lines, zero-radius

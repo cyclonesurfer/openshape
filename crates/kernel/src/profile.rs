@@ -89,6 +89,81 @@ impl ProfileCurve {
         })
     }
 
+    /// The elliptical arc `center + cos θ·major + sin θ·minor`, θ from
+    /// `start` to `start + sweep` (`0 < |sweep| ≤ 2π`), as an exact rational
+    /// quadratic B-spline (design note 0008 §6).
+    ///
+    /// `major` and `minor` are conjugate semi-diameters (the semi-axes when
+    /// perpendicular). The θ range is split into `k = ⌈|sweep|/(π/2)⌉`
+    /// equal segments of `δ = sweep/k`; each is the rational quadratic Bézier
+    /// arc of Piegl & Tiller A7.1 (end points `E(θᵢ)`, `E(θᵢ₊₁)`, middle
+    /// point `center + (cos θₘ·major + sin θₘ·minor)/cos(δ/2)` of weight
+    /// `cos(δ/2)`, `θₘ` the segment's middle), mapped by the affine map that
+    /// takes the unit circle to the ellipse; rational curves are affine
+    /// invariant (P&T §4.2), so the result is the ellipse exactly. Knots are
+    /// `0,0,0, 1/k,1/k, …, 1,1,1`. A sweep of a full turn ends exactly on its
+    /// start point.
+    ///
+    /// Fails for non-finite input, parallel (or zero) semi-diameters, and a
+    /// sweep that is zero or beyond a full turn.
+    pub fn elliptical_arc(
+        center: DVec2,
+        major: DVec2,
+        minor: DVec2,
+        start: f64,
+        sweep: f64,
+    ) -> Result<ProfileCurve, KernelError> {
+        if !(center.is_finite() && major.is_finite() && minor.is_finite() && start.is_finite()) {
+            return Err(KernelError::InvalidInput(
+                "elliptical arc: non-finite input".into(),
+            ));
+        }
+        let turn = major.perp_dot(minor);
+        if turn == 0.0 || turn.is_nan() {
+            return Err(KernelError::InvalidInput(
+                "elliptical arc: the semi-diameters are parallel or zero".into(),
+            ));
+        }
+        if !(sweep.abs() > 0.0 && sweep.abs() <= 2.0 * PI) {
+            return Err(KernelError::InvalidInput(format!(
+                "elliptical arc: sweep {sweep} is not within (0, 2π]"
+            )));
+        }
+        let at = |t: f64| {
+            let (s, c) = t.sin_cos();
+            center + major * c + minor * s
+        };
+        let full = sweep.abs() == 2.0 * PI;
+        let k = ((sweep.abs() / (0.5 * PI)).ceil() as usize).max(1);
+        let delta = sweep / k as f64;
+        let w = (0.5 * delta).cos();
+        let mut points = Vec::with_capacity(2 * k + 1);
+        let mut weights = Vec::with_capacity(2 * k + 1);
+        for i in 0..k {
+            let t0 = start + delta * i as f64;
+            let tm = t0 + 0.5 * delta;
+            points.push(at(t0));
+            weights.push(1.0);
+            let (s, c) = tm.sin_cos();
+            points.push(center + (major * c + minor * s) / w);
+            weights.push(w);
+        }
+        points.push(if full { points[0] } else { at(start + sweep) });
+        weights.push(1.0);
+        let mut knots = vec![0.0; 3];
+        for i in 1..k {
+            let u = i as f64 / k as f64;
+            knots.extend([u, u]);
+        }
+        knots.extend([1.0; 3]);
+        Ok(ProfileCurve::Spline {
+            degree: 2,
+            knots,
+            points,
+            weights: Some(weights),
+        })
+    }
+
     /// A cubic (or lower, for few points) spline interpolating `points`.
     pub fn interpolate(points: &[DVec2]) -> Result<ProfileCurve, KernelError> {
         let degree = 3.min(points.len().saturating_sub(1)).max(1);

@@ -155,10 +155,13 @@ pub struct Arc {
     pub end: SketchId,
 }
 
-/// The items to delete for deleting `selected`: the selection plus the
-/// points that only selected curves use (the delete edit removes
-/// constraints on any of them).
+/// The items to delete for deleting `selected`: the selection, the
+/// construction semi-axes of selected ellipses, and the points that only
+/// these curves use (the delete edit removes constraints on any of them).
 pub fn deletion(sketch: &SketchData, selected: &BTreeSet<SketchId>) -> Vec<SketchId> {
+    let mut selected = selected.clone();
+    selected.extend(semi_axes(sketch, &selected));
+    let selected = &selected;
     let kept_points: BTreeSet<SketchId> = sketch
         .entities
         .iter()
@@ -179,6 +182,46 @@ pub fn deletion(sketch: &SketchData, selected: &BTreeSet<SketchId>) -> Vec<Sketc
     items.into_iter().collect()
 }
 
+/// The construction lines from a selected ellipse's centre to its axis
+/// ends, which the ellipse tools draw with it (design note 0008 §7): they
+/// go with the ellipse unless another ellipse kept shares them.
+fn semi_axes(sketch: &SketchData, selected: &BTreeSet<SketchId>) -> Vec<SketchId> {
+    let axes_of = |g: &Geometry<SketchId>| match *g {
+        Geometry::Ellipse {
+            center,
+            major,
+            minor,
+        }
+        | Geometry::EllipticalArc {
+            center,
+            major,
+            minor,
+            ..
+        } => Some([(center, major), (center, minor)]),
+        _ => None,
+    };
+    let (mut going, mut kept) = (BTreeSet::new(), BTreeSet::new());
+    for e in &sketch.entities {
+        if let Some(axes) = axes_of(&e.geometry) {
+            if selected.contains(&e.id) {
+                going.extend(axes);
+            } else {
+                kept.extend(axes);
+            }
+        }
+    }
+    sketch
+        .entities
+        .iter()
+        .filter(|e| {
+            e.construction
+                && matches!(e.geometry, Geometry::Line { start, end }
+                    if going.contains(&(start, end)) && !kept.contains(&(start, end)))
+        })
+        .map(|e| e.id)
+        .collect()
+}
+
 /// The left normal of `v` (turned a quarter counter-clockwise).
 pub fn perp(v: DVec2) -> DVec2 {
     DVec2::new(-v.y, v.x)
@@ -189,7 +232,9 @@ pub fn perp(v: DVec2) -> DVec2 {
 pub fn curve_ending_at(sketch: &SketchData, point: SketchId) -> Option<(SketchId, bool)> {
     sketch.entities.iter().find_map(|e| {
         let (first, last) = match &e.geometry {
-            Geometry::Line { start, end } | Geometry::Arc { start, end, .. } => (*start, *end),
+            Geometry::Line { start, end }
+            | Geometry::Arc { start, end, .. }
+            | Geometry::EllipticalArc { start, end, .. } => (*start, *end),
             Geometry::ControlSpline { control: p, .. }
             | Geometry::InterpolatedSpline { through: p, .. } => (*p.first()?, *p.last()?),
             _ => return None,
@@ -239,7 +284,24 @@ pub fn leaving_direction(curve: &ResolvedCurve, at_end: bool) -> Option<DVec2> {
                 points[0] - points[1]
             }
         }
-        ResolvedCurve::Circle { .. } => return None,
+        ResolvedCurve::EllipticalArc {
+            major,
+            minor,
+            start_param,
+            sweep_param,
+            ..
+        } => {
+            // E′(θ) = −sin θ·major + cos θ·minor points the way θ grows;
+            // the arc runs the way its sweep does.
+            let tangent = |t: f64| *minor * t.cos() - *major * t.sin();
+            let s = sweep_param.signum();
+            if at_end {
+                tangent(start_param + sweep_param) * s
+            } else {
+                -tangent(*start_param) * s
+            }
+        }
+        ResolvedCurve::Circle { .. } | ResolvedCurve::Ellipse { .. } => return None,
     };
     let len = d.length();
     (len.is_finite() && len > 0.0).then(|| d / len)

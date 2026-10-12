@@ -874,7 +874,8 @@ fn add_shapes(m: &mut Model, f: FeatureId, shapes: &[Shape]) {
     m.edit_sketch(f, b.edits).unwrap();
 }
 
-/// The point a fraction `along` of the way along a line, arc or circle.
+/// The point a fraction `along` of the way along a curve (in its
+/// parameter, for ellipses its eccentric anomaly).
 fn along(c: &ResolvedCurve, along: f64) -> DVec2 {
     match c {
         ResolvedCurve::Line { start, end } => start.lerp(*end, along),
@@ -888,6 +889,24 @@ fn along(c: &ResolvedCurve, along: f64) -> DVec2 {
             *center + DVec2::from_angle(along * TAU) * *radius
         }
         ResolvedCurve::Spline { points, .. } => points[0],
+        ResolvedCurve::Ellipse {
+            center,
+            major,
+            minor,
+        } => {
+            let (s, c) = (along * TAU).sin_cos();
+            *center + *major * c + *minor * s
+        }
+        ResolvedCurve::EllipticalArc {
+            center,
+            major,
+            minor,
+            start_param,
+            sweep_param,
+        } => {
+            let (s, c) = (start_param + along * sweep_param).sin_cos();
+            *center + *major * c + *minor * s
+        }
     }
 }
 
@@ -1058,6 +1077,13 @@ fn edit_randomly(
                 } => radius * sweep_angle,
                 ResolvedCurve::Circle { radius, .. } => *radius,
                 ResolvedCurve::Spline { .. } => 1.0,
+                ResolvedCurve::Ellipse { major, minor, .. } => major.length().min(minor.length()),
+                ResolvedCurve::EllipticalArc {
+                    major,
+                    minor,
+                    sweep_param,
+                    ..
+                } => major.length().min(minor.length()) * sweep_param.abs(),
             };
             prop_assert!(size > trim::CUT_GAP, "{:?}", c);
         }

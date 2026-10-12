@@ -420,6 +420,28 @@ fn check_geometry(g: &Geometry<SketchId>) -> Result<(), String> {
             }
         }
         Geometry::InterpolatedSpline { through, params } => check_params(params, through.len()),
+        Geometry::Ellipse {
+            center,
+            major,
+            minor,
+        } if center == major || center == minor || major == minor => {
+            Err("an ellipse needs three distinct points".into())
+        }
+        Geometry::EllipticalArc {
+            center,
+            major,
+            minor,
+            start,
+            end,
+        } if center == major
+            || center == minor
+            || major == minor
+            || start == end
+            || start == center
+            || end == center =>
+        {
+            Err("an elliptical arc needs distinct centre, axis ends and ends".into())
+        }
         _ => Ok(()),
     }
 }

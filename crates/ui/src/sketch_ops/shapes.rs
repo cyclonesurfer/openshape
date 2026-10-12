@@ -1,5 +1,6 @@
 //! Shape tools (design note 0007 §4): rectangles, slots, regular polygons
-//! and tangent arcs, built from lines, arcs and constraints.
+//! and tangent arcs, built from lines, arcs and constraints; ellipses and
+//! elliptical arcs (design note 0008 §7).
 //!
 //! Each builder computes the exact geometry, adds it to a [`Batch`] with
 //! constraints the geometry already satisfies, and refuses degenerate input
@@ -344,6 +345,129 @@ pub fn arc_polyline(c: DVec2, a: DVec2, b: DVec2) -> Vec<DVec2> {
     (0..=n)
         .map(|i| c + DVec2::from_angle(a0 + sweep * i as f64 / n as f64) * r)
         .collect()
+}
+
+/// The semi-axes of the ellipse centred on `c` whose first axis ends at
+/// `m` and whose second axis ends where `q` projects onto the line through
+/// `c` perpendicular to the first (design note 0008 §7), or `None` when
+/// either would be (nearly) zero.
+pub fn ellipse_axes(c: DVec2, m: DVec2, q: DVec2) -> Option<(DVec2, DVec2)> {
+    let a = m - c;
+    let len = a.length();
+    if len <= SAME_POINT {
+        return None;
+    }
+    let u = perp(a / len);
+    let h = (q - c).dot(u);
+    (h.abs() > SAME_POINT).then_some((a, u * h))
+}
+
+/// The point at eccentric anomaly `t` on the ellipse with centre `c` and
+/// semi-axes `a`, `b`: c + cos t·a + sin t·b.
+pub fn ellipse_point(c: DVec2, a: DVec2, b: DVec2, t: f64) -> DVec2 {
+    c + a * t.cos() + b * t.sin()
+}
+
+/// The eccentric anomaly of `p` about the ellipse with centre `c` and
+/// perpendicular semi-axes `a`, `b`: exact for points on it, and for others
+/// the anomaly of the point where the ray from the centre in the axis frame
+/// meets it.
+pub fn eccentric_anomaly(c: DVec2, a: DVec2, b: DVec2, p: DVec2) -> f64 {
+    let v = p - c;
+    (v.dot(b) / b.length_squared()).atan2(v.dot(a) / a.length_squared())
+}
+
+/// Points of the elliptical arc from anomaly `t0` over the signed `sweep`.
+pub fn ellipse_polyline(c: DVec2, a: DVec2, b: DVec2, t0: f64, sweep: f64) -> Vec<DVec2> {
+    let n = ((sweep.abs() / 3.75f64.to_radians()).ceil() as usize).clamp(4, 96);
+    (0..=n)
+        .map(|i| ellipse_point(c, a, b, t0 + sweep * i as f64 / n as f64))
+        .collect()
+}
+
+const NO_SECOND_AXIS: &str = "The second axis has no length: click away from the first axis";
+
+/// Construction lines along an ellipse's semi-axes, from its centre to its
+/// axis ends: they share the ellipse's points, so they add no freedom, and
+/// the axes can be dimensioned and constrained as lines.
+fn semi_axes(b: &mut Batch, center: SketchId, major: SketchId, minor: SketchId) {
+    for end in [major, minor] {
+        b.entity(Geometry::Line { start: center, end }, true);
+    }
+}
+
+/// An ellipse from its centre, the end of its first axis and a point giving
+/// the second axis's extent ([`ellipse_axes`]): the three points, the
+/// ellipse, and construction lines along both semi-axes. DOF 5.
+pub fn ellipse(
+    b: &mut Batch,
+    center: &Snap,
+    major: &Snap,
+    extent: DVec2,
+    construction: bool,
+) -> Result<(), String> {
+    let (_, n) = ellipse_axes(center.at, major.at, extent).ok_or(NO_SECOND_AXIS)?;
+    let c = b.snapped_point(center);
+    let m = b.snapped_point(major);
+    let q = b.point(center.at + n);
+    b.entity(
+        Geometry::Ellipse {
+            center: c,
+            major: m,
+            minor: q,
+        },
+        construction,
+    );
+    semi_axes(b, c, m, q);
+    Ok(())
+}
+
+/// An elliptical arc: the ellipse as for [`ellipse`], then the arc from the
+/// start click to the end click, each taken at its eccentric anomaly so it
+/// lies on the curve. `turn` is the signed change of anomaly the pointer
+/// made from start to end; arcs run counter-clockwise in the plane, so the
+/// ends are stored swapped when the arc was drawn the other way. DOF 7.
+#[allow(clippy::too_many_arguments)]
+pub fn elliptical_arc(
+    b: &mut Batch,
+    center: &Snap,
+    major: &Snap,
+    extent: DVec2,
+    start: &Snap,
+    end: &Snap,
+    turn: f64,
+    construction: bool,
+) -> Result<(), String> {
+    let (a, n) = ellipse_axes(center.at, major.at, extent).ok_or(NO_SECOND_AXIS)?;
+    let on = |s: &Snap| Snap {
+        at: ellipse_point(center.at, a, n, eccentric_anomaly(center.at, a, n, s.at)),
+        target: s.target,
+    };
+    let (s, e) = (on(start), on(end));
+    if turn.abs() < 1e-6 || (s.at - e.at).length() <= SAME_POINT {
+        return Err("Move around the ellipse to where the arc ends".into());
+    }
+    // Increasing anomaly is counter-clockwise when the second axis is left
+    // of the first.
+    let ccw = (turn > 0.0) == (a.perp_dot(n) > 0.0);
+    let (first, second) = if ccw { (s, e) } else { (e, s) };
+    let c = b.snapped_point(center);
+    let m = b.snapped_point(major);
+    let q = b.point(center.at + n);
+    let p0 = b.snapped_point(&first);
+    let p1 = b.snapped_point(&second);
+    b.entity(
+        Geometry::EllipticalArc {
+            center: c,
+            major: m,
+            minor: q,
+            start: p0,
+            end: p1,
+        },
+        construction,
+    );
+    semi_axes(b, c, m, q);
+    Ok(())
 }
 
 #[cfg(test)]

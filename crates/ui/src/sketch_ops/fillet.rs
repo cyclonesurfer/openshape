@@ -182,6 +182,12 @@ pub fn fillet(
                 }
                 continue;
             }
+            Geometry::EllipticalArc { start, end, .. } => {
+                if at_corner(*start) || at_corner(*end) {
+                    return Err("Fillets join lines and arcs; an elliptical arc ends here".into());
+                }
+                continue;
+            }
             _ => continue,
         };
         for (near, far, corner_is_end) in [(start, end, false), (end, start, true)] {

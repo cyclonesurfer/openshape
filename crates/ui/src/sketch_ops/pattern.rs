@@ -75,7 +75,16 @@ impl Motion {
         }
     }
 
-    /// Copy `k` of a solved curve (arcs keep their start and end).
+    /// Copy `k` of a vector (a direction, not a position).
+    fn vector(&self, v: DVec2, k: u32) -> DVec2 {
+        match *self {
+            Motion::Translate(_) => v,
+            Motion::Rotate { angle, .. } => DVec2::from_angle(angle * f64::from(k)).rotate(v),
+        }
+    }
+
+    /// Copy `k` of a solved curve (arcs keep their start and end;
+    /// ellipses their eccentric anomalies, as motions keep handedness).
     pub fn curve(&self, c: &ResolvedCurve, k: u32) -> ResolvedCurve {
         let turn = match *self {
             Motion::Translate(_) => 0.0,
@@ -100,6 +109,28 @@ impl Motion {
                 radius: *radius,
                 start_angle: start_angle + turn,
                 sweep_angle: *sweep_angle,
+            },
+            ResolvedCurve::Ellipse {
+                center,
+                major,
+                minor,
+            } => ResolvedCurve::Ellipse {
+                center: self.point(*center, k),
+                major: self.vector(*major, k),
+                minor: self.vector(*minor, k),
+            },
+            ResolvedCurve::EllipticalArc {
+                center,
+                major,
+                minor,
+                start_param,
+                sweep_param,
+            } => ResolvedCurve::EllipticalArc {
+                center: self.point(*center, k),
+                major: self.vector(*major, k),
+                minor: self.vector(*minor, k),
+                start_param: *start_param,
+                sweep_param: *sweep_param,
             },
             ResolvedCurve::Spline {
                 degree,

@@ -12,8 +12,9 @@
 //!   change of everything else, the images completing it
 //!   ([`images_first`]), so changing an offset's distance moves the
 //!   offset, not the curves it follows.
-//! * **Bounds and corners** (`bounded_step`): hidden curve parameters stay
-//!   in `[0, 1]` by an active set; a radius may at most halve per step;
+//! * **Bounds and corners** (`bounded_step`): hidden spline parameters
+//!   stay in `[0, 1]` by an active set (ellipse parameters are periodic
+//!   and free); a radius may at most halve per step;
 //!   at a corner of a degree-1 spline the step uses the one-sided
 //!   derivative of the piece it moves into (both pieces are tried), and
 //!   the line search stops at the first corner crossed.
@@ -46,6 +47,7 @@
 use openshape_linalg::{dot, lstsq_min_norm, null_space, residual, weighted_min_norm, Matrix};
 
 use crate::build::Problem;
+use crate::ellipse;
 use crate::eq::{norm, EqKind, PairMode, VecExpr};
 use crate::reduce::{Component, Reduced};
 
@@ -118,6 +120,9 @@ pub(crate) struct CompSystem<'a> {
     /// Local unknowns that are images of a derived constraint.
     pub image: Vec<bool>,
     is_param: Vec<bool>,
+    /// Hidden parameters confined to `[0, 1]` (spline parameters; an
+    /// ellipse's is periodic).
+    bounded: Vec<bool>,
     is_radius: Vec<bool>,
     /// Admissible range of each local unknown.
     range: Vec<(f64, f64)>,
@@ -125,6 +130,9 @@ pub(crate) struct CompSystem<'a> {
     param_spline: Vec<Option<usize>>,
     /// For hidden parameters, the point they place on the spline.
     param_point: Vec<Option<usize>>,
+    /// For hidden parameters on ellipses, `(centre, major end, minor end,
+    /// point)`.
+    param_ellipse: Vec<Option<[usize; 4]>>,
     /// The vectors whose direction the equations use (line directions,
     /// radius vectors, point-to-point vectors), for the turn limit.
     vectors: Vec<VecExpr>,
@@ -166,6 +174,7 @@ impl<'a> CompSystem<'a> {
         let mut col_of_slot = vec![usize::MAX; prob.n_slots()];
         let mut members = Vec::with_capacity(comp.unknowns.len());
         let mut is_param = Vec::with_capacity(comp.unknowns.len());
+        let mut bounded = Vec::with_capacity(comp.unknowns.len());
         let mut is_radius = Vec::with_capacity(comp.unknowns.len());
         let mut weights = Vec::with_capacity(comp.unknowns.len());
         let mut image = Vec::with_capacity(comp.unknowns.len());
@@ -178,9 +187,12 @@ impl<'a> CompSystem<'a> {
             members.push(class.members.clone());
             let s0 = class.members[0];
             is_param.push(prob.is_param(s0));
+            bounded.push(prob.is_bounded_param(s0));
             is_radius.push(prob.is_radius(s0));
-            range.push(if prob.is_param(s0) {
+            range.push(if prob.is_bounded_param(s0) {
                 (0.0, 1.0)
+            } else if prob.is_param(s0) {
+                (f64::NEG_INFINITY, f64::INFINITY)
             } else if prob.is_radius(s0) {
                 (0.0, region.r_max)
             } else if s0 % 2 == 0 {
@@ -193,12 +205,17 @@ impl<'a> CompSystem<'a> {
         }
         let mut param_spline = vec![None; comp.unknowns.len()];
         let mut param_point = vec![None; comp.unknowns.len()];
+        let mut param_ellipse = vec![None; comp.unknowns.len()];
         for &i in &comp.eqs {
-            if let EqKind::SplinePoint { spline, t, p, .. } = prob.eqs[i].kind {
-                if col_of_slot[t] != usize::MAX {
+            match prob.eqs[i].kind {
+                EqKind::SplinePoint { spline, t, p, .. } if col_of_slot[t] != usize::MAX => {
                     param_spline[col_of_slot[t]] = Some(spline);
                     param_point[col_of_slot[t]] = Some(p);
                 }
+                EqKind::EllipsePoint { c, m, n, t, p, .. } if col_of_slot[t] != usize::MAX => {
+                    param_ellipse[col_of_slot[t]] = Some([c, m, n, p]);
+                }
+                _ => {}
             }
         }
         let mut vectors = Vec::new();
@@ -218,6 +235,11 @@ impl<'a> CompSystem<'a> {
                     add(a);
                     add(b);
                 }
+                EqKind::EllipseSupport { dir, a, b, .. } => {
+                    add(dir);
+                    add(a);
+                    add(b);
+                }
                 _ => {}
             }
         }
@@ -231,10 +253,12 @@ impl<'a> CompSystem<'a> {
             weights,
             image,
             is_param,
+            bounded,
             is_radius,
             range,
             param_spline,
             param_point,
+            param_ellipse,
             vectors,
             turn_limit: false,
             v,
@@ -262,11 +286,11 @@ impl<'a> CompSystem<'a> {
         }
     }
 
-    /// Clamps hidden parameters to `[0, 1]`; returns true if any moved.
+    /// Clamps spline parameters to `[0, 1]`; returns true if any moved.
     pub fn project(&self, u: &mut [f64]) -> bool {
         let mut moved = false;
         for (k, x) in u.iter_mut().enumerate() {
-            if self.is_param[k] {
+            if self.bounded[k] {
                 let c = x.clamp(0.0, 1.0);
                 if c != *x {
                     *x = c;
@@ -408,6 +432,18 @@ impl<'a> CompSystem<'a> {
         self.write(u);
         let mut moved = false;
         for (k, uk) in u.iter_mut().enumerate() {
+            if let Some([c, m, n, p]) = self.param_ellipse[k] {
+                let at = |q: usize| glam::DVec2::new(self.v[2 * q], self.v[2 * q + 1]);
+                let (cc, pp) = (at(c), at(p));
+                let (a, b) = (at(m) - cc, at(n) - cc);
+                let d2 = |t: f64| (ellipse::point(cc, a, b, t) - pp).length_squared();
+                let t = ellipse::closest_param(cc, a, b, pp);
+                if d2(t) < d2(*uk) {
+                    *uk = t;
+                    moved = true;
+                }
+                continue;
+            }
             let (Some(sp), Some(p)) = (self.param_spline[k], self.param_point[k]) else {
                 continue;
             };
@@ -662,7 +698,7 @@ fn bounded_step(
                     continue;
                 }
             }
-            let value = if sys.is_param[k]
+            let value = if sys.bounded[k]
                 && ((u[k] <= 0.0 && step[k] < 0.0) || (u[k] >= 1.0 && step[k] > 0.0))
             {
                 0.0

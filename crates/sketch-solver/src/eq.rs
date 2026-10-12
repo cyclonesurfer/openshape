@@ -214,6 +214,49 @@ pub(crate) enum EqKind {
         /// Comparison.
         mode: PairMode,
     },
+    /// `E(θ)_axis − p_axis` for a point on an ellipse (design note 0008
+    /// §4.2): `E(θ) = (1 − cos θ − sin θ)·c + cos θ·m + sin θ·n`.
+    EllipsePoint {
+        /// Centre point.
+        c: usize,
+        /// Major axis end point.
+        m: usize,
+        /// Minor axis end point.
+        n: usize,
+        /// Slot of the hidden parameter `θ`.
+        t: usize,
+        /// The point.
+        p: usize,
+        /// 0 for x, 1 for y.
+        axis: usize,
+    },
+    /// A line tangent to an ellipse (design note 0008 §4.3):
+    /// `cross(dir, v)/‖dir‖ − sign·√((n̂·a)² + (n̂·b)²)`, `n̂` the line's unit
+    /// left normal, `v` the centre minus a point of the line and `a`, `b`
+    /// the semi-axes.
+    EllipseSupport {
+        /// Line direction.
+        dir: VecExpr,
+        /// Centre minus the line's start.
+        v: VecExpr,
+        /// First semi-axis.
+        a: VecExpr,
+        /// Second semi-axis.
+        b: VecExpr,
+        /// +1 when the centre is on the line's left, −1 otherwise.
+        sign: f64,
+    },
+    /// Directions compared at a shared point when one of them (or both) is
+    /// an elliptical arc's tangent there (design note 0008 §4.4); otherwise
+    /// as [`EqKind::DirPair`] with [`PairMode::Cross`] or [`PairMode::Dot`].
+    TanDirs {
+        /// First direction.
+        a: TanDir,
+        /// Second direction.
+        b: TanDir,
+        /// Cross (parallel) or dot (perpendicular).
+        mode: PairMode,
+    },
     /// `C(t)_axis − p_axis` for a point on a spline.
     SplinePoint {
         /// Index into the problem's splines.
@@ -225,6 +268,111 @@ pub(crate) enum EqKind {
         /// 0 for x, 1 for y.
         axis: usize,
     },
+}
+
+/// A direction for [`EqKind::TanDirs`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum TanDir {
+    /// A linear combination of points.
+    Lin(VecExpr),
+    /// The tangent of the ellipse on centre `c` and axis ends `m`, `n` at
+    /// its point `p`, written without a parameter (design note 0008 §4.4):
+    /// with `w = p − c`, `A = m − c`, `B = n − c`,
+    /// `T = (−(w·B)/‖B‖²)·A + ((w·A)/‖A‖²)·B`, which is `E′(θ)` at `p`'s
+    /// parameter when `p` is on the ellipse and `A ⟂ B`.
+    Ellipse {
+        /// Centre.
+        c: usize,
+        /// Major axis end.
+        m: usize,
+        /// Minor axis end.
+        n: usize,
+        /// The point.
+        p: usize,
+    },
+}
+
+impl TanDir {
+    /// The direction's value, its Jacobian columns `(slot, ∂x/∂slot,
+    /// ∂y/∂slot)` if `jac` is given, or `None` where an axis has no length.
+    fn eval(&self, v: &[f64], jac: Option<&mut Vec<(usize, f64, f64)>>) -> Option<(f64, f64)> {
+        match self {
+            TanDir::Lin(e) => {
+                if let Some(j) = jac {
+                    for &(p, c) in &e.0 {
+                        j.push((2 * p, c, 0.0));
+                        j.push((2 * p + 1, 0.0, c));
+                    }
+                }
+                Some(e.eval(v))
+            }
+            &TanDir::Ellipse { c, m, n, p } => {
+                let pt = |q: usize| [v[2 * q], v[2 * q + 1]];
+                let (pc, pm, pn, pp) = (pt(c), pt(m), pt(n), pt(p));
+                let w = [pp[0] - pc[0], pp[1] - pc[1]];
+                let a = [pm[0] - pc[0], pm[1] - pc[1]];
+                let b = [pn[0] - pc[0], pn[1] - pc[1]];
+                let a2 = a[0] * a[0] + a[1] * a[1];
+                let b2 = b[0] * b[0] + b[1] * b[1];
+                if !(a2 > 0.0 && b2 > 0.0) || !a2.is_finite() || !b2.is_finite() {
+                    return None;
+                }
+                // T = −σ·A + κ·B with σ = (w·B)/b2, κ = (w·A)/a2.
+                let sg = (w[0] * b[0] + w[1] * b[1]) / b2;
+                let ka = (w[0] * a[0] + w[1] * a[1]) / a2;
+                let t = [-sg * a[0] + ka * b[0], -sg * a[1] + ka * b[1]];
+                if let Some(j) = jac {
+                    // ∂σ/∂w = B/b2, ∂σ/∂B = w/b2 − 2σB/b2;
+                    // ∂κ/∂w = A/a2, ∂κ/∂A = w/a2 − 2κA/a2.
+                    // dT = −dσ·A − σ·dA + dκ·B + κ·dB.
+                    // Columns over (w, A, B) components, row i of T.
+                    let mut cols: [[f64; 2]; 6] = [[0.0; 2]; 6];
+                    for i in 0..2 {
+                        for k in 0..2 {
+                            let delta = if i == k { 1.0 } else { 0.0 };
+                            // w_k
+                            cols[k][i] = -(b[k] / b2) * a[i] + (a[k] / a2) * b[i];
+                            // A_k
+                            cols[2 + k][i] = -sg * delta + ((w[k] - 2.0 * ka * a[k]) / a2) * b[i];
+                            // B_k
+                            cols[4 + k][i] = -((w[k] - 2.0 * sg * b[k]) / b2) * a[i] + ka * delta;
+                        }
+                    }
+                    for k in 0..2 {
+                        let (cw, ca, cb) = (cols[k], cols[2 + k], cols[4 + k]);
+                        j.push((2 * p + k, cw[0], cw[1]));
+                        j.push((2 * m + k, ca[0], ca[1]));
+                        j.push((2 * n + k, cb[0], cb[1]));
+                        // w, A and B all subtract the centre.
+                        j.push((
+                            2 * c + k,
+                            -(cw[0] + ca[0] + cb[0]),
+                            -(cw[1] + ca[1] + cb[1]),
+                        ));
+                    }
+                }
+                Some((t[0], t[1]))
+            }
+        }
+    }
+
+    /// The points referenced.
+    fn points(&self) -> Vec<usize> {
+        match self {
+            TanDir::Lin(e) => e.points().collect(),
+            &TanDir::Ellipse { c, m, n, p } => vec![c, m, n, p],
+        }
+    }
+}
+
+/// The ellipse point `E(θ)_axis` and `∂/∂θ` from slot values.
+fn ellipse_axis(v: &[f64], c: usize, m: usize, n: usize, t: usize, axis: usize) -> (f64, f64) {
+    let (s, co) = v[t].sin_cos();
+    let (xc, xm, xn) = (v[2 * c + axis], v[2 * m + axis], v[2 * n + axis]);
+    (
+        xc + co * (xm - xc) + s * (xn - xc),
+        -s * (xm - xc) + co * (xn - xc),
+    )
 }
 
 /// A spline as used by equations: its linear map and its points.
@@ -415,7 +563,22 @@ impl EqKind {
                 out.push(a);
                 out.push(b);
             }
-            EqKind::Lin { .. } | EqKind::AbsLin { .. } | EqKind::SplinePoint { .. } => {}
+            EqKind::EllipseSupport { dir, a, b, .. } => {
+                out.push(dir);
+                out.push(a);
+                out.push(b);
+            }
+            EqKind::TanDirs { a, b, .. } => {
+                for d in [a, b] {
+                    if let TanDir::Lin(e) = d {
+                        out.push(e);
+                    }
+                }
+            }
+            EqKind::Lin { .. }
+            | EqKind::AbsLin { .. }
+            | EqKind::SplinePoint { .. }
+            | EqKind::EllipsePoint { .. } => {}
         }
         out.retain(|e| short(e));
         out
@@ -562,6 +725,107 @@ impl EqKind {
                     lever: na.min(nb),
                 })
             }
+            &EqKind::EllipsePoint {
+                c,
+                m,
+                n,
+                t,
+                p,
+                axis,
+            } => {
+                let (e, de) = ellipse_axis(v, c, m, n, t, axis);
+                if let Some(g) = grad {
+                    let (s, co) = v[t].sin_cos();
+                    g.push((t, de));
+                    g.push((2 * c + axis, 1.0 - co - s));
+                    g.push((2 * m + axis, co));
+                    g.push((2 * n + axis, s));
+                    g.push((2 * p + axis, -1.0));
+                }
+                Some(Eval {
+                    r: e - v[2 * p + axis],
+                    lever: inf,
+                })
+            }
+            EqKind::EllipseSupport {
+                dir,
+                v: w,
+                a,
+                b,
+                sign,
+            } => {
+                let (dx, dy) = dir.eval(v);
+                let nd = norm(dx, dy);
+                if nd.is_nan() || nd <= degen {
+                    return None;
+                }
+                // Unit left normal and unit direction.
+                let (nx, ny) = (-dy / nd, dx / nd);
+                let (ux, uy) = (dx / nd, dy / nd);
+                let (wx, wy) = w.eval(v);
+                let (ax, ay) = a.eval(v);
+                let (bx, by) = b.eval(v);
+                let pa = nx * ax + ny * ay;
+                let pb = nx * bx + ny * by;
+                let h = norm(pa, pb);
+                if h.is_nan() || h <= degen {
+                    return None;
+                }
+                let dist = nx * wx + ny * wy;
+                if let Some(g) = grad {
+                    // ∂(n̂·X)/∂d = ((X.y, −X.x) − (n̂·X)·û)/‖d‖.
+                    let gd = |x: f64, y: f64, nxv: f64| ((y - nxv * ux) / nd, (-x - nxv * uy) / nd);
+                    let (g1x, g1y) = gd(wx, wy, dist);
+                    let (gax, gay) = gd(ax, ay, pa);
+                    let (gbx, gby) = gd(bx, by, pb);
+                    let (ka, kb) = (sign * pa / h, sign * pb / h);
+                    w.push_grad(nx, ny, g);
+                    a.push_grad(-ka * nx, -ka * ny, g);
+                    b.push_grad(-kb * nx, -kb * ny, g);
+                    dir.push_grad(g1x - ka * gax - kb * gbx, g1y - ka * gay - kb * gby, g);
+                }
+                Some(Eval {
+                    r: dist - sign * h,
+                    lever: inf,
+                })
+            }
+            EqKind::TanDirs { a, b, mode } => {
+                let mut ja = Vec::new();
+                let mut jb = Vec::new();
+                let want = grad.is_some();
+                let (ax, ay) = a.eval(v, want.then_some(&mut ja))?;
+                let (bx, by) = b.eval(v, want.then_some(&mut jb))?;
+                let na = norm(ax, ay);
+                let nb = norm(bx, by);
+                if na.is_nan() || nb.is_nan() || na <= degen || nb <= degen {
+                    return None;
+                }
+                let nn = na * nb;
+                let cr = ax * by - ay * bx;
+                let dt = ax * bx + ay * by;
+                let (cc, cd) = match mode {
+                    PairMode::Dot => (0.0, 1.0),
+                    _ => (1.0, 0.0),
+                };
+                let r = (cc * cr + cd * dt) / nn;
+                if let Some(g) = grad {
+                    let (na2, nb2) = (na * na, nb * nb);
+                    let gax = (cc * by + cd * bx) / nn - r * ax / na2;
+                    let gay = (-cc * bx + cd * by) / nn - r * ay / na2;
+                    let gbx = (-cc * ay + cd * ax) / nn - r * bx / nb2;
+                    let gby = (cc * ax + cd * ay) / nn - r * by / nb2;
+                    for &(s, jx, jy) in &ja {
+                        g.push((s, gax * jx + gay * jy));
+                    }
+                    for &(s, jx, jy) in &jb {
+                        g.push((s, gbx * jx + gby * jy));
+                    }
+                }
+                Some(Eval {
+                    r,
+                    lever: na.min(nb),
+                })
+            }
             EqKind::SplinePoint { spline, t, p, axis } => {
                 let def = &splines[*spline];
                 let (w, dw) = def.map.weights(v[*t]);
@@ -661,6 +925,28 @@ impl EqKind {
                 for &q in &splines[*spline].points {
                     slots.push(2 * q + axis);
                 }
+            }
+            &EqKind::EllipsePoint {
+                c,
+                m,
+                n,
+                t,
+                p,
+                axis,
+            } => {
+                slots.push(t);
+                for q in [c, m, n, p] {
+                    slots.push(2 * q + axis);
+                }
+            }
+            EqKind::EllipseSupport { dir, v, a, b, .. } => {
+                for e in [dir, v, a, b] {
+                    points.extend(e.points());
+                }
+            }
+            EqKind::TanDirs { a, b, .. } => {
+                points.extend(a.points());
+                points.extend(b.points());
             }
         }
         for p in points {
@@ -973,6 +1259,92 @@ mod tests {
                     axis: 0,
                 },
             ),
+            (
+                "point on ellipse, x",
+                EqKind::EllipsePoint {
+                    c: 0,
+                    m: 1,
+                    n: 2,
+                    t: 14,
+                    p: 3,
+                    axis: 0,
+                },
+            ),
+            (
+                "point on ellipse, y",
+                EqKind::EllipsePoint {
+                    c: 4,
+                    m: 1,
+                    n: 5,
+                    t: 14,
+                    p: 0,
+                    axis: 1,
+                },
+            ),
+            (
+                "line tangent to ellipse, centre left",
+                EqKind::EllipseSupport {
+                    dir: VecExpr::diff(5, 4),
+                    v: VecExpr::diff(0, 4),
+                    a: VecExpr::diff(1, 0),
+                    b: VecExpr::diff(2, 0),
+                    sign: 1.0,
+                },
+            ),
+            (
+                "line tangent to ellipse, centre right",
+                EqKind::EllipseSupport {
+                    dir: VecExpr::diff(3, 2),
+                    v: VecExpr::diff(4, 2),
+                    a: VecExpr::diff(5, 4),
+                    b: VecExpr::diff(0, 4),
+                    sign: -1.0,
+                },
+            ),
+            (
+                "elliptical arc tangent to a line at a point",
+                EqKind::TanDirs {
+                    a: TanDir::Ellipse {
+                        c: 0,
+                        m: 1,
+                        n: 2,
+                        p: 3,
+                    },
+                    b: TanDir::Lin(VecExpr::diff(5, 4)),
+                    mode: PairMode::Cross,
+                },
+            ),
+            (
+                "elliptical arc tangent to an arc at a point",
+                EqKind::TanDirs {
+                    a: TanDir::Lin(VecExpr::diff(3, 5)),
+                    b: TanDir::Ellipse {
+                        c: 0,
+                        m: 1,
+                        n: 2,
+                        p: 3,
+                    },
+                    mode: PairMode::Dot,
+                },
+            ),
+            (
+                "two elliptical arcs tangent at a point",
+                EqKind::TanDirs {
+                    a: TanDir::Ellipse {
+                        c: 0,
+                        m: 1,
+                        n: 2,
+                        p: 3,
+                    },
+                    b: TanDir::Ellipse {
+                        c: 4,
+                        m: 5,
+                        n: 1,
+                        p: 3,
+                    },
+                    mode: PairMode::Cross,
+                },
+            ),
         ]
     }
 
@@ -1060,7 +1432,11 @@ mod tests {
         for (name, eq) in all_equations() {
             let divides = matches!(
                 eq,
-                EqKind::SignedDist { .. } | EqKind::Proj { .. } | EqKind::DirPair { .. }
+                EqKind::SignedDist { .. }
+                    | EqKind::Proj { .. }
+                    | EqKind::DirPair { .. }
+                    | EqKind::EllipseSupport { .. }
+                    | EqKind::TanDirs { .. }
             );
             let out = eq.eval(&v, &sp, 1e-9, None);
             assert_eq!(out.is_none(), divides, "{name}");
