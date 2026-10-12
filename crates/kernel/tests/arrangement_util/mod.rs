@@ -378,7 +378,7 @@ pub fn try_extrude(curves: &[ProfileCurve], h: f64) -> Result<Body, KernelError>
 }
 
 pub fn volume(b: &Body) -> f64 {
-    k().mass_properties(b, 1e-6).unwrap().volume
+    k().mass_properties(b, 1e-10).unwrap().volume
 }
 
 /// Extrudes the union of `sel` and checks volume = area × height.

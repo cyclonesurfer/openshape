@@ -617,6 +617,83 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     d.hover(on_plane(&d, 120.0, -80.0)?)?;
     save("25-curvature.png", &d.settle()?)?;
     d.app.run(crate::commands::Command::CancelSketch);
+
+    // Text in a new part: being placed (the box growing towards the
+    // pointer, the letters in it), then selected with its characters and
+    // font in the dialog, then its letters extruded.
+    let mut model = Model::new();
+    let sketch = model.add_sketch(PlaneRef::Top);
+    let mut t = AppDriver::new(size, 1.0, model)?;
+    t.app.enter_sketch(sketch);
+    t.settle()?;
+    t.app.run(crate::commands::Command::Tool(Tool::Text));
+    if let Some(ed) = t.app.sketch_editor_mut() {
+        ed.text_content = "OpenShape".into();
+        ed.text_font = openshape_text::Font::SansBold;
+    }
+    t.click(on_plane(&t, -60.0, -8.0)?)?;
+    t.hover(on_plane(&t, -30.0, 12.0)?)?;
+    save("26-text-placing.png", &t.settle()?)?;
+    t.click(on_plane(&t, -30.0, 12.0)?)?;
+    t.app.run(crate::commands::Command::Tool(Tool::Select));
+    let text = t
+        .app
+        .model()
+        .sketch_def(sketch)
+        .and_then(|def| {
+            def.sketch
+                .entities
+                .iter()
+                .find(|e| matches!(e.geometry, Geometry::Text { .. }))
+                .map(|e| e.id)
+        })
+        .ok_or("the text was not placed")?;
+    if let Some(ed) = t.app.sketch_editor_mut() {
+        ed.selection = vec![text];
+    }
+    t.hover(on_plane(&t, 90.0, -60.0)?)?;
+    save("27-text.png", &t.settle()?)?;
+    t.app.run(crate::commands::Command::FinishSketch);
+    // Every letter's ink (not the counters inside O, p, a and e).
+    let interiors: Vec<DVec2> = t
+        .app
+        .model()
+        .sketch_result(sketch)
+        .and_then(|r| r.regions.as_ref().ok())
+        .map(|regions| {
+            let a = &regions.arrangement;
+            let edges = |l: &openshape_kernel::RegionLoop| -> Vec<usize> {
+                let mut e: Vec<usize> = l.edges.iter().map(|(e, _)| *e).collect();
+                e.sort_unstable();
+                e
+            };
+            let holes: Vec<Vec<usize>> = a
+                .regions
+                .iter()
+                .flat_map(|r| r.holes.iter().map(edges))
+                .collect();
+            a.regions
+                .iter()
+                .filter(|r| !holes.contains(&edges(&r.outer)))
+                .map(|r| r.interior_point)
+                .collect()
+        })
+        .unwrap_or_default();
+    let view = ScreenMap::new(&t.app.camera, Frame::top(), t.app.layout().graphics);
+    let mut pick = ProfilePick::new(SweepKind::Extrude);
+    for p in interiors {
+        let at = view.to_screen(p).ok_or("a letter is off screen")?;
+        pick.click(t.app.model(), &view, at);
+    }
+    pick.distance = "4".into();
+    let letters = pick.build()?;
+    t.app.model_mut().add_feature("Extrude 1", letters);
+    // Closer than "fit", which frames the default planes too.
+    t.app
+        .set_view(openshape_ui_kit::view_cube::CubeTarget::HOME);
+    t.app.camera.target = DVec3::new(-0.011, 0.002, 0.002);
+    t.app.camera.distance *= 0.4;
+    save("28-text-extruded.png", &t.settle()?)?;
     Ok(written)
 }
 

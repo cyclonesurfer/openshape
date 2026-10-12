@@ -83,6 +83,7 @@ pub fn chain(sketch: &SketchData, start: SketchId) -> Result<Chain, String> {
             return Err("A conic cannot be offset: its offset is not a conic".into())
         }
         Geometry::Point { .. } => return Err("Click a line, arc or circle to offset".into()),
+        Geometry::Text { .. } => return Err("Text cannot be offset".into()),
     }
     let construction = e.construction;
     let classes = coincidence_classes(sketch);

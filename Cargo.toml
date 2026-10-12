@@ -12,6 +12,7 @@ members = [
     "crates/ui-kit",
     "crates/linalg",
     "crates/sketch-solver",
+    "crates/text",
 ]
 
 [workspace.package]
@@ -33,6 +34,7 @@ openshape-io = { path = "crates/io", version = "0.1.0" }
 openshape-linalg = { path = "crates/linalg", version = "0.1.0" }
 openshape-sketch-solver = { path = "crates/sketch-solver", version = "0.1.0" }
 openshape-ui-kit = { path = "crates/ui-kit", version = "0.1.0" }
+openshape-text = { path = "crates/text", version = "0.1.0" }
 
 glam = { version = "0.34", features = ["serde", "bytemuck"] }
 serde = { version = "1", features = ["derive"] }
@@ -50,6 +52,8 @@ egui = "0.36"
 egui-wgpu = "0.36"
 proptest = "1"
 log = "0.4"
+harfrust = "0.14"
+skrifa = { version = "0.48", default-features = false, features = ["std"] }
 env_logger = "0.11"
 
 [workspace.lints.rust]

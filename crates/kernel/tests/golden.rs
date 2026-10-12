@@ -87,7 +87,7 @@ fn check(body: &openshape_kernel::Body, e: Expect) {
     }
     assert_eq!(t.genus, Some(e.genus), "genus");
     assert_eq!(t.solids, e.solids, "solids");
-    let m = kern.mass_properties(body, 1e-4).unwrap();
+    let m = kern.mass_properties(body, e.rel / 10.0).unwrap();
     assert!(
         ((m.volume - e.volume) / e.volume).abs() < e.rel,
         "volume {} vs {}",
@@ -128,7 +128,7 @@ fn unit_box() {
             rel: 1e-12,
         },
     );
-    let m = k().mass_properties(&b, 1e-3).unwrap();
+    let m = k().mass_properties(&b, 1e-13).unwrap();
     assert!((m.centroid - DVec3::new(0.5, 1.0, 1.5)).length() < 1e-12);
     // Inertia of a cuboid about its centroid: m (b² + c²) / 12 etc.
     let mass = 6.0;
@@ -673,7 +673,7 @@ fn revolve_spline_vase_matches_pappus() {
     let b = revolve_z(p, TAU);
     let kern = k();
     assert!(kern.validate(&b).is_empty());
-    let m = kern.mass_properties(&b, 1e-4).unwrap();
+    let m = kern.mass_properties(&b, 1e-7).unwrap();
     assert!(
         ((m.volume - volume) / volume).abs() < 1e-6,
         "{} vs {}",
@@ -764,7 +764,7 @@ proptest! {
         prop_assert!(k().validate(&b).is_empty());
         let t = k().topology(&b);
         prop_assert_eq!((t.vertices, t.edges, t.faces), (2 * n, 3 * n, n + 2));
-        let m = k().mass_properties(&b, 1e-3).unwrap();
+        let m = k().mass_properties(&b, 1e-10).unwrap();
         prop_assert!((m.volume - area * h.abs()).abs() < 1e-9 * (1.0 + area * h.abs()));
         let mesh = k().tessellate(&b, &TessellationOptions::default()).unwrap();
         assert_watertight(&mesh);
@@ -779,7 +779,7 @@ proptest! {
         let r2 = r1 + w;
         let b = revolve_z(Profile::rectangle(Frame::front(), DVec2::new(r1, 0.0), DVec2::new(r2, h)), theta);
         prop_assert!(k().validate(&b).is_empty());
-        let m = k().mass_properties(&b, 1e-4).unwrap();
+        let m = k().mass_properties(&b, 1e-10).unwrap();
         let expect = theta / 2.0 * (r2 * r2 - r1 * r1) * h;
         prop_assert!(((m.volume - expect) / expect).abs() < 1e-9, "{} vs {}", m.volume, expect);
         assert_watertight(&k().tessellate(&b, &TessellationOptions::default()).unwrap());
@@ -805,7 +805,7 @@ fn cylinder_inertia_and_centroid() {
             },
         )
         .unwrap();
-    let m = k().mass_properties(&b, 1e-3).unwrap();
+    let m = k().mass_properties(&b, 1e-13).unwrap();
     let mass = PI * r * r * h;
     assert!((m.centroid - DVec3::new(0.3, 0.1, h / 2.0)).length() < 1e-12);
     let izz = mass * r * r / 2.0;
@@ -865,6 +865,6 @@ fn revolve_about_offset_axis() {
         .unwrap();
     assert!(k().validate(&b).is_empty());
     assert_watertight(&k().tessellate(&b, &TessellationOptions::default()).unwrap());
-    let m = k().mass_properties(&b, 1e-3).unwrap();
+    let m = k().mass_properties(&b, 1e-13).unwrap();
     assert!((m.centroid.x - x0).abs() < 1e-12 && m.centroid.y.abs() < 1e-12);
 }

@@ -8,6 +8,7 @@ pub mod mirror;
 pub mod offset;
 pub mod pattern;
 pub mod shapes;
+pub mod text;
 pub mod transform;
 pub mod trim;
 
@@ -183,9 +184,9 @@ pub fn deletion(sketch: &SketchData, selected: &BTreeSet<SketchId>) -> Vec<Sketc
     items.into_iter().collect()
 }
 
-/// The construction lines from a selected ellipse's centre to its axis
-/// ends, which the ellipse tools draw with it (design note 0008 §7): they
-/// go with the ellipse unless another ellipse kept shares them.
+/// The construction lines a selected curve's tool drew with it, which go
+/// with it unless a curve kept shares them: an ellipse's lines from its
+/// centre to its axis ends (design note 0008 §7), a text's box (ADR 0015).
 fn semi_axes(sketch: &SketchData, selected: &BTreeSet<SketchId>) -> Vec<SketchId> {
     let axes_of = |g: &Geometry<SketchId>| match *g {
         Geometry::Ellipse {
@@ -198,7 +199,8 @@ fn semi_axes(sketch: &SketchData, selected: &BTreeSet<SketchId>) -> Vec<SketchId
             major,
             minor,
             ..
-        } => Some([(center, major), (center, minor)]),
+        } => Some(vec![(center, major), (center, minor)]),
+        Geometry::Text { corners: c, .. } => Some((0..4).map(|i| (c[i], c[(i + 1) % 4])).collect()),
         _ => None,
     };
     let (mut going, mut kept) = (BTreeSet::new(), BTreeSet::new());

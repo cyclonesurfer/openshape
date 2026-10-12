@@ -69,7 +69,7 @@ fn failed_feature_does_not_stop_later_features() {
     assert!(matches!(r.status(bad), Some(FeatureStatus::Failed(m)) if m.contains("open")));
     assert_eq!(r.status(c), Some(&FeatureStatus::Ok));
     assert_eq!(r.bodies.len(), 2);
-    let v = k.mass_properties(&r.bodies[0].body, 1e-3).unwrap().volume;
+    let v = k.mass_properties(&r.bodies[0].body, 1e-9).unwrap().volume;
     assert!((v - 0.01 * 0.02 * 0.03).abs() < 1e-12);
 
     // Suppress the box: one body left. Undo: two again.

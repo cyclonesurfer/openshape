@@ -25,13 +25,14 @@ use openshape_sketch_solver::{
     conic, measure, resolve_curves, solve, ResolvedCurve, SolveError, SolveOptions, SolveStatus,
     RHO_MIN,
 };
+use openshape_text::Font;
 
 use crate::sketch_ops::fillet::fillet;
 use crate::sketch_ops::shapes::{self, TangentStart};
 use crate::sketch_ops::transform::{self, Similarity};
 use crate::sketch_ops::trim::{self, Cuts, Plan};
 use crate::sketch_ops::{curve_ending_at, deletion, leaving_direction, Batch};
-use crate::sketch_ops::{mirror, offset, pattern};
+use crate::sketch_ops::{mirror, offset, pattern, text};
 use crate::{geometry_edits, Model};
 
 /// Pick radius for points, in screen points.
@@ -1183,8 +1184,19 @@ fn nearest_curve(
     pos: Pos2,
     radius: f32,
 ) -> Option<(SketchId, Pos2)> {
+    nearest_curve_where(d, map, pos, radius, |_| true)
+}
+
+/// [`nearest_curve`] among the curves for which `keep` is true.
+fn nearest_curve_where(
+    d: &SketchDisplay,
+    map: &ScreenMap,
+    pos: Pos2,
+    radius: f32,
+    keep: impl Fn(&DisplayCurve) -> bool,
+) -> Option<(SketchId, Pos2)> {
     let mut best: Option<(SketchId, Pos2, f32)> = None;
-    for c in &d.curves {
+    for c in d.curves.iter().filter(|c| keep(c)) {
         for run in map.polyline(&c.polyline) {
             for w in run.windows(2) {
                 let (dist, q) = segment_distance(pos, w[0], w[1]);
@@ -1317,7 +1329,10 @@ pub fn snap(d: &SketchDisplay, map: &ScreenMap, pos: Pos2, exclude: &[SketchId])
             target: SnapTarget::Origin,
         });
     }
-    if let Some((id, q)) = nearest_curve(d, map, pos, CURVE_PICK) {
+    // Not onto a text's letters: a point cannot be held on them (ADR 0015).
+    let texts = text::texts(&d.sketch);
+    if let Some((id, q)) = nearest_curve_where(d, map, pos, CURVE_PICK, |c| !texts.contains(&c.id))
+    {
         let at = onto_curve(d, id, map.to_plane(q).unwrap_or(free));
         return Some(Snap {
             at,
@@ -1472,11 +1487,13 @@ pub enum Tool {
     Rotate,
     /// Scales the selection (or a copy) about a base point.
     Scale,
+    /// A line of text in a box: a corner, then the height (ADR 0015).
+    Text,
 }
 
 impl Tool {
     /// Every tool, in toolbar order.
-    pub const ALL: [Tool; 28] = [
+    pub const ALL: [Tool; 29] = [
         Tool::Select,
         Tool::Line,
         Tool::Rectangle,
@@ -1494,6 +1511,7 @@ impl Tool {
         Tool::Spline,
         Tool::ControlSpline,
         Tool::Conic,
+        Tool::Text,
         Tool::Trim,
         Tool::Extend,
         Tool::Split,
@@ -1539,6 +1557,7 @@ impl Tool {
                 &[Tool::LinearPattern, Tool::CircularPattern]
             }
             Tool::Move | Tool::Rotate | Tool::Scale => &[Tool::Move, Tool::Rotate, Tool::Scale],
+            Tool::Text => &[Tool::Text],
         }
     }
 
@@ -1573,6 +1592,7 @@ impl Tool {
             Tool::Move => "Move",
             Tool::Rotate => "Rotate",
             Tool::Scale => "Scale",
+            Tool::Text => "Text",
         }
     }
 
@@ -1625,7 +1645,8 @@ impl Tool {
             | Tool::Conic
             | Tool::Move
             | Tool::Rotate
-            | Tool::Scale => return None,
+            | Tool::Scale
+            | Tool::Text => return None,
         })
     }
 
@@ -1692,6 +1713,8 @@ impl Tool {
             (Tool::Ellipse, _) | (Tool::EllipticalArc, 2) => "Click to set the second axis",
             (Tool::EllipticalArc, 3) => "Click the start point on the ellipse",
             (Tool::EllipticalArc, _) => "Move around the ellipse and click the end point",
+            (Tool::Text, 0) => "Type the text and choose a font, then click a corner of its box",
+            (Tool::Text, _) => "Click to set the text's height (the box grows towards the pointer)",
             (Tool::Conic, 0) => "Click the start point",
             (Tool::Conic, 1) => "Click the end point",
             (Tool::Conic, 2) => "Click where the tangents at the two ends meet",
@@ -1832,6 +1855,8 @@ enum Kind {
     Ellipse,
     /// A conic arc.
     Conic,
+    /// Text (ADR 0015).
+    Text,
 }
 
 impl Kind {
@@ -1849,6 +1874,7 @@ fn kind(sketch: &SketchData, id: SketchId) -> Option<Kind> {
         Geometry::ControlSpline { .. } | Geometry::InterpolatedSpline { .. } => Kind::Spline,
         Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. } => Kind::Ellipse,
         Geometry::Conic { .. } => Kind::Conic,
+        Geometry::Text { .. } => Kind::Text,
     })
 }
 
@@ -1914,6 +1940,9 @@ pub fn constraints_for(
     selection: &[SketchId],
     sketch: &SketchData,
 ) -> Result<Vec<Constraint<SketchId>>, String> {
+    if selection.iter().any(|id| text::is_text(sketch, *id)) {
+        return Err(text::CONSTRAIN_THE_BOX.into());
+    }
     let items: Vec<(SketchId, Kind)> = selection
         .iter()
         .filter_map(|id| Some((*id, kind(sketch, *id)?)))
@@ -2123,6 +2152,9 @@ pub fn dimension_for(
     selection: &[SketchId],
     sketch: &SketchData,
 ) -> Result<Constraint<SketchId>, String> {
+    if selection.iter().any(|id| text::is_text(sketch, *id)) {
+        return Err(text::CONSTRAIN_THE_BOX.into());
+    }
     let items: Vec<(SketchId, Kind)> = selection
         .iter()
         .filter_map(|id| Some((*id, kind(sketch, *id)?)))
@@ -2414,6 +2446,26 @@ pub struct SketchEditor {
     pub transform_angle: f64,
     /// The Scale tool's typed factor.
     pub transform_factor: f64,
+    /// The text the Text tool places.
+    pub text_content: String,
+    /// The font the Text tool places it in.
+    pub text_font: Font,
+    /// The selected text's characters and font as being edited in the
+    /// dialog (applied with [`SketchEditor::apply_text`]).
+    pub text_edit: Option<TextEdit>,
+}
+
+/// A selected text's characters and font, as typed in the dialog.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextEdit {
+    /// The text.
+    pub entity: SketchId,
+    /// Its characters.
+    pub content: String,
+    /// Its font.
+    pub font: Font,
+    /// Its characters and font when loaded from the document.
+    pub loaded: (String, Font),
 }
 
 /// What the trim, extend or split tool would do at the pointer.
@@ -2460,6 +2512,9 @@ impl SketchEditor {
             transform_offset: DVec2::ZERO,
             transform_angle: FRAC_PI_2,
             transform_factor: 2.0,
+            text_content: text::DEFAULT_TEXT.to_string(),
+            text_font: Font::DEFAULT,
+            text_edit: None,
         }
     }
 
@@ -3116,6 +3171,61 @@ impl SketchEditor {
         }
     }
 
+    /// Keeps [`SketchEditor::text_edit`] on the selected text: loaded when
+    /// a single text is selected (with the Select tool) or when the
+    /// document's text changed under it (undo, say), cleared otherwise.
+    pub fn sync_text_edit(&mut self, model: &Model) {
+        let selected = match (self.tool, self.selection.as_slice()) {
+            (Tool::Select, [id]) => model
+                .sketch_def(self.feature)
+                .and_then(|def| Some((*id, text::text_of(&def.sketch, *id)?))),
+            _ => None,
+        };
+        let Some((entity, (content, font))) = selected else {
+            self.text_edit = None;
+            return;
+        };
+        let font = Font::from_name(&font).unwrap_or(Font::DEFAULT);
+        let current = (content.clone(), font);
+        if self
+            .text_edit
+            .as_ref()
+            .is_none_or(|e| e.entity != entity || e.loaded != current)
+        {
+            self.text_edit = Some(TextEdit {
+                entity,
+                content,
+                font,
+                loaded: current,
+            });
+        }
+    }
+
+    /// Gives the selected text (and its mirror images and pattern copies)
+    /// the characters and font typed in the dialog, in one undo step; the
+    /// box keeps its corner, height and direction and takes the new width.
+    pub fn apply_text(&mut self, model: &mut Model) {
+        let Some(edit) = self.text_edit.clone() else {
+            return;
+        };
+        let Some(def) = model.sketch_def(self.feature) else {
+            return;
+        };
+        let done = text::set_text(&def.sketch, edit.entity, &edit.content, edit.font)
+            .and_then(|edits| model.edit_sketch_checked(self.feature, edits));
+        self.message = match done {
+            Ok(_) => {
+                // The document has the typed text now; an undo reloads.
+                self.text_edit = Some(TextEdit {
+                    loaded: (edit.content.clone(), edit.font),
+                    ..edit
+                });
+                self.solve_message(model).or(Some("Text changed".into()))
+            }
+            Err(e) => Some(format!("Text not changed: {e}")),
+        };
+    }
+
     /// Applies the transform tool's typed amount: the offsets (Move), the
     /// angle about the clicked centre (Rotate) or the factor about the
     /// clicked base point (Scale), in one undo step.
@@ -3305,8 +3415,13 @@ impl SketchEditor {
         target: SketchId,
         at: DVec2,
     ) -> Result<Plan, String> {
+        if text::is_text(&d.sketch, target) {
+            return Err(text::NOT_EDITABLE.into());
+        }
         let curves: Vec<(SketchId, ResolvedCurve)> =
             d.curves.iter().map(|c| (c.id, c.curve.clone())).collect();
+        // Letters cut curves, but no end can be held on them.
+        let texts = text::texts(&d.sketch);
         match self.tool {
             Tool::Trim => {
                 // Finding cuts intersects the curve with every other one;
@@ -3314,13 +3429,13 @@ impl SketchEditor {
                 let fresh = !matches!(&self.cuts,
                     Some((c, k)) if k.target == target && *c == curves);
                 if fresh {
-                    let k = trim::cuts(model.kernel(), &curves, target)?;
+                    let k = trim::cuts(model.kernel(), &curves, target, &texts)?;
                     self.cuts = Some((curves, k));
                 }
                 let (_, k) = self.cuts.as_ref().expect("cuts were just found");
                 trim::trim(&d.sketch, k, at)
             }
-            Tool::Extend => trim::extend(model.kernel(), &d.sketch, &curves, target, at),
+            Tool::Extend => trim::extend(model.kernel(), &d.sketch, &curves, target, at, &texts),
             Tool::Split => trim::split(&d.sketch, &curves, target, at),
             _ => Err("not a curve editing tool".into()),
         }
@@ -3526,6 +3641,10 @@ impl SketchEditor {
                     _ => vec![pts],
                 }
             }
+            (Tool::Text, 1) => match text::layout(&self.text_content, self.text_font) {
+                Ok(layout) => text::preview(c[0].at, cur.at, &layout),
+                Err(_) => vec![vec![c[0].at, cur.at]],
+            },
             (Tool::Conic, 1) => vec![vec![c[0].at, cur.at]],
             (Tool::Conic, 2) => {
                 // The control polygon to the pointer and the parabola
@@ -3637,6 +3756,26 @@ impl SketchEditor {
             | Tool::Move
             | Tool::Rotate
             | Tool::Scale => {}
+            Tool::Text => {
+                let Some(first) = self.clicks.first().copied() else {
+                    // Say at once if the text cannot be laid out.
+                    match text::layout(&self.text_content, self.text_font) {
+                        Ok(_) => self.clicks.push(s),
+                        Err(e) => self.message = Some(format!("Text not placed: {e}")),
+                    }
+                    return;
+                };
+                let mut b = Batch::default();
+                let made = text::place(
+                    &mut b,
+                    &first,
+                    s.at,
+                    &self.text_content,
+                    self.text_font,
+                    construction,
+                );
+                self.commit_shape(model, made.map(|()| b.edits));
+            }
             Tool::Point => {
                 let mut b = Batch::default();
                 let p = b.snapped_point(&s);

@@ -287,6 +287,7 @@ impl Command {
                 Tool::LinearPattern => Icon::LinearPattern,
                 Tool::CircularPattern => Icon::CircularPattern,
                 Tool::Ellipse => Icon::Ellipse,
+                Tool::Text => Icon::Text,
                 Tool::EllipticalArc => Icon::EllipticalArc,
                 Tool::Conic => Icon::Conic,
                 Tool::Move => Icon::Move,

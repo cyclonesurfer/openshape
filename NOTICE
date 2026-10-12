@@ -33,3 +33,15 @@ The user interface draws text with the fonts bundled by the egui toolkit
     Bitstream Vera Sans Mono (the DejaVu contributions are public domain)
   - Noto Emoji: SIL Open Font License 1.1
   - emoji-icon-font (John Slegers): MIT License
+
+Sketch text is laid out in fonts bundled with OpenShape (crates/text/fonts),
+unmodified:
+  - Liberation Sans, Liberation Serif and Liberation Mono 2.1.5, regular
+    and bold: SIL Open Font License 1.1. Digitized data copyright (c) 2010
+    Google Corporation, with Reserved Font Arimo, Tinos and Cousine;
+    copyright (c) 2012 Red Hat, Inc., with Reserved Font Name Liberation.
+    The licence and notices are in crates/text/fonts/OFL.txt.
+Text is shaped with the harfrust crate (MIT License), the HarfBuzz
+project's Rust port of its shaping algorithm, and font metrics and glyph
+outlines are read with the skrifa and read-fonts crates (MIT OR
+Apache-2.0) of the fontations project.

@@ -172,6 +172,12 @@ pub fn fillet(
     let mut sides = Vec::new();
     for e in &sketch.entities {
         let (start, end) = match &e.geometry {
+            Geometry::Text { corners, .. } => {
+                if corners.iter().any(|c| at_corner(*c)) {
+                    return Err("A text's box keeps square corners; it cannot be filleted".into());
+                }
+                continue;
+            }
             Geometry::Line { start, end } | Geometry::Arc { start, end, .. } => (*start, *end),
             Geometry::ControlSpline { control: p, .. }
             | Geometry::InterpolatedSpline { through: p, .. } => {

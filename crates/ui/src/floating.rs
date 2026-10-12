@@ -9,6 +9,7 @@ use egui::{
 use openshape_core_model::sketch::DistanceKind;
 use openshape_core_model::ModelOp;
 use openshape_features::FeatureStatus;
+use openshape_text::Font;
 use openshape_ui_kit::palette::{PaletteEntry, PaletteOutcome};
 use openshape_ui_kit::{icon_button, paint_icon, Icon, Theme};
 
@@ -109,6 +110,20 @@ pub fn floating_dialog(
 }
 
 /// A labelled text field with a unit after it.
+/// Width of the sketch dialog's text fields (points).
+const TEXT_FIELD_WIDTH: f32 = 150.0;
+
+/// A drop-down of the bundled fonts.
+fn font_choice(ui: &mut Ui, id: &str, font: &mut Font) {
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(font.name())
+        .show_ui(ui, |ui| {
+            for f in Font::ALL {
+                ui.selectable_value(font, f, f.name());
+            }
+        });
+}
+
 fn field(ui: &mut Ui, theme: &Theme, label: &str, text: &mut String, unit: &str) {
     ui.label(RichText::new(label).color(theme.text_muted));
     ui.horizontal(|ui| {
@@ -352,6 +367,9 @@ impl OpenShapeApp {
     }
 
     fn sketch_dialog(&mut self, ctx: &egui::Context) {
+        if let Some(ed) = self.sketch.as_mut() {
+            ed.sync_text_edit(&self.model);
+        }
         let Some(ed) = self.sketch.as_ref() else {
             return;
         };
@@ -393,6 +411,10 @@ impl OpenShapeApp {
         let mut copy = ed.transform_copy;
         let mut keep = ed.transform_keep;
         let mut apply = false;
+        let mut text_content = ed.text_content.clone();
+        let mut text_font = ed.text_font;
+        let mut text_edit = ed.text_edit.clone();
+        let mut apply_text = false;
         let (action, rect) = floating_dialog(
             ctx,
             &theme,
@@ -414,6 +436,36 @@ impl OpenShapeApp {
                         if tool == Tool::Polygon {
                             ui.label(RichText::new("Sides").color(theme.text_muted));
                             ui.add(egui::DragValue::new(&mut sides).range(MIN_SIDES..=MAX_SIDES));
+                            ui.end_row();
+                        }
+                        if tool == Tool::Text {
+                            ui.label(RichText::new("Text").color(theme.text_muted));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut text_content)
+                                    .desired_width(TEXT_FIELD_WIDTH),
+                            );
+                            ui.end_row();
+                            ui.label(RichText::new("Font").color(theme.text_muted));
+                            font_choice(ui, "text tool font", &mut text_font);
+                            ui.end_row();
+                        }
+                        if let Some(e) = text_edit.as_mut() {
+                            ui.label(RichText::new("Text").color(theme.text_muted));
+                            let field = ui.add(
+                                egui::TextEdit::singleline(&mut e.content)
+                                    .desired_width(TEXT_FIELD_WIDTH),
+                            );
+                            if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                apply_text = true;
+                            }
+                            ui.end_row();
+                            ui.label(RichText::new("Font").color(theme.text_muted));
+                            ui.horizontal(|ui| {
+                                font_choice(ui, "selected text font", &mut e.font);
+                                if ui.button("Apply").clicked() {
+                                    apply_text = true;
+                                }
+                            });
                             ui.end_row();
                         }
                         if tool == Tool::SketchFillet {
@@ -506,6 +558,12 @@ impl OpenShapeApp {
         );
         self.layout.dialog = Some(rect);
         if let Some(ed) = self.sketch.as_mut() {
+            ed.text_content = text_content;
+            ed.text_font = text_font;
+            ed.text_edit = text_edit;
+            if apply_text {
+                ed.apply_text(&mut self.model);
+            }
             ed.polygon_sides = sides;
             ed.pattern_count = count;
             ed.transform_copy = copy;

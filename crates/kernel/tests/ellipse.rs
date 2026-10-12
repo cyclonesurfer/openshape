@@ -238,7 +238,7 @@ fn check_body(body: &openshape_kernel::Body, volume: f64, area: f64) {
     let t = kern.topology(body);
     assert_eq!(t.genus, Some(0));
     assert_eq!(t.solids, 1);
-    let m = kern.mass_properties(body, 1e-4).unwrap();
+    let m = kern.mass_properties(body, 1e-10).unwrap();
     assert_rel(m.volume, volume, 1e-9);
     assert_rel(m.area, area, 1e-9);
     for opts in [
@@ -349,7 +349,7 @@ fn a_revolved_ellipse_is_an_elliptic_torus() {
         let kern = k();
         assert!(kern.validate(&body).is_empty());
         assert_eq!(kern.topology(&body).genus, Some(1));
-        let m = kern.mass_properties(&body, 1e-4).unwrap();
+        let m = kern.mass_properties(&body, 1e-10).unwrap();
         assert_rel(m.volume, TAU * d * PI * a * b, 1e-9);
         assert_rel(m.area, TAU * d * perimeter(a, b), 1e-9);
         for opts in [

@@ -1,0 +1,24 @@
+[package]
+name = "openshape-text"
+description = "Lays out a line of text in OpenShape's bundled fonts as outline curves"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# Our code is GPL; the bundled fonts in fonts/ stay under the SIL Open Font
+# Licence 1.1 (ADR 0015).
+license = "GPL-3.0-or-later AND OFL-1.1"
+repository.workspace = true
+authors.workspace = true
+include = ["src/**", "fonts/**", "tests/**", "Cargo.toml"]
+
+[dependencies]
+glam.workspace = true
+harfrust.workspace = true
+skrifa.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[lints]
+workspace = true

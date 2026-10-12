@@ -24,6 +24,7 @@ mod spline;
 
 pub use glam::DVec2;
 pub use model::*;
+pub use resolve::text_curves;
 pub use spline::clamped_uniform_knots;
 
 use std::collections::BTreeMap;

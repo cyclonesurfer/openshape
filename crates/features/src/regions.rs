@@ -10,9 +10,11 @@ use openshape_kernel::{Kernel, RegionLoop, SketchArrangement};
 use crate::SketchRegions;
 
 /// The key of every region of `arrangement`, whose curve `i` belongs to the
-/// sketch curve `owners[i]`.
+/// sketch curve `owners[i]`. An entity with several curves (text) numbers
+/// them in order as parts (ADR 0015).
 pub fn region_keys(arrangement: &SketchArrangement, owners: &[SketchId]) -> Vec<RegionKey> {
-    let vertices = vertex_keys(arrangement, owners);
+    let parts = parts_of(owners);
+    let vertices = vertex_keys(arrangement, owners, &parts);
     arrangement
         .regions
         .iter()
@@ -20,10 +22,10 @@ pub fn region_keys(arrangement: &SketchArrangement, owners: &[SketchId]) -> Vec<
             let mut holes: Vec<Vec<EdgeKey>> = r
                 .holes
                 .iter()
-                .map(|h| loop_key(h, arrangement, owners, &vertices))
+                .map(|h| loop_key(h, arrangement, owners, &parts, &vertices))
                 .collect();
             holes.sort();
-            let mut loops = vec![loop_key(&r.outer, arrangement, owners, &vertices)];
+            let mut loops = vec![loop_key(&r.outer, arrangement, owners, &parts, &vertices)];
             loops.extend(holes);
             RegionKey {
                 loops,
@@ -33,20 +35,39 @@ pub fn region_keys(arrangement: &SketchArrangement, owners: &[SketchId]) -> Vec<
         .collect()
 }
 
-/// Names every vertex by the sketch curves through it, with an ordinal for
-/// vertices sharing the same curves, ordered along the first of them.
-fn vertex_keys(arrangement: &SketchArrangement, owners: &[SketchId]) -> Vec<VertexKey> {
-    let sets: Vec<Vec<SketchId>> = arrangement
+/// Each curve's index among the curves of its owner.
+fn parts_of(owners: &[SketchId]) -> Vec<u32> {
+    let mut count: BTreeMap<SketchId, u32> = BTreeMap::new();
+    owners
+        .iter()
+        .map(|o| {
+            let n = count.entry(*o).or_insert(0);
+            *n += 1;
+            *n - 1
+        })
+        .collect()
+}
+
+/// Names every vertex by the sketch curves (and parts) through it, with an
+/// ordinal for vertices sharing the same curves, ordered along the first of
+/// them.
+fn vertex_keys(
+    arrangement: &SketchArrangement,
+    owners: &[SketchId],
+    parts: &[u32],
+) -> Vec<VertexKey> {
+    let sets: Vec<Vec<(SketchId, u32)>> = arrangement
         .vertices
         .iter()
         .map(|v| {
-            let mut s: Vec<SketchId> = v.curves.iter().map(|&c| owners[c]).collect();
+            let mut s: Vec<(SketchId, u32)> =
+                v.curves.iter().map(|&c| (owners[c], parts[c])).collect();
             s.sort();
             s.dedup();
             s
         })
         .collect();
-    let mut groups: BTreeMap<&[SketchId], Vec<usize>> = BTreeMap::new();
+    let mut groups: BTreeMap<&[(SketchId, u32)], Vec<usize>> = BTreeMap::new();
     for (i, s) in sets.iter().enumerate() {
         groups.entry(s.as_slice()).or_default().push(i);
     }
@@ -59,7 +80,7 @@ fn vertex_keys(arrangement: &SketchArrangement, owners: &[SketchId]) -> Vec<Vert
                 vx.curves
                     .iter()
                     .zip(&vx.params)
-                    .find(|(c, _)| Some(owners[**c]) == first)
+                    .find(|(c, _)| Some((owners[**c], parts[**c])) == first)
                     .map(|(_, t)| *t)
                     .unwrap_or(0.0)
             };
@@ -77,7 +98,19 @@ fn vertex_keys(arrangement: &SketchArrangement, owners: &[SketchId]) -> Vec<Vert
     }
     sets.into_iter()
         .zip(ordinal)
-        .map(|(entities, ordinal)| VertexKey { entities, ordinal })
+        .map(|(set, ordinal)| {
+            let entities = set.iter().map(|(e, _)| *e).collect();
+            let parts = if set.iter().any(|(_, p)| *p != 0) {
+                set.iter().map(|(_, p)| *p).collect()
+            } else {
+                Vec::new()
+            };
+            VertexKey {
+                entities,
+                ordinal,
+                parts,
+            }
+        })
         .collect()
 }
 
@@ -85,6 +118,7 @@ fn loop_key(
     l: &RegionLoop,
     arrangement: &SketchArrangement,
     owners: &[SketchId],
+    parts: &[u32],
     vertices: &[VertexKey],
 ) -> Vec<EdgeKey> {
     let mut keys: Vec<EdgeKey> = l
@@ -102,6 +136,7 @@ fn loop_key(
                 forward,
                 from: vertices[from].clone(),
                 to: vertices[to].clone(),
+                part: parts[edge.curve],
             }
         })
         .collect();

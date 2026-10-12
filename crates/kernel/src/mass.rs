@@ -13,14 +13,15 @@
 //!
 //! Both the inner integrals and the boundary integrals use Gauss–Legendre
 //! quadrature on the exact surfaces and edge curves, so the result does not
-//! depend on a tessellation; accuracy is limited only by quadrature (close to
-//! machine precision for analytic geometry).
+//! depend on a tessellation. The boundary integrals are adaptive (see
+//! [`Adaptive`]) to the requested accuracy, which for smooth geometry is
+//! reached with few evaluations and can be asked down to rounding.
 
 use glam::{DMat3, DVec2, DVec3};
 
 use crate::geom::Surface;
 use crate::topo::{Brep, Face};
-use crate::MassProperties;
+use crate::{KernelError, MassProperties};
 
 /// Gauss–Legendre nodes and weights on [-1, 1] (Newton iteration on P_n).
 fn gauss_legendre(n: usize) -> Vec<(f64, f64)> {
@@ -59,8 +60,13 @@ fn add(a: &mut Acc, b: &Acc, s: f64) {
 
 /// Integrand vector at parameter point `uv`, with coordinates relative to `o`.
 fn integrand(s: &Surface, uv: DVec2, o: DVec3) -> Acc {
-    let p = s.point(uv.x, uv.y) - o;
     let (su, sv) = s.derivs(uv.x, uv.y);
+    integrand_at(s.point(uv.x, uv.y) - o, su, sv)
+}
+
+/// Integrand vector at a surface point `p` (relative to the origin) with
+/// partial derivatives `su`, `sv`.
+fn integrand_at(p: DVec3, su: DVec3, sv: DVec3) -> Acc {
     let n = su.cross(sv);
     [
         n.length(),
@@ -98,6 +104,17 @@ impl Ctx<'_> {
         };
         let half = 0.5 * (b - a);
         if half == 0.0 {
+            return acc;
+        }
+        // Along an extrusion's v the base curve's point and tangent are
+        // fixed: evaluate them once.
+        if let (Surface::Extrusion { curve, dir, .. }, false) = (self.surface, self.inner_u) {
+            let base = curve.point(uv.x) - self.origin;
+            let su = curve.deriv(uv.x);
+            for &(x, w) in &self.inner {
+                let t = a + half * (x + 1.0);
+                add(&mut acc, &integrand_at(base + *dir * t, su, *dir), w * half);
+            }
             return acc;
         }
         for &(x, w) in &self.inner {
@@ -155,14 +172,102 @@ fn end_uv(s: &Surface, p_end: DVec3, p_inside: DVec3) -> DVec2 {
     }
 }
 
+/// The deepest bisection of a boundary piece. A piece that still misses
+/// its tolerance there makes the whole computation fail (at once) rather
+/// than return a value it cannot vouch for.
+const MAX_DEPTH: u32 = 30;
+
+/// Differences below this fraction of a piece's absolute integral are
+/// rounding noise: the integrand is evaluated in floating point, so no
+/// rule resolves finer differences (the termination criterion of Gander &
+/// Gautschi, below). Requested accuracies finer than this mean this.
+const NOISE: f64 = 1e-13;
+
+/// Adaptive Gauss–Legendre quadrature over one smooth piece of an edge
+/// (Gander & Gautschi, "Adaptive Quadrature — Revisited", BIT 40, 2000).
+struct Adaptive<'a> {
+    /// The integrand.
+    g: &'a dyn Fn(f64) -> Acc,
+    /// The rule (8 points: exact to degree 15).
+    gl: &'a [(f64, f64)],
+    /// Allowed error as a fraction of a piece's absolute integral.
+    relative: f64,
+    /// Allowed error per component per unit of parameter length regardless
+    /// of the integral (the rounding floor of a component that vanishes on
+    /// the piece up to rounding).
+    floor: Acc,
+}
+
+/// The result of [`Adaptive::run`] on a piece: its integral, and whether
+/// every piece met its tolerance.
+struct Quad {
+    value: Acc,
+    converged: bool,
+}
+
+impl Adaptive<'_> {
+    /// Integrates over `[a, b]`, given the rule's value `whole` there.
+    ///
+    /// The rule on the two halves is compared with `whole`; the halves are
+    /// accepted when every component differs by at most the relative
+    /// tolerance times the integral of the component's magnitude over the
+    /// piece, or by at most its floor times the piece's length (the
+    /// halves' own error is far smaller for smooth integrands). Otherwise
+    /// each half is refined in turn.
+    ///
+    /// The estimate assumes the integrand is smooth on the piece, which
+    /// the splitting into pieces at knots ensures: a jump between samples
+    /// is invisible to any sampling rule.
+    fn run(&self, a: f64, b: f64, whole: &Acc, depth: u32, out: &mut Quad) {
+        if !out.converged {
+            // The result is already known to be refused.
+            return;
+        }
+        let m = 0.5 * (a + b);
+        let (left, left_abs) = rule(self.g, a, m, self.gl);
+        let (right, right_abs) = rule(self.g, m, b, self.gl);
+        let len = (b - a).abs();
+        let ok = (0..11).all(|k| {
+            let d = (left[k] + right[k] - whole[k]).abs();
+            d <= self.relative * (left_abs[k] + right_abs[k]) || d <= self.floor[k] * len
+        });
+        if ok {
+            add(&mut out.value, &left, 1.0);
+            add(&mut out.value, &right, 1.0);
+        } else if depth >= MAX_DEPTH || m == a || m == b {
+            add(&mut out.value, &left, 1.0);
+            add(&mut out.value, &right, 1.0);
+            out.converged = false;
+        } else {
+            self.run(a, m, &left, depth + 1, out);
+            self.run(m, b, &right, depth + 1, out);
+        }
+    }
+}
+
+/// The Gauss–Legendre rule `gl` for `g` on `[a, b]`, and the same rule
+/// for `|g|` (the scale of the rounding noise in the first).
+fn rule(g: &dyn Fn(f64) -> Acc, a: f64, b: f64, gl: &[(f64, f64)]) -> (Acc, Acc) {
+    let half = 0.5 * (b - a);
+    let mut acc = [0.0; 11];
+    let mut abs = [0.0; 11];
+    for &(x, w) in gl {
+        let v = g(a + half * (x + 1.0));
+        add(&mut acc, &v, w * half);
+        add(&mut abs, &v.map(f64::abs), w * half.abs());
+    }
+    (acc, abs)
+}
+
 fn face_integrals(
     b: &Brep,
     f: &Face,
     origin: DVec3,
-    chord: f64,
+    relative: f64,
+    floor: &Acc,
     gl_edge: &[(f64, f64)],
     gl_inner: &[(f64, f64)],
-) -> Acc {
+) -> Quad {
     let s = &f.surface;
     let inner_u = !matches!(s, Surface::Extrusion { .. });
     // Reference line: middle of the boundary's parameter range.
@@ -185,7 +290,10 @@ fn face_integrals(
         reference: if inner_u { mid.x } else { mid.y },
         inner: gl_inner.to_vec(),
     };
-    let mut acc = [0.0; 11];
+    let mut acc = Quad {
+        value: [0.0; 11],
+        converged: true,
+    };
     for l in &f.loops {
         let n = l.coedges.len();
         let mut starts = Vec::with_capacity(n);
@@ -200,19 +308,29 @@ fn face_integrals(
             };
             starts.push(end_uv(s, e.curve.point(ta), e.curve.point(ia)));
             ends.push(end_uv(s, e.curve.point(tb), e.curve.point(ib)));
-            // Boundary integral along the edge.
-            let ts = e.curve.discretize(e.t0, e.t1, chord, 0.3);
+            // Boundary integral along the edge, adaptively on each smooth
+            // piece; the floor is shared out by parameter length.
             let dir = if c.forward { 1.0 } else { -1.0 };
-            for w in ts.windows(2) {
-                let half = 0.5 * (w[1] - w[0]);
-                for &(x, wt) in gl_edge {
-                    let t = w[0] + half * (x + 1.0);
-                    let (u, v) = s.project(e.curve.point(t));
-                    let uv = DVec2::new(u, v);
-                    let duv = param_velocity(s, uv, e.curve.deriv(t)) * dir;
-                    let (val, d) = ctx.boundary(uv, duv);
-                    add(&mut acc, &val, d * wt * half);
+            let g = |t: f64| -> Acc {
+                let (u, v) = s.project(e.curve.point(t));
+                let uv = DVec2::new(u, v);
+                let duv = param_velocity(s, uv, e.curve.deriv(t)) * dir;
+                let (mut val, d) = ctx.boundary(uv, duv);
+                for x in &mut val {
+                    *x *= d;
                 }
+                val
+            };
+            let span = (e.t1 - e.t0).abs();
+            let quad = Adaptive {
+                g: &g,
+                gl: gl_edge,
+                relative,
+                floor: floor.map(|x| x / span),
+            };
+            for w in e.curve.smooth_breaks(e.t0, e.t1).windows(2) {
+                let (whole, _) = rule(&g, w[0], w[1], gl_edge);
+                quad.run(w[0], w[1], &whole, 0, &mut acc);
             }
         }
         // Parameter-space connectors at singular points (zero length in 3D).
@@ -224,7 +342,7 @@ fn face_integrals(
                 for &(x, wt) in gl_edge {
                     let uv = a + d * (0.5 * (x + 1.0));
                     let (val, dd) = ctx.boundary(uv, d);
-                    add(&mut acc, &val, dd * wt * 0.5);
+                    add(&mut acc.value, &val, dd * wt * 0.5);
                 }
             }
         }
@@ -232,13 +350,23 @@ fn face_integrals(
     // The loop traversal already carries the face sense for flux terms; the
     // area integrand is unsigned, so restore its sign.
     if !f.forward {
-        acc[0] = -acc[0];
+        acc.value[0] = -acc.value[0];
     }
     acc
 }
 
-/// Mass properties of a body with unit density.
-pub(crate) fn mass_properties(b: &Brep, chord: f64) -> MassProperties {
+/// Mass properties of a body with unit density: each integral to within
+/// `relative_accuracy` (no finer than [`NOISE`]) of the boundary integral
+/// of its integrand's magnitude, as estimated by [`Adaptive`], plus a
+/// rounding floor of [`NOISE`] times the body's `size` to the integral's
+/// dimension (area L², volume L³, first moments L⁴, second moments L⁵).
+/// Fails if some piece of the boundary cannot be integrated that
+/// accurately.
+pub(crate) fn mass_properties(
+    b: &Brep,
+    size: f64,
+    relative_accuracy: f64,
+) -> Result<MassProperties, KernelError> {
     let gl_edge = gauss_legendre(8);
     let gl_inner = gauss_legendre(16);
     // Integrate about the vertex centroid for conditioning.
@@ -247,10 +375,26 @@ pub(crate) fn mass_properties(b: &Brep, chord: f64) -> MassProperties {
     } else {
         b.vertices.iter().map(|v| v.point).sum::<DVec3>() / b.vertices.len() as f64
     };
+    let coedges: usize = b
+        .faces
+        .iter()
+        .flat_map(|f| &f.loops)
+        .map(|l| l.coedges.len())
+        .sum();
+    let share = NOISE / coedges.max(1) as f64;
+    let dims = [2, 3, 4, 4, 4, 5, 5, 5, 5, 5, 5];
+    let floor: Acc = dims.map(|d| share * size.powi(d));
+    let relative = relative_accuracy.max(NOISE);
     let mut acc = [0.0; 11];
     for f in &b.faces {
-        let fa = face_integrals(b, f, origin, chord, &gl_edge, &gl_inner);
-        add(&mut acc, &fa, 1.0);
+        let fa = face_integrals(b, f, origin, relative, &floor, &gl_edge, &gl_inner);
+        if !fa.converged {
+            return Err(KernelError::MassProperties(format!(
+                "the boundary integrals did not converge to a relative accuracy of \
+                 {relative_accuracy:e}"
+            )));
+        }
+        add(&mut acc, &fa.value, 1.0);
     }
     let volume = acc[1];
     let first = DVec3::new(acc[2], acc[3], acc[4]);
@@ -268,12 +412,12 @@ pub(crate) fn mass_properties(b: &Brep, chord: f64) -> MassProperties {
     let cov_c = cov_o - DMat3::from_cols(d * d.x, d * d.y, d * d.z) * volume;
     let tr = cov_c.x_axis.x + cov_c.y_axis.y + cov_c.z_axis.z;
     let inertia = DMat3::from_diagonal(DVec3::splat(tr)) - cov_c;
-    MassProperties {
+    Ok(MassProperties {
         volume,
         area: acc[0],
         centroid: origin + d,
         inertia: inertia.to_cols_array_2d(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -288,5 +432,58 @@ mod tests {
         assert!((s - 2.0 / 15.0).abs() < 1e-14);
         let w: f64 = g.iter().map(|(_, w)| w).sum();
         assert!((w - 2.0).abs() < 1e-14);
+    }
+
+    fn integrate(g: &dyn Fn(f64) -> Acc, relative: f64) -> Quad {
+        let gl = gauss_legendre(8);
+        let quad = Adaptive {
+            g,
+            gl: &gl,
+            relative,
+            floor: [0.0; 11],
+        };
+        let mut out = Quad {
+            value: [0.0; 11],
+            converged: true,
+        };
+        let (whole, _) = rule(g, 0.0, 1.0, &gl);
+        quad.run(0.0, 1.0, &whole, 0, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_sharp_peak_is_resolved_however_the_first_rules_agree() {
+        // ∫₀¹ w/(1 + w²(t − ½)²) dt = 2·atan(w/2): almost all of it within
+        // 1/w of the middle, where the first rules barely look.
+        for w in [10.0, 1e3, 1e5] {
+            let g = |t: f64| {
+                let mut v = [0.0; 11];
+                let x = w * (t - 0.5);
+                v[1] = w / (1.0 + x * x);
+                v
+            };
+            let q = integrate(&g, 1e-12);
+            assert!(q.converged);
+            let exact = 2.0 * (w / 2.0).atan();
+            assert!(
+                (q.value[1] - exact).abs() < 1e-12 * exact,
+                "{w}: {}",
+                q.value[1]
+            );
+        }
+    }
+
+    #[test]
+    fn an_integrand_it_cannot_resolve_is_reported() {
+        // Evaluation noise of 10 % (a hash of the parameter's bits): no
+        // piece ever passes a relative test, so the result is refused
+        // rather than returned.
+        let g = |t: f64| {
+            let mut v = [0.0; 11];
+            let h = t.to_bits().wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 11;
+            v[1] = 1.0 + 0.1 * (h as f64 / (1u64 << 53) as f64 - 0.5);
+            v
+        };
+        assert!(!integrate(&g, 1e-9).converged);
     }
 }

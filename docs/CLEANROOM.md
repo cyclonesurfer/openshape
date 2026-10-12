@@ -68,6 +68,14 @@ documentation shipped with the program, file formats or metadata. The test
   toolkit (Ubuntu Light, Hack, Noto Emoji and emoji-icon-font), under their
   own open licences (Ubuntu Font Licence 1.0, MIT with the Bitstream Vera
   licence, SIL OFL 1.1 and MIT respectively). See `NOTICE`.
+- Sketch text (the geometry a user types into a sketch) is laid out with
+  the Liberation fonts 2.1.5 (Sans, Serif and Mono, regular and bold), SIL
+  Open Font License 1.1, bundled unmodified in `crates/text/fonts/` with
+  their licence. Characters are shaped by the harfrust crate (MIT), the
+  HarfBuzz project's Rust port of its shaper, and the glyph outlines,
+  read with the skrifa crate (MIT OR Apache-2.0), are used exactly as
+  drawn ([ADR 0015](adr/0015-sketch-text.md)). The font
+  format is the public OpenType specification.
 
 ## Records
 

@@ -180,12 +180,18 @@ fn point_pairs(sketch: &SketchData, s: SketchId, i: SketchId) -> Vec<(SketchId, 
         .collect()
 }
 
-/// The entities to mirror for a selection: its curves, and its points that
-/// are not points of a selected curve (those come with their curve).
+/// The entities to mirror for a selection: its curves (a text with its
+/// box lines), and its points that are not points of a selected curve
+/// (those come with their curve).
 pub fn sources(sketch: &SketchData, selection: &[SketchId]) -> Vec<SketchId> {
+    let boxes = selection
+        .iter()
+        .flat_map(|id| super::text::box_lines(sketch, *id));
     let picked: Vec<&openshape_core_model::sketch::Entity<SketchId>> = selection
         .iter()
-        .filter_map(|id| sketch.entity(*id))
+        .copied()
+        .chain(boxes)
+        .filter_map(|id| sketch.entity(id))
         .collect();
     let of_curves: BTreeSet<SketchId> = picked
         .iter()
@@ -352,6 +358,28 @@ pub fn mirror(
                 through: through.iter().map(|p| map(*p)).collect::<Result<_, _>>()?,
                 params: params.clone(),
             },
+            // A mirror image of text is mirrored text; its corners keep
+            // their names in its own frame (ADR 0015).
+            Geometry::Text {
+                corners,
+                content,
+                font,
+                aspect,
+                mirrored,
+                outline,
+            } => Geometry::Text {
+                corners: [
+                    map(corners[0])?,
+                    map(corners[1])?,
+                    map(corners[2])?,
+                    map(corners[3])?,
+                ],
+                content: content.clone(),
+                font: font.clone(),
+                aspect: *aspect,
+                mirrored: !*mirrored,
+                outline: outline.clone(),
+            },
             Geometry::Conic {
                 start,
                 control,
@@ -364,7 +392,7 @@ pub fn mirror(
                 rho: *rho,
             },
         };
-        if let Some((_, c)) = curves.iter().find(|(id, _)| *id == src) {
+        for (_, c) in curves.iter().filter(|(id, _)| *id == src) {
             preview_curves.push(line.reflect_curve(c));
         }
         let id = batch.entity(image, e.construction);
@@ -503,6 +531,8 @@ fn own_image(sketch: &SketchData, g: &Geometry<SketchId>, line: &Axis) -> Result
             let k = at(*control)?;
             same(line.reflect(k), k) && same(line.reflect(at(*start)?), at(*end)?)
         }
+        // Mirrored text reads backwards: never the text itself.
+        Geometry::Text { .. } => false,
     })
 }
 

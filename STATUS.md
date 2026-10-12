@@ -1,8 +1,8 @@
 # OpenShape status
 
 Updated 2026-10-12, Phase 2 (sketcher): core sketcher, the application
-shell, the editing tools, ellipses, conics, transform and curvature
-continuity done; text next.
+shell, the editing tools, ellipses, conics, transform, curvature
+continuity and text done; smooth closed splines next.
 
 ## What works
 
@@ -37,7 +37,12 @@ continuity done; text next.
     ADR 0008), so the display draws only creases; the comparison is
     geometric and errs towards showing an edge.
   - Exact mass properties (volume, area, centroid, inertia) by boundary
-    integration, accurate to 1e-9 relative on the golden corpus.
+    integration with adaptive Gauss–Legendre quadrature (design note
+    0003): accurate to the relative accuracy the caller asks (down to
+    1e-13), measured against the boundary integral of the integrand's
+    magnitude; a computation that cannot reach it fails with an error
+    instead of returning an unvouched value. The golden corpus checks
+    1e-9 relative and better.
 - **Features** (`openshape-features`): regenerates a Part Studio through the
   kernel with per-feature status (ok, warning, suppressed, failed with
   message). A failing feature never blocks the others. Sketch features are
@@ -219,11 +224,29 @@ continuity done; text next.
   elliptical joints. The tool replaces a tangency it implies, the joint
   shows "C", and trim and split hand the constraint on to the piece at
   the joint.
+  Text (ADR 0015) places one line of characters in a box: type it, pick
+  one of six bundled faces (Liberation Sans, Serif and Mono, regular and
+  bold), click a corner, then click its height; the box grows towards the
+  pointer and reads left to right. The box is four construction lines with
+  a horizontal bottom, so the text has three freedoms (where it is, how
+  tall) and is constrained and dimensioned through its corners and box
+  lines like any geometry; a width dimension drives the height. The
+  letters are the font's own quadratic and cubic outlines, shaped with
+  kerning by harfrust (HarfBuzz's Rust shaper) and stored in the document
+  (so a font or shaper update never changes an existing model); their
+  regions extrude to their exact shapes, with holes, and keep their names
+  when the text moves, turns, grows or gets more characters. Selecting a
+  text opens its characters and font for editing (the box keeps its
+  corner, height and direction); mirror images and pattern copies take the
+  new text. Characters a font cannot draw are refused by name before
+  anything is placed. Letters take no snaps, constraints, trim, extend,
+  split or fillet (each refused with the reason); deleting a text deletes
+  its box.
   Every edit is one undoable op; Cancel
   undoes the whole sketch session. The editor is UI-toolkit independent and
   tested end to end by driving it with screen clicks.
 - **UI kit** (`openshape-ui-kit`): the application's look in one place
-  (ADR 0012): theme tokens with pinned contrast ratios, 81 original icons
+  (ADR 0012): theme tokens with pinned contrast ratios, 82 original icons
   drawn in code, a view cube, the command palette and search field, and an
   offscreen egui renderer used for screenshots and UI tests.
 - **I/O** (`openshape-io`): STL export, ASCII and binary.
@@ -318,6 +341,29 @@ continuity done; text next.
   shots showed sketches drawn over the parts that hide them (they are now
   rendered in 3D with depth).
 
+- Text, 2026-10-12, on Mesa lavapipe: fmt, clippy with `-D warnings`,
+  756 tests and `cargo deny` pass. The font tests pin each bundled
+  font's hash and licence, lay out closed contours in every face, compare
+  the stored pieces of nine awkward glyphs (O, S, g, 8, @, e, Q, B, &)
+  with the font's own outline read independently, and check holes,
+  kerning, monospace widths and determinism; the solver
+  tests check the box's freedoms, redundancy and conflicts, and letters
+  mapped exactly into turned and mirrored boxes; the features tests
+  extrude words letter by letter (each volume within 1e-6 of its
+  region's exact area times the depth) and follow them through resizes, turns and longer text; nine
+  end-to-end tests drive the tool, the edit dialog, mirror, patterns,
+  deletion and every refusal. Extruding a word exposed the cost of exact
+  mass properties on curved faces: edges were split to the requested
+  accuracy before quadrature, so a 15-letter word at 1e-9 took 128 s and
+  one extruded ellipse 20 s in release. Integration is now adaptive
+  (Gander & Gautschi), the three text feature tests take 1.8 s in a
+  debug build (557 s before), and
+  the kernel tests that ask 1e-9 or finer were checked against the
+  closed forms they already used. Building it found two defects before
+  they shipped: a draft that stopped refining when bisection stalled
+  returned a strongly rational conic's volume 21 % small, and a spline
+  split one rounding step from a knot left a 5.6e-17 knot span on which
+  quadrature never converged; both are regression tests.
 - Curvature continuity, 2026-10-12, on Mesa lavapipe: fmt, clippy with
   `-D warnings`, 717 tests and `cargo deny` pass. The solver tests
   check every joint against curvatures computed in the test from closed
@@ -371,7 +417,14 @@ continuity done; text next.
 
 ## Not yet / known limits
 
-- Sketch tools not done: text and use/project.
+- Sketch tools not done: use/project (needs Phase 3 faces).
+  Text is one line, in six bundled faces only (no system fonts), with no
+  right-to-left reordering of mixed scripts and no text on a curve; its
+  letters cannot be trimmed or constrained individually. A word extruded
+  in one feature makes one part with a solid per letter (each feature
+  makes its own part until booleans). A spline split a rounding step from
+  one of its knots keeps a near-zero knot span; integration merges such
+  spans, but the split itself should snap to the knot (nurbs crate).
   Curvature continuity fails on 0.27 % of heavily perturbed joints
   (mostly a spline meeting an interpolated spline), reported, never
   wrong; where the spline alone cannot reach the joint's curvature the
@@ -428,12 +481,6 @@ continuity done; text next.
   hole, cusp regions next to circles tangent to two sides, 0.2 mm slots,
   0.01 mm slivers, V notches. Making both checks adapt to local feature
   size is on the kernel list.
-- Exact mass properties on curved (rational) faces are slow at tight
-  accuracy: the tests' 1e-9 relative volume of one extruded ellipse or
-  conic takes about 20 s even in release, because edges are split by a
-  chord tolerance of the accuracy times the body size before Gauss–Legendre
-  quadrature, far finer than the quadrature needs. The app asks for 1e-3,
-  which is instant. On the kernel list.
 - Solver conflict detection is local: from a start far from any solution it
   can call a sketch conflicting although another branch would satisfy it.
 - No booleans: each feature makes its own part (Phase 3).
@@ -445,7 +492,7 @@ continuity done; text next.
 
 ## Next steps
 
-1. The rest of the Phase 2 sketcher that needs no faces: text, smooth
+1. The rest of the Phase 2 sketcher that needs no faces: smooth
    closed splines, trim/extend/split of ellipses and conics, and a
    curvature comb display. Project/convert,
    intersection curves and pierce wait for Phase 3 faces.
@@ -453,4 +500,5 @@ continuity done; text next.
    run the windowed app on a desktop.
 3. Phase 3 groundwork: design notes for curve/surface intersection, booleans
    and persistent naming; make the kernel's tessellation and profile checks
-   adapt to local feature size.
+   adapt to local feature size; snap NURBS splits that land a rounding step
+   from a knot onto the knot.

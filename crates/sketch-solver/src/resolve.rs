@@ -9,8 +9,51 @@ use crate::conic;
 use crate::ellipse;
 use crate::eq::signed_angle;
 use crate::index::{Circ, Con, EntKind, Index, LineRef};
-use crate::model::{Constraint, DistanceKind, Sketch, SketchKey};
+use crate::model::{Constraint, DistanceKind, Geometry, Sketch, SketchKey, TextPiece};
+use crate::spline::clamped_uniform_knots;
 use crate::{ResolvedCurve, SolveError};
+
+/// The curves of a text's outline (in box units, ADR 0015) placed in the
+/// box with corners `[bottom-left, bottom-right, top-right, top-left]`
+/// (only the first, second and fourth are used), or `None` when the box
+/// has no area. Equal outline points map to equal plane points, so the
+/// contours stay exactly closed.
+pub fn text_curves(
+    corners: [DVec2; 4],
+    aspect: f64,
+    outline: &[Vec<TextPiece>],
+) -> Option<Vec<ResolvedCurve>> {
+    let bl = corners[0];
+    let across = corners[1] - bl;
+    let up = corners[3] - bl;
+    let turn = across.perp_dot(up);
+    if !(turn.is_finite() && turn != 0.0) {
+        return None;
+    }
+    let map = |q: DVec2| bl + across * (q.x / aspect) + up * q.y;
+    Some(
+        outline
+            .iter()
+            .flatten()
+            .map(|piece| {
+                let pts: Vec<DVec2> = piece.points.iter().map(|&q| map(q)).collect();
+                if piece.degree == 1 {
+                    ResolvedCurve::Line {
+                        start: pts[0],
+                        end: pts[1],
+                    }
+                } else {
+                    let degree = piece.degree as usize;
+                    ResolvedCurve::Spline {
+                        degree,
+                        knots: clamped_uniform_knots(pts.len(), degree),
+                        points: pts,
+                    }
+                }
+            })
+            .collect(),
+    )
+}
 
 /// The explicit geometry of every curve entity, in entity order.
 pub(crate) fn resolve_curves<K: SketchKey>(
@@ -137,6 +180,18 @@ pub(crate) fn resolve_curves<K: SketchKey>(
                     knots: sp.map.knots.clone(),
                     points: sp.map.control_points(&pts),
                 }
+            }
+            EntKind::Text(t) => {
+                let Geometry::Text { outline, .. } = &e.geometry else {
+                    unreachable!("text kinds come from text geometry")
+                };
+                let text = index.texts[t];
+                let corners = text.c.map(pos);
+                let curves = text_curves(corners, text.aspect, outline).ok_or_else(|| {
+                    SolveError::Degenerate(format!("text {id:?} has a box of zero size"))
+                })?;
+                out.extend(curves.into_iter().map(|c| (id, e.construction, c)));
+                continue;
             }
         };
         out.push((id, e.construction, curve));

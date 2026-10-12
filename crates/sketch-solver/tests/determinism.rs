@@ -99,6 +99,21 @@ fn relabel<F: Fn(u32) -> u64>(s: &Sketch<u32>, f: F) -> Sketch<u64> {
             end: f(end),
             rho,
         },
+        Geometry::Text {
+            corners,
+            content,
+            font,
+            aspect,
+            mirrored,
+            outline,
+        } => Geometry::Text {
+            corners: corners.map(&f),
+            content,
+            font,
+            aspect,
+            mirrored,
+            outline,
+        },
     };
     use Constraint as C;
     let constraint = |c: &Constraint<u32>| match c.clone() {

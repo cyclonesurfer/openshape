@@ -91,6 +91,7 @@ fn entity_slots<K: SketchKey>(index: &Index<K>, prob: &Problem, ent: usize) -> V
             .iter()
             .flat_map(|&p| pt(p))
             .collect(),
+        EntKind::Text(t) => index.texts[t].c.into_iter().flat_map(pt).collect(),
     }
 }
 
@@ -797,6 +798,7 @@ fn solve_inner<K: SketchKey>(
                     EntKind::Ellipse(Ell { arc: None, .. }) => "ellipse",
                     EntKind::Ellipse(_) => "elliptical arc",
                     EntKind::Conic(_) => "conic",
+                    EntKind::Text(_) => "text box",
                     _ => "arc",
                 };
                 let msg = format!("{kind} {:?} {}", sketch.entities[ent].id, how.says());
@@ -1025,6 +1027,7 @@ fn entity_points<K: SketchKey>(index: &Index<K>, ent: usize) -> Vec<usize> {
         }
         EntKind::Conic(cn) => vec![cn.p0, cn.p1, cn.p2],
         EntKind::Spline(s) => index.splines[s].points.clone(),
+        EntKind::Text(t) => index.texts[t].c.to_vec(),
     }
 }
 
@@ -1156,6 +1159,8 @@ fn collapsed<K: SketchKey>(
             EntKind::Conic(cn) if !(rhos[cn.k] >= RHO_MIN && rhos[cn.k] <= 1.0 - RHO_MIN) => {
                 Collapse::Shape
             }
+            // The box's height (its width follows by the box equations).
+            EntKind::Text(t) if short(index.texts[t].c[0], index.texts[t].c[3]) => Collapse::Length,
             _ => continue,
         };
         out.push((ent, how));
@@ -1217,6 +1222,7 @@ fn collapse_rows<K: SketchKey>(
             }
         }
         (EntKind::Conic(cn), Collapse::Shape) => vec![vec![(prob.shape_slot(cn.k), 1.0)]],
+        (EntKind::Text(t), _) => between(index.texts[t].c[0], index.texts[t].c[3]),
         _ => Vec::new(),
     }
 }

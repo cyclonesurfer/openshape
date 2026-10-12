@@ -610,7 +610,7 @@ impl OpenShapeApp {
         let mut lines = Vec::new();
         if let Some(b) = self.model.bodies().bodies.iter().find(|b| b.feature == f) {
             let k = self.model.kernel();
-            match k.mass_properties(&b.body, 1e-3) {
+            match k.mass_properties(&b.body, 1e-9) {
                 Ok(m) => {
                     lines.push(("Volume".into(), format!("{:.3} cm³", m.volume * 1e6)));
                     lines.push(("Surface area".into(), format!("{:.3} cm²", m.area * 1e4)));

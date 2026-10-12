@@ -136,7 +136,7 @@ pub fn run(out: &Path) -> Result<DemoReport, String> {
     report.check("box regenerates", model.bodies().bodies.len() == 1);
     let volume = model
         .kernel()
-        .mass_properties(&model.bodies().bodies[0].body, 1e-3)
+        .mass_properties(&model.bodies().bodies[0].body, 1e-12)
         .map(|m| m.volume)
         .unwrap_or(0.0);
     report.check("box volume is 24 cm³", (volume - 24e-6).abs() < 1e-12);

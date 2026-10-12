@@ -85,11 +85,13 @@ pub enum Preview {
 }
 
 /// Finds where the other curves cut `target` (`curves` are the sketch's
-/// solved curves, construction geometry included).
+/// solved curves, construction geometry included). Curves in `loose` cut
+/// but cannot hold a cut end (a text's letters, ADR 0015).
 pub fn cuts(
     kernel: &(impl Kernel + ?Sized),
     curves: &[(SketchId, ResolvedCurve)],
     target: SketchId,
+    loose: &BTreeSet<SketchId>,
 ) -> Result<Cuts, String> {
     let curve = curves
         .iter()
@@ -108,7 +110,7 @@ pub fn cuts(
                 (x.point - s).length() <= CUT_GAP || (x.point - e).length() <= CUT_GAP
             });
             if !at_end {
-                raw.push(x.cut(*id));
+                raw.push(x.cut(*id, loose));
             }
         }
     }
@@ -152,12 +154,17 @@ struct Contact {
 }
 
 impl Contact {
-    /// The cut it makes, by curve `id`.
-    fn cut(&self, id: SketchId) -> Cut {
+    /// The cut it makes, by curve `id` (which can hold the cut end unless
+    /// it is `loose`).
+    fn cut(&self, id: SketchId, loose: &BTreeSet<SketchId>) -> Cut {
         Cut {
             t: self.t,
             point: self.point,
-            cutters: if self.crossing { vec![id] } else { Vec::new() },
+            cutters: if self.crossing && !loose.contains(&id) {
+                vec![id]
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -351,13 +358,15 @@ fn trim_circle(
 }
 
 /// Plans extending the end of line or arc `target` nearest `near` to the
-/// first curve beyond it (design note 0007 §7.3).
+/// first curve beyond it (design note 0007 §7.3); the new end is not held
+/// on a curve in `loose` (see [`cuts`]).
 pub fn extend(
     kernel: &(impl Kernel + ?Sized),
     sketch: &SketchData,
     curves: &[(SketchId, ResolvedCurve)],
     target: SketchId,
     near: DVec2,
+    loose: &BTreeSet<SketchId>,
 ) -> Result<Plan, String> {
     let curve = curves
         .iter()
@@ -429,9 +438,11 @@ pub fn extend(
                 continue;
             }
             match &mut best {
-                Some((_, b)) if (b.point - x.point).length() <= CUT_GAP => merge(b, x.cut(*id)),
+                Some((_, b)) if (b.point - x.point).length() <= CUT_GAP => {
+                    merge(b, x.cut(*id, loose))
+                }
                 Some((d, _)) if *d <= dist => {}
-                _ => best = Some((dist, x.cut(*id))),
+                _ => best = Some((dist, x.cut(*id, loose))),
             }
         }
     }

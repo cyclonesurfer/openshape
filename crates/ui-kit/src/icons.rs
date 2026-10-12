@@ -148,6 +148,9 @@ pub enum Icon {
     /// and a small ring at the apex where its end tangents meet (a conic
     /// arc and its control point).
     Conic,
+    /// A capital A drawn in strokes inside a dashed box, with a dot at the
+    /// box's bottom-left corner (sketch text in its box).
+    Text,
     /// A rectangle with a dot at its centre and one corner, joined by a
     /// dashed half-diagonal.
     CenterRectangle,
@@ -281,6 +284,7 @@ impl Icon {
         Icon::Ellipse,
         Icon::EllipticalArc,
         Icon::Conic,
+        Icon::Text,
         Icon::CenterRectangle,
         Icon::AlignedRectangle,
         Icon::TangentArc,
@@ -367,6 +371,7 @@ impl Icon {
             Icon::Ellipse => "Ellipse",
             Icon::EllipticalArc => "Elliptical arc",
             Icon::Conic => "Conic",
+            Icon::Text => "Text",
             Icon::CenterRectangle => "Center rectangle",
             Icon::AlignedRectangle => "Aligned rectangle",
             Icon::TangentArc => "Tangent arc",
@@ -1100,6 +1105,16 @@ fn draw(pen: &Pen<'_>, icon: Icon) {
             pen.dot(a, 1.9);
             pen.dot(b, 1.9);
             pen.circle(k, 2.0);
+        }
+        Icon::Text => {
+            let (l, t, r, b) = (4.0, 4.5, 20.0, 19.0);
+            pen.dashed((l, b), (r, b), 2.4, 1.6);
+            pen.dashed((r, b), (r, t), 2.4, 1.6);
+            pen.dashed((r, t), (l, t), 2.4, 1.6);
+            pen.dashed((l, t), (l, b), 2.4, 1.6);
+            pen.poly(&[(7.5, 16.5), (12.0, 7.5), (16.5, 16.5)]);
+            pen.line((9.25, 13.0), (14.75, 13.0));
+            pen.dot((l, b), 2.0);
         }
         Icon::CenterRectangle => {
             pen.rect(4.0, 6.5, 20.0, 17.5);

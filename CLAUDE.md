@@ -44,6 +44,7 @@ container without a GPU, install Mesa's software Vulkan (lavapipe):
 | `crates/sketch-solver` | `openshape-sketch-solver` | 2D sketch constraint solver with DOF/redundancy/conflict diagnostics (design note 0005) |
 | `crates/features` | `openshape-features` | evaluates a part studio's feature list through `Kernel` |
 | `crates/render` | `openshape-render` | wgpu viewport renderer + offscreen renderer; no kernel/egui deps |
+| `crates/text` | `openshape-text` | font layout for sketch text: bundled Liberation fonts (OFL), shaping, exact outlines (ADR 0015) |
 | `crates/io` | `openshape-io` | import/export formats (STL today) |
 | `crates/ui-kit` | `openshape-ui-kit` | the look: theme tokens, original icon set, view cube, offscreen egui rendering (ADR 0012) |
 | `crates/ui` | `openshape` (bin) | egui/eframe application shell (ADR 0012), offscreen screenshots and end-to-end UI tests |

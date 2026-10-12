@@ -47,6 +47,9 @@ pub enum KernelError {
     /// Tessellation failed.
     #[error("tessellation failed: {0}")]
     Tessellation(String),
+    /// Mass properties could not be computed to the requested accuracy.
+    #[error("mass properties: {0}")]
+    MassProperties(String),
 }
 
 /// Entity counts of a body, plus the genus derived from Euler–Poincaré.
@@ -193,8 +196,12 @@ pub trait Kernel: Send + Sync {
     /// Entity counts.
     fn topology(&self, body: &Self::Body) -> TopologyCounts;
 
-    /// Mass properties by exact boundary integration (design note 0003),
-    /// to the given accuracy relative to the body's size.
+    /// Mass properties by exact boundary integration (design note 0003).
+    /// Each integral is computed to within `relative_accuracy` of the
+    /// boundary integral of its integrand's magnitude (for the volume of a
+    /// solid that is star-shaped about its vertex centroid, the volume
+    /// itself), but no finer than rounding allows (about 1e-13). Fails
+    /// rather than return a less accurate value.
     fn mass_properties(
         &self,
         body: &Self::Body,
@@ -337,7 +344,7 @@ impl Kernel for OsKernel {
             ));
         }
         let size = check::bounding_size(&body.brep).max(self.tol.linear);
-        Ok(mass::mass_properties(&body.brep, size * relative_accuracy))
+        mass::mass_properties(&body.brep, size, relative_accuracy)
     }
 
     fn face_kinds(&self, body: &Body) -> Vec<SurfaceKind> {

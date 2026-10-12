@@ -250,7 +250,7 @@ fn check_body(body: &openshape_kernel::Body, volume: f64, area: f64) {
     let t = kern.topology(body);
     assert_eq!(t.genus, Some(0));
     assert_eq!(t.solids, 1);
-    let m = kern.mass_properties(body, 1e-4).unwrap();
+    let m = kern.mass_properties(body, 1e-10).unwrap();
     assert_rel(m.volume, volume, 1e-9);
     assert_rel(m.area, area, 1e-9);
     for opts in [
@@ -361,7 +361,7 @@ proptest! {
             )
             .unwrap();
         prop_assert!(k().validate(&body).is_empty());
-        let m = k().mass_properties(&body, 1e-4).unwrap();
+        let m = k().mass_properties(&body, 1e-10).unwrap();
         prop_assert!((m.volume - ratio(w) * tri * h).abs() <= 1e-9 * ratio(w) * tri * h);
         assert_watertight(&k().tessellate(&body, &TessellationOptions::default()).unwrap());
     }

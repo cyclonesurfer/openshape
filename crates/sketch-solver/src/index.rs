@@ -9,7 +9,9 @@ use std::fmt::Debug;
 
 use glam::DVec2;
 
-use crate::model::{Constraint, DistanceKind, Geometry, Sketch, SketchKey, TangentKind, RHO_MIN};
+use crate::model::{
+    check_text, Constraint, DistanceKind, Geometry, Sketch, SketchKey, TangentKind, RHO_MIN,
+};
 use crate::spline::{SplineError, SplineMap};
 use crate::SolveError;
 
@@ -271,6 +273,9 @@ pub(crate) struct Derived {
     /// Entity positions of the image ellipses and elliptical arcs, whose
     /// implicit equations the derived equations imply.
     pub ellipses: Vec<usize>,
+    /// Entity positions of the image texts, whose box equations the
+    /// derived equations imply.
+    pub texts: Vec<usize>,
 }
 
 /// A copy turned by less than this from a whole number of turns (radians,
@@ -295,6 +300,9 @@ pub(crate) struct Pattern {
     /// Entity positions of the image ellipses and elliptical arcs, whose
     /// implicit equations the pattern's equations imply.
     pub ellipses: Vec<usize>,
+    /// Entity positions of the image texts, whose box equations the
+    /// pattern's equations imply.
+    pub texts: Vec<usize>,
 }
 
 /// What an entity is, over internal indices.
@@ -312,6 +320,20 @@ pub(crate) enum EntKind {
     Conic(Cnc),
     /// Spline index.
     Spline(usize),
+    /// Text index.
+    Text(usize),
+}
+
+/// A validated text entity (ADR 0015).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TextEnt {
+    /// Corner point indices: bottom-left, bottom-right, top-right,
+    /// top-left in the text's own frame.
+    pub c: [usize; 4],
+    /// Box width over height.
+    pub aspect: f64,
+    /// True for a mirror image.
+    pub mirrored: bool,
 }
 
 /// A validated spline entity.
@@ -347,6 +369,8 @@ pub(crate) struct Index<K> {
     pub rhos: Vec<f64>,
     /// Spline entities.
     pub splines: Vec<SplineEnt>,
+    /// Text entities.
+    pub texts: Vec<TextEnt>,
     /// Entity position → kind.
     pub kinds: Vec<EntKind>,
 }
@@ -402,6 +426,7 @@ impl<K: SketchKey> Index<K> {
         let mut conics = Vec::new();
         let mut rhos = Vec::new();
         let mut splines = Vec::new();
+        let mut texts = Vec::new();
         for (i, e) in sketch.entities.iter().enumerate() {
             let id = &e.id;
             let kind = match &e.geometry {
@@ -529,6 +554,31 @@ impl<K: SketchKey> Index<K> {
                     });
                     EntKind::Spline(splines.len() - 1)
                 }
+                Geometry::Text {
+                    corners,
+                    aspect,
+                    mirrored,
+                    outline,
+                    ..
+                } => {
+                    check_text(corners, *aspect, outline)
+                        .map_err(|why| invalid(format!("entity {id:?}: {why}")))?;
+                    let mut c = [0; 4];
+                    for (slot, (k, role)) in c.iter_mut().zip(corners.iter().zip([
+                        "bottom-left corner",
+                        "bottom-right corner",
+                        "top-right corner",
+                        "top-left corner",
+                    ])) {
+                        *slot = point(id, k, role)?;
+                    }
+                    texts.push(TextEnt {
+                        c,
+                        aspect: *aspect,
+                        mirrored: *mirrored,
+                    });
+                    EntKind::Text(texts.len() - 1)
+                }
             };
             kinds.push(kind);
         }
@@ -542,6 +592,7 @@ impl<K: SketchKey> Index<K> {
             conics,
             rhos,
             splines,
+            texts,
             kinds,
         })
     }
@@ -660,6 +711,7 @@ impl<K: SketchKey> Index<K> {
                             "constraint {id:?}: entity {curve:?} must be a curve"
                         )))
                     }
+                    EntKind::Text(_) => return Err(text_refused(id, curve)),
                 }
             }
             Constraint::Horizontal { line } => Con::Horizontal(self.line(id, line)?),
@@ -987,6 +1039,7 @@ impl<K: SketchKey> Index<K> {
             out.entities.extend(d.entities);
             out.arcs.extend(d.arcs);
             out.ellipses.extend(d.ellipses);
+            out.texts.extend(d.texts);
         }
         let mut images = BTreeSet::new();
         if let Some(&(_, i)) = out.entities.iter().find(|&&(_, i)| !images.insert(i)) {
@@ -1253,6 +1306,19 @@ impl<K: SketchKey> Index<K> {
                     }
                     point_pairs.extend(a.points.iter().copied().zip(b.points.iter().copied()));
                 }
+                // Corners keep their names in the text's own frame; a
+                // mirror image of text is mirrored text (ADR 0015).
+                (EntKind::Text(a), EntKind::Text(b)) => {
+                    let (a, b) = (self.texts[a], self.texts[b]);
+                    if a.aspect != b.aspect || b.mirrored != (a.mirrored != reverses) {
+                        return Err(invalid(format!(
+                            "constraint {id:?}: {img:?} is not {} copy of the text {src:?}",
+                            if reverses { "a mirrored" } else { "an unmirrored" }
+                        )));
+                    }
+                    point_pairs.extend(a.c.into_iter().zip(b.c));
+                    d.texts.push(ei);
+                }
                 _ => {
                     return Err(invalid(format!(
                         "constraint {id:?}: {src:?} and its image {img:?} are not the same kind of entity"
@@ -1369,6 +1435,7 @@ impl<K: SketchKey> Index<K> {
                     "constraint {id:?}: entity {curve:?} must be a curve"
                 )))
             }
+            EntKind::Text(_) => return Err(text_refused(id, curve)),
         })
     }
 
@@ -1443,6 +1510,7 @@ impl<K: SketchKey> Index<K> {
             EntKind::Point(_) => Err(invalid(format!(
                 "constraint {id:?}: entity {curve:?} must be a curve"
             ))),
+            EntKind::Text(_) => Err(text_refused(id, curve)),
         }
     }
 
@@ -1573,6 +1641,14 @@ fn ellipse_points<K: SketchKey>(
 fn conic_tangency(id: &dyn Debug) -> SolveError {
     invalid(format!(
         "constraint {id:?}: tangency of a conic away from its ends is not supported yet; make them tangent at a shared end point instead"
+    ))
+}
+
+/// Text takes part in constraints only through its box's corners and lines
+/// (ADR 0015).
+fn text_refused(id: &dyn Debug, curve: &dyn Debug) -> SolveError {
+    invalid(format!(
+        "constraint {id:?}: {curve:?} is text; constrain its box's corners or lines instead"
     ))
 }
 

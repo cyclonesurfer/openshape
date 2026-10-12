@@ -14,6 +14,7 @@ openshape-sketch-solver.workspace = true
 
 [dev-dependencies]
 openshape-oplog.workspace = true
+openshape-text.workspace = true
 
 [lints]
 workspace = true

@@ -12,8 +12,8 @@ use openshape_sketch_solver::SolveStatus;
 use openshape_ui_kit::Theme;
 
 use crate::sketch_mode::{
-    annotations, sample_resolved, Annotation, CurveEdit, Pick, ScreenMap, SketchDisplay,
-    SketchEditor, SnapTarget, Tool,
+    annotations, sample_resolved, Annotation, CurveEdit, DisplayCurve, Pick, ScreenMap,
+    SketchDisplay, SketchEditor, SnapTarget, Tool,
 };
 use crate::sketch_ops::trim::Preview;
 
@@ -36,10 +36,40 @@ fn stroke_polyline(
     for run in map.polyline(pts) {
         if dashed {
             painter.extend(Shape::dashed_line(&run, stroke, 6.0, 4.0));
+        } else if run.len() > 3 && run.first() == run.last() {
+            // Closed (a letter's contour): joined all round, no end caps
+            // overlapping where it closes.
+            let mut ring = run;
+            ring.pop();
+            painter.add(Shape::closed_line(ring, stroke));
         } else {
             painter.add(Shape::line(run, stroke));
         }
     }
+}
+
+/// Joins consecutive curves of one entity that continue one another (the
+/// pieces of a text's letters) into one polyline, so translucent halos do
+/// not darken at the joints and dashes run on across them: (entity,
+/// construction, points).
+fn chained<'a>(
+    curves: impl Iterator<Item = &'a DisplayCurve>,
+) -> Vec<(SketchId, bool, Vec<DVec2>)> {
+    let mut out: Vec<(SketchId, bool, Vec<DVec2>)> = Vec::new();
+    for c in curves {
+        let Some(first) = c.polyline.first() else {
+            continue;
+        };
+        match out.last_mut() {
+            Some((id, _, pts))
+                if *id == c.id && pts.last().is_some_and(|l| (*l - *first).length() <= 1e-9) =>
+            {
+                pts.extend_from_slice(&c.polyline[1..]);
+            }
+            _ => out.push((c.id, c.construction, c.polyline.clone())),
+        }
+    }
+    out
 }
 
 /// Draws a sketch that is not being edited.
@@ -90,8 +120,8 @@ pub fn paint_editor(
         }
     };
     // Halos first, so every curve and point is drawn over them.
-    for c in d.curves.iter().filter(|c| selected(c.id) || hovered(c.id)) {
-        stroke_polyline(painter, map, &c.polyline, Stroke::new(HALO, k.halo), false);
+    for (_, _, pts) in chained(d.curves.iter().filter(|c| selected(c.id) || hovered(c.id))) {
+        stroke_polyline(painter, map, &pts, Stroke::new(HALO, k.halo), false);
     }
     for (_, at) in d.points().filter(|(id, _)| selected(*id) || hovered(*id)) {
         if let Some(s) = map.to_screen(at) {
@@ -109,21 +139,15 @@ pub fn paint_editor(
         painter.line_segment([o, o + axis(y)], Stroke::new(1.5, k.axis_y));
         painter.circle_filled(o, 3.0, k.constrained);
     }
-    for c in &d.curves {
-        let col = color(c.id);
-        let col = if c.construction { dimmed(col) } else { col };
-        let width = if selected(c.id) || hovered(c.id) {
+    for (id, construction, pts) in chained(d.curves.iter()) {
+        let col = color(id);
+        let col = if construction { dimmed(col) } else { col };
+        let width = if selected(id) || hovered(id) {
             2.5
         } else {
             1.75
         };
-        stroke_polyline(
-            painter,
-            map,
-            &c.polyline,
-            Stroke::new(width, col),
-            c.construction,
-        );
+        stroke_polyline(painter, map, &pts, Stroke::new(width, col), construction);
     }
     // Control-point splines and conics show their control polygons.
     for e in &d.sketch.entities {

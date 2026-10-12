@@ -115,6 +115,114 @@ pub enum Geometry<K> {
         /// Curve parameter at each through-point.
         params: Vec<f64>,
     },
+    /// A line of text (ADR 0015) filling the box on its four corner
+    /// points. The solver keeps the corners a rectangle `aspect` times as
+    /// wide as it is high, read the right way round (a mirror image when
+    /// `mirrored`): with `R` the quarter turn clockwise (anticlockwise when
+    /// mirrored), `bottom_right − bottom_left = aspect·R(top_left −
+    /// bottom_left)` and `top_right − top_left = bottom_right −
+    /// bottom_left`. The letters are `outline`, laid out once when the text
+    /// was typed and stored, so they never change unless the text is
+    /// edited.
+    Text {
+        /// Corner point entities in the text's own frame: bottom-left,
+        /// bottom-right, top-right, top-left.
+        corners: [K; 4],
+        /// The characters.
+        content: String,
+        /// The bundled font they were laid out in.
+        font: String,
+        /// Box width over height (> 0).
+        aspect: f64,
+        /// True for a mirror image of the text.
+        mirrored: bool,
+        /// Closed contours in box units: a box point `(u, v)`, `u` in
+        /// `[0, aspect]` and `v` in `[0, 1]`, lies at `bottom_left + (u /
+        /// aspect)·(bottom_right − bottom_left) + v·(top_left −
+        /// bottom_left)`.
+        outline: Vec<Vec<TextPiece>>,
+    },
+}
+
+/// The largest accepted text aspect ratio (box width over height): about a
+/// thousand wide characters.
+pub const MAX_TEXT_ASPECT: f64 = 2000.0;
+
+/// Structural checks of a text's data that need no other entity (ADR
+/// 0015): four distinct corners, an aspect ratio in (0,
+/// [`MAX_TEXT_ASPECT`]], pieces of degree 1 (two points) to 3 (at least
+/// four) with finite coordinates within reach of the box, none ending where
+/// it starts, and contours of at least two pieces that join and close
+/// exactly.
+pub fn check_text<K: SketchKey>(
+    corners: &[K; 4],
+    aspect: f64,
+    outline: &[Vec<TextPiece>],
+) -> Result<(), String> {
+    if (0..4).any(|a| (a + 1..4).any(|b| corners[a] == corners[b])) {
+        return Err("a text box needs four distinct corner points".into());
+    }
+    if !(aspect.is_finite() && aspect > 0.0 && aspect <= MAX_TEXT_ASPECT) {
+        return Err(format!(
+            "a text's aspect ratio must lie in (0, {MAX_TEXT_ASPECT}] (got {aspect})"
+        ));
+    }
+    let reach = 4.0 * MAX_TEXT_ASPECT;
+    for (i, contour) in outline.iter().enumerate() {
+        if contour.len() < 2 {
+            return Err(format!(
+                "text outline contour {i} has fewer than two pieces"
+            ));
+        }
+        for (j, piece) in contour.iter().enumerate() {
+            let n = piece.points.len();
+            let ok = match piece.degree {
+                1 => n == 2,
+                2 | 3 => n > piece.degree as usize,
+                _ => false,
+            };
+            if !ok {
+                return Err(format!(
+                    "text outline contour {i} piece {j}: degree {} with {n} points",
+                    piece.degree
+                ));
+            }
+            if piece
+                .points
+                .iter()
+                .any(|p| !(p.is_finite() && p.x.abs() <= reach && p.y.abs() <= reach))
+            {
+                return Err(format!(
+                    "text outline contour {i} piece {j}: a point is out of range"
+                ));
+            }
+            if piece.points[0] == piece.points[n - 1] {
+                return Err(format!(
+                    "text outline contour {i} piece {j} ends where it starts"
+                ));
+            }
+            let next = &contour[(j + 1) % contour.len()];
+            if piece.points[n - 1] != next.points[0] {
+                return Err(format!(
+                    "text outline contour {i} piece {j} does not meet the next"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One piece of a text outline (ADR 0015), in box units: a line (degree 1,
+/// two points) or a clamped B-spline of degree 2 or 3 with uniform interior
+/// knots on [0, 1] (`points` are its control points). Each piece of a
+/// contour starts exactly where the previous one ends, and the last ends
+/// exactly where the first starts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TextPiece {
+    /// 1, 2 or 3.
+    pub degree: u32,
+    /// The line's ends or the spline's control points.
+    pub points: Vec<DVec2>,
 }
 
 impl<K: SketchKey> Geometry<K> {
@@ -145,6 +253,7 @@ impl<K: SketchKey> Geometry<K> {
             } => vec![*start, *control, *end],
             Geometry::ControlSpline { control, .. } => control.clone(),
             Geometry::InterpolatedSpline { through, .. } => through.clone(),
+            Geometry::Text { corners, .. } => corners.to_vec(),
         }
     }
 
@@ -210,6 +319,21 @@ impl<K: SketchKey> Geometry<K> {
             Geometry::InterpolatedSpline { through, params } => Geometry::InterpolatedSpline {
                 through: through.iter().map(|k| f(*k)).collect(),
                 params: params.clone(),
+            },
+            Geometry::Text {
+                corners,
+                content,
+                font,
+                aspect,
+                mirrored,
+                outline,
+            } => Geometry::Text {
+                corners: corners.map(&f),
+                content: content.clone(),
+                font: font.clone(),
+                aspect: *aspect,
+                mirrored: *mirrored,
+                outline: outline.clone(),
             },
         }
     }
@@ -1005,6 +1129,23 @@ mod tests {
                 control: 2,
                 end: 3,
                 rho: 0.3,
+            },
+            Geometry::Text {
+                corners: [1, 2, 3, 4],
+                content: "A".into(),
+                font: "Liberation Sans".into(),
+                aspect: 0.6,
+                mirrored: true,
+                outline: vec![vec![
+                    TextPiece {
+                        degree: 1,
+                        points: vec![DVec2::ZERO, DVec2::X],
+                    },
+                    TextPiece {
+                        degree: 2,
+                        points: vec![DVec2::X, DVec2::ONE, DVec2::ZERO],
+                    },
+                ]],
             },
         ];
         for g in &geometry {

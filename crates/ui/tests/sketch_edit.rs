@@ -1072,10 +1072,16 @@ fn edit_randomly(
         let near = along(&curve, t);
         let sketch = r.solution.sketch.clone();
         let planned = match op {
-            0 => {
-                trim::cuts(m.kernel(), &curves, target).and_then(|k| trim::trim(&sketch, &k, near))
-            }
-            1 => trim::extend(m.kernel(), &sketch, &curves, target, near),
+            0 => trim::cuts(m.kernel(), &curves, target, &Default::default())
+                .and_then(|k| trim::trim(&sketch, &k, near)),
+            1 => trim::extend(
+                m.kernel(),
+                &sketch,
+                &curves,
+                target,
+                near,
+                &Default::default(),
+            ),
             _ => trim::split(&sketch, &curves, target, near),
         };
         let plan = match planned {

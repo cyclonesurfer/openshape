@@ -1074,6 +1074,53 @@ pub(crate) fn build<K: SketchKey>(index: &Index<K>, cons: &[Con], scale: Scale) 
             }
         }
     }
+    // Every text keeps its box a rectangle of its aspect ratio (ADR 0015),
+    // except derived images: with u = top-left − bottom-left and R the
+    // quarter turn clockwise (anticlockwise when mirrored),
+    // bottom-right − bottom-left = aspect·R(u) and top-right − top-left =
+    // bottom-right − bottom-left. Linear, so exact in one step.
+    let derived_texts: std::collections::BTreeSet<usize> = cons
+        .iter()
+        .flat_map(|c| match c {
+            Con::Mirror(_, d) => d.texts.clone(),
+            Con::LinearPattern(_, pt) | Con::CircularPattern(_, _, pt) => pt.texts.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
+    for (i, k) in index.kinds.iter().enumerate() {
+        let crate::index::EntKind::Text(t) = *k else {
+            continue;
+        };
+        if derived_texts.contains(&i) {
+            continue;
+        }
+        let text = index.texts[t];
+        let [bl, br, tr, tl] = text.c;
+        let ks = if text.mirrored {
+            -text.aspect
+        } else {
+            text.aspect
+        };
+        let (x, y) = (|p: usize| 2 * p, |p: usize| 2 * p + 1);
+        let rows = [
+            // br.x − bl.x − ks·(tl.y − bl.y) = 0
+            vec![(x(br), 1.0), (x(bl), -1.0), (y(tl), -ks), (y(bl), ks)],
+            // br.y − bl.y + ks·(tl.x − bl.x) = 0
+            vec![(y(br), 1.0), (y(bl), -1.0), (x(tl), ks), (x(bl), -ks)],
+            // tr − tl − br + bl = 0
+            vec![(x(tr), 1.0), (x(tl), -1.0), (x(br), -1.0), (x(bl), 1.0)],
+            vec![(y(tr), 1.0), (y(tl), -1.0), (y(br), -1.0), (y(bl), 1.0)],
+        ];
+        for terms in rows {
+            b.eqs.push(Equation {
+                kind: EqKind::Lin { terms, rhs: 0.0 },
+                owner: None,
+                arc: Some(i),
+                angular: false,
+                sub: None,
+            });
+        }
+    }
     for (pos, con) in cons.iter().enumerate() {
         b.constraint(pos, con);
     }

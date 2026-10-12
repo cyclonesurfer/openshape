@@ -28,6 +28,10 @@ pub(crate) enum Curve3 {
     Nurbs(NurbsCurve),
 }
 
+/// Knot spans shorter than this fraction of a parameter range are merged
+/// into their neighbours by [`Curve3::smooth_breaks`].
+pub const KNOT_MERGE: f64 = 1e-12;
+
 impl Curve3 {
     /// Point at parameter `t`.
     pub fn point(&self, t: f64) -> DVec3 {
@@ -95,6 +99,41 @@ impl Curve3 {
                 }
             }
             Curve3::Nurbs(n) => Curve3::Nurbs(n.transformed(m)),
+        }
+    }
+
+    /// Parameters splitting `[t0, t1]` into pieces on which the curve is
+    /// one polynomial or rational piece (for quadrature): a line whole, a
+    /// circle in pieces of at most π/4, a NURBS curve at its distinct knots
+    /// inside the range. Knots within [`KNOT_MERGE`] of the range's length
+    /// of a neighbouring break are skipped: such a knot span is a rounding
+    /// artefact (a split one rounding step from an existing knot), its
+    /// polynomial piece is numerically meaningless, and its contribution
+    /// to any integral is negligible.
+    pub fn smooth_breaks(&self, t0: f64, t1: f64) -> Vec<f64> {
+        match self {
+            Curve3::Line { .. } => vec![t0, t1],
+            Curve3::Circle { .. } => {
+                let n = (((t1 - t0).abs() / std::f64::consts::FRAC_PI_4).ceil() as usize).max(1);
+                (0..=n)
+                    .map(|i| t0 + (t1 - t0) * i as f64 / n as f64)
+                    .collect()
+            }
+            Curve3::Nurbs(c) => {
+                let (lo, hi) = (t0.min(t1), t0.max(t1));
+                let gap = KNOT_MERGE * (hi - lo);
+                let mut out = vec![lo];
+                for &k in c.knots().as_slice() {
+                    if k > lo + gap && k < hi - gap && out.last().is_some_and(|&l| k > l + gap) {
+                        out.push(k);
+                    }
+                }
+                out.push(hi);
+                if t0 > t1 {
+                    out.reverse();
+                }
+                out
+            }
         }
     }
 

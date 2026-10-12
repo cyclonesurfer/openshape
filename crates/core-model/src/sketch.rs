@@ -13,7 +13,8 @@ use openshape_oplog::OpId;
 use serde::{Deserialize, Serialize};
 
 pub use openshape_sketch_solver::{
-    Constraint, ConstraintEntry, DistanceKind, Entity, Geometry, Sketch, TangentKind, RHO_MIN,
+    check_text, Constraint, ConstraintEntry, DistanceKind, Entity, Geometry, Sketch, TangentKind,
+    TextPiece, MAX_TEXT_ASPECT, RHO_MIN,
 };
 
 use crate::PlaneRef;
@@ -135,6 +136,21 @@ pub enum SketchEdit {
         entity: SketchId,
         /// New parameters: strictly increasing, first 0, last 1.
         params: Vec<f64>,
+    },
+    /// Changes a text's characters and font (ADR 0015): the new aspect ratio
+    /// and outline come from laying them out. The corners stay; the solver
+    /// then refits the box to the new aspect ratio.
+    SetText {
+        /// The text.
+        entity: SketchId,
+        /// New characters.
+        content: String,
+        /// New font name.
+        font: String,
+        /// New box width over height.
+        aspect: f64,
+        /// New outline, in box units.
+        outline: Vec<Vec<TextPiece>>,
     },
     /// Moves the sketch to another plane.
     SetPlane(PlaneRef),
@@ -357,6 +373,33 @@ impl SketchDef {
                     _ => Err(format!("{id:?} is not an interpolated spline")),
                 }
             }
+            SketchEdit::SetText {
+                entity,
+                content,
+                font,
+                aspect,
+                outline,
+            } => {
+                let id = r(*entity);
+                match &mut self.entity_mut(id)?.geometry {
+                    Geometry::Text {
+                        corners,
+                        content: c0,
+                        font: f0,
+                        aspect: a0,
+                        outline: o0,
+                        ..
+                    } => {
+                        check_text(corners, *aspect, outline)?;
+                        *c0 = content.clone();
+                        *f0 = font.clone();
+                        *a0 = *aspect;
+                        *o0 = outline.clone();
+                        Ok(())
+                    }
+                    _ => Err(format!("{id:?} is not text")),
+                }
+            }
             SketchEdit::SetPlane(plane) => {
                 self.plane = *plane;
                 Ok(())
@@ -487,6 +530,12 @@ fn check_geometry(g: &Geometry<SketchId>) -> Result<(), String> {
             Err("a conic needs three distinct points".into())
         }
         Geometry::Conic { rho, .. } => check_rho(*rho),
+        Geometry::Text {
+            corners,
+            aspect,
+            outline,
+            ..
+        } => check_text(corners, *aspect, outline),
         _ => Ok(()),
     }
 }
@@ -514,14 +563,28 @@ pub struct EdgeKey {
     pub from: VertexKey,
     /// Where the piece ends.
     pub to: VertexKey,
+    /// Which of the entity's curves: 0 for every entity but text, whose
+    /// outline pieces are numbered in order (ADR 0015). Not stored when 0,
+    /// so keys of sketches without text are as they always were.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub part: u32,
 }
 
 /// A vertex of the arrangement, named by the curves meeting there.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct VertexKey {
-    /// The sketch curves through the vertex, sorted.
+    /// The sketch curves through the vertex, sorted (a text appears once
+    /// per piece of its outline through the vertex).
     pub entities: Vec<SketchId>,
     /// Distinguishes several vertices with the same curves, in order along
     /// the first curve.
     pub ordinal: u32,
+    /// The part (see [`EdgeKey::part`]) of each of `entities`, when any is
+    /// not 0; empty otherwise, and then not stored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<u32>,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }

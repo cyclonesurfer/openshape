@@ -1301,6 +1301,12 @@ fn success_tolerances(s: &Sketch<u32>) -> (f64, f64) {
                     }
                 }
             }
+            Geometry::Text { corners, .. } => {
+                let d = (common::pos(s, corners[3]) - common::pos(s, corners[0])).length();
+                if d > 0.0 {
+                    short = short.min(d);
+                }
+            }
         }
     }
     let q = (m / short.min(m)).max(1.0);
