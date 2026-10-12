@@ -4,8 +4,9 @@
 
 use glam::DVec2;
 
+use crate::conic;
 use crate::eq::{EqKind, PairMode, RTerm, Rhs, SplineDef, TanDir, VecExpr};
-use crate::index::{Circ, Con, Ell, Index, LineRef, OCurve, OEq, OffsetCon, TanSide};
+use crate::index::{Circ, Cnc, Con, Ell, Index, LineRef, OCurve, OEq, OffsetCon, TanSide};
 use crate::model::{DistanceKind, SketchKey};
 
 /// Lengths are divided by `l` after subtracting the centre `(cx, cy)` from
@@ -53,7 +54,8 @@ pub(crate) enum Sub {
         slot: usize,
         /// Scaled value.
         value: f64,
-        /// Value in metres.
+        /// Value in metres (for a conic's shape, which is not scaled, the
+        /// same as `value`).
         abs: f64,
     },
 }
@@ -82,10 +84,13 @@ pub(crate) enum ParamCurve {
     /// An ellipse: the parameter is its eccentric anomaly, periodic and
     /// unbounded (design note 0008 §4.2).
     Ellipse(Ell),
+    /// A conic arc: the parameter lies in `[0, 1]` (design note 0009 §4.2).
+    Conic(Cnc),
 }
 
-/// A hidden curve parameter placing a point on a curve: a point-on-spline
-/// or point-on-ellipse constraint, or an elliptical arc's own end.
+/// A hidden curve parameter placing a point on a curve: a point-on-spline,
+/// point-on-ellipse or point-on-conic constraint, or an elliptical arc's
+/// own end.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Param {
     /// The curve.
@@ -101,7 +106,9 @@ pub(crate) struct Problem {
     pub n_points: usize,
     /// Number of circle radii.
     pub n_circles: usize,
-    /// Hidden spline parameters, in slot order.
+    /// Number of conic shapes `u = ln w` (design note 0009 §4.1).
+    pub n_shapes: usize,
+    /// Hidden curve parameters, in slot order.
     pub params: Vec<Param>,
     /// Equations in priority order.
     pub eqs: Vec<Equation>,
@@ -111,10 +118,12 @@ pub(crate) struct Problem {
     pub degen: f64,
 }
 
+/// The slot layout: two per point, then circle radii, conic shapes and
+/// hidden curve parameters.
 impl Problem {
     /// Total number of slots.
     pub fn n_slots(&self) -> usize {
-        2 * self.n_points + self.n_circles + self.params.len()
+        self.param_base() + self.params.len()
     }
 
     /// Slot of circle radius `r`.
@@ -122,29 +131,43 @@ impl Problem {
         2 * self.n_points + r
     }
 
+    /// Slot of conic shape `k`.
+    pub fn shape_slot(&self, k: usize) -> usize {
+        2 * self.n_points + self.n_circles + k
+    }
+
     /// Slot of hidden parameter `k`.
     pub fn param_slot(&self, k: usize) -> usize {
-        2 * self.n_points + self.n_circles + k
+        self.param_base() + k
+    }
+
+    fn param_base(&self) -> usize {
+        2 * self.n_points + self.n_circles + self.n_shapes
     }
 
     /// True for hidden-parameter slots.
     pub fn is_param(&self, slot: usize) -> bool {
-        slot >= 2 * self.n_points + self.n_circles
+        slot >= self.param_base()
     }
 
-    /// True for hidden parameters confined to `[0, 1]` (on splines; an
-    /// ellipse's parameter is periodic and unbounded).
+    /// True for hidden parameters confined to `[0, 1]` (on splines and
+    /// conics; an ellipse's parameter is periodic and unbounded).
     pub fn is_bounded_param(&self, slot: usize) -> bool {
         self.is_param(slot)
-            && matches!(
-                self.params[slot - 2 * self.n_points - self.n_circles].curve,
-                ParamCurve::Spline(_)
+            && !matches!(
+                self.params[slot - self.param_base()].curve,
+                ParamCurve::Ellipse(_)
             )
     }
 
     /// True for circle-radius slots.
     pub fn is_radius(&self, slot: usize) -> bool {
-        slot >= 2 * self.n_points && !self.is_param(slot)
+        slot >= 2 * self.n_points && slot < 2 * self.n_points + self.n_circles
+    }
+
+    /// True for conic-shape slots.
+    pub fn is_shape(&self, slot: usize) -> bool {
+        slot >= 2 * self.n_points + self.n_circles && slot < self.param_base()
     }
 }
 
@@ -221,9 +244,9 @@ pub(crate) fn scale_of<K: SketchKey>(
 
 struct Builder<'a> {
     scale: Scale,
-    n_points: usize,
-    n_circles: usize,
     radius_base: usize,
+    shape_base: usize,
+    param_base: usize,
     splines: &'a [SplineDef],
     eqs: Vec<Equation>,
     params: Vec<Param>,
@@ -270,11 +293,17 @@ impl Builder<'_> {
         }
     }
 
+    /// A new hidden parameter placing `p` on `curve`; returns its slot.
+    fn param(&mut self, curve: ParamCurve, p: usize) -> usize {
+        self.params.push(Param { curve, point: p });
+        self.param_base + self.params.len() - 1
+    }
+
     /// A hidden parameter placing `p` on ellipse `el`, with its two
     /// equations (design note 0008 §4.2), owned by constraint `owner` or,
     /// for an elliptical arc's own ends, implicit to entity `ent`.
     fn on_ellipse(&mut self, owner: Option<usize>, ent: Option<usize>, p: usize, el: Ell) {
-        let t = 2 * self.n_points + self.n_circles + self.params.len();
+        let t = self.param_base + self.params.len();
         self.params.push(Param {
             curve: ParamCurve::Ellipse(el),
             point: p,
@@ -440,12 +469,28 @@ impl Builder<'_> {
                 )
             }
             Con::OnEllipse(p, el) => self.on_ellipse(Some(owner), None, p, el),
+            Con::OnConic(p, cn) => {
+                let t = self.param(ParamCurve::Conic(cn), p);
+                let u = self.shape_base + cn.k;
+                for axis in 0..2 {
+                    self.push(
+                        owner,
+                        EqKind::ConicPoint {
+                            p0: cn.p0,
+                            p1: cn.p1,
+                            p2: cn.p2,
+                            u,
+                            t,
+                            p,
+                            axis,
+                        },
+                        false,
+                        None,
+                    );
+                }
+            }
             Con::OnSpline(p, s) => {
-                let t = 2 * self.n_points + self.n_circles + self.params.len();
-                self.params.push(Param {
-                    curve: ParamCurve::Spline(s),
-                    point: p,
-                });
+                let t = self.param(ParamCurve::Spline(s), p);
                 for axis in 0..2 {
                     self.push(
                         owner,
@@ -734,6 +779,9 @@ impl Builder<'_> {
                 for &(r, r2) in &pt.radii {
                     self.equal_slots(owner, self.radius_base + r, self.radius_base + r2);
                 }
+                for &(k, k2) in &pt.shapes {
+                    self.equal_slots(owner, self.shape_base + k, self.shape_base + k2);
+                }
             }
             Con::CircularPattern(c, angle, ref pt) => {
                 // Design note 0007 §11.1: q − c − R(k·θ)(p − c) = 0, linear
@@ -758,6 +806,9 @@ impl Builder<'_> {
                 for &(r, r2) in &pt.radii {
                     self.equal_slots(owner, self.radius_base + r, self.radius_base + r2);
                 }
+                for &(k, k2) in &pt.shapes {
+                    self.equal_slots(owner, self.shape_base + k, self.shape_base + k2);
+                }
             }
             Con::Mirror(l, ref d) => {
                 // Design note 0007 §9: two equations per image point, whose
@@ -781,6 +832,9 @@ impl Builder<'_> {
                 }
                 for &(r, r2) in &d.radii {
                     self.equal_slots(owner, self.radius_base + r, self.radius_base + r2);
+                }
+                for &(k, k2) in &d.shapes {
+                    self.equal_slots(owner, self.shape_base + k, self.shape_base + k2);
                 }
             }
             Con::Offset(ref o) => {
@@ -843,6 +897,26 @@ impl Builder<'_> {
                     ),
                 }
             }
+            Con::Rho(cn, v) => {
+                // u = logit(ρ), linear in the unscaled shape unknown, so it
+                // is eliminated like a radius dimension (design note 0009
+                // §4.4).
+                let slot = self.shape_base + cn.k;
+                let value = conic::logit(v);
+                self.push(
+                    owner,
+                    EqKind::Lin {
+                        terms: vec![(slot, 1.0)],
+                        rhs: value,
+                    },
+                    false,
+                    Some(Sub::Const {
+                        slot,
+                        value,
+                        abs: value,
+                    }),
+                )
+            }
         }
     }
 }
@@ -851,6 +925,7 @@ impl Builder<'_> {
 pub(crate) fn build<K: SketchKey>(index: &Index<K>, cons: &[Con], scale: Scale) -> Problem {
     let n_points = index.points.len();
     let n_circles = index.circles.len();
+    let n_shapes = index.conics.len();
     let splines: Vec<SplineDef> = index
         .splines
         .iter()
@@ -861,9 +936,9 @@ pub(crate) fn build<K: SketchKey>(index: &Index<K>, cons: &[Con], scale: Scale) 
         .collect();
     let mut b = Builder {
         scale,
-        n_points,
-        n_circles,
         radius_base: 2 * n_points,
+        shape_base: 2 * n_points + n_circles,
+        param_base: 2 * n_points + n_circles + n_shapes,
         splines: &splines,
         eqs: Vec::new(),
         params: Vec::new(),
@@ -942,6 +1017,7 @@ pub(crate) fn build<K: SketchKey>(index: &Index<K>, cons: &[Con], scale: Scale) 
     Problem {
         n_points,
         n_circles,
+        n_shapes,
         params,
         eqs,
         splines,

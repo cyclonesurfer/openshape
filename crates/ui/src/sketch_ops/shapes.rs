@@ -1,6 +1,6 @@
 //! Shape tools (design note 0007 §4): rectangles, slots, regular polygons
 //! and tangent arcs, built from lines, arcs and constraints; ellipses and
-//! elliptical arcs (design note 0008 §7).
+//! elliptical arcs (design note 0008 §7); conics (design note 0009 §7).
 //!
 //! Each builder computes the exact geometry, adds it to a [`Batch`] with
 //! constraints the geometry already satisfies, and refuses degenerate input
@@ -12,6 +12,7 @@ use std::f64::consts::TAU;
 use glam::DVec2;
 use openshape_core_model::sketch::{Constraint, Geometry};
 use openshape_core_model::SketchId;
+use openshape_sketch_solver::conic as conic_curve;
 
 use super::{perp, Batch, Ends, SAME_POINT};
 use crate::sketch_mode::Snap;
@@ -470,9 +471,110 @@ pub fn elliptical_arc(
     Ok(())
 }
 
+/// The range of ρ the conic tool draws (design note 0009 §7): fuller or
+/// flatter conics are made by dimensioning ρ.
+pub const TOOL_RHO: (f64, f64) = (0.02, 0.98);
+
+/// True when `control` is far enough off the line through `start` and
+/// `end` to be where a conic's end tangents meet: at least a thousandth of
+/// the chord, and more than [`SAME_POINT`].
+pub fn conic_control_ok(start: DVec2, end: DVec2, control: DVec2) -> bool {
+    let chord = end - start;
+    let len = chord.length();
+    len > SAME_POINT && {
+        let h = chord.perp_dot(control - start).abs() / len;
+        h > SAME_POINT && h > 1e-3 * len
+    }
+}
+
+/// Where the line through `q` parallel to the chord of the conic from
+/// `start` to `end` with control point `control` crosses its median, as a
+/// fraction of the way from the chord's midpoint to the control point: q's
+/// height above the chord over the control point's. A conic's shoulder is
+/// at its ρ, and is its highest point above the chord (its tangent there is
+/// parallel to the chord), so the curve reaches up to the pointer.
+pub fn median_position(start: DVec2, control: DVec2, end: DVec2, q: DVec2) -> f64 {
+    let chord = end - start;
+    chord.perp_dot(q - start) / chord.perp_dot(control - start)
+}
+
+/// The ρ of the conic from `start` to `end` with control point `control`
+/// whose shoulder is level with `q` ([`median_position`]), kept within
+/// [`TOOL_RHO`].
+pub fn conic_rho(start: DVec2, control: DVec2, end: DVec2, q: DVec2) -> f64 {
+    let rho = median_position(start, control, end, q);
+    if rho.is_finite() {
+        rho.clamp(TOOL_RHO.0, TOOL_RHO.1)
+    } else {
+        0.5
+    }
+}
+
+/// Points along the conic arc on `p` with ρ `rho`, closer where it bends.
+pub fn conic_polyline(p: [DVec2; 3], rho: f64) -> Vec<DVec2> {
+    let w = conic_curve::weight(rho);
+    conic_curve::samples(p, w)
+        .into_iter()
+        .map(|t| conic_curve::point(p, w, t))
+        .collect()
+}
+
+/// A conic from its start, its end, the point where its end tangents meet
+/// and its ρ: the three points and the curve, nothing else. DOF 7.
+pub fn conic(
+    b: &mut Batch,
+    start: &Snap,
+    end: &Snap,
+    control: &Snap,
+    rho: f64,
+    construction: bool,
+) -> Result<(), String> {
+    if !conic_control_ok(start.at, end.at, control.at) {
+        return Err(NO_CORNER.into());
+    }
+    let p0 = b.snapped_point(start);
+    let p2 = b.snapped_point(end);
+    let p1 = b.snapped_point(control);
+    b.entity(
+        Geometry::Conic {
+            start: p0,
+            control: p1,
+            end: p2,
+            rho,
+        },
+        construction,
+    );
+    Ok(())
+}
+
+/// Why a conic's control point was refused.
+pub const NO_CORNER: &str =
+    "The tangents would meet on the line through the ends: click off that line";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conic_rho_is_the_shoulders_place_on_the_median() {
+        let (s, c, e) = (DVec2::ZERO, DVec2::new(1.0, 2.0), DVec2::new(2.0, 0.0));
+        let m = DVec2::new(1.0, 0.0);
+        for rho in [0.1, 0.5, 0.75] {
+            // Any point on the line through the shoulder parallel to the
+            // chord gives the same ρ.
+            let q = m + (c - m) * rho + DVec2::new(0.3, 0.0);
+            assert!((conic_rho(s, c, e, q) - rho).abs() < 1e-15);
+            let shoulder = conic_polyline([s, c, e], rho);
+            assert!(shoulder
+                .iter()
+                .all(|p| p.y >= 0.0 && p.y <= 2.0 * rho + 1e-12));
+        }
+        assert_eq!(conic_rho(s, c, e, DVec2::new(1.0, -5.0)), TOOL_RHO.0);
+        assert_eq!(conic_rho(s, c, e, DVec2::new(1.0, 9.0)), TOOL_RHO.1);
+        assert!(conic_control_ok(s, e, c));
+        assert!(!conic_control_ok(s, e, DVec2::new(5.0, 1e-4)));
+        assert!(!conic_control_ok(s, s, c));
+    }
 
     #[test]
     fn tangent_arc_through_a_quarter_turn() {

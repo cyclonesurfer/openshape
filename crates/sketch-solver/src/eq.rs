@@ -1,7 +1,8 @@
 //! Residual equations (design note 0005 §4) with analytic gradients.
 //!
 //! Unknowns live in a flat slot vector: point `p` has slots `2p` (x) and
-//! `2p + 1` (y); circle radii and hidden spline parameters follow. Every
+//! `2p + 1` (y); circle radii, conic shapes and hidden curve parameters
+//! follow. Every
 //! equation evaluates its residual and, on request, pushes `(slot, ∂r/∂slot)`
 //! pairs (a slot may appear several times; the caller sums them).
 //! Equations that divide by a length report degeneracy instead of producing
@@ -256,6 +257,25 @@ pub(crate) enum EqKind {
         b: TanDir,
         /// Cross (parallel) or dot (perpendicular).
         mode: PairMode,
+    },
+    /// `C(t)_axis − p_axis` for a point on a conic arc (design note 0009
+    /// §4.2): `C(t) = Σ Rₖ(t) Pₖ`, the rational quadratic Bézier with
+    /// middle weight `e^u`.
+    ConicPoint {
+        /// Start point.
+        p0: usize,
+        /// Control point.
+        p1: usize,
+        /// End point.
+        p2: usize,
+        /// Slot of the shape unknown `u = ln w`.
+        u: usize,
+        /// Slot of the hidden parameter `t ∈ [0, 1]`.
+        t: usize,
+        /// The point.
+        p: usize,
+        /// 0 for x, 1 for y.
+        axis: usize,
     },
     /// `C(t)_axis − p_axis` for a point on a spline.
     SplinePoint {
@@ -578,7 +598,8 @@ impl EqKind {
             EqKind::Lin { .. }
             | EqKind::AbsLin { .. }
             | EqKind::SplinePoint { .. }
-            | EqKind::EllipsePoint { .. } => {}
+            | EqKind::EllipsePoint { .. }
+            | EqKind::ConicPoint { .. } => {}
         }
         out.retain(|e| short(e));
         out
@@ -744,6 +765,38 @@ impl EqKind {
                 }
                 Some(Eval {
                     r: e - v[2 * p + axis],
+                    lever: inf,
+                })
+            }
+            &EqKind::ConicPoint {
+                p0,
+                p1,
+                p2,
+                u,
+                t,
+                p,
+                axis,
+            } => {
+                let (w, tv) = (v[u].exp(), v[t]);
+                let (x0, x1, x2) = (v[2 * p0 + axis], v[2 * p1 + axis], v[2 * p2 + axis]);
+                let s = 1.0 - tv;
+                let (b0, b1, b2) = (s * s, 2.0 * tv * s * w, tv * tv);
+                let d = b0 + b1 + b2;
+                let (r0, r1, r2) = (b0 / d, b1 / d, b2 / d);
+                let c = r0 * x0 + r1 * x1 + r2 * x2;
+                if let Some(g) = grad {
+                    // ∂C/∂t = (N′ − C·D′)/D; ∂C/∂u = w·∂C/∂w = R₁(P₁ − C).
+                    let n1 = -2.0 * s * x0 + 2.0 * (1.0 - 2.0 * tv) * w * x1 + 2.0 * tv * x2;
+                    let d1 = -2.0 * s + 2.0 * (1.0 - 2.0 * tv) * w + 2.0 * tv;
+                    g.push((t, (n1 - c * d1) / d));
+                    g.push((u, r1 * (x1 - c)));
+                    g.push((2 * p0 + axis, r0));
+                    g.push((2 * p1 + axis, r1));
+                    g.push((2 * p2 + axis, r2));
+                    g.push((2 * p + axis, -1.0));
+                }
+                Some(Eval {
+                    r: c - v[2 * p + axis],
                     lever: inf,
                 })
             }
@@ -939,6 +992,21 @@ impl EqKind {
                     slots.push(2 * q + axis);
                 }
             }
+            &EqKind::ConicPoint {
+                p0,
+                p1,
+                p2,
+                u,
+                t,
+                p,
+                axis,
+            } => {
+                slots.push(t);
+                slots.push(u);
+                for q in [p0, p1, p2, p] {
+                    slots.push(2 * q + axis);
+                }
+            }
             EqKind::EllipseSupport { dir, v, a, b, .. } => {
                 for e in [dir, v, a, b] {
                     points.extend(e.points());
@@ -1027,7 +1095,7 @@ mod tests {
     }
 
     /// Six points (12 slots), a radius slot (12), a radius slot (13), a
-    /// spline parameter slot (14).
+    /// spline parameter slot (14). A conic's shape uses slot 12 or 13.
     const SLOTS: usize = 15;
 
     fn splines() -> Vec<SplineDef> {
@@ -1276,6 +1344,30 @@ mod tests {
                     c: 4,
                     m: 1,
                     n: 5,
+                    t: 14,
+                    p: 0,
+                    axis: 1,
+                },
+            ),
+            (
+                "point on conic, x",
+                EqKind::ConicPoint {
+                    p0: 0,
+                    p1: 1,
+                    p2: 2,
+                    u: 12,
+                    t: 14,
+                    p: 3,
+                    axis: 0,
+                },
+            ),
+            (
+                "point on conic, y",
+                EqKind::ConicPoint {
+                    p0: 4,
+                    p1: 5,
+                    p2: 1,
+                    u: 13,
                     t: 14,
                     p: 0,
                     axis: 1,

@@ -179,6 +179,130 @@ fn invalid_values_are_rejected() {
     }
 }
 
+/// A conic on three new points with ρ `rho`, and its ρ dimension.
+fn draw_conic(s: &mut Session, f: FeatureId, rho: f64) -> openshape_core_model::OpId {
+    let n = SketchId::new_in_batch;
+    edit(
+        s,
+        f,
+        vec![
+            point(0, 0.0, 0.0),
+            point(1, 0.003, 0.008),
+            point(2, 0.01, 0.001),
+            SketchEdit::AddEntity(Entity {
+                id: n(3),
+                geometry: Geometry::Conic {
+                    start: n(0),
+                    control: n(1),
+                    end: n(2),
+                    rho,
+                },
+                construction: false,
+            }),
+            constraint(
+                4,
+                Constraint::Rho {
+                    curve: n(3),
+                    value: rho,
+                },
+            ),
+        ],
+    )
+}
+
+#[test]
+fn conics_keep_their_rho_in_range() {
+    let mut s = Session::new_document(ReplicaId(1));
+    let f = new_sketch(&mut s);
+    let op = draw_conic(&mut s, f, 0.4);
+    assert!(s.document().conflicts.is_empty());
+    let id = |index| SketchId { op, index };
+    edit(
+        &mut s,
+        f,
+        vec![
+            SketchEdit::SetRho {
+                entity: id(3),
+                rho: 0.7,
+            },
+            SketchEdit::SetValue {
+                constraint: id(4),
+                value: 0.7,
+            },
+        ],
+    );
+    assert!(s.document().conflicts.is_empty());
+    let d = sketch(&s, f);
+    assert!(matches!(
+        d.sketch.entity(id(3)).unwrap().geometry,
+        Geometry::Conic { rho, .. } if rho == 0.7
+    ));
+    assert_eq!(
+        d.sketch.constraint(id(4)).unwrap().constraint.value(),
+        Some(0.7)
+    );
+
+    let line_op = draw_line(&mut s, f);
+    let before = sketch(&s, f);
+    for e in [
+        SketchEdit::SetRho {
+            entity: id(3),
+            rho: 1.0,
+        },
+        SketchEdit::SetRho {
+            entity: id(3),
+            rho: 0.0,
+        },
+        SketchEdit::SetRho {
+            entity: id(3),
+            rho: f64::NAN,
+        },
+        SketchEdit::SetRho {
+            entity: SketchId {
+                op: line_op,
+                index: 2,
+            },
+            rho: 0.5,
+        },
+        SketchEdit::SetValue {
+            constraint: id(4),
+            value: 1.5,
+        },
+        SketchEdit::AddEntity(Entity {
+            id: SketchId::new_in_batch(0),
+            geometry: Geometry::Conic {
+                start: id(0),
+                control: id(1),
+                end: id(2),
+                rho: -0.2,
+            },
+            construction: false,
+        }),
+        SketchEdit::AddEntity(Entity {
+            id: SketchId::new_in_batch(0),
+            geometry: Geometry::Conic {
+                start: id(0),
+                control: id(0),
+                end: id(2),
+                rho: 0.5,
+            },
+            construction: false,
+        }),
+        constraint(
+            0,
+            Constraint::Rho {
+                curve: id(3),
+                value: 0.0,
+            },
+        ),
+    ] {
+        let n_conflicts = s.document().conflicts.len();
+        edit(&mut s, f, vec![e.clone()]);
+        assert_eq!(sketch(&s, f), before, "{e:?}");
+        assert_eq!(s.document().conflicts.len(), n_conflicts + 1, "{e:?}");
+    }
+}
+
 #[test]
 fn deleting_a_point_cascades_to_curves_and_constraints() {
     let mut s = Session::new_document(ReplicaId(1));

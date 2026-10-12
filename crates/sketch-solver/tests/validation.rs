@@ -10,7 +10,7 @@ use common::{bits, violation, B};
 use openshape_sketch_solver::{
     measure, resolve_curves, solve, Constraint, ConstraintEntry, DVec2, DistanceKind, Entity,
     EntityState, Geometry, ResolvedCurve, Sketch, Solution, SolveError, SolveOptions, SolveStatus,
-    TangentKind,
+    TangentKind, RHO_MIN,
 };
 use proptest::prelude::*;
 use std::f64::consts::{PI, TAU};
@@ -24,7 +24,7 @@ fn unknowns(s: &Sketch<u32>) -> usize {
         .iter()
         .map(|e| match e.geometry {
             Geometry::Point { .. } => 2,
-            Geometry::Circle { .. } => 1,
+            Geometry::Circle { .. } | Geometry::Conic { .. } => 1,
             _ => 0,
         })
         .sum()
@@ -843,6 +843,7 @@ fn garbage(seed: u64) -> Sketch<u32> {
     let mut circulars = Vec::new();
     let mut splines = Vec::new();
     let mut ellipses = Vec::new();
+    let mut conics = Vec::new();
     let mut ends: Vec<(u32, Vec<u32>)> = Vec::new();
     for i in 0..3 + j.r.int(6) {
         // At least two lines and a circle or arc, so that most constraints
@@ -850,7 +851,7 @@ fn garbage(seed: u64) -> Sketch<u32> {
         let pick = match i {
             0 | 1 => 0,
             2 => 4 + 2 * j.r.int(2),
-            _ => j.r.int(12),
+            _ => j.r.int(13),
         };
         let (geometry, kind, curve_ends) = match pick {
             0..=3 => {
@@ -911,6 +912,20 @@ fn garbage(seed: u64) -> Sketch<u32> {
                     vec![start, end],
                 )
             }
+            12 => {
+                let (start, end) = j.pair(&points, n_pts);
+                let control = j.pick(&points, n_pts);
+                (
+                    Geometry::Conic {
+                        start,
+                        control,
+                        end,
+                        rho: j.value(0.0, 1.0),
+                    },
+                    4,
+                    vec![start, end],
+                )
+            }
             _ => {
                 let n = 2 + j.r.int(5);
                 let mut params: Vec<f64> = (1..n - 1).map(|_| j.r.f()).collect();
@@ -933,6 +948,7 @@ fn garbage(seed: u64) -> Sketch<u32> {
             0 => lines.push(id),
             1 => circulars.push(id),
             3 => ellipses.push(id),
+            4 => conics.push(id),
             _ => splines.push(id),
         }
         let construction = j.r.chance(0.2);
@@ -948,6 +964,7 @@ fn garbage(seed: u64) -> Sketch<u32> {
         .chain(&circulars)
         .chain(&splines)
         .chain(&ellipses)
+        .chain(&conics)
         .copied()
         .collect();
     // Circles and arcs, and sometimes ellipses where a circular is wanted.
@@ -960,7 +977,7 @@ fn garbage(seed: u64) -> Sketch<u32> {
     for _ in 0..j.r.int(9) {
         use Constraint as C;
         let mut extra: Option<Constraint<u32>> = None;
-        let constraint = match j.r.int(20) {
+        let constraint = match j.r.int(21) {
             0 => {
                 let (a, b) = j.pair(&points, n_keys);
                 C::Coincident { a, b }
@@ -1100,6 +1117,10 @@ fn garbage(seed: u64) -> Sketch<u32> {
                 curve: j.pick(&roundish, n_keys),
                 value: j.value(0.01, 5.0),
             },
+            19 => C::Rho {
+                curve: j.pick(&conics, n_keys),
+                value: j.value(0.0, 1.0),
+            },
             _ => C::Diameter {
                 curve: j.pick(&circulars, n_keys),
                 value: j.value(0.01, 5.0),
@@ -1117,6 +1138,7 @@ fn geometry_ok(s: &Sketch<u32>) -> bool {
     s.entities.iter().all(|e| match e.geometry {
         Geometry::Point { at } => at.is_finite() && at.abs().max_element() <= 1e6,
         Geometry::Circle { radius, .. } => radius.is_finite() && radius > 0.0 && radius <= 1e6,
+        Geometry::Conic { rho, .. } => (RHO_MIN..=1.0 - RHO_MIN).contains(&rho),
         _ => true,
     })
 }
@@ -1135,6 +1157,11 @@ fn not_collapsed(s: &Sketch<u32>) -> bool {
         Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. } => {
             let (_, a, b) = common::ell(s, e.id);
             a.length() > min && b.length() > min
+        }
+        Geometry::Conic { .. } => {
+            let ([p0, p1, p2], _) = common::cnc(s, e.id);
+            let chord = p2 - p0;
+            chord.length() > min && chord.perp_dot(p1 - p0).abs() / chord.length() > min
         }
         _ => true,
     })
@@ -1184,6 +1211,19 @@ fn resolved_ok(c: &ResolvedCurve) -> bool {
                 && sweep_param.abs() < TAU
                 // Counter-clockwise in the plane.
                 && (*sweep_param > 0.0) == (major.perp_dot(*minor) > 0.0)
+        }
+        ResolvedCurve::Conic {
+            start,
+            control,
+            end,
+            weight,
+        } => {
+            start.is_finite()
+                && control.is_finite()
+                && end.is_finite()
+                && weight.is_finite()
+                && *weight > 0.0
+                && (*end - *start).perp_dot(*control - *start) != 0.0
         }
         ResolvedCurve::Spline {
             degree,
@@ -1244,6 +1284,12 @@ fn success_tolerances(s: &Sketch<u32>) -> (f64, f64) {
             Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. } => {
                 let (_, a, b) = common::ell(s, e.id);
                 short = short.min(a.length()).min(b.length());
+            }
+            Geometry::Conic { .. } => {
+                let ([p0, p1, p2], _) = common::cnc(s, e.id);
+                let chord = p2 - p0;
+                let height = chord.perp_dot(p1 - p0).abs() / chord.length();
+                short = short.min(chord.length()).min(height);
             }
             Geometry::ControlSpline { .. } | Geometry::InterpolatedSpline { .. } => {
                 if let ResolvedCurve::Spline { points, .. } = common::resolved(s, e.id) {

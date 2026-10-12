@@ -13,8 +13,9 @@
 //!   ([`images_first`]), so changing an offset's distance moves the
 //!   offset, not the curves it follows.
 //! * **Bounds and corners** (`bounded_step`): hidden spline parameters
-//!   stay in `[0, 1]` by an active set (ellipse parameters are periodic
-//!   and free); a radius may at most halve per step;
+//!   stay in `[0, 1]` by an active set (as do conic parameters; ellipse
+//!   parameters are periodic and free); a radius may at most halve per
+//!   step;
 //!   at a corner of a degree-1 spline the step uses the one-sided
 //!   derivative of the piece it moves into (both pieces are tried), and
 //!   the line search stops at the first corner crossed.
@@ -47,6 +48,7 @@
 use openshape_linalg::{dot, lstsq_min_norm, null_space, residual, weighted_min_norm, Matrix};
 
 use crate::build::Problem;
+use crate::conic::{self, SHAPE_MAX};
 use crate::ellipse;
 use crate::eq::{norm, EqKind, PairMode, VecExpr};
 use crate::reduce::{Component, Reduced};
@@ -120,8 +122,8 @@ pub(crate) struct CompSystem<'a> {
     /// Local unknowns that are images of a derived constraint.
     pub image: Vec<bool>,
     is_param: Vec<bool>,
-    /// Hidden parameters confined to `[0, 1]` (spline parameters; an
-    /// ellipse's is periodic).
+    /// Hidden parameters confined to `[0, 1]` (spline and conic
+    /// parameters; an ellipse's is periodic).
     bounded: Vec<bool>,
     is_radius: Vec<bool>,
     /// Admissible range of each local unknown.
@@ -133,6 +135,9 @@ pub(crate) struct CompSystem<'a> {
     /// For hidden parameters on ellipses, `(centre, major end, minor end,
     /// point)`.
     param_ellipse: Vec<Option<[usize; 4]>>,
+    /// For hidden parameters on conics, `(start, control, end, point)`
+    /// and the slot of the conic's shape.
+    param_conic: Vec<Option<([usize; 4], usize)>>,
     /// The vectors whose direction the equations use (line directions,
     /// radius vectors, point-to-point vectors), for the turn limit.
     vectors: Vec<VecExpr>,
@@ -195,6 +200,8 @@ impl<'a> CompSystem<'a> {
                 (f64::NEG_INFINITY, f64::INFINITY)
             } else if prob.is_radius(s0) {
                 (0.0, region.r_max)
+            } else if prob.is_shape(s0) {
+                (-SHAPE_MAX, SHAPE_MAX)
             } else if s0 % 2 == 0 {
                 region.x
             } else {
@@ -206,6 +213,7 @@ impl<'a> CompSystem<'a> {
         let mut param_spline = vec![None; comp.unknowns.len()];
         let mut param_point = vec![None; comp.unknowns.len()];
         let mut param_ellipse = vec![None; comp.unknowns.len()];
+        let mut param_conic = vec![None; comp.unknowns.len()];
         for &i in &comp.eqs {
             match prob.eqs[i].kind {
                 EqKind::SplinePoint { spline, t, p, .. } if col_of_slot[t] != usize::MAX => {
@@ -214,6 +222,17 @@ impl<'a> CompSystem<'a> {
                 }
                 EqKind::EllipsePoint { c, m, n, t, p, .. } if col_of_slot[t] != usize::MAX => {
                     param_ellipse[col_of_slot[t]] = Some([c, m, n, p]);
+                }
+                EqKind::ConicPoint {
+                    p0,
+                    p1,
+                    p2,
+                    u,
+                    t,
+                    p,
+                    ..
+                } if col_of_slot[t] != usize::MAX => {
+                    param_conic[col_of_slot[t]] = Some(([p0, p1, p2, p], u));
                 }
                 _ => {}
             }
@@ -259,6 +278,7 @@ impl<'a> CompSystem<'a> {
             param_spline,
             param_point,
             param_ellipse,
+            param_conic,
             vectors,
             turn_limit: false,
             v,
@@ -438,6 +458,17 @@ impl<'a> CompSystem<'a> {
                 let (a, b) = (at(m) - cc, at(n) - cc);
                 let d2 = |t: f64| (ellipse::point(cc, a, b, t) - pp).length_squared();
                 let t = ellipse::closest_param(cc, a, b, pp);
+                if d2(t) < d2(*uk) {
+                    *uk = t;
+                    moved = true;
+                }
+                continue;
+            }
+            if let Some(([p0, p1, p2, p], u_slot)) = self.param_conic[k] {
+                let at = |q: usize| glam::DVec2::new(self.v[2 * q], self.v[2 * q + 1]);
+                let (ctl, w, pp) = ([at(p0), at(p1), at(p2)], self.v[u_slot].exp(), at(p));
+                let d2 = |t: f64| (conic::point(ctl, w, t) - pp).length_squared();
+                let t = conic::closest_param(ctl, w, pp);
                 if d2(t) < d2(*uk) {
                     *uk = t;
                     moved = true;

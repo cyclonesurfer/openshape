@@ -491,10 +491,7 @@ impl OpenShapeApp {
                         if !r.has_focus() && !r.lost_focus() {
                             r.request_focus();
                         }
-                        ui.label(
-                            RichText::new(if prompt.is_angle() { "°" } else { "mm" })
-                                .color(theme.text_muted),
-                        );
+                        ui.label(RichText::new(prompt.unit()).color(theme.text_muted));
                         if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                             commit = true;
                         }

@@ -9,7 +9,7 @@ use std::fmt::Debug;
 
 use glam::DVec2;
 
-use crate::model::{Constraint, DistanceKind, Geometry, Sketch, SketchKey, TangentKind};
+use crate::model::{Constraint, DistanceKind, Geometry, Sketch, SketchKey, TangentKind, RHO_MIN};
 use crate::spline::{SplineError, SplineMap};
 use crate::SolveError;
 
@@ -71,10 +71,24 @@ pub(crate) struct Ell {
     pub arc: Option<(usize, usize)>,
 }
 
+/// A conic arc over point indices (design note 0009 §3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Cnc {
+    /// Start point.
+    pub p0: usize,
+    /// Where the end tangents meet.
+    pub p1: usize,
+    /// End point.
+    pub p2: usize,
+    /// Conic index (into the shape unknowns).
+    pub k: usize,
+}
+
 /// One side of a tangency at a shared point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TanSide {
-    /// A line: its direction is the tangent.
+    /// A line, or a conic's leg at its end: its direction is the
+    /// tangent.
     Line(LineRef),
     /// An arc: `point − centre` is the normal.
     Arc {
@@ -100,6 +114,7 @@ pub(crate) enum Con {
     OnCirc(usize, Circ),
     OnSpline(usize, usize),
     OnEllipse(usize, Ell),
+    OnConic(usize, Cnc),
     Horizontal(LineRef),
     Vertical(LineRef),
     HPoints(usize, usize),
@@ -124,6 +139,7 @@ pub(crate) enum Con {
     Angle(LineRef, LineRef, f64),
     Radius(Circ, f64),
     Diameter(Circ, f64),
+    Rho(Cnc, f64),
     Mirror(LineRef, Derived),
     /// A linear pattern: the direction line and the copies.
     LinearPattern(LineRef, Pattern),
@@ -202,6 +218,8 @@ pub(crate) struct Derived {
     pub fixed: Vec<usize>,
     /// `(source, image)` circle radius indices.
     pub radii: Vec<(usize, usize)>,
+    /// `(source, image)` conic indices, whose shapes are equal.
+    pub shapes: Vec<(usize, usize)>,
     /// `(source, image)` entity positions.
     pub entities: Vec<(usize, usize)>,
     /// Entity positions of the image arcs, whose implicit equation the
@@ -224,6 +242,8 @@ pub(crate) struct Pattern {
     pub points: Vec<(usize, usize, u32)>,
     /// `(source, image)` circle radius indices.
     pub radii: Vec<(usize, usize)>,
+    /// `(source, image)` conic indices, whose shapes are equal.
+    pub shapes: Vec<(usize, usize)>,
     /// `(source, image)` entity positions.
     pub entities: Vec<(usize, usize)>,
     /// Entity positions of the image arcs, whose implicit equation the
@@ -245,6 +265,8 @@ pub(crate) enum EntKind {
     Circular(Circ),
     /// An ellipse or an elliptical arc.
     Ellipse(Ell),
+    /// A conic arc.
+    Conic(Cnc),
     /// Spline index.
     Spline(usize),
 }
@@ -276,6 +298,10 @@ pub(crate) struct Index<K> {
     pub circles: Vec<usize>,
     /// Radius of each circle.
     pub radii: Vec<f64>,
+    /// Conic (shape) index → entity position.
+    pub conics: Vec<usize>,
+    /// Shape value ρ of each conic.
+    pub rhos: Vec<f64>,
     /// Spline entities.
     pub splines: Vec<SplineEnt>,
     /// Entity position → kind.
@@ -330,6 +356,8 @@ impl<K: SketchKey> Index<K> {
         let mut kinds = Vec::with_capacity(n);
         let mut circles = Vec::new();
         let mut radii = Vec::new();
+        let mut conics = Vec::new();
+        let mut rhos = Vec::new();
         let mut splines = Vec::new();
         for (i, e) in sketch.entities.iter().enumerate() {
             let id = &e.id;
@@ -394,6 +422,30 @@ impl<K: SketchKey> Index<K> {
                     el.arc = Some((s, t));
                     EntKind::Ellipse(el)
                 }
+                Geometry::Conic {
+                    start,
+                    control,
+                    end,
+                    rho,
+                } => {
+                    let p0 = point(id, start, "start")?;
+                    let p1 = point(id, control, "control point")?;
+                    let p2 = point(id, end, "end")?;
+                    if p0 == p1 || p1 == p2 || p0 == p2 {
+                        return Err(invalid(format!(
+                            "entity {id:?}: a conic needs distinct start, control and end points"
+                        )));
+                    }
+                    if !(*rho >= RHO_MIN && *rho <= 1.0 - RHO_MIN) {
+                        return Err(invalid(format!(
+                            "entity {id:?}: a conic's ρ must lie in [{RHO_MIN}, 1 − {RHO_MIN}] (got {rho})"
+                        )));
+                    }
+                    let k = conics.len();
+                    conics.push(i);
+                    rhos.push(*rho);
+                    EntKind::Conic(Cnc { p0, p1, p2, k })
+                }
                 Geometry::ControlSpline { control, degree } => {
                     let pts = control
                         .iter()
@@ -444,6 +496,8 @@ impl<K: SketchKey> Index<K> {
             positions,
             circles,
             radii,
+            conics,
+            rhos,
             splines,
             kinds,
         })
@@ -550,6 +604,14 @@ impl<K: SketchKey> Index<K> {
                         }
                         Con::OnEllipse(p, el)
                     }
+                    EntKind::Conic(cn) => {
+                        if cn.p1 == p {
+                            return Err(invalid(format!(
+                                "constraint {id:?}: the control point of {curve:?} cannot lie on it"
+                            )));
+                        }
+                        Con::OnConic(p, cn)
+                    }
                     EntKind::Point(_) => {
                         return Err(invalid(format!(
                             "constraint {id:?}: entity {curve:?} must be a curve"
@@ -625,6 +687,9 @@ impl<K: SketchKey> Index<K> {
                         | (EntKind::Ellipse(el), EntKind::Line(l)) => {
                             Con::TangentLE(l, el, *center_left)
                         }
+                        (EntKind::Conic(_), _) | (_, EntKind::Conic(_)) => {
+                            return Err(conic_tangency(id))
+                        }
                         _ => {
                             return Err(invalid(format!(
                                 "constraint {id:?}: line-circle tangency needs a line and a circle, arc, ellipse or elliptical arc"
@@ -634,6 +699,9 @@ impl<K: SketchKey> Index<K> {
                     TangentKind::CircleCircle { internal } => match (ka, kb) {
                         (EntKind::Circular(x), EntKind::Circular(y)) => {
                             Con::TangentCC(x, y, *internal)
+                        }
+                        (EntKind::Conic(_), _) | (_, EntKind::Conic(_)) => {
+                            return Err(conic_tangency(id))
                         }
                         (EntKind::Ellipse(_), _) | (_, EntKind::Ellipse(_)) => {
                             return Err(invalid(format!(
@@ -701,6 +769,19 @@ impl<K: SketchKey> Index<K> {
             }
             Constraint::Diameter { curve, value } => {
                 Con::Diameter(self.circular(id, curve)?, length(*value, "diameter")?)
+            }
+            Constraint::Rho { curve, value } => {
+                let EntKind::Conic(cn) = self.kind_of(id, curve)? else {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: entity {curve:?} must be a conic"
+                    )));
+                };
+                if !(*value >= RHO_MIN && *value <= 1.0 - RHO_MIN) {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: a conic's ρ must lie in [{RHO_MIN}, 1 − {RHO_MIN}] (got {value})"
+                    )));
+                }
+                Con::Rho(cn, *value)
             }
             Constraint::Mirror { axis, pairs } => {
                 let l = self.line(id, axis)?;
@@ -844,6 +925,7 @@ impl<K: SketchKey> Index<K> {
                 out.points.push((p, q, k));
             }
             out.radii.extend(d.radii);
+            out.shapes.extend(d.shapes);
             out.entities.extend(d.entities);
             out.arcs.extend(d.arcs);
             out.ellipses.extend(d.ellipses);
@@ -1095,6 +1177,12 @@ impl<K: SketchKey> Index<K> {
                     }
                     d.ellipses.push(ei);
                 }
+                // A conic has no orientation: start maps to start even
+                // under a reflection (design note 0009 §4.5).
+                (EntKind::Conic(a), EntKind::Conic(b)) => {
+                    point_pairs.extend([(a.p0, b.p0), (a.p1, b.p1), (a.p2, b.p2)]);
+                    d.shapes.push((a.k, b.k));
+                }
                 (EntKind::Spline(a), EntKind::Spline(b)) => {
                     let (a, b) = (&self.splines[a], &self.splines[b]);
                     if a.map.degree != b.map.degree
@@ -1191,6 +1279,16 @@ impl<K: SketchKey> Index<K> {
                 None => Err(invalid(format!(
                     "constraint {id:?}: {curve:?} is an ellipse and has no end points; use line-ellipse tangency"
                 ))),
+            },
+            EntKind::Conic(cn) => match (at(cn.p0), at(cn.p2)) {
+                // The tangent at an end is along the leg to the control
+                // point (design note 0009 §4.3).
+                (true, false) => Ok(TanSide::Line(LineRef { s: cn.p0, e: cn.p1 })),
+                (false, true) => Ok(TanSide::Line(LineRef { s: cn.p1, e: cn.p2 })),
+                (true, true) => Err(invalid(format!(
+                    "constraint {id:?}: both ends of {curve:?} are at the tangency point; the end is ambiguous"
+                ))),
+                (false, false) => Err(not_end()),
             },
             EntKind::Spline(s) => {
                 let pts = &self.splines[s].points;
@@ -1337,6 +1435,14 @@ fn ellipse_points<K: SketchKey>(
         )));
     }
     Ok(Ell { c, m, n, arc: None })
+}
+
+/// The refusal of tangency to a conic away from its ends (design note
+/// 0009 §4.7).
+fn conic_tangency(id: &dyn Debug) -> SolveError {
+    invalid(format!(
+        "constraint {id:?}: tangency of a conic away from its ends is not supported yet; make them tangent at a shared end point instead"
+    ))
 }
 
 fn spline_err<K: SketchKey>(id: &K, e: SplineError) -> SolveError {

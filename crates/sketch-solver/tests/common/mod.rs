@@ -161,6 +161,46 @@ pub fn dist_to_ellipse(s: &Sketch<u32>, k: u32, q: DVec2) -> f64 {
     f.abs() / g
 }
 
+/// (start, control, end, ρ) of a conic.
+pub fn cnc(s: &Sketch<u32>, k: u32) -> ([DVec2; 3], f64) {
+    match s.entity(k).unwrap().geometry {
+        Geometry::Conic {
+            start,
+            control,
+            end,
+            rho,
+        } => ([pos(s, start), pos(s, control), pos(s, end)], rho),
+        _ => panic!("not a conic"),
+    }
+}
+
+/// Distance of `q` from a conic arc, from Lee's implicit equation in the
+/// barycentric coordinates `τ` of the control triangle, `F = τ₁² −
+/// 4w²τ₀τ₂ = 0` with `w = ρ/(1 − ρ)` (independent of the solver's
+/// parametric form): Sampson's first-order distance `|F|/‖∇F‖`, plus how
+/// far `q` lies outside the triangle (the arc is the part of the conic
+/// with every `τ ≥ 0`).
+pub fn dist_to_conic(s: &Sketch<u32>, k: u32, q: DVec2) -> f64 {
+    let ([p0, p1, p2], rho) = cnc(s, k);
+    let w = rho / (1.0 - rho);
+    let area = (p1 - p0).perp_dot(p2 - p0);
+    // τᵢ(x) = cross(Pⱼ − x, Pₖ − x)/area, affine in x with gradient
+    // (Pⱼ − Pₖ)ᵖᵉʳᵖ/area.
+    let tau = |a: DVec2, b: DVec2| (a - q).perp_dot(b - q) / area;
+    let grad = |a: DVec2, b: DVec2| (a - b).perp() / area;
+    let (t0, t1, t2) = (tau(p1, p2), tau(p2, p0), tau(p0, p1));
+    let (g0, g1, g2) = (grad(p1, p2), grad(p2, p0), grad(p0, p1));
+    let f = t1 * t1 - 4.0 * w * w * t0 * t2;
+    let gf = g1 * (2.0 * t1) - (g0 * t2 + g2 * t0) * (4.0 * w * w);
+    let size = (p1 - p0).length().max((p2 - p1).length());
+    let outside = [t0, t1, t2]
+        .iter()
+        .map(|t| (-t).max(0.0))
+        .fold(0.0, f64::max)
+        * size;
+    f.abs() / gf.length() + outside
+}
+
 /// (start, end) of a line.
 pub fn line(s: &Sketch<u32>, k: u32) -> (DVec2, DVec2) {
     match s.entity(k).unwrap().geometry {
@@ -307,6 +347,22 @@ fn end_tangent(s: &Sketch<u32>, k: u32, key: u32) -> DVec2 {
             let grad = a.normalize() * (u.x / a.length()) + b.normalize() * (u.y / b.length());
             grad.perp().normalize()
         }
+        Geometry::Conic { start, end, .. } => {
+            // Along the leg from the end to the control point (the end
+            // that is the point or joined to it; else the nearer one).
+            let ([p0, p1, p2], _) = cnc(s, k);
+            let joined = |q: u32| coincident_class(s, key).contains(&q);
+            let at_start = match (joined(start), joined(end)) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => (p0 - p).length() <= (p2 - p).length(),
+            };
+            if at_start {
+                (p1 - p0).normalize()
+            } else {
+                (p2 - p1).normalize()
+            }
+        }
         Geometry::ControlSpline { .. } | Geometry::InterpolatedSpline { .. } => {
             let ResolvedCurve::Spline { points, .. } = resolved(s, k) else {
                 unreachable!()
@@ -369,6 +425,7 @@ pub fn violation(s: &Sketch<u32>, c: &Constraint<u32>) -> (f64, bool) {
                 Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. } => {
                     (dist_to_ellipse(s, *curve, q), false)
                 }
+                Geometry::Conic { .. } => (dist_to_conic(s, *curve, q), false),
                 _ => (dist_to_spline(s, *curve, q), false),
             }
         }
@@ -500,6 +557,8 @@ pub fn violation(s: &Sketch<u32>, c: &Constraint<u32>) -> (f64, bool) {
         }
         Constraint::Radius { curve, value } => ((circ(s, *curve).1 - value).abs(), false),
         Constraint::Diameter { curve, value } => ((2.0 * circ(s, *curve).1 - value).abs(), false),
+        // A plain number: compared like an angle, unscaled.
+        Constraint::Rho { curve, value } => ((cnc(s, *curve).1 - value).abs(), true),
         Constraint::Mirror { axis, pairs } => {
             let (s0, s1) = line(s, *axis);
             let d = (s1 - s0).normalize();
@@ -533,6 +592,9 @@ pub fn violation(s: &Sketch<u32>, c: &Constraint<u32>) -> (f64, bool) {
                 }
                 if let (Geometry::Circle { .. }, Geometry::Circle { .. }) = (gs, gi) {
                     worst = worst.max((circ(s, *src).1 - circ(s, *img).1).abs());
+                }
+                if let (Geometry::Conic { .. }, Geometry::Conic { .. }) = (gs, gi) {
+                    worst = worst.max((cnc(s, *src).1 - cnc(s, *img).1).abs() * size(s));
                 }
             }
             (worst, false)
@@ -584,6 +646,9 @@ pub fn pattern_violation(
         }
         if let (Geometry::Circle { .. }, Geometry::Circle { .. }) = (gs, gi) {
             worst = worst.max((circ(s, src).1 - circ(s, img).1).abs());
+        }
+        if let (Geometry::Conic { .. }, Geometry::Conic { .. }) = (gs, gi) {
+            worst = worst.max((cnc(s, src).1 - cnc(s, img).1).abs() * size(s));
         }
     }
     worst
@@ -671,6 +736,7 @@ pub fn bits(s: &Sketch<u32>) -> Vec<u64> {
                 out.push(at.y.to_bits());
             }
             Geometry::Circle { radius, .. } => out.push(radius.to_bits()),
+            Geometry::Conic { rho, .. } => out.push(rho.to_bits()),
             _ => {}
         }
     }

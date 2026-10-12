@@ -5,6 +5,7 @@ use std::fmt;
 
 use glam::DVec2;
 
+use crate::conic;
 use crate::ellipse;
 use crate::eq::signed_angle;
 use crate::index::{Circ, Con, EntKind, Index, LineRef};
@@ -108,6 +109,26 @@ pub(crate) fn resolve_curves<K: SketchKey>(
                     }
                 }
             }
+            EntKind::Conic(cn) => {
+                let (start, control, end) = (pos(cn.p0), pos(cn.p1), pos(cn.p2));
+                if start == end {
+                    return Err(SolveError::Degenerate(format!(
+                        "conic {id:?} ends where it starts"
+                    )));
+                }
+                let turn = (end - start).perp_dot(control - start);
+                if turn == 0.0 || turn.is_nan() {
+                    return Err(SolveError::Degenerate(format!(
+                        "conic {id:?} is flat: its control point is in line with its ends"
+                    )));
+                }
+                ResolvedCurve::Conic {
+                    start,
+                    control,
+                    end,
+                    weight: conic::weight(index.rhos[cn.k]),
+                }
+            }
             EntKind::Spline(s) => {
                 let sp = &index.splines[s];
                 let pts: Vec<DVec2> = sp.points.iter().map(|&p| pos(p)).collect();
@@ -162,9 +183,14 @@ pub(crate) fn measure<K: SketchKey>(
         ));
     }
     let index = Index::new(sketch)?;
-    // The stored value is irrelevant here; validate with a placeholder.
+    // The stored value is irrelevant here; validate with a placeholder in
+    // range (a ρ lies in (0, 1)).
     let mut probe = constraint.clone();
-    probe.set_value(1.0);
+    probe.set_value(if matches!(constraint, Constraint::Rho { .. }) {
+        0.5
+    } else {
+        1.0
+    });
     let con = index.constraint_dbg(&Measured, &probe, &[])?;
     let p = &index.positions;
     let line_dist = |q: DVec2, l: LineRef| -> Result<f64, SolveError> {
@@ -192,6 +218,7 @@ pub(crate) fn measure<K: SketchKey>(
         }
         Con::Radius(c, _) => radius_of(&index, c),
         Con::Diameter(c, _) => 2.0 * radius_of(&index, c),
+        Con::Rho(cn, _) => index.rhos[cn.k],
         _ => {
             return Err(SolveError::Invalid(
                 "measure: the constraint is not a dimension".to_string(),

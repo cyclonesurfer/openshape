@@ -1,7 +1,7 @@
 # OpenShape status
 
 Updated 2026-10-12, Phase 2 (sketcher): core sketcher, the application
-shell, the editing tools and ellipses done; conics, transform, curvature
+shell, the editing tools, ellipses and conics done; transform, curvature
 and text next.
 
 ## What works
@@ -26,7 +26,8 @@ and text next.
     closed loops, manifold edge use, edges on their surfaces, Euler–Poincaré,
     outward orientation. Every operation validates its output.
   - Box, extrude (blind, symmetric; multi-region profiles with holes; lines,
-    arcs, circles, splines, ellipses as exact rational quadratics) and revolve (full and partial, profiles touching
+    arcs, circles, splines, ellipses and conics as exact rational
+    quadratics) and revolve (full and partial, profiles touching
     the axis, offset axes). Periodic faces split at ≤ π (ADR 0008).
   - Surface classification: plane, cylinder, cone, sphere, torus, extrusion,
     revolution, NURBS.
@@ -45,8 +46,9 @@ and text next.
   topologically and re-found after sketch edits (design note 0006 §5).
 - **Sketch solver** (`openshape-sketch-solver`, on the deterministic
   `openshape-linalg`): points, lines, circles, arcs, through-point and
-  control-point splines, ellipses and elliptical arcs (design note 0008)
-  under 15 geometric constraint kinds and 5 dimension kinds. Weighted
+  control-point splines, ellipses and elliptical arcs (design note 0008),
+  conic arcs with their ρ (design note 0009) under 15 geometric constraint
+  kinds and 6 dimension kinds. Weighted
   minimum-norm Gauss–Newton with Levenberg–Marquardt fallback and
   continuation (design note 0005, §9 lists what changed while building it).
   Reports degrees of freedom, free entities, redundant and conflicting
@@ -106,7 +108,14 @@ and text next.
   turned; both handednesses; a line can be made tangent to an ellipse and
   curves tangent at an elliptical arc's end; mirror and both patterns
   copy them; the kernel receives them exactly, so an ellipse's region is
-  πab and its extrusion πab·h to rounding), construction
+  πab and its extrusion πab·h to rounding), conic (design note 0009: its
+  two ends, the corner where its end tangents meet, then its shoulder,
+  which the curve reaches up to; its control polygon shown dashed; its ρ
+  dimensioned as a plain number, "ρ 0.42", or set by dragging the curve;
+  lines and tangent arcs continue tangentially from its ends; mirror and
+  both patterns copy it with its ρ, which a dimension on the source drives
+  exactly; the kernel receives it exactly, so a segment's region is the
+  closed form r(w) times its control triangle), construction
   toggle (design note 0007 §4; each shape's degrees of freedom and the
   absence of redundant constraints are tested); 12
   constraint tools and dimensions (length, distance aligned/horizontal/
@@ -271,6 +280,24 @@ and text next.
   shots showed sketches drawn over the parts that hide them (they are now
   rendered in 3D with depth).
 
+- Conics, 2026-10-12, on Mesa lavapipe: fmt, clippy with `-D warnings`,
+  686 tests and `cargo deny` pass. The solver's conic points are checked
+  against Lee's implicit equation of the control triangle, which is
+  independent of the solver's parametric form; the fuzz generator gained
+  a conic motif (20,000 cases per property, no failure), and 100,000
+  perturbed re-solves per size fail no more often with conics than
+  without (0, 2 and 19 at 1%, 2% and 5%, against 0, 1 and 19), always
+  reported, never wrong. The kernel tests check segment areas against
+  the closed form r(w) to 1e-12 (the closed form itself against an
+  independent quadrature to 1e-10), a quarter ellipse drawn as a conic
+  (πab/4), a paraboloid and a one-sheet hyperboloid revolved from conic
+  arcs (volume and area to 1e-9), and 2,000 random extruded segments in
+  release (valid, watertight, exact). Writing them found two defects,
+  both fixed: the closest-point search stopped a rounding error short of
+  an arc's end when that end was the answer, and mirror images could
+  differ from their source's ρ in the last bit (now written back
+  exactly). The test's own closed form needed `(1 − w)(1 + w)` for
+  `1 − w²`: near w = 1 the rounding of w² cost five digits.
 - Ellipses, 2026-10-12, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   646 tests and `cargo deny` pass. The kernel tests check every curve
   point against the ellipse's implicit equation, exact areas of full
@@ -286,8 +313,14 @@ and text next.
 
 ## Not yet / known limits
 
-- Sketch tools not done: conics, text, use/project and transform; the
-  curvature constraint.
+- Sketch tools not done: text, use/project and transform; the curvature
+  constraint.
+  Conics cannot yet be trimmed, extended or split (refused with a message;
+  every piece of a conic is an exact conic, design note 0009 §8), nor made
+  tangent to a curve away from their ends, so a sketch fillet at a conic's
+  end is refused; a conic cannot be offset (its offset is not a conic).
+  The ρ label reads "ρ 0.42"; in the app's font at 13 points ρ looks much
+  like a p.
   Ellipses cannot yet be trimmed, extended or split (refused with a
   message; every piece is an exact elliptical arc, so this is planned
   work, design note 0008 §8), nor made tangent to a circle, an arc or
@@ -331,6 +364,12 @@ and text next.
   hole, cusp regions next to circles tangent to two sides, 0.2 mm slots,
   0.01 mm slivers, V notches. Making both checks adapt to local feature
   size is on the kernel list.
+- Exact mass properties on curved (rational) faces are slow at tight
+  accuracy: the tests' 1e-9 relative volume of one extruded ellipse or
+  conic takes about 20 s even in release, because edges are split by a
+  chord tolerance of the accuracy times the body size before Gauss–Legendre
+  quadrature, far finer than the quadrature needs. The app asks for 1e-3,
+  which is instant. On the kernel list.
 - Solver conflict detection is local: from a start far from any solution it
   can call a sketch conflicting although another branch would satisfy it.
 - No booleans: each feature makes its own part (Phase 3).
@@ -342,9 +381,9 @@ and text next.
 
 ## Next steps
 
-1. The rest of the Phase 2 sketcher that needs no faces: conics,
-   transform (move, rotate, scale a selection), the curvature constraint,
-   text, smooth closed splines, and trim/extend/split of ellipses. Project/convert,
+1. The rest of the Phase 2 sketcher that needs no faces: transform (move,
+   rotate, scale a selection), the curvature constraint, text, smooth
+   closed splines, and trim/extend/split of ellipses and conics. Project/convert,
    intersection curves and pierce wait for Phase 3 faces.
 2. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.

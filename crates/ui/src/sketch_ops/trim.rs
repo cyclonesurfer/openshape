@@ -298,6 +298,11 @@ pub fn trim(sketch: &SketchData, cuts: &Cuts, near: DVec2) -> Result<Plan, Strin
              or draw an elliptical arc"
                 .into(),
         ),
+        (Geometry::Conic { .. }, _) => Err(
+            "Trimming conics is not built yet (design note 0009 §8): delete the conic and \
+             redraw it between the curves"
+                .into(),
+        ),
         _ => Err("this curve cannot be trimmed".into()),
     }
 }
@@ -817,6 +822,7 @@ fn end_points(c: &ResolvedCurve) -> Option<(DVec2, DVec2)> {
             let at = |t: f64| *center + *major * t.cos() + *minor * t.sin();
             Some((at(*start_param), at(start_param + sweep_param)))
         }
+        ResolvedCurve::Conic { start, end, .. } => Some((*start, *end)),
         _ => None,
     }
 }
@@ -846,7 +852,8 @@ fn param(c: &ResolvedCurve, p: DVec2) -> f64 {
         ResolvedCurve::Circle { center, .. } => (p - *center).to_angle().rem_euclid(TAU),
         ResolvedCurve::Spline { .. }
         | ResolvedCurve::Ellipse { .. }
-        | ResolvedCurve::EllipticalArc { .. } => 0.0,
+        | ResolvedCurve::EllipticalArc { .. }
+        | ResolvedCurve::Conic { .. } => 0.0,
     }
 }
 
@@ -862,6 +869,7 @@ fn point_at(c: &ResolvedCurve, t: f64) -> DVec2 {
         } => *center + DVec2::from_angle(start_angle + t) * *radius,
         ResolvedCurve::Circle { center, radius } => *center + DVec2::from_angle(t) * *radius,
         ResolvedCurve::Spline { points, .. } => points[0],
+        ResolvedCurve::Conic { start, .. } => *start,
         ResolvedCurve::Ellipse { center, major, .. }
         | ResolvedCurve::EllipticalArc { center, major, .. } => *center + *major,
     }
@@ -894,7 +902,8 @@ fn piece(c: &ResolvedCurve, a: f64, b: f64) -> ResolvedCurve {
         },
         ResolvedCurve::Spline { .. }
         | ResolvedCurve::Ellipse { .. }
-        | ResolvedCurve::EllipticalArc { .. } => c.clone(),
+        | ResolvedCurve::EllipticalArc { .. }
+        | ResolvedCurve::Conic { .. } => c.clone(),
     }
 }
 
@@ -918,6 +927,13 @@ fn extent(curves: &[(SketchId, ResolvedCurve)]) -> f64 {
                 add(*center + DVec2::splat(*radius));
             }
             ResolvedCurve::Spline { points, .. } => points.iter().for_each(|p| add(*p)),
+            // Inside its control triangle.
+            ResolvedCurve::Conic {
+                start,
+                control,
+                end,
+                ..
+            } => [start, control, end].into_iter().for_each(|p| add(*p)),
             ResolvedCurve::Ellipse {
                 center,
                 major,

@@ -144,6 +144,10 @@ pub enum Icon {
     /// An arc over the top of a wide ellipse with a dot at its centre and
     /// each end, the centre joined to the right end by a dashed semi-axis.
     EllipticalArc,
+    /// A full rounded arch inside a dashed triangle: dots at its two ends
+    /// and a small ring at the apex where its end tangents meet (a conic
+    /// arc and its control point).
+    Conic,
     /// A rectangle with a dot at its centre and one corner, joined by a
     /// dashed half-diagonal.
     CenterRectangle,
@@ -264,6 +268,7 @@ impl Icon {
         Icon::ControlSpline,
         Icon::Ellipse,
         Icon::EllipticalArc,
+        Icon::Conic,
         Icon::CenterRectangle,
         Icon::AlignedRectangle,
         Icon::TangentArc,
@@ -345,6 +350,7 @@ impl Icon {
             Icon::ControlSpline => "Control-point spline",
             Icon::Ellipse => "Ellipse",
             Icon::EllipticalArc => "Elliptical arc",
+            Icon::Conic => "Conic",
             Icon::CenterRectangle => "Center rectangle",
             Icon::AlignedRectangle => "Aligned rectangle",
             Icon::TangentArc => "Tangent arc",
@@ -1051,6 +1057,29 @@ fn draw(pen: &Pen<'_>, icon: Icon) {
             for a in [0.0, 200.0] {
                 pen.dot(on_ellipse(c, rx, ry, a), 1.9);
             }
+        }
+        Icon::Conic => {
+            let (a, k, b) = ((4.5, 19.0), (12.0, 4.5), (19.5, 19.0));
+            pen.dashed(a, k, 2.4, 1.8);
+            pen.dashed(k, b, 2.4, 1.8);
+            // The rational quadratic with weight 2 (ρ = ⅔): a full arch.
+            let w = 2.0;
+            let curve: Vec<P> = (0..=24)
+                .map(|i| {
+                    let t = i as f32 / 24.0;
+                    let s = 1.0 - t;
+                    let r = [s * s, 2.0 * s * t * w, t * t];
+                    let d = r[0] + r[1] + r[2];
+                    (
+                        (r[0] * a.0 + r[1] * k.0 + r[2] * b.0) / d,
+                        (r[0] * a.1 + r[1] * k.1 + r[2] * b.1) / d,
+                    )
+                })
+                .collect();
+            pen.poly(&curve);
+            pen.dot(a, 1.9);
+            pen.dot(b, 1.9);
+            pen.circle(k, 2.0);
         }
         Icon::CenterRectangle => {
             pen.rect(4.0, 6.5, 20.0, 17.5);

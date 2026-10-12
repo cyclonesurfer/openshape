@@ -12,6 +12,11 @@ use std::hash::Hash;
 use glam::DVec2;
 use serde::{Deserialize, Serialize};
 
+/// Smallest accepted conic shape value ρ; the largest is 1 − `RHO_MIN`.
+/// Beyond them a conic lies within a millionth of its triangle's size of
+/// its chord or its control polygon (design note 0009 §4.6).
+pub const RHO_MIN: f64 = 1e-6;
+
 /// Requirements on entity and constraint keys.
 pub trait SketchKey: Copy + Eq + Ord + Hash + Debug {}
 impl<T: Copy + Eq + Ord + Hash + Debug> SketchKey for T {}
@@ -85,6 +90,21 @@ pub enum Geometry<K> {
         /// End point entity.
         end: K,
     },
+    /// A conic arc (design note 0009 §3): the rational quadratic Bézier
+    /// from `start` to `end` whose end tangents meet at `control`, with
+    /// middle weight `rho / (1 − rho)`. `rho` is stored like a circle's
+    /// radius: the solver treats it as an unknown and writes it back.
+    Conic {
+        /// Start point entity (on the curve).
+        start: K,
+        /// Point entity where the end tangents meet.
+        control: K,
+        /// End point entity (on the curve).
+        end: K,
+        /// Shape value in (0, 1): below ½ elliptic, ½ parabolic, above ½
+        /// hyperbolic.
+        rho: f64,
+    },
     /// A cubic B-spline interpolating `through` (at least 2 point entities)
     /// at the fixed, strictly increasing parameters `params` (first 0, last
     /// 1). Its control points are derived (P&T A9.1, knots by averaging), so
@@ -117,6 +137,12 @@ impl<K: SketchKey> Geometry<K> {
                 start,
                 end,
             } => vec![*center, *major, *minor, *start, *end],
+            Geometry::Conic {
+                start,
+                control,
+                end,
+                ..
+            } => vec![*start, *control, *end],
             Geometry::ControlSpline { control, .. } => control.clone(),
             Geometry::InterpolatedSpline { through, .. } => through.clone(),
         }
@@ -165,6 +191,17 @@ impl<K: SketchKey> Geometry<K> {
                 minor: f(*minor),
                 start: f(*start),
                 end: f(*end),
+            },
+            Geometry::Conic {
+                start,
+                control,
+                end,
+                rho,
+            } => Geometry::Conic {
+                start: f(*start),
+                control: f(*control),
+                end: f(*end),
+                rho: *rho,
             },
             Geometry::ControlSpline { control, degree } => Geometry::ControlSpline {
                 control: control.iter().map(|k| f(*k)).collect(),
@@ -382,6 +419,14 @@ pub enum Constraint<K> {
         /// Value.
         value: f64,
     },
+    /// Dimension: a conic's shape value ρ (design note 0009 §4.4), a plain
+    /// number in [`RHO_MIN`], 1 − [`RHO_MIN`]].
+    Rho {
+        /// The conic.
+        curve: K,
+        /// Value.
+        value: f64,
+    },
     /// Derived geometry (design note 0007 §9): each image entity is the
     /// mirror image of its source about the line `axis`, and moves with it.
     ///
@@ -476,7 +521,8 @@ impl<K: SketchKey> Constraint<K> {
             | Constraint::Length { value, .. }
             | Constraint::Angle { value, .. }
             | Constraint::Radius { value, .. }
-            | Constraint::Diameter { value, .. } => Some(*value),
+            | Constraint::Diameter { value, .. }
+            | Constraint::Rho { value, .. } => Some(*value),
             Constraint::Offset { distance, .. } => Some(*distance),
             Constraint::CircularPattern { angle, .. } => Some(*angle),
             _ => None,
@@ -491,6 +537,7 @@ impl<K: SketchKey> Constraint<K> {
             | Constraint::Angle { value, .. }
             | Constraint::Radius { value, .. }
             | Constraint::Diameter { value, .. }
+            | Constraint::Rho { value, .. }
             | Constraint::Offset {
                 distance: value, ..
             }
@@ -570,6 +617,10 @@ impl<K: SketchKey> Constraint<K> {
                 value: *value,
             },
             C::Diameter { curve, value } => C::Diameter {
+                curve: f(*curve),
+                value: *value,
+            },
+            C::Rho { curve, value } => C::Rho {
                 curve: f(*curve),
                 value: *value,
             },
@@ -695,7 +746,9 @@ impl<K: SketchKey> Constraint<K> {
             },
             Constraint::Normal { line, curve } => vec![*line, *curve],
             Constraint::Fix { point, .. } => vec![*point],
-            Constraint::Radius { curve, .. } | Constraint::Diameter { curve, .. } => vec![*curve],
+            Constraint::Radius { curve, .. }
+            | Constraint::Diameter { curve, .. }
+            | Constraint::Rho { curve, .. } => vec![*curve],
             Constraint::Mirror { axis, pairs } => std::iter::once(*axis)
                 .chain(pairs.iter().flat_map(|(s, i)| [*s, *i]))
                 .collect(),
@@ -846,6 +899,10 @@ mod tests {
                 curve: 1,
                 value: 0.5,
             },
+            Constraint::Rho {
+                curve: 1,
+                value: 0.5,
+            },
             Constraint::Mirror {
                 axis: 1,
                 pairs: vec![(2, 3), (4, 5)],
@@ -904,6 +961,12 @@ mod tests {
                 minor: 3,
                 start: 4,
                 end: 5,
+            },
+            Geometry::Conic {
+                start: 1,
+                control: 2,
+                end: 3,
+                rho: 0.3,
             },
         ];
         for g in &geometry {

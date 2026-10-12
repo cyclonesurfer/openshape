@@ -628,8 +628,9 @@ impl Model {
     }
 }
 
-/// The edits that move `sketch` to its solved state: positions of points and
-/// radii of circles that the solver changed. Empty when it does not solve.
+/// The edits that move `sketch` to its solved state: positions of points,
+/// radii of circles and ρ of conics that the solver changed. Empty when it
+/// does not solve.
 pub fn settle(sketch: &SketchData) -> Vec<SketchEdit> {
     let solution = solve(sketch, &SolveOptions::default());
     if matches!(solution.status, SolveStatus::Failed(_)) {
@@ -638,8 +639,8 @@ pub fn settle(sketch: &SketchData) -> Vec<SketchEdit> {
     geometry_edits(sketch, &solution.sketch)
 }
 
-/// The edits that change `from`'s point positions and circle radii to
-/// `to`'s (entities are matched by id; others are ignored).
+/// The edits that change `from`'s point positions, circle radii and conic
+/// ρ to `to`'s (entities are matched by id; others are ignored).
 pub fn geometry_edits(from: &SketchData, to: &SketchData) -> Vec<SketchEdit> {
     let target: BTreeMap<SketchId, &Geometry<SketchId>> =
         to.entities.iter().map(|e| (e.id, &e.geometry)).collect();
@@ -656,6 +657,12 @@ pub fn geometry_edits(from: &SketchData, to: &SketchData) -> Vec<SketchEdit> {
                 edits.push(SketchEdit::SetRadius {
                     entity: e.id,
                     radius: *r,
+                });
+            }
+            (Geometry::Conic { rho, .. }, Some(Geometry::Conic { rho: r, .. })) if rho != r => {
+                edits.push(SketchEdit::SetRho {
+                    entity: e.id,
+                    rho: *r,
                 });
             }
             _ => {}

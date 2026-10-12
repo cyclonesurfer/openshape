@@ -172,8 +172,9 @@ pub fn profile(def: &ProfileDef) -> Result<Profile, KernelError> {
 /// Converts a solved sketch curve to a kernel curve. Ellipses and
 /// elliptical arcs become exact rational quadratic splines
 /// ([`ProfileCurve::elliptical_arc`]), a full ellipse running
-/// counter-clockwise from its major end. Fails only for a degenerate
-/// ellipse, which [`resolve_curves`] never returns.
+/// counter-clockwise from its major end; so do conics
+/// ([`ProfileCurve::conic`]). Fails only for a degenerate ellipse or conic,
+/// which [`resolve_curves`] never returns.
 pub fn kernel_curve(c: &ResolvedCurve) -> Result<ProfileCurve, KernelError> {
     Ok(match c {
         ResolvedCurve::Line { start, end } => ProfileCurve::Line {
@@ -216,6 +217,12 @@ pub fn kernel_curve(c: &ResolvedCurve) -> Result<ProfileCurve, KernelError> {
             start_param,
             sweep_param,
         } => ProfileCurve::elliptical_arc(*center, *major, *minor, *start_param, *sweep_param)?,
+        ResolvedCurve::Conic {
+            start,
+            control,
+            end,
+            weight,
+        } => ProfileCurve::conic(*start, *control, *end, *weight)?,
         ResolvedCurve::Spline {
             degree,
             knots,

@@ -10,6 +10,7 @@
 pub mod model;
 
 mod build;
+pub mod conic;
 mod diagnose;
 pub mod ellipse;
 mod eq;
@@ -143,9 +144,13 @@ pub struct Solution<K: Ord> {
 /// curve. A solve that fails while heading into a collapse (a radius
 /// cannot reach zero) is blamed the same way.
 ///
+/// A conic is collapsed when its ends meet, its control point comes within
+/// that threshold of the line through its ends, or its ρ leaves
+/// [`RHO_MIN`], 1 − [`RHO_MIN`]] (design note 0009 §4.6).
+///
 /// On failure the returned geometry is the input. For `Invalid` and
 /// `Degenerate` failures nothing is solved or diagnosed: `dof` counts every
-/// unknown (2 per point, 1 per circle), every entity is `Free`, the lists
+/// unknown (2 per point, 1 per circle or conic), every entity is `Free`, the lists
 /// are empty and `max_residual` is 0. For `Conflicting` and `NotConverged`,
 /// the diagnosis describes the least-squares state the solver reached, and
 /// `max_residual` is measured on the (unchanged) input geometry.
@@ -207,6 +212,19 @@ pub enum ResolvedCurve {
         /// Signed extent of the eccentric anomaly, 0 < |sweep| < 2π.
         sweep_param: f64,
     },
+    /// Conic arc (design note 0009 §3): the rational quadratic Bézier
+    /// from `start` to `end` with control point `control` and weights 1,
+    /// `weight`, 1.
+    Conic {
+        /// Start.
+        start: DVec2,
+        /// Where the end tangents meet.
+        control: DVec2,
+        /// End.
+        end: DVec2,
+        /// Middle weight `ρ/(1 − ρ)`, positive.
+        weight: f64,
+    },
     /// Non-rational clamped B-spline.
     Spline {
         /// Degree.
@@ -223,12 +241,13 @@ pub enum ResolvedCurve {
 ///
 /// Arcs run counter-clockwise from the start point's angle to the end
 /// point's angle, with the radius of the start point. Elliptical arcs run
-/// counter-clockwise between their end points' eccentric anomalies. Control-point splines
+/// counter-clockwise between their end points' eccentric anomalies. Conics
+/// carry their middle weight. Control-point splines
 /// get clamped uniform knots on `[0, 1]`; interpolated splines are cubic
 /// (quadratic through 3 points, a straight segment through 2) with knots by
 /// averaging (Piegl & Tiller eq. 9.8, A9.1). Zero-length lines, zero-radius
-/// arcs and arcs that end where they start are `Degenerate`; bad references
-/// are `Invalid`.
+/// arcs, arcs that end where they start and conics whose ends meet or whose
+/// three points are in line are `Degenerate`; bad references are `Invalid`.
 pub fn resolve_curves<K: model::SketchKey>(
     sketch: &Sketch<K>,
 ) -> Result<Vec<(K, bool, ResolvedCurve)>, SolveError> {
@@ -241,7 +260,8 @@ pub fn resolve_curves<K: model::SketchKey>(
 /// The conventions are those of the solver's equations: distances and
 /// lengths in metres (point–line distances to the infinite line, line–line
 /// distances from the first line's start to the second line), angles as the
-/// signed angle from `a`'s direction to `b`'s in `(−π, π]`. The constraint's
+/// signed angle from `a`'s direction to `b`'s in `(−π, π]`, a conic's ρ as
+/// stored. The constraint's
 /// stored value is ignored. Non-dimensions and bad references are
 /// `Invalid`; zero-length lines where a direction is needed are
 /// `Degenerate`.

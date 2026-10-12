@@ -84,7 +84,8 @@ impl Motion {
     }
 
     /// Copy `k` of a solved curve (arcs keep their start and end;
-    /// ellipses their eccentric anomalies, as motions keep handedness).
+    /// ellipses their eccentric anomalies, as motions keep handedness;
+    /// conics their weight).
     pub fn curve(&self, c: &ResolvedCurve, k: u32) -> ResolvedCurve {
         let turn = match *self {
             Motion::Translate(_) => 0.0,
@@ -140,6 +141,17 @@ impl Motion {
                 degree: *degree,
                 knots: knots.clone(),
                 points: points.iter().map(|p| self.point(*p, k)).collect(),
+            },
+            ResolvedCurve::Conic {
+                start,
+                control,
+                end,
+                weight,
+            } => ResolvedCurve::Conic {
+                start: self.point(*start, k),
+                control: self.point(*control, k),
+                end: self.point(*end, k),
+                weight: *weight,
             },
         }
     }

@@ -288,6 +288,7 @@ impl Command {
                 Tool::CircularPattern => Icon::CircularPattern,
                 Tool::Ellipse => Icon::Ellipse,
                 Tool::EllipticalArc => Icon::EllipticalArc,
+                Tool::Conic => Icon::Conic,
             },
             Command::Construction => Icon::Construction,
             Command::Constrain(c) => match c {

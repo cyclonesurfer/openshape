@@ -234,7 +234,8 @@ pub fn curve_ending_at(sketch: &SketchData, point: SketchId) -> Option<(SketchId
         let (first, last) = match &e.geometry {
             Geometry::Line { start, end }
             | Geometry::Arc { start, end, .. }
-            | Geometry::EllipticalArc { start, end, .. } => (*start, *end),
+            | Geometry::EllipticalArc { start, end, .. }
+            | Geometry::Conic { start, end, .. } => (*start, *end),
             Geometry::ControlSpline { control: p, .. }
             | Geometry::InterpolatedSpline { through: p, .. } => (*p.first()?, *p.last()?),
             _ => return None,
@@ -299,6 +300,20 @@ pub fn leaving_direction(curve: &ResolvedCurve, at_end: bool) -> Option<DVec2> {
                 tangent(start_param + sweep_param) * s
             } else {
                 -tangent(*start_param) * s
+            }
+        }
+        ResolvedCurve::Conic {
+            start,
+            control,
+            end,
+            ..
+        } => {
+            // Tangent to its control polygon's legs at its ends (design
+            // note 0009 §3).
+            if at_end {
+                *end - *control
+            } else {
+                *start - *control
             }
         }
         ResolvedCurve::Circle { .. } | ResolvedCurve::Ellipse { .. } => return None,

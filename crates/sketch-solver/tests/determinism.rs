@@ -34,6 +34,7 @@ fn geometry_bits<K>(s: &Sketch<K>) -> Vec<u64> {
         match e.geometry {
             Geometry::Point { at } => out.extend([at.x.to_bits(), at.y.to_bits()]),
             Geometry::Circle { radius, .. } => out.push(radius.to_bits()),
+            Geometry::Conic { rho, .. } => out.push(rho.to_bits()),
             _ => {}
         }
     }
@@ -86,6 +87,17 @@ fn relabel<F: Fn(u32) -> u64>(s: &Sketch<u32>, f: F) -> Sketch<u64> {
             minor: f(minor),
             start: f(start),
             end: f(end),
+        },
+        Geometry::Conic {
+            start,
+            control,
+            end,
+            rho,
+        } => Geometry::Conic {
+            start: f(start),
+            control: f(control),
+            end: f(end),
+            rho,
         },
     };
     use Constraint as C;
@@ -149,6 +161,10 @@ fn relabel<F: Fn(u32) -> u64>(s: &Sketch<u32>, f: F) -> Sketch<u64> {
             value,
         },
         C::Diameter { curve, value } => C::Diameter {
+            curve: f(curve),
+            value,
+        },
+        C::Rho { curve, value } => C::Rho {
             curve: f(curve),
             value,
         },

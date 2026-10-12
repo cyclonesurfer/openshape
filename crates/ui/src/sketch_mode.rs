@@ -22,7 +22,8 @@ use openshape_features::{kernel_curve, EntityState, SketchResult, Solution};
 use openshape_kernel::{Frame, ProfileCurve};
 use openshape_render::{Camera, Projection};
 use openshape_sketch_solver::{
-    measure, resolve_curves, solve, ResolvedCurve, SolveError, SolveOptions, SolveStatus,
+    conic, measure, resolve_curves, solve, ResolvedCurve, SolveError, SolveOptions, SolveStatus,
+    RHO_MIN,
 };
 
 use crate::sketch_ops::fillet::fillet;
@@ -214,6 +215,21 @@ pub fn sample_curve(c: &ProfileCurve) -> Vec<DVec2> {
 /// Points along a resolved sketch curve (empty if it has no kernel curve,
 /// e.g. a degenerate ellipse).
 pub fn sample_resolved(c: &ResolvedCurve) -> Vec<DVec2> {
+    if let ResolvedCurve::Conic {
+        start,
+        control,
+        end,
+        weight,
+    } = *c
+    {
+        // Denser where it bends: a full conic turns sharply near its
+        // control point (design note 0009 §4.2).
+        let p = [start, control, end];
+        return conic::samples(p, weight)
+            .into_iter()
+            .map(|t| conic::point(p, weight, t))
+            .collect();
+    }
     kernel_curve(c)
         .map(|k| sample_curve(&k))
         .unwrap_or_default()
@@ -390,7 +406,8 @@ pub fn glyph(c: &Constraint<SketchId>) -> &'static str {
         | Constraint::Radius { .. }
         | Constraint::Diameter { .. }
         | Constraint::Offset { .. }
-        | Constraint::CircularPattern { .. } => "",
+        | Constraint::CircularPattern { .. }
+        | Constraint::Rho { .. } => "",
     }
 }
 
@@ -456,6 +473,7 @@ pub fn dimension_text(c: &Constraint<SketchId>) -> String {
             format_angle(*value)
         }
         Constraint::Offset { distance, .. } => format_length(*distance),
+        Constraint::Rho { value, .. } => format!("ρ {}", trim_number(*value)),
         _ => String::new(),
     }
 }
@@ -572,6 +590,30 @@ fn circular(
     }
 }
 
+/// A conic's start, control point and end, and its ρ.
+fn conic_of(
+    sketch: &SketchData,
+    points: &BTreeMap<SketchId, DVec2>,
+    id: SketchId,
+) -> Option<([DVec2; 3], f64)> {
+    match sketch.entity(id)?.geometry {
+        Geometry::Conic {
+            start,
+            control,
+            end,
+            rho,
+        } => Some((
+            [
+                *points.get(&start)?,
+                *points.get(&control)?,
+                *points.get(&end)?,
+            ],
+            rho,
+        )),
+        _ => None,
+    }
+}
+
 /// What a dimension measures, in plane coordinates: enough to draw it and to
 /// find its anchor.
 #[derive(Clone, Copy, Debug)]
@@ -612,6 +654,9 @@ enum Measured {
         source: DVec2,
         sweep: f64,
     },
+    /// A conic's ρ: its shoulder point, and the unit direction of the
+    /// median from the chord's midpoint through it (design note 0009 §7).
+    Shoulder { at: DVec2, dir: DVec2 },
 }
 
 impl Measured {
@@ -626,6 +671,7 @@ impl Measured {
             Measured::Radial { centre, .. } | Measured::Turn { centre, .. } => centre,
             Measured::Angle { vertex, .. } => vertex,
             Measured::Across { from, to } => (from + to) * 0.5,
+            Measured::Shoulder { at, .. } => at,
         }
     }
 }
@@ -746,6 +792,14 @@ fn measured(
                 centre: c,
                 source,
                 sweep: *angle,
+            }
+        }
+        Constraint::Rho { curve, .. } => {
+            let (p, rho) = conic_of(sketch, points, *curve)?;
+            let m = (p[0] + p[2]) * 0.5;
+            Measured::Shoulder {
+                at: m + (p[1] - m) * rho,
+                dir: (p[1] - m).normalize_or(DVec2::Y),
             }
         }
         _ => return None,
@@ -1010,6 +1064,17 @@ fn dimension_geometry(
                 .unwrap_or_else(|| c + DVec2::from_angle(start + sweep * 0.5) * (r + off * 0.9));
             (lines, at)
         }
+        (Measured::Shoulder { at, dir }, placement) => {
+            // A leader from the shoulder point to the label, which goes on
+            // along the median, outside the curve.
+            let label = placement.unwrap_or(at + dir * off * 1.4);
+            let lines = if (label - at).length() > tiny {
+                vec![[at, label]]
+            } else {
+                Vec::new()
+            };
+            (lines, label)
+        }
     }
 }
 
@@ -1030,6 +1095,7 @@ fn dimension_annotation(
             .copied()
             .or_else(|| line_ends(sketch, points, *e).map(|(a, _)| a))
             .or_else(|| circular(sketch, points, *e).map(|(c, _, _)| c))
+            .or_else(|| conic_of(sketch, points, *e).map(|(p, _)| p[0]))
     })?;
     let ppp = map.plane_per_point(map.to_screen(near)?);
     let anchor = m.anchor();
@@ -1166,7 +1232,8 @@ pub struct Snap {
     pub target: SnapTarget,
 }
 
-/// The exact point of a curve nearest `p` for lines and circulars, else `p`.
+/// The exact point of a curve nearest `p` for lines, circulars, ellipses and
+/// conics, else `p`.
 fn onto_curve(d: &SketchDisplay, id: SketchId, p: DVec2) -> DVec2 {
     match d.curve(id).map(|c| &c.curve) {
         Some(ResolvedCurve::Line { start, end }) => {
@@ -1193,6 +1260,15 @@ fn onto_curve(d: &SketchDisplay, id: SketchId, p: DVec2) -> DVec2 {
             minor,
             ..
         }) => closest_on_ellipse(*center, *major, *minor, p),
+        Some(&ResolvedCurve::Conic {
+            start,
+            control,
+            end,
+            weight,
+        }) => {
+            let c = [start, control, end];
+            conic::point(c, weight, conic::closest_param(c, weight, p))
+        }
         _ => p,
     }
 }
@@ -1383,11 +1459,14 @@ pub enum Tool {
     Ellipse,
     /// Elliptical arc: the ellipse's three clicks, then its start and end.
     EllipticalArc,
+    /// Conic arc: its start, its end, where its end tangents meet, then
+    /// its shoulder (design note 0009 §7).
+    Conic,
 }
 
 impl Tool {
     /// Every tool, in toolbar order.
-    pub const ALL: [Tool; 24] = [
+    pub const ALL: [Tool; 25] = [
         Tool::Select,
         Tool::Line,
         Tool::Rectangle,
@@ -1404,6 +1483,7 @@ impl Tool {
         Tool::Point,
         Tool::Spline,
         Tool::ControlSpline,
+        Tool::Conic,
         Tool::Trim,
         Tool::Extend,
         Tool::Split,
@@ -1436,7 +1516,9 @@ impl Tool {
             Tool::Slot => &[Tool::Slot],
             Tool::Polygon => &[Tool::Polygon],
             Tool::Point => &[Tool::Point],
-            Tool::Spline | Tool::ControlSpline => &[Tool::Spline, Tool::ControlSpline],
+            Tool::Spline | Tool::ControlSpline | Tool::Conic => {
+                &[Tool::Spline, Tool::ControlSpline, Tool::Conic]
+            }
             Tool::SketchFillet => &[Tool::SketchFillet],
             Tool::Mirror => &[Tool::Mirror],
             Tool::Offset => &[Tool::Offset],
@@ -1473,6 +1555,7 @@ impl Tool {
             Tool::CircularPattern => "Circular pattern",
             Tool::Ellipse => "Ellipse",
             Tool::EllipticalArc => "Elliptical arc",
+            Tool::Conic => "Conic",
         }
     }
 
@@ -1516,7 +1599,8 @@ impl Tool {
             | Tool::CircularPattern
             | Tool::ControlSpline
             | Tool::Ellipse
-            | Tool::EllipticalArc => return None,
+            | Tool::EllipticalArc
+            | Tool::Conic => return None,
         })
     }
 
@@ -1580,6 +1664,12 @@ impl Tool {
             (Tool::Ellipse, _) | (Tool::EllipticalArc, 2) => "Click to set the second axis",
             (Tool::EllipticalArc, 3) => "Click the start point on the ellipse",
             (Tool::EllipticalArc, _) => "Move around the ellipse and click the end point",
+            (Tool::Conic, 0) => "Click the start point",
+            (Tool::Conic, 1) => "Click the end point",
+            (Tool::Conic, 2) => "Click where the tangents at the two ends meet",
+            (Tool::Conic, _) => {
+                "Click the shoulder: how far the curve reaches towards the corner sets its ρ"
+            }
         }
     }
 }
@@ -1707,6 +1797,8 @@ enum Kind {
     Spline,
     /// An ellipse or an elliptical arc.
     Ellipse,
+    /// A conic arc.
+    Conic,
 }
 
 impl Kind {
@@ -1723,6 +1815,7 @@ fn kind(sketch: &SketchData, id: SketchId) -> Option<Kind> {
         Geometry::Arc { .. } => Kind::Arc,
         Geometry::ControlSpline { .. } | Geometry::InterpolatedSpline { .. } => Kind::Spline,
         Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. } => Kind::Ellipse,
+        Geometry::Conic { .. } => Kind::Conic,
     })
 }
 
@@ -1731,7 +1824,8 @@ fn end_points(sketch: &SketchData, id: SketchId) -> Vec<SketchId> {
     match &sketch.entity(id).map(|e| &e.geometry) {
         Some(Geometry::Line { start, end })
         | Some(Geometry::Arc { start, end, .. })
-        | Some(Geometry::EllipticalArc { start, end, .. }) => vec![*start, *end],
+        | Some(Geometry::EllipticalArc { start, end, .. })
+        | Some(Geometry::Conic { start, end, .. }) => vec![*start, *end],
         Some(Geometry::ControlSpline { control: p, .. })
         | Some(Geometry::InterpolatedSpline { through: p, .. }) => {
             p.first().into_iter().chain(p.last()).copied().collect()
@@ -1900,6 +1994,8 @@ pub fn constraints_for(
                 TangentKind::AtPoint { point }
             } else if kinds.contains(&Kind::Spline) {
                 return Err("Tangency with a spline needs a shared end point".into());
+            } else if kinds.contains(&Kind::Conic) {
+                return Err("Tangency with a conic needs a shared end point".into());
             } else if kinds.contains(&Kind::Line) {
                 let (line, circ) = if kinds[0] == Kind::Line {
                     (a, b)
@@ -1956,6 +2052,10 @@ pub fn dimension_for(
             curve: *curve,
             value: 0.0,
         },
+        [(curve, Kind::Conic)] => C::Rho {
+            curve: *curve,
+            value: 0.5,
+        },
         [(a, Kind::Point), (b, Kind::Point)] => C::Distance {
             a: *a,
             b: *b,
@@ -1994,8 +2094,8 @@ pub fn dimension_for(
         }
         _ => {
             return Err(
-                "Dimension needs a line, a circle or arc, two points, a point and a \
-                        line, or two lines"
+                "Dimension needs a line, a circle or arc, a conic, two points, a point \
+                        and a line, or two lines"
                     .into(),
             )
         }
@@ -2026,6 +2126,23 @@ impl DimensionPrompt {
         )
     }
 
+    /// True for a conic's ρ, a plain number.
+    pub fn is_rho(&self) -> bool {
+        matches!(self.constraint, Constraint::Rho { .. })
+    }
+
+    /// What the typed value is in, shown beside it: millimetres, degrees,
+    /// or ρ.
+    pub fn unit(&self) -> &'static str {
+        if self.is_angle() {
+            "°"
+        } else if self.is_rho() {
+            "ρ"
+        } else {
+            "mm"
+        }
+    }
+
     /// How a point-to-point distance is measured, if it is one.
     pub fn distance_kind(&self) -> Option<DistanceKind> {
         match self.constraint {
@@ -2037,6 +2154,21 @@ impl DimensionPrompt {
     /// Parses the typed value into SI units, keeping an angle's sign.
     fn value(&self) -> Result<f64, String> {
         let current = self.constraint.value().unwrap_or(0.0);
+        if self.is_rho() {
+            let v: f64 = self
+                .text
+                .trim()
+                .parse()
+                .map_err(|_| "ρ is a number between 0 and 1".to_string())?;
+            return if (RHO_MIN..=1.0 - RHO_MIN).contains(&v) {
+                Ok(v)
+            } else {
+                Err(format!(
+                    "ρ is between 0 and 1 ({RHO_MIN} to {})",
+                    1.0 - RHO_MIN
+                ))
+            };
+        }
         if self.is_angle() {
             let v = Quantity::parse_angle(&self.text).map_err(|e| e.to_string())?;
             let v = v.abs() * if current < 0.0 { -1.0 } else { 1.0 };
@@ -2085,6 +2217,7 @@ fn prompt_text(c: &Constraint<SketchId>) -> String {
         Constraint::Angle { .. } | Constraint::CircularPattern { .. } => {
             trim_number(v.abs().to_degrees())
         }
+        Constraint::Rho { .. } => trim_number(v),
         _ => trim_number(v / LengthUnit::Millimetre.metres()),
     }
 }
@@ -2103,6 +2236,13 @@ enum Drag {
     },
     /// Changing a circle's radius.
     Radius { circle: SketchId },
+    /// Changing a conic's ρ: its shoulder follows the pointer along the
+    /// median from where it was grabbed, when ρ was `from`.
+    Rho {
+        conic: SketchId,
+        grab: DVec2,
+        from: f64,
+    },
     /// Box selection.
     Box { from: Pos2, to: Pos2 },
     /// Moving a dimension's label: its offset from the dimension's anchor
@@ -2933,7 +3073,7 @@ impl SketchEditor {
                             candidates.push((w, Inference::Parallel(curve)));
                         }
                     }
-                    Some(Kind::Arc) | Some(Kind::Spline) | Some(Kind::Ellipse) => {
+                    Some(Kind::Arc | Kind::Spline | Kind::Ellipse | Kind::Conic) => {
                         if let Some(w) = d
                             .curve(curve)
                             .and_then(|c| leaving_direction(&c.curve, at_end))
@@ -3064,6 +3204,31 @@ impl SketchEditor {
                     Ok(curve) if pts.len() >= 2 => vec![sample_curve(&curve)],
                     _ => vec![pts],
                 }
+            }
+            (Tool::Conic, 1) => vec![vec![c[0].at, cur.at]],
+            (Tool::Conic, 2) => {
+                // The control polygon to the pointer and the parabola
+                // (ρ = ½) it would make.
+                let (a, e) = (c[0].at, c[1].at);
+                if shapes::conic_control_ok(a, e, cur.at) {
+                    vec![
+                        shapes::conic_polyline([a, cur.at, e], 0.5),
+                        vec![a, cur.at, e],
+                    ]
+                } else {
+                    vec![vec![a, e]]
+                }
+            }
+            (Tool::Conic, 3) => {
+                // The conic whose shoulder follows the pointer along the
+                // median, with the control polygon and the median.
+                let (a, k, e) = (c[0].at, c[2].at, c[1].at);
+                let rho = shapes::conic_rho(a, k, e, cur.at);
+                vec![
+                    shapes::conic_polyline([a, k, e], rho),
+                    vec![a, k, e],
+                    vec![(a + e) * 0.5, k],
+                ]
             }
             (Tool::ControlSpline, n) if n >= 1 => {
                 // The control polygon and, from three points, the curve.
@@ -3421,6 +3586,28 @@ impl SketchEditor {
                     }
                 }
             }
+            Tool::Conic => match self.clicks.len() {
+                0 => self.clicks.push(s),
+                1 => {
+                    if distinct(&self.clicks[0], &s) {
+                        self.clicks.push(s);
+                    }
+                }
+                2 => {
+                    if shapes::conic_control_ok(self.clicks[0].at, self.clicks[1].at, s.at) {
+                        self.clicks.push(s);
+                    } else {
+                        self.message = Some(shapes::NO_CORNER.into());
+                    }
+                }
+                _ => {
+                    let c = &self.clicks;
+                    let rho = shapes::conic_rho(c[0].at, c[2].at, c[1].at, s.at);
+                    let mut b = Batch::default();
+                    let made = shapes::conic(&mut b, &c[0], &c[1], &c[2], rho, construction);
+                    self.commit_shape(model, made.map(|()| b.edits));
+                }
+            },
             Tool::Ellipse | Tool::EllipticalArc => {
                 let arc = self.tool == Tool::EllipticalArc;
                 match self.clicks.len() {
@@ -3593,6 +3780,14 @@ impl SketchEditor {
                 let sketch = &d.sketch;
                 match kind(sketch, id) {
                     Some(Kind::Circle) => Some(Drag::Radius { circle: id }),
+                    Some(Kind::Conic) => match sketch.entity(id).map(|e| &e.geometry) {
+                        Some(&Geometry::Conic { rho, .. }) => Some(Drag::Rho {
+                            conic: id,
+                            grab,
+                            from: rho,
+                        }),
+                        _ => None,
+                    },
                     Some(Kind::Point) => sketch.point(id).map(|at| Drag::Move {
                         grab,
                         points: vec![(id, at)],
@@ -3684,6 +3879,46 @@ impl SketchEditor {
                 }
                 solve(&sketch, &SolveOptions::default())
             }
+            Drag::Rho { conic, grab, from } => {
+                let Some(q) = map.to_plane(pos) else {
+                    return;
+                };
+                let mut sketch = base;
+                let points = match sketch.entity(*conic).map(|e| &e.geometry) {
+                    Some(&Geometry::Conic {
+                        start,
+                        control,
+                        end,
+                        ..
+                    }) => sketch
+                        .point(start)
+                        .zip(sketch.point(control))
+                        .zip(sketch.point(end)),
+                    _ => None,
+                };
+                let Some(((p0, p1), p2)) = points else {
+                    return;
+                };
+                // The shoulder moves as far along the median as the
+                // pointer has, within the tool's range (or the range
+                // that already held it).
+                let moved = shapes::median_position(p0, p1, p2, q)
+                    - shapes::median_position(p0, p1, p2, *grab);
+                let (lo, hi) = (shapes::TOOL_RHO.0.min(*from), shapes::TOOL_RHO.1.max(*from));
+                let r = *from + moved;
+                if !r.is_finite() {
+                    return;
+                }
+                let r = r.clamp(lo, hi);
+                for e in &mut sketch.entities {
+                    if e.id == *conic {
+                        if let Geometry::Conic { rho, .. } = &mut e.geometry {
+                            *rho = r;
+                        }
+                    }
+                }
+                solve(&sketch, &SolveOptions::default())
+            }
         };
         // Keep the last good state if this step does not solve.
         if !matches!(solution.status, SolveStatus::Failed(_)) {
@@ -3694,7 +3929,7 @@ impl SketchEditor {
     /// The pointer was released at `pos`, ending a drag.
     pub fn drag_end(&mut self, model: &mut Model, map: &ScreenMap, pos: Pos2) {
         match self.drag.take() {
-            Some(Drag::Move { .. }) | Some(Drag::Radius { .. }) => {
+            Some(Drag::Move { .. }) | Some(Drag::Radius { .. }) | Some(Drag::Rho { .. }) => {
                 let Some(preview) = self.preview.take() else {
                     self.message = Some("That geometry can't move that way".into());
                     return;

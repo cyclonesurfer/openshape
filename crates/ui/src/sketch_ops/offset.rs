@@ -46,12 +46,13 @@ enum Node {
     Point(SketchId),
 }
 
-/// The ends of a line, arc, elliptical arc or spline.
+/// The ends of a line, arc, elliptical arc, conic or spline.
 fn ends(g: &Geometry<SketchId>) -> Option<(SketchId, SketchId)> {
     match g {
         Geometry::Line { start, end }
         | Geometry::Arc { start, end, .. }
-        | Geometry::EllipticalArc { start, end, .. } => Some((*start, *end)),
+        | Geometry::EllipticalArc { start, end, .. }
+        | Geometry::Conic { start, end, .. } => Some((*start, *end)),
         Geometry::ControlSpline { control: p, .. }
         | Geometry::InterpolatedSpline { through: p, .. } => Some((*p.first()?, *p.last()?)),
         _ => None,
@@ -60,8 +61,8 @@ fn ends(g: &Geometry<SketchId>) -> Option<(SketchId, SketchId)> {
 
 /// The chain through `start` (design note 0007 §10.1): curves of the same
 /// kind (construction or not) joined end to end through points where
-/// exactly two of them end. Splines and elliptical arcs end a chain (they
-/// cannot be offset); a circle is a chain of its own. The chain runs in `start`'s direction.
+/// exactly two of them end. Splines, elliptical arcs and conics end a chain
+/// (they cannot be offset); a circle is a chain of its own. The chain runs in `start`'s direction.
 pub fn chain(sketch: &SketchData, start: SketchId) -> Result<Chain, String> {
     let e = sketch.entity(start).ok_or("The curve no longer exists")?;
     match e.geometry {
@@ -77,6 +78,9 @@ pub fn chain(sketch: &SketchData, start: SketchId) -> Result<Chain, String> {
         }
         Geometry::Ellipse { .. } | Geometry::EllipticalArc { .. } => {
             return Err("An ellipse cannot be offset: its offset is not an ellipse".into())
+        }
+        Geometry::Conic { .. } => {
+            return Err("A conic cannot be offset: its offset is not a conic".into())
         }
         Geometry::Point { .. } => return Err("Click a line, arc or circle to offset".into()),
     }
@@ -170,7 +174,8 @@ pub fn side_and_distance(curve: &ResolvedCurve, at: DVec2) -> Option<(f64, bool)
         }
         ResolvedCurve::Spline { .. }
         | ResolvedCurve::Ellipse { .. }
-        | ResolvedCurve::EllipticalArc { .. } => None,
+        | ResolvedCurve::EllipticalArc { .. }
+        | ResolvedCurve::Conic { .. } => None,
     }
 }
 

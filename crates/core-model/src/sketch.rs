@@ -13,7 +13,7 @@ use openshape_oplog::OpId;
 use serde::{Deserialize, Serialize};
 
 pub use openshape_sketch_solver::{
-    Constraint, ConstraintEntry, DistanceKind, Entity, Geometry, Sketch, TangentKind,
+    Constraint, ConstraintEntry, DistanceKind, Entity, Geometry, Sketch, TangentKind, RHO_MIN,
 };
 
 use crate::PlaneRef;
@@ -120,6 +120,14 @@ pub enum SketchEdit {
         /// New radius (> 0).
         radius: f64,
     },
+    /// Changes a conic's ρ (usually the solver's result; design note 0009
+    /// §3).
+    SetRho {
+        /// The conic.
+        entity: SketchId,
+        /// New ρ, in `[RHO_MIN, 1 − RHO_MIN]`.
+        rho: f64,
+    },
     /// Changes an interpolated spline's parameters (re-parameterization
     /// after its points moved).
     SetSplineParams {
@@ -221,6 +229,9 @@ impl SketchDef {
                         return Err("dimension value is not finite".into());
                     }
                 }
+                if let Constraint::Rho { value, .. } = c.constraint {
+                    check_rho(value)?;
+                }
                 if let Constraint::Fix { at, .. } = c.constraint {
                     if !at.is_finite() {
                         return Err("fixed position is not finite".into());
@@ -245,6 +256,9 @@ impl SketchDef {
                     .iter_mut()
                     .find(|c| c.id == id)
                     .ok_or_else(|| format!("constraint {id:?} does not exist"))?;
+                if matches!(c.constraint, Constraint::Rho { .. }) {
+                    check_rho(*value)?;
+                }
                 if c.constraint.set_value(*value) {
                     Ok(())
                 } else {
@@ -321,6 +335,17 @@ impl SketchDef {
                     _ => Err(format!("{id:?} is not a circle")),
                 }
             }
+            SketchEdit::SetRho { entity, rho } => {
+                check_rho(*rho)?;
+                let id = r(*entity);
+                match &mut self.entity_mut(id)?.geometry {
+                    Geometry::Conic { rho: r0, .. } => {
+                        *r0 = *rho;
+                        Ok(())
+                    }
+                    _ => Err(format!("{id:?} is not a conic")),
+                }
+            }
             SketchEdit::SetSplineParams { entity, params } => {
                 let id = r(*entity);
                 match &mut self.entity_mut(id)?.geometry {
@@ -394,6 +419,17 @@ fn check_params(params: &[f64], points: usize) -> Result<(), String> {
     }
 }
 
+fn check_rho(rho: f64) -> Result<(), String> {
+    if (RHO_MIN..=1.0 - RHO_MIN).contains(&rho) {
+        Ok(())
+    } else {
+        Err(format!(
+            "a conic's ρ must lie in [{RHO_MIN}, {}]",
+            1.0 - RHO_MIN
+        ))
+    }
+}
+
 /// Structural checks that need no other entity.
 fn check_geometry(g: &Geometry<SketchId>) -> Result<(), String> {
     match g {
@@ -442,6 +478,15 @@ fn check_geometry(g: &Geometry<SketchId>) -> Result<(), String> {
         {
             Err("an elliptical arc needs distinct centre, axis ends and ends".into())
         }
+        Geometry::Conic {
+            start,
+            control,
+            end,
+            ..
+        } if start == control || start == end || control == end => {
+            Err("a conic needs three distinct points".into())
+        }
+        Geometry::Conic { rho, .. } => check_rho(*rho),
         _ => Ok(()),
     }
 }

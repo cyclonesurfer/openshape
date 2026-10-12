@@ -69,6 +69,8 @@ impl Axis {
     /// image has the images of its semi-axes, so the same eccentric anomaly
     /// gives the image point, with the opposite handedness: an elliptical
     /// arc's image starts where its source ends, with the opposite sweep.
+    /// A conic's image is the conic on the images of its points, with the
+    /// same weight (design note 0009 §4.5).
     pub fn reflect_curve(&self, c: &ResolvedCurve) -> ResolvedCurve {
         match c {
             ResolvedCurve::Line { start, end } => ResolvedCurve::Line {
@@ -124,6 +126,17 @@ impl Axis {
                 degree: *degree,
                 knots: knots.clone(),
                 points: points.iter().map(|p| self.reflect(*p)).collect(),
+            },
+            ResolvedCurve::Conic {
+                start,
+                control,
+                end,
+                weight,
+            } => ResolvedCurve::Conic {
+                start: self.reflect(*start),
+                control: self.reflect(*control),
+                end: self.reflect(*end),
+                weight: *weight,
             },
         }
     }
@@ -339,6 +352,17 @@ pub fn mirror(
                 through: through.iter().map(|p| map(*p)).collect::<Result<_, _>>()?,
                 params: params.clone(),
             },
+            Geometry::Conic {
+                start,
+                control,
+                end,
+                rho,
+            } => Geometry::Conic {
+                start: map(*start)?,
+                control: map(*control)?,
+                end: map(*end)?,
+                rho: *rho,
+            },
         };
         if let Some((_, c)) = curves.iter().find(|(id, _)| *id == src) {
             preview_curves.push(line.reflect_curve(c));
@@ -418,8 +442,8 @@ impl Mirrored {
 }
 
 /// True when the reflection of `g` is `g` itself: every reflected point
-/// lands on the corresponding point, or (for a line, an arc's ends and a
-/// spline) on the corresponding point in reverse order.
+/// lands on the corresponding point, or (for a line, an arc's ends, a spline
+/// and a conic's ends) on the corresponding point in reverse order.
 fn own_image(sketch: &SketchData, g: &Geometry<SketchId>, line: &Axis) -> Result<bool, String> {
     let at = |p: SketchId| point(sketch, p);
     let same = |a: DVec2, b: DVec2| (a - b).length() <= SAME_POINT;
@@ -467,6 +491,17 @@ fn own_image(sketch: &SketchData, g: &Geometry<SketchId>, line: &Axis) -> Result
             let r: Vec<DVec2> = p.iter().map(|q| line.reflect(*q)).collect();
             r.iter().zip(&p).all(|(a, b)| same(*a, *b))
                 || r.iter().zip(p.iter().rev()).all(|(a, b)| same(*a, *b))
+        }
+        Geometry::Conic {
+            start,
+            control,
+            end,
+            ..
+        } => {
+            // Its control point on the line and its ends swapped (its three
+            // points are never all on a line).
+            let k = at(*control)?;
+            same(line.reflect(k), k) && same(line.reflect(at(*start)?), at(*end)?)
         }
     })
 }

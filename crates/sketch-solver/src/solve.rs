@@ -15,11 +15,12 @@ use glam::DVec2;
 use openshape_linalg::{dot, norm2, residual, select_columns_in_order, CompleteOrthogonal, Matrix};
 
 use crate::build::{build, scale_of, ParamCurve, Problem, Scale, DEGENERATE};
+use crate::conic;
 use crate::diagnose::{conflicts, diagnose, CompDiag, FREE_TOL};
 use crate::ellipse;
-use crate::eq::EqKind;
+use crate::eq::{EqKind, Rhs, VecExpr};
 use crate::index::{Circ, Con, Ell, EntKind, Index, OCurve, OEq, MAX_MAGNITUDE};
-use crate::model::{Geometry, Sketch, SketchKey};
+use crate::model::{Geometry, Sketch, SketchKey, RHO_MIN};
 use crate::newton::{
     equation_tol, solve_component, CompSystem, LengthTol, Region, RANK_TOL, REACH,
 };
@@ -46,7 +47,7 @@ pub(crate) fn early_failure<K: SketchKey>(sketch: &Sketch<K>, err: SolveError) -
         entities.insert(e.id, EntityState::Free);
         dof += match e.geometry {
             Geometry::Point { .. } => 2,
-            Geometry::Circle { .. } => 1,
+            Geometry::Circle { .. } | Geometry::Conic { .. } => 1,
             _ => 0,
         };
     }
@@ -62,7 +63,8 @@ pub(crate) fn early_failure<K: SketchKey>(sketch: &Sketch<K>, err: SolveError) -
     }
 }
 
-/// Every slot of each entity (points: x, y; circles add the radius).
+/// Every slot of each entity (points: x, y; circles add the radius, conics
+/// their shape).
 fn entity_slots<K: SketchKey>(index: &Index<K>, prob: &Problem, ent: usize) -> Vec<usize> {
     let pt = |p: usize| [2 * p, 2 * p + 1];
     match index.kinds[ent] {
@@ -75,6 +77,11 @@ fn entity_slots<K: SketchKey>(index: &Index<K>, prob: &Problem, ent: usize) -> V
         }
         EntKind::Circular(Circ::Arc { c, s, e }) => [pt(c), pt(s), pt(e)].concat(),
         EntKind::Ellipse(_) => entity_points(index, ent).into_iter().flat_map(pt).collect(),
+        EntKind::Conic(cn) => {
+            let mut v = [pt(cn.p0), pt(cn.p1), pt(cn.p2)].concat();
+            v.push(prob.shape_slot(cn.k));
+            v
+        }
         EntKind::Spline(s) => index.splines[s]
             .points
             .iter()
@@ -119,20 +126,21 @@ fn check_all(prob: &Problem, v: &[f64], lin: f64, ang: f64) -> Vec<Option<(f64, 
         .collect()
 }
 
-/// Absolute slot values of a sketch (positions and radii) with the given
-/// hidden parameters.
-fn absolute_slots<K: SketchKey>(
-    index: &Index<K>,
-    positions: &[DVec2],
-    radii: &[f64],
-    params: &[f64],
-) -> Vec<f64> {
-    let mut v = Vec::with_capacity(2 * positions.len() + radii.len() + params.len());
+/// Absolute slot values of a sketch (positions, radii and the shapes of
+/// conics from their ρ) with the given hidden parameters.
+fn absolute_slots<K: SketchKey>(index: &Index<K>, geom: &Geom<'_>, params: &[f64]) -> Vec<f64> {
+    let Geom {
+        positions,
+        radii,
+        rhos,
+    } = *geom;
+    let mut v = Vec::with_capacity(2 * positions.len() + radii.len() + rhos.len() + params.len());
     for p in positions {
         v.push(p.x);
         v.push(p.y);
     }
     v.extend_from_slice(radii);
+    v.extend(rhos.iter().map(|&r| conic::logit(r)));
     v.extend_from_slice(params);
     debug_assert_eq!(index.points.len(), positions.len());
     v
@@ -147,6 +155,28 @@ fn max_abs_residual(checks: &[Option<(f64, f64, bool)>]) -> f64 {
         .map(|(r, _, _)| r.abs())
         .filter(|r| r.is_finite())
         .fold(0.0, f64::max)
+}
+
+/// The values of a sketch's unknowns, in metres (and plain numbers for the
+/// ρ of conics).
+#[derive(Clone, Copy)]
+struct Geom<'a> {
+    /// Point positions.
+    positions: &'a [DVec2],
+    /// Circle radii.
+    radii: &'a [f64],
+    /// Conic shape values ρ.
+    rhos: &'a [f64],
+}
+
+impl<'a, K: SketchKey> From<&'a Index<K>> for Geom<'a> {
+    fn from(index: &'a Index<K>) -> Self {
+        Geom {
+            positions: &index.positions,
+            radii: &index.radii,
+            rhos: &index.rhos,
+        }
+    }
 }
 
 /// A block of columns of the whole system's null space: a component's
@@ -210,9 +240,13 @@ fn solve_inner<K: SketchKey>(
     for (r, rad) in index.radii.iter().enumerate() {
         abs_seed[prob.radius_slot(r)] = *rad;
     }
+    for (k, rho) in index.rhos.iter().enumerate() {
+        abs_seed[prob.shape_slot(k)] = conic::logit(*rho);
+    }
     for k in 0..prob.params.len() {
         slot_w[prob.param_slot(k)] = PARAM_WEIGHT;
     }
+    // Conic shapes are plain numbers, not scaled (design note 0009 §4.1).
     let to_scaled = |s: usize, a: f64| -> f64 {
         if s < 2 * np {
             if s % 2 == 0 {
@@ -220,23 +254,76 @@ fn solve_inner<K: SketchKey>(
             } else {
                 (a - scale.cy) / scale.l
             }
+        } else if prob.is_shape(s) {
+            a
         } else {
             a / scale.l
         }
     };
     let seed: Vec<f64> = (0..n_slots).map(|s| to_scaled(s, abs_seed[s])).collect();
 
-    // Class starting values: dragged members win; otherwise the mean (exact
-    // when all members agree).
+    // Images of derived constraints move first (`newton::images_first`):
+    // an unknown is an image when every slot it stands for is, and none is
+    // dragged (a dragged image moves last, like any dragged point).
+    let mut image_slot = vec![false; n_slots];
+    for con in &cons {
+        match con {
+            Con::Mirror(_, d) => {
+                for &(_, q) in &d.points {
+                    image_slot[2 * q] = true;
+                    image_slot[2 * q + 1] = true;
+                }
+                for &(_, r) in &d.radii {
+                    image_slot[prob.radius_slot(r)] = true;
+                }
+                for &(_, k) in &d.shapes {
+                    image_slot[prob.shape_slot(k)] = true;
+                }
+            }
+            Con::LinearPattern(_, pt) | Con::CircularPattern(_, _, pt) => {
+                for &(_, q, _) in &pt.points {
+                    image_slot[2 * q] = true;
+                    image_slot[2 * q + 1] = true;
+                }
+                for &(_, r) in &pt.radii {
+                    image_slot[prob.radius_slot(r)] = true;
+                }
+                for &(_, k) in &pt.shapes {
+                    image_slot[prob.shape_slot(k)] = true;
+                }
+            }
+            Con::Offset(o) => {
+                for &(x, ..) in &o.points {
+                    image_slot[2 * x] = true;
+                    image_slot[2 * x + 1] = true;
+                }
+                for &(_, img, _) in &o.pieces {
+                    if let OCurve::Circle { r, .. } = img {
+                        image_slot[prob.radius_slot(r)] = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // Class starting values: dragged members win, then those that are no
+    // image (an image's radius or shape equal to its source's starts at the
+    // source's); otherwise the mean (exact when all members agree).
     let class_seed: Vec<f64> = red
         .classes
         .iter()
         .map(|cl| {
-            let dm: Vec<usize> = cl.members.iter().copied().filter(|&s| dragged[s]).collect();
-            let set = if dm.is_empty() {
-                cl.members.clone()
-            } else {
+            let pick = |keep: &dyn Fn(usize) -> bool| -> Vec<usize> {
+                cl.members.iter().copied().filter(|&s| keep(s)).collect()
+            };
+            let dm = pick(&|s| dragged[s]);
+            let sources = pick(&|s| !image_slot[s]);
+            let set = if !dm.is_empty() {
                 dm
+            } else if !sources.is_empty() {
+                sources
+            } else {
+                cl.members.clone()
             };
             if set
                 .iter()
@@ -264,6 +351,11 @@ fn solve_inner<K: SketchKey>(
                 let c = at(el.c);
                 ellipse::closest_param(c, at(el.m) - c, at(el.n) - c, at(par.point))
             }
+            ParamCurve::Conic(cn) => {
+                let at = |q: usize| DVec2::new(v[2 * q], v[2 * q + 1]);
+                let w = v[prob.shape_slot(cn.k)].exp();
+                conic::closest_param([at(cn.p0), at(cn.p1), at(cn.p2)], w, at(par.point))
+            }
         };
         v[prob.param_slot(k)] = t;
     }
@@ -278,38 +370,6 @@ fn solve_inner<K: SketchKey>(
         .iter()
         .map(|&c| red.classes[c].members.iter().map(|&s| slot_w[s]).sum())
         .collect();
-    // Images of derived constraints move first (`newton::images_first`):
-    // an unknown is an image when every slot it stands for is, and none is
-    // dragged (a dragged image moves last, like any dragged point).
-    let mut image_slot = vec![false; n_slots];
-    for con in &cons {
-        match con {
-            Con::Mirror(_, d) => {
-                for &(_, q) in &d.points {
-                    image_slot[2 * q] = true;
-                    image_slot[2 * q + 1] = true;
-                }
-            }
-            Con::LinearPattern(_, pt) | Con::CircularPattern(_, _, pt) => {
-                for &(_, q, _) in &pt.points {
-                    image_slot[2 * q] = true;
-                    image_slot[2 * q + 1] = true;
-                }
-            }
-            Con::Offset(o) => {
-                for &(x, ..) in &o.points {
-                    image_slot[2 * x] = true;
-                    image_slot[2 * x + 1] = true;
-                }
-                for &(_, img, _) in &o.pieces {
-                    if let OCurve::Circle { r, .. } = img {
-                        image_slot[prob.radius_slot(r)] = true;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
     let unknown_image: Vec<bool> = red
         .unknowns
         .iter()
@@ -564,8 +624,7 @@ fn solve_inner<K: SketchKey>(
     let (input_ok, input_residual) = accept(
         &mut abs_prob,
         &index,
-        &index.positions,
-        &index.radii,
+        &Geom::from(&index),
         &input_params,
         degen_in,
     );
@@ -593,6 +652,8 @@ fn solve_inner<K: SketchKey>(
             } else {
                 scale.cy + scale.l * u_global[u]
             }
+        } else if prob.is_shape(s) {
+            u_global[u]
         } else {
             scale.l * u_global[u]
         }
@@ -603,6 +664,32 @@ fn solve_inner<K: SketchKey>(
     let radii: Vec<f64> = (0..prob.n_circles)
         .map(|r| abs_value(prob.radius_slot(r)))
         .collect();
+    // A shape that is the logit of a ρ dimension's value or of a stored ρ
+    // (bit for bit: unchanged, set by a dimension, or equal to a source's)
+    // is written back as that ρ exactly, so that equal shapes have equal ρ.
+    let mut exact: BTreeMap<u64, f64> = BTreeMap::new();
+    for con in &cons {
+        if let Con::Rho(_, v) = con {
+            exact.entry(conic::logit(*v).to_bits()).or_insert(*v);
+        }
+    }
+    for rho in &index.rhos {
+        exact.entry(conic::logit(*rho).to_bits()).or_insert(*rho);
+    }
+    let rhos: Vec<f64> = (0..prob.n_shapes)
+        .map(|k| {
+            let u = abs_value(prob.shape_slot(k));
+            exact
+                .get(&u.to_bits())
+                .copied()
+                .unwrap_or_else(|| conic::rho_of(u))
+        })
+        .collect();
+    let out_geom = Geom {
+        positions: &positions,
+        radii: &radii,
+        rhos: &rhos,
+    };
     // The result must also be non-degenerate at its own scale, which is
     // the scale it will be solved at next.
     let out_scale = {
@@ -625,8 +712,7 @@ fn solve_inner<K: SketchKey>(
     let collapse = if (!failed || conflicting.is_empty()) && !(failed && fallback) {
         collapsed(
             &index,
-            &positions,
-            &radii,
+            &out_geom,
             Some((&index.positions, degen_in)),
             degen_out,
         )
@@ -671,6 +757,7 @@ fn solve_inner<K: SketchKey>(
                     EntKind::Circular(Circ::Circle { .. }) => "circle",
                     EntKind::Ellipse(Ell { arc: None, .. }) => "ellipse",
                     EntKind::Ellipse(_) => "elliptical arc",
+                    EntKind::Conic(_) => "conic",
                     _ => "arc",
                 };
                 let msg = format!("{kind} {:?} {}", sketch.entities[ent].id, how.says());
@@ -682,14 +769,7 @@ fn solve_inner<K: SketchKey>(
     let (out_ok, max_residual) = if failed {
         (false, f64::NAN)
     } else {
-        accept(
-            &mut abs_prob,
-            &index,
-            &positions,
-            &radii,
-            &params,
-            degen_out,
-        )
+        accept(&mut abs_prob, &index, &out_geom, &params, degen_out)
     };
     let offset_error = if out_ok {
         offset_problem(sketch, &index, &cons, &positions, &radii)
@@ -755,6 +835,11 @@ fn solve_inner<K: SketchKey>(
             *radius = radii[r];
         }
     }
+    for (k, &ent) in index.conics.iter().enumerate() {
+        if let Geometry::Conic { rho, .. } = &mut out.entities[ent].geometry {
+            *rho = rhos[k];
+        }
+    }
     let status = if redundant.is_empty() {
         SolveStatus::Solved
     } else {
@@ -780,20 +865,23 @@ const ACCEPT_MARGIN: f64 = 8.0;
 /// to the model tolerance (on its branch), no direction a constraint needs
 /// is shorter than `degen` (metres), no curve has collapsed at that
 /// threshold ([`collapsed`], an arc may end where it starts), and
-/// coordinates and radii are within the input limits. Returns whether it
-/// passes and the largest absolute residual.
+/// coordinates and radii are within the input limits (so is every conic's
+/// ρ, by [`collapsed`]). Returns whether it passes and the largest absolute
+/// residual.
 fn accept<K: SketchKey>(
     abs_prob: &mut Problem,
     index: &Index<K>,
-    positions: &[DVec2],
-    radii: &[f64],
+    geom: &Geom<'_>,
     params: &[f64],
     degen: f64,
 ) -> (bool, f64) {
     abs_prob.degen = degen;
-    let va = absolute_slots(index, positions, radii, params);
+    let va = absolute_slots(index, geom, params);
     let checks = check_all(abs_prob, &va, LINEAR_TOL, ANGULAR_TOL);
-    let ok = collapsed(index, positions, radii, None, degen).is_empty()
+    let Geom {
+        positions, radii, ..
+    } = *geom;
+    let ok = collapsed(index, geom, None, degen).is_empty()
         && checks
             .iter()
             .all(|c| matches!(c, Some((r, tol, true)) if r.abs() <= *tol))
@@ -896,6 +984,7 @@ fn entity_points<K: SketchKey>(index: &Index<K>, ent: usize) -> Vec<usize> {
             }
             v
         }
+        EntKind::Conic(cn) => vec![cn.p0, cn.p1, cn.p2],
         EntKind::Spline(s) => index.splines[s].points.clone(),
     }
 }
@@ -953,8 +1042,13 @@ enum Collapse {
     /// An ellipse or elliptical arc with an axis of zero length (the
     /// major axis when `true`).
     Axis(bool),
-    /// An arc whose end has come onto its start.
+    /// An arc whose end has come onto its start (for a conic, at any
+    /// time).
     Closed,
+    /// A conic whose control point is in line with its ends.
+    Flat,
+    /// A conic whose ρ is outside [`RHO_MIN`], 1 − [`RHO_MIN`]].
+    Shape,
 }
 
 impl Collapse {
@@ -965,24 +1059,34 @@ impl Collapse {
             Collapse::Radius => "has zero radius",
             Collapse::Axis(_) => "has an axis of zero length",
             Collapse::Closed => "ends where it starts",
+            Collapse::Flat => "is flat: its control point is in line with its ends",
+            Collapse::Shape => {
+                "has a ρ too close to 0 or 1: it would lie along its chord or its control polygon"
+            }
         }
     }
 }
 
-/// The curves that have collapsed at `positions` and `radii`, in entity
-/// order: a line no longer than `degen` (metres), a circle or arc whose
-/// radius is no longer, or an arc whose end lies within `degen` of its
-/// start where it did not in the input (`input`: the input positions and
-/// their threshold; `None` when `positions` are the input, whose arcs may
-/// end where they start). Splines are not checked: their control points
-/// may coincide.
+/// The curves that have collapsed at `geom`, in entity order: a line no
+/// longer than `degen` (metres), a circle or arc whose radius is no
+/// longer, an arc whose end lies within `degen` of its start where it did
+/// not in the input (`input`: the input positions and their threshold;
+/// `None` when `positions` are the input, whose arcs may end where they
+/// start), or a conic whose ends are that close, whose control point is
+/// that close to the line through them, or whose ρ is outside
+/// [`RHO_MIN`], 1 − [`RHO_MIN`]] (design note 0009 §4.6). Splines are not
+/// checked: their control points may coincide.
 fn collapsed<K: SketchKey>(
     index: &Index<K>,
-    positions: &[DVec2],
-    radii: &[f64],
+    geom: &Geom<'_>,
     input: Option<(&[DVec2], f64)>,
     degen: f64,
 ) -> Vec<(usize, Collapse)> {
+    let Geom {
+        positions,
+        radii,
+        rhos,
+    } = *geom;
     let short = |a: usize, b: usize| (positions[b] - positions[a]).length() <= degen;
     let mut out = Vec::new();
     for (ent, k) in index.kinds.iter().enumerate() {
@@ -1006,6 +1110,13 @@ fn collapsed<K: SketchKey>(
             }) if short(s, e) && input.is_some_and(|(at, d)| (at[e] - at[s]).length() > d) => {
                 Collapse::Closed
             }
+            EntKind::Conic(cn) if short(cn.p0, cn.p2) => Collapse::Closed,
+            EntKind::Conic(cn) if conic_height(positions, cn).is_none_or(|h| h <= degen) => {
+                Collapse::Flat
+            }
+            EntKind::Conic(cn) if !(rhos[cn.k] >= RHO_MIN && rhos[cn.k] <= 1.0 - RHO_MIN) => {
+                Collapse::Shape
+            }
             _ => continue,
         };
         out.push((ent, how));
@@ -1013,11 +1124,22 @@ fn collapsed<K: SketchKey>(
     out
 }
 
-/// The quantity that has collapsed, as gradient rows over slots: the
-/// vector between the two points that met (two rows), or the radius.
+/// The distance of a conic's control point from the line through its ends
+/// (`None` where the ends meet).
+fn conic_height(positions: &[DVec2], cn: crate::index::Cnc) -> Option<f64> {
+    let chord = positions[cn.p2] - positions[cn.p0];
+    let len = chord.length();
+    (len > 0.0).then(|| chord.perp_dot(positions[cn.p1] - positions[cn.p0]).abs() / len)
+}
+
+/// The quantity that has collapsed, as gradient rows over slots at scaled
+/// slot values `v`: the vector between the two points that met (two rows),
+/// the radius, a conic's height (its control point's signed distance from
+/// the line through its ends) or its shape.
 fn collapse_rows<K: SketchKey>(
     index: &Index<K>,
     prob: &Problem,
+    v: &[f64],
     ent: usize,
     how: Collapse,
 ) -> Vec<Vec<(usize, f64)>> {
@@ -1041,6 +1163,21 @@ fn collapse_rows<K: SketchKey>(
             }),
             Collapse::Closed,
         ) => between(s, e),
+        (EntKind::Conic(cn), Collapse::Closed) => between(cn.p0, cn.p2),
+        (EntKind::Conic(cn), Collapse::Flat) => {
+            let height = EqKind::SignedDist {
+                dir: VecExpr::diff(cn.p2, cn.p0),
+                v: VecExpr::diff(cn.p1, cn.p0),
+                abs: false,
+                rhs: Rhs::zero(),
+            };
+            let mut grad = Vec::new();
+            match height.eval(v, &prob.splines, 0.0, Some(&mut grad)) {
+                Some(_) => vec![grad],
+                None => between(cn.p0, cn.p2),
+            }
+        }
+        (EntKind::Conic(cn), Collapse::Shape) => vec![vec![(prob.shape_slot(cn.k), 1.0)]],
         _ => Vec::new(),
     }
 }
@@ -1290,7 +1427,7 @@ impl<K: SketchKey> Part<'_, K> {
                 _ => false,
             })
             .collect();
-        let rows = collapse_rows(self.index, prob, ent, how);
+        let rows = collapse_rows(self.index, prob, v, ent, how);
         let held = holding(prob, v, &eqs, &rows, sketch.constraints.len());
         let candidates: Vec<usize> = cons
             .iter()
@@ -1341,15 +1478,7 @@ impl<K: SketchKey> Part<'_, K> {
                 continue;
             };
             let input = Some((part_index.positions.as_slice(), degen_in));
-            if collapsed(
-                &out_index,
-                &out_index.positions,
-                &out_index.radii,
-                input,
-                degen,
-            )
-            .is_empty()
-            {
+            if collapsed(&out_index, &Geom::from(&out_index), input, degen).is_empty() {
                 return (Some(j), iterations);
             }
         }

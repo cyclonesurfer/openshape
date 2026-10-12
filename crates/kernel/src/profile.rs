@@ -164,6 +164,39 @@ impl ProfileCurve {
         })
     }
 
+    /// The conic arc from `start` to `end` whose end tangents meet at
+    /// `control`, with middle weight `weight` (design note 0009 §6): the
+    /// rational quadratic Bézier with weights 1, `weight`, 1, exactly.
+    /// Fails for non-finite input, a weight that is not positive, or three
+    /// points in line.
+    pub fn conic(
+        start: DVec2,
+        control: DVec2,
+        end: DVec2,
+        weight: f64,
+    ) -> Result<ProfileCurve, KernelError> {
+        if !(start.is_finite() && control.is_finite() && end.is_finite()) {
+            return Err(KernelError::InvalidInput("conic: non-finite input".into()));
+        }
+        if !(weight.is_finite() && weight > 0.0) {
+            return Err(KernelError::InvalidInput(format!(
+                "conic: the weight {weight} is not positive and finite"
+            )));
+        }
+        let turn = (end - start).perp_dot(control - start);
+        if turn == 0.0 || turn.is_nan() {
+            return Err(KernelError::InvalidInput(
+                "conic: the start, control and end points are in line".into(),
+            ));
+        }
+        Ok(ProfileCurve::Spline {
+            degree: 2,
+            knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            points: vec![start, control, end],
+            weights: Some(vec![1.0, weight, 1.0]),
+        })
+    }
+
     /// A cubic (or lower, for few points) spline interpolating `points`.
     pub fn interpolate(points: &[DVec2]) -> Result<ProfileCurve, KernelError> {
         let degree = 3.min(points.len().saturating_sub(1)).max(1);

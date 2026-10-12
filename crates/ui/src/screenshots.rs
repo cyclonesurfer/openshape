@@ -496,6 +496,33 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     d.click(on_plane(&d, x, y)?)?;
     d.hover(on_plane(&d, 120.0, -80.0)?)?;
     save("20-ellipses.png", &d.settle()?)?;
+    // Below the plate: a conic being drawn (its ends, then the corner where
+    // its end tangents meet; the curve reaches up to the pointer), then a
+    // second one, flatter, with its ρ dimensioned.
+    d.app.run(crate::commands::Command::Tool(Tool::Conic));
+    for (x, y) in [(-34.0, -50.0), (-6.0, -50.0), (-24.0, -33.0)] {
+        d.click(on_plane(&d, x, y)?)?;
+    }
+    // ρ = 0.7: 0.7 of the corner's height above the chord.
+    d.hover(on_plane(&d, -12.0, -38.1)?)?;
+    save("21-conic-drawing.png", &d.settle()?)?;
+    d.click(on_plane(&d, -12.0, -38.1)?)?;
+    for (x, y) in [(6.0, -50.0), (34.0, -50.0), (20.0, -33.0), (26.0, -44.05)] {
+        d.click(on_plane(&d, x, y)?)?;
+    }
+    d.app.run(crate::commands::Command::Tool(Tool::Select));
+    // Selected at its shoulder (ρ = 0.35), dimensioned, and set to 0.42.
+    d.click(on_plane(&d, 20.0, -44.05)?)?;
+    d.hover(on_plane(&d, 30.0, -36.0)?)?;
+    d.app.run(crate::commands::Command::Dimension);
+    if let Some(p) = d.app.sketch_editor_mut().and_then(|ed| ed.prompt.as_mut()) {
+        p.text = "0.42".into();
+    }
+    d.settle()?;
+    d.key(Key::Enter, Modifiers::NONE)?;
+    d.app.select(None);
+    d.hover(on_plane(&d, 120.0, -80.0)?)?;
+    save("22-conics.png", &d.settle()?)?;
     d.app.run(crate::commands::Command::CancelSketch);
     Ok(written)
 }

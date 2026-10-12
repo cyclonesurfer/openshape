@@ -125,18 +125,26 @@ pub fn paint_editor(
             c.construction,
         );
     }
-    // Control-point splines show their control polygons.
+    // Control-point splines and conics show their control polygons.
     for e in &d.sketch.entities {
-        if let Geometry::ControlSpline { control, .. } = &e.geometry {
-            let pts: Vec<DVec2> = control.iter().filter_map(|p| d.sketch.point(*p)).collect();
-            stroke_polyline(
-                painter,
-                map,
-                &pts,
-                Stroke::new(1.0, dimmed(color(e.id))),
-                true,
-            );
-        }
+        let control = match &e.geometry {
+            Geometry::ControlSpline { control, .. } => control.clone(),
+            Geometry::Conic {
+                start,
+                control,
+                end,
+                ..
+            } => vec![*start, *control, *end],
+            _ => continue,
+        };
+        let pts: Vec<DVec2> = control.iter().filter_map(|p| d.sketch.point(*p)).collect();
+        stroke_polyline(
+            painter,
+            map,
+            &pts,
+            Stroke::new(1.0, dimmed(color(e.id))),
+            true,
+        );
     }
     for (id, at) in d.points() {
         if let Some(s) = map.to_screen(at) {

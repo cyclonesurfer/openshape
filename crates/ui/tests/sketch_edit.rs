@@ -875,7 +875,7 @@ fn add_shapes(m: &mut Model, f: FeatureId, shapes: &[Shape]) {
 }
 
 /// The point a fraction `along` of the way along a curve (in its
-/// parameter, for ellipses its eccentric anomaly).
+/// parameter, for ellipses its eccentric anomaly, for conics t).
 fn along(c: &ResolvedCurve, along: f64) -> DVec2 {
     match c {
         ResolvedCurve::Line { start, end } => start.lerp(*end, along),
@@ -907,6 +907,12 @@ fn along(c: &ResolvedCurve, along: f64) -> DVec2 {
             let (s, c) = (start_param + along * sweep_param).sin_cos();
             *center + *major * c + *minor * s
         }
+        ResolvedCurve::Conic {
+            start,
+            control,
+            end,
+            weight,
+        } => openshape_sketch_solver::conic::point([*start, *control, *end], *weight, along),
     }
 }
 
@@ -1084,6 +1090,7 @@ fn edit_randomly(
                     sweep_param,
                     ..
                 } => major.length().min(minor.length()) * sweep_param.abs(),
+                ResolvedCurve::Conic { start, end, .. } => (*end - *start).length(),
             };
             prop_assert!(size > trim::CUT_GAP, "{:?}", c);
         }

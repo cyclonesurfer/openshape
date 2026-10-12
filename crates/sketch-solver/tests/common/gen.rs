@@ -614,6 +614,87 @@ impl G {
         }
     }
 
+    /// A conic arc (design note 0009) of any type, sometimes with its ρ
+    /// dimensioned, with a point on it, a line leaving an end along its
+    /// tangent, or an arc continuing tangentially from its start.
+    fn conics(&mut self) {
+        let p0 = self.rng.pt() * 0.5;
+        let chord = self.rng.dir() * self.rng.range(0.5, 1.0);
+        let p2 = p0 + chord;
+        // The control point above the chord, anywhere along it (the legs
+        // well apart from the chord, so that a perturbation cannot flatten
+        // the triangle).
+        let along = self.rng.range(0.1, 0.9);
+        let height = self.rng.range(0.4, 0.8) * if self.rng.chance(0.5) { 1.0 } else { -1.0 };
+        let p1 = p0 + chord * along + chord.perp().normalize() * height;
+        let rho = self.rng.range(0.15, 0.85);
+        let w = rho / (1.0 - rho);
+        // The curve by its homogeneous de Casteljau form, written here
+        // independently of the solver.
+        let at = |t: f64| {
+            let (a, b) = ((1.0 - t) * (1.0 - t), 2.0 * t * (1.0 - t) * w);
+            (p0 * a + p1 * b + p2 * (t * t)) / (a + b + t * t)
+        };
+        let (k0, k1, k2) = (self.point(p0), self.point(p1), self.point(p2));
+        let k = self.b.entity(Geometry::Conic {
+            start: k0,
+            control: k1,
+            end: k2,
+            rho,
+        });
+        if self.rng.chance(0.4) {
+            self.con(Constraint::Rho {
+                curve: k,
+                value: 0.5,
+            });
+        }
+        match self.rng.int(3) {
+            0 => {
+                let t = self.rng.range(0.15, 0.85);
+                let q = self.point(at(t));
+                self.con(Constraint::PointOnCurve { point: q, curve: k });
+            }
+            1 => {
+                // A line on from the end, along the leg into it.
+                let d = (p2 - p1).normalize();
+                let ll = self.len();
+                let (l, ls, _) = self.line(p2, p2 + d * ll);
+                self.con(Constraint::Coincident { a: k2, b: ls });
+                self.con(Constraint::Tangent {
+                    a: k,
+                    b: l,
+                    kind: TangentKind::AtPoint { point: ls },
+                });
+            }
+            _ => {
+                // An arc ending at the start, tangent to the first leg
+                // there: its centre on the normal to the leg, away from
+                // the control point.
+                let d = (p1 - p0).normalize();
+                let side = if d.perp().dot(p2 - p0) > 0.0 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let r = self.rng.range(0.3, 0.6);
+                let c = p0 + d.perp() * (side * r);
+                // The arc (counter-clockwise) ends or starts there.
+                let a1 = (p0 - c).to_angle();
+                let sweep = self.rng.range(0.6, 1.8);
+                let ends_there = self.rng.chance(0.5);
+                let a0 = if ends_there { a1 - sweep } else { a1 };
+                let (ka, _, ks, ke) = self.arc(c, r, a0, sweep);
+                let join = if ends_there { ke } else { ks };
+                self.con(Constraint::Coincident { a: k0, b: join });
+                self.con(Constraint::Tangent {
+                    a: k,
+                    b: ka,
+                    kind: TangentKind::AtPoint { point: join },
+                });
+            }
+        }
+    }
+
     fn aligned_points(&mut self) {
         if self.points.is_empty() {
             return;
@@ -710,6 +791,17 @@ pub fn generate_with(
     offset: DVec2,
     ellipses: bool,
 ) -> Generated {
+    generate_kinds(seed, motifs, scale, offset, if ellipses { 10 } else { 9 })
+}
+
+/// As [`generate`], with ellipses, elliptical arcs and conics among the
+/// motifs.
+pub fn generate_with_conics(seed: u64, motifs: usize, scale: f64, offset: DVec2) -> Generated {
+    generate_kinds(seed, motifs, scale, offset, 11)
+}
+
+/// The generator over the first `kinds` motifs.
+fn generate_kinds(seed: u64, motifs: usize, scale: f64, offset: DVec2, kinds: usize) -> Generated {
     let mut g = G {
         b: B::new(),
         rng: Rng(seed),
@@ -718,10 +810,10 @@ pub fn generate_with(
         circulars: Vec::new(),
         circles: Vec::new(),
     };
-    let kinds = if ellipses { 10 } else { 9 };
     for _ in 0..motifs {
         match g.rng.int(kinds) {
             9 => g.ellipses(),
+            10 => g.conics(),
             0 => g.polygon(),
             1 => g.rectangle(),
             2 => g.line_pair(),
@@ -782,8 +874,9 @@ pub fn generate_with(
     }
 }
 
-/// Moves every point by up to `amount · scale` in each coordinate and
-/// scales circle radii by up to `1 ± amount`.
+/// Moves every point by up to `amount · scale` in each coordinate, scales
+/// circle radii by up to `1 ± amount` and moves conics' ρ by up to
+/// `± amount / 2`.
 pub fn perturb(s: &Sketch<u32>, seed: u64, amount: f64, scale: f64) -> Sketch<u32> {
     let mut rng = Rng(seed ^ 0x5DEE_CE66_D1CE_4E5B);
     let mut out = s.clone();
@@ -793,6 +886,9 @@ pub fn perturb(s: &Sketch<u32>, seed: u64, amount: f64, scale: f64) -> Sketch<u3
                 *at += DVec2::new(rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)) * (amount * scale);
             }
             Geometry::Circle { radius, .. } => *radius *= 1.0 + amount * rng.range(-1.0, 1.0),
+            Geometry::Conic { rho, .. } => {
+                *rho = (*rho + 0.5 * amount * rng.range(-1.0, 1.0)).clamp(0.01, 0.99);
+            }
             _ => {}
         }
     }
