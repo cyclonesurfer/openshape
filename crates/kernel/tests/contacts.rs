@@ -68,6 +68,33 @@ fn tangent_line_touches_once() {
     assert_rel(c[0].tb, FRAC_PI_2, 1e-6);
 }
 
+/// A line along the tangent at an end of a gently curved conic touches it
+/// once, at that end. The curves stay within the tolerance of each other
+/// for about 0.4 mm there (radius of curvature 0.87 m), and refinement used
+/// to stop microns along it, reporting two more contacts.
+#[test]
+fn a_line_along_an_end_tangent_touches_once_at_the_end() {
+    let (s, c, e) = (
+        v(-0.008734990039930208, -0.03091914159280349),
+        v(0.024128675730140697, 0.0),
+        v(0.0, 0.0),
+    );
+    for w in [1.8832086295738748, 1.0, 0.4] {
+        let conic = ProfileCurve::conic(s, c, e, w).unwrap();
+        for (end, d) in [(s, (c - s).normalize()), (e, (e - c).normalize())] {
+            for l in [
+                line(end - d * 0.03, end + d * 0.03),
+                line(end, end + d * 0.03),
+                line(end - d * 0.03, end),
+            ] {
+                let x = contacts(&l, &conic);
+                assert_eq!(x.len(), 1, "w {w}: {x:?}");
+                assert!((x[0].point - end).length() < 1e-15, "w {w}: {x:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn arc_parameters_run_along_the_arc() {
     // A clockwise arc from angle π/2 sweeping −π (through +x): its

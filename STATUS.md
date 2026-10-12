@@ -2,8 +2,9 @@
 
 Updated 2026-10-12, Phase 2 (sketcher): core sketcher, the application
 shell, the editing tools, ellipses, conics, transform, curvature
-continuity, text, smooth closed splines and ellipse trimming done;
-conic trimming next.
+continuity, text, smooth closed splines, and trimming of ellipses and
+conics done; a rare arrangement inconsistency and then the curvature
+comb next.
 
 ## What works
 
@@ -147,17 +148,20 @@ conic trimming next.
   uncrossed curve is deleted; a circle or ellipse cut twice becomes an arc
   or elliptical arc on the same points), extend (a line along its ray, an
   arc around its circle, an elliptical arc around its ellipse, to the next
-  curve) and split (design note 0007 §7; ellipses 0008 §8.1, where an
-  ellipse's own semi-axes do not cut it): cut ends are put on the crossing curve, the far end
+  curve, a conic along the same conic) and split (design note 0007 §7;
+  ellipses 0008 §8.1, where an ellipse's own semi-axes do not cut it;
+  conics 0009 §8.1, every piece an exact conic with its own corner and ρ,
+  split pieces held tangent): cut ends are put on the crossing curve, the far end
   of a trimmed middle piece moves to a new curve with every constraint it
   had (tangencies included), curves that met at a moved end stay joined,
   and only constraints that no longer mean anything (a moved end's, a
   segment's length) are removed and counted; each edit is refused rather
   than committed if the sketch would stop solving or gain a redundant
   constraint. Fuzzed on random lines, arcs, circles, ellipses, elliptical
-  arcs, rectangles, slots, polygons and joined chains (12,000 sketches,
-  about 15,000 edits, every one solved with nothing unplanned moving; a
-  2,000-case run with ellipses committed 1,469 ellipse edits). Sketch fillet rounds the
+  arcs, conics, rectangles, slots, polygons and joined chains (12,000
+  sketches, about 15,000 edits, every one solved with nothing unplanned
+  moving; a 2,000-case run with ellipses committed 1,469 ellipse edits,
+  and a 5,000-case run 2,477 conic edits, every piece on its conic). Sketch fillet rounds the
   corner of two lines or arcs with a tangent arc of the radius typed in the
   sketch dialog (line–line, line–arc, arc–arc; the centre from the curves'
   offsets); constraints on the corner, a filleted line's length and
@@ -428,6 +432,38 @@ conic trimming next.
   to the knot. The closure's end derivatives, which matched to 7e-14
   from the solve, are now equal by construction, so the display test
   does not depend on how well the interpolation system is conditioned.
+- Trimming conics, 2026-10-12, on Mesa lavapipe: fmt, clippy with
+  `-D warnings`, 795 tests and `cargo deny` pass. The solver tests
+  check pieces against the conic's implicit equation inside and past the
+  arc, with their end tangents, and parameter round trips; five end-to-end
+  tests drive trim, split and extend on elliptic, parabolic and
+  hyperbolic conics (pieces on the old conic, segment areas against the
+  closed form, constraints handed on, freedoms, refusals); a wrong weight
+  normalisation fails four of them. Adding conics to the trim fuzz, with
+  a line held tangent into a conic's start, found two defects, both
+  fixed with regression tests. The kernel reported that one tangent touch
+  as three contacts up to 3.7 µm apart (its refinement stalls at
+  tangencies, where the curves stay within the tolerance for about
+  0.4 mm on a gently curved conic), so extend moved the line's end 2 µm
+  and dropped its tangency; tangencies are now finished by Newton's
+  method on a system whose root is simple there (design note 0007 §6).
+  And a 2 µm piece of a conic, a straight segment to the tolerance, was
+  flattened by the solver; such pieces are now refused.
+  CI had failed once on main (9cbfe98) in the random region test
+  (lines, circles and arcs on a lattice, perturbed by up to three
+  tolerances), unrelated to this work. Running it 20,000 times instead of
+  48 found four rare failures that are documented refusals, not wrong
+  results, which the test now allows for perturbed input only (counted
+  and printed, seeds kept as regressions): a triangle of 1e-13 m² or a
+  few microns of boundary that the profile builder refuses below its
+  resolution, a 0.3 µm sliver whose mass properties cannot show 1e-10
+  (computed to 1e-6), and a sliver whose two sides the validator's coarse
+  tessellation turns into one chord each, reading as inside-out (the
+  documented extrude limitation). A fifth is a real kernel defect, about
+  once in 2,500 perturbed cases: a line tangent to a circle at its end,
+  with a second line starting 0.11 µm from that end, made the
+  arrangement inconsistent (Euler's formula fails) and it refused the
+  sketch (see the known issues).
 - Curvature continuity, 2026-10-12, on Mesa lavapipe: fmt, clippy with
   `-D warnings`, 717 tests and `cargo deny` pass. The solver tests
   check every joint against curvatures computed in the test from closed
@@ -494,10 +530,12 @@ conic trimming next.
   There is no curvature comb display yet.
   Transform has no on-screen manipulator (drag handles): the selection
   moves by clicked points or typed values.
-  Conics cannot yet be trimmed, extended or split (refused with a message;
-  every piece of a conic is an exact conic, design note 0009 §8), nor made
-  tangent to a curve away from their ends, so a sketch fillet at a conic's
-  end is refused; a conic cannot be offset (its offset is not a conic).
+  Conics cannot be made tangent to a curve away from their ends, so a
+  sketch fillet at a conic's end is refused; a conic cannot be offset (its
+  offset is not a conic). The two conics left by trimming the middle of
+  one are independent afterwards (nothing says they are one conic), split
+  pieces are only held tangent, and a piece whose corner would be within
+  0.1 µm of its chord is refused as too short to keep its shape.
   The ρ label reads "ρ 0.42"; in the app's font at 13 points ρ looks much
   like a p.
   Ellipses cannot be made tangent to a circle, an arc or another ellipse
@@ -537,7 +575,19 @@ conic trimming next.
   extrude exactly (volume within 1.2e-9 relative): walls down to 0.01 mm next to a
   hole, cusp regions next to circles tangent to two sides, 0.2 mm slots,
   0.01 mm slivers, V notches. Making both checks adapt to local feature
-  size is on the kernel list.
+  size is on the kernel list. Mass properties have the same blind spot:
+  their rounding floor scales with the body's size, not with the
+  coordinates the curves are evaluated in, so a sliver 0.3 µm wide on an
+  arc of 3 m radius cannot be integrated to 1e-10 and the kernel says
+  so (it converges to 1e-6; the random region test computes such slivers
+  there).
+- The region arrangement can refuse a sketch as internally inconsistent
+  where curves meet within a tolerance or two of a tangency: in the
+  random region test, about once in 2,500 lattices perturbed by up to
+  three tolerances (minimal case: lines from (3, 3) to (4, 3) and from
+  (3, 3 − 1.1e-7) to (2, 4), and a circle about (3, 1) of radius 2 +
+  3e-8, in metres). The kernel reports it (an error, never a wrong
+  region), but the random test can fail on it, about once in 50 runs.
 - Solver conflict detection is local: from a start far from any solution it
   can call a sketch conflicting although another branch would satisfy it.
 - No booleans: each feature makes its own part (Phase 3).
@@ -549,11 +599,14 @@ conic trimming next.
 
 ## Next steps
 
-1. The rest of the Phase 2 sketcher that needs no faces:
-   trim/extend/split of conics (design note 0009 §8), and a curvature
-   comb display. Project/convert,
-   intersection curves and pierce wait for Phase 3 faces.
-2. Check the new title bar on GNOME (on Pat's desktop).
-3. Phase 3 groundwork: design notes for curve/surface intersection, booleans
+1. Fix the arrangement's inconsistency at a tangency within a tolerance
+   or two of another curve's end (known issues; the minimal case is
+   recorded there), so the random region test cannot fail on it.
+2. The rest of the Phase 2 sketcher that needs no faces: a curvature
+   comb display. Project/convert, intersection curves and pierce wait
+   for Phase 3 faces.
+3. Check the new title bar on GNOME (on Pat's desktop).
+4. Phase 3 groundwork: design notes for curve/surface intersection, booleans
    and persistent naming; make the kernel's tessellation and profile checks
-   adapt to local feature size.
+   adapt to local feature size, and scale the mass-property rounding floor
+   to the coordinates curves are evaluated in.

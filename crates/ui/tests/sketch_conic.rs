@@ -9,9 +9,12 @@ use common::*;
 use openshape_app::sketch_mode::{
     annotations, sample_resolved, ConstraintTool, SketchEditor, SnapTarget, Tool,
 };
+use openshape_app::sketch_ops::trim::{self, Preview};
+use openshape_app::sketch_ops::Batch;
 use openshape_app::Model;
-use openshape_core_model::sketch::{Constraint, Geometry, TangentKind};
-use openshape_core_model::{DVec2, FeatureId, SketchId};
+use openshape_core_model::sketch::{Constraint, ConstraintEntry, Geometry, TangentKind};
+use openshape_core_model::{DVec2, FeatureId, SketchEdit, SketchId};
+use openshape_sketch_solver::conic::point as conic_point;
 use openshape_sketch_solver::{ResolvedCurve, SolveStatus};
 
 /// `a` within `rel` (relative) of `b`.
@@ -582,30 +585,15 @@ fn editing_tools_that_cannot_handle_conics_say_so() {
     let (mut m, mut ed, map) = setup();
     let f = ed.feature;
     draw_conic(&mut m, &mut ed, 24.0);
-    // A line across it.
-    draw(
-        &mut m,
-        &mut ed,
-        &map,
-        Tool::Line,
-        &[(34.0, -5.0), (34.0, 55.0)],
-    );
     let before = m.sketch_def(f).unwrap().sketch.clone();
-    // On the curve, left of the line across it.
+    // Offset, on the curve.
     let c = conics(&m, f).remove(0);
-    let q = openshape_sketch_solver::conic::point(c.0, c.1, 0.3) / MM;
-    for (tool, says) in [
-        (Tool::Trim, "Trimming conics is not built yet"),
-        (Tool::Extend, "Conics cannot be extended yet"),
-        (Tool::Split, "Conics cannot be split yet"),
-        (Tool::Offset, "its offset is not a conic"),
-    ] {
-        ed.set_tool(tool);
-        click(&mut m, &mut ed, &map, q.x, q.y);
-        let message = ed.message.clone().unwrap_or_default();
-        assert!(message.contains(says), "{tool:?}: {message}");
-        assert_eq!(m.sketch_def(f).unwrap().sketch, before, "{tool:?}");
-    }
+    let q = conic_point(c.0, c.1, 0.3) / MM;
+    ed.set_tool(Tool::Offset);
+    click(&mut m, &mut ed, &map, q.x, q.y);
+    let message = ed.message.clone().unwrap_or_default();
+    assert!(message.contains("its offset is not a conic"), "{message}");
+    assert_eq!(m.sketch_def(f).unwrap().sketch, before);
 
     // A fillet where it meets a line.
     let (mut m, mut ed, map) = setup();
@@ -640,4 +628,537 @@ fn drawing_is_one_undo_step_and_deleting_takes_the_points() {
     assert_eq!(count(&m, f, is_conic), 1);
     assert!(m.undo());
     assert_eq!(m.sketch_def(f).unwrap().sketch.entities.len(), 0);
+}
+
+/// The conic entity's (start, control, end) points.
+fn conic_points(m: &Model, f: FeatureId, id: SketchId) -> [SketchId; 3] {
+    match m.sketch_def(f).unwrap().sketch.entity(id).unwrap().geometry {
+        Geometry::Conic {
+            start,
+            control,
+            end,
+            ..
+        } => [start, control, end],
+        ref g => panic!("{g:?}"),
+    }
+}
+
+/// The solved position of point `id`.
+fn solved_point(m: &Model, f: FeatureId, id: SketchId) -> DVec2 {
+    m.sketch_result(f)
+        .unwrap()
+        .solution
+        .sketch
+        .point(id)
+        .unwrap()
+}
+
+fn redundant(m: &Model, f: FeatureId) -> usize {
+    m.sketch_result(f).unwrap().solution.redundant.len()
+}
+
+/// The ids of the sketch's lines, in order.
+fn line_ids(m: &Model, f: FeatureId) -> Vec<SketchId> {
+    m.sketch_def(f)
+        .unwrap()
+        .sketch
+        .entities
+        .iter()
+        .filter(|e| matches!(e.geometry, Geometry::Line { .. }))
+        .map(|e| e.id)
+        .collect()
+}
+
+/// Every point of conic `c` (33 samples) is on the conic of `of`: Lee's
+/// implicit equation of `of`'s control triangle, not `c`'s.
+fn on_conic(c: &Solved, of: &Solved) -> bool {
+    (0..=32).all(|i| {
+        let x = conic_point(c.0, c.1, i as f64 / 32.0);
+        implicit(of, x).0.abs() < 1e-9
+    })
+}
+
+/// `a`, `b` and `c` lie on one line (relative to their spread).
+fn in_line(a: DVec2, b: DVec2, c: DVec2) -> bool {
+    (b - a).perp_dot(c - a).abs() <= 1e-9 * (b - a).length() * (c - a).length()
+}
+
+/// The first parameter of conic `c`, stepping from `t0` by `dt`, where
+/// `f` of its point changes sign, refined by bisection.
+fn first_crossing(c: &Solved, t0: f64, dt: f64, f: impl Fn(DVec2) -> f64) -> f64 {
+    let g = |t: f64| f(conic_point(c.0, c.1, t));
+    let (mut a, s0) = (t0, g(t0).signum());
+    loop {
+        let b = a + dt;
+        assert!(b.abs() < 10.0, "no crossing");
+        if g(b).signum() != s0 {
+            let (mut lo, mut hi) = (a, b);
+            for _ in 0..200 {
+                let mid = 0.5 * (lo + hi);
+                if g(mid).signum() == s0 {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            return 0.5 * (lo + hi);
+        }
+        a = b;
+    }
+}
+
+/// Uses `tool` once at a plane point (millimetres) and returns its message.
+fn act(m: &mut Model, ed: &mut SketchEditor, tool: Tool, at_mm: DVec2) -> String {
+    let map = view();
+    ed.set_tool(tool);
+    click(m, ed, &map, at_mm.x, at_mm.y);
+    ed.set_tool(Tool::Select);
+    ed.message.clone().unwrap_or_default()
+}
+
+/// Closes conic `c` with a line along its chord and checks the region
+/// against the closed form of its segment.
+fn check_segment(m: &mut Model, ed: &mut SketchEditor, c: &Solved) {
+    let map = view();
+    let f = ed.feature;
+    let (a, b) = (c.0[0] / MM, c.0[2] / MM);
+    draw(m, ed, &map, Tool::Line, &[(a.x, a.y), (b.x, b.y)]);
+    assert_eq!(status(m, f), SolveStatus::Solved);
+    let areas = region_areas(m, f);
+    assert_eq!(areas.len(), 1, "{areas:?}");
+    let c = conics(m, f)
+        .into_iter()
+        .find(|k| (k.0[0] - c.0[0]).length() < 1e-9)
+        .unwrap();
+    assert!(
+        near(areas[0], segment(&c), 1e-11),
+        "{areas:?} vs {}",
+        segment(&c)
+    );
+}
+
+#[test]
+fn trimming_a_conic_keeps_an_exact_piece_of_it() {
+    // Elliptic, parabolic and hyperbolic; the piece left of the line, and
+    // the one right of it.
+    for height in [16.0, 20.0, 24.0] {
+        for left in [true, false] {
+            let (mut m, mut ed, map) = setup();
+            let f = ed.feature;
+            draw_conic(&mut m, &mut ed, height);
+            draw(
+                &mut m,
+                &mut ed,
+                &map,
+                Tool::Line,
+                &[(34.0, -5.0), (34.0, 55.0)],
+            );
+            let line = line_ids(&m, f)[0];
+            let conic = conic_ids(&m, f)[0];
+            let [start, control, end] = conic_points(&m, f, conic);
+            let old = conics(&m, f).remove(0);
+            let before = dof(&m, f);
+            let line_x = curves(&m, f, false)
+                .into_iter()
+                .find_map(|(id, c)| match c {
+                    ResolvedCurve::Line { start, .. } if id == line => Some(start.x),
+                    _ => None,
+                })
+                .unwrap();
+            let tc = first_crossing(&old, 0.0, 1e-3, |p| p.x - line_x);
+            let (moved, kept) = if left { (start, end) } else { (end, start) };
+            let kept_at = solved_point(&m, f, kept);
+
+            // The preview is the piece that goes, on the conic.
+            let q = conic_point(old.0, old.1, if left { 0.1 } else { 0.9 }) / MM;
+            ed.set_tool(Tool::Trim);
+            hover(&m, &mut ed, &map, q.x, q.y);
+            match ed.curve_edit.clone().unwrap().plan.unwrap().preview {
+                Preview::Piece(ResolvedCurve::Conic {
+                    start,
+                    control,
+                    end,
+                    weight,
+                }) => {
+                    let gone = ([start, control, end], weight);
+                    assert!(on_conic(&gone, &old));
+                    let far = if left { old.0[0] } else { old.0[2] };
+                    assert!((start - far).length().min((end - far).length()) < 1e-12);
+                }
+                p => panic!("{p:?}"),
+            }
+            let ops = m.session().log().len();
+            act(&mut m, &mut ed, Tool::Trim, q);
+            assert_eq!(m.session().log().len(), ops + 1, "one undo step");
+
+            assert_eq!(conic_ids(&m, f), vec![conic], "the same conic, cut");
+            assert_eq!(conic_points(&m, f, conic), [start, control, end]);
+            let c = conics(&m, f).remove(0);
+            let cut = conic_point(old.0, old.1, tc);
+            assert!((solved_point(&m, f, moved) - cut).length() < 1e-9);
+            assert!((solved_point(&m, f, kept) - kept_at).length() < 1e-12);
+            let on = Constraint::PointOnCurve {
+                point: moved,
+                curve: line,
+            };
+            assert_eq!(constraints(&m, f, |k| *k == on), 1);
+            // The kept end keeps its tangent: the new control point is on
+            // the old one's leg from it.
+            assert!(in_line(kept_at, c.0[1], old.0[1]), "{:?}", c.0);
+            assert!(on_conic(&c, &old), "the piece is part of the conic");
+            assert!(near(rhos(&m, f)[0], c.1 / (1.0 + c.1), 1e-12));
+            assert_eq!(status(&m, f), SolveStatus::Solved);
+            assert_eq!(redundant(&m, f), 0);
+            assert_eq!(dof(&m, f), before - 1, "the cut end is held on the line");
+            check_segment(&mut m, &mut ed, &c);
+        }
+    }
+}
+
+/// Adds `constraint` to the sketch as one edit.
+fn constrain(m: &mut Model, f: FeatureId, constraint: Constraint<SketchId>) {
+    m.edit_sketch(
+        f,
+        vec![SketchEdit::AddConstraint(ConstraintEntry {
+            id: SketchId::new_in_batch(0),
+            constraint,
+        })],
+    )
+    .unwrap();
+}
+
+#[test]
+fn trimming_the_middle_of_a_conic_leaves_two_conics() {
+    let (mut m, mut ed, map) = setup();
+    let f = ed.feature;
+    draw_conic(&mut m, &mut ed, 16.0);
+    let conic = conic_ids(&m, f)[0];
+    let [start, control, end] = conic_points(&m, f, conic);
+    constrain(
+        &mut m,
+        f,
+        Constraint::Rho {
+            curve: conic,
+            value: 0.4,
+        },
+    );
+    // A line on from its end, tangent there.
+    draw(
+        &mut m,
+        &mut ed,
+        &map,
+        Tool::Line,
+        &[(70.0, 5.0), (85.0, -10.0)],
+    );
+    let tangent_line = line_ids(&m, f)[0];
+    for x in [25.0, 55.0] {
+        draw(&mut m, &mut ed, &map, Tool::Line, &[(x, -5.0), (x, 55.0)]);
+    }
+    let old = conics(&m, f).remove(0);
+    // Points held on the conic near its start, in the middle and near its
+    // end.
+    let mut b = Batch::default();
+    for t in [0.05, 0.55, 0.95] {
+        let p = b.point(conic_point(old.0, old.1, t));
+        b.constraint(Constraint::PointOnCurve {
+            point: p,
+            curve: conic,
+        });
+    }
+    m.edit_sketch(f, b.edits).unwrap();
+    // Their ids in the document, along the conic.
+    let mut held: Vec<SketchId> = m
+        .sketch_def(f)
+        .unwrap()
+        .sketch
+        .constraints
+        .iter()
+        .filter_map(|c| match c.constraint {
+            Constraint::PointOnCurve { point, curve } if curve == conic => Some(point),
+            _ => None,
+        })
+        .collect();
+    held.sort_by_key(|p| (solved_point(&m, f, *p).x * 1e6) as i64);
+    assert_eq!(status(&m, f), SolveStatus::Solved);
+    assert_eq!(redundant(&m, f), 0);
+    let before = dof(&m, f);
+
+    let message = act(
+        &mut m,
+        &mut ed,
+        Tool::Trim,
+        conic_point(old.0, old.1, 0.45) / MM,
+    );
+    assert!(message.contains("removed 2 constraints"), "{message}");
+    let ids = conic_ids(&m, f);
+    assert_eq!(ids.len(), 2, "{message}");
+    assert_eq!(ids[0], conic);
+    let first = conic_points(&m, f, ids[0]);
+    let second = conic_points(&m, f, ids[1]);
+    assert_eq!(first, [start, control, end]);
+    assert!((solved_point(&m, f, second[2]) - old.0[2]).length() < 1e-12);
+    let cs = conics(&m, f);
+    for c in &cs {
+        assert!(on_conic(c, &old));
+    }
+    // Each keeps its outer end's tangent.
+    assert!(in_line(old.0[0], cs[0].0[1], old.0[1]));
+    assert!(in_line(old.0[2], cs[1].0[1], old.0[1]));
+    // The ρ dimension went with the shape it measured; the middle point's
+    // constraint went with the piece it was on; the end's tangency and the
+    // point near the end moved to the new conic.
+    assert_eq!(
+        constraints(&m, f, |k| matches!(k, Constraint::Rho { .. })),
+        0
+    );
+    let on = |p: SketchId, c: SketchId| Constraint::PointOnCurve { point: p, curve: c };
+    assert_eq!(constraints(&m, f, |k| *k == on(held[0], conic)), 1);
+    assert_eq!(
+        constraints(&m, f, |k| matches!(k,
+        Constraint::PointOnCurve { point, .. } if *point == held[1])),
+        0
+    );
+    assert_eq!(constraints(&m, f, |k| *k == on(held[2], ids[1])), 1);
+    assert_eq!(
+        constraints(&m, f, |k| matches!(k,
+            Constraint::Tangent { a, b, kind: TangentKind::AtPoint { .. } }
+                if [*a, *b].contains(&tangent_line) && [*a, *b].contains(&ids[1]))),
+        1
+    );
+    let line_start = match m
+        .sketch_def(f)
+        .unwrap()
+        .sketch
+        .entity(tangent_line)
+        .unwrap()
+        .geometry
+    {
+        Geometry::Line { start, .. } => start,
+        _ => unreachable!(),
+    };
+    assert!((solved_point(&m, f, line_start) - solved_point(&m, f, second[2])).length() < 1e-12);
+    assert_eq!(status(&m, f), SolveStatus::Solved);
+    assert_eq!(redundant(&m, f), 0);
+    // Per conic: 7 less its cut end held on a line; the dimension's 1
+    // back, the middle point's 1 back. Before, one conic of 6.
+    assert_eq!(dof(&m, f), before - 6 + 2 * 6 + 1);
+    // The trim preview of the first conic's piece is gone, and the pieces
+    // extrude as exact segments.
+    check_segment(&mut m, &mut ed, &cs[1]);
+}
+
+#[test]
+fn splitting_a_conic_leaves_two_conics_tangent_at_the_split() {
+    for height in [16.0, 24.0] {
+        let (mut m, mut ed, map) = setup();
+        let f = ed.feature;
+        draw_conic(&mut m, &mut ed, height);
+        let conic = conic_ids(&m, f)[0];
+        let [start, control, end] = conic_points(&m, f, conic);
+        let old = conics(&m, f).remove(0);
+        let before = dof(&m, f);
+        let ops = m.session().log().len();
+        let at_split = conic_point(old.0, old.1, 0.4);
+        ed.set_tool(Tool::Split);
+        hover(&m, &mut ed, &map, at_split.x / MM, at_split.y / MM);
+        match ed.curve_edit.clone().unwrap().plan.unwrap().preview {
+            Preview::Point(q) => assert!((q - at_split).length() < 1e-7),
+            p => panic!("{p:?}"),
+        }
+        act(&mut m, &mut ed, Tool::Split, at_split / MM);
+        assert_eq!(m.session().log().len(), ops + 1);
+        let ids = conic_ids(&m, f);
+        assert_eq!(ids.len(), 2, "{:?}", ed.message);
+        assert_eq!(conic_points(&m, f, ids[0]), [start, control, end]);
+        let second = conic_points(&m, f, ids[1]);
+        let joint = Constraint::Coincident {
+            a: end,
+            b: second[0],
+        };
+        assert_eq!(constraints(&m, f, |k| *k == joint), 1);
+        let smooth = Constraint::Tangent {
+            a: ids[0],
+            b: ids[1],
+            kind: TangentKind::AtPoint { point: end },
+        };
+        assert_eq!(constraints(&m, f, |k| *k == smooth), 1);
+        let cs = conics(&m, f);
+        for c in &cs {
+            assert!(on_conic(c, &old));
+        }
+        assert!((cs[0].0[2] - at_split).length() < 1e-7);
+        assert_eq!(status(&m, f), SolveStatus::Solved);
+        assert_eq!(redundant(&m, f), 0);
+        // The second conic's control point and ρ, and its end, less the
+        // tangency.
+        assert_eq!(dof(&m, f), before + 4);
+        // Together they bound the old segment.
+        draw(
+            &mut m,
+            &mut ed,
+            &map,
+            Tool::Line,
+            &[(10.0, 5.0), (70.0, 5.0)],
+        );
+        let areas = region_areas(&m, f);
+        assert_eq!(areas.len(), 1, "{areas:?}");
+        assert!(near(areas[0], segment(&old), 1e-11), "{areas:?}");
+        // Dragging the joint keeps them tangent there.
+        let j = solved_point(&m, f, end) / MM;
+        ed.drag_start(&mut m, &map, at(&map, j.x, j.y));
+        ed.drag_to(&m, &map, at(&map, j.x + 4.0, j.y + 3.0));
+        ed.drag_end(&mut m, &map, at(&map, j.x + 4.0, j.y + 3.0));
+        assert_eq!(status(&m, f), SolveStatus::Solved);
+        let cs = conics(&m, f);
+        assert!((cs[0].0[2] / MM - j).length() > 1.0, "it moved");
+        let (u, v) = (cs[0].0[2] - cs[0].0[1], cs[1].0[1] - cs[1].0[0]);
+        assert!(u.normalize().perp_dot(v.normalize()).abs() < 1e-9);
+        assert!(u.dot(v) > 0.0);
+    }
+}
+
+#[test]
+fn extending_a_conic_follows_the_same_conic() {
+    for height in [16.0, 24.0] {
+        let (mut m, mut ed, map) = setup();
+        let f = ed.feature;
+        draw_conic(&mut m, &mut ed, height);
+        let conic = conic_ids(&m, f)[0];
+        let [start, control, end] = conic_points(&m, f, conic);
+        // Below its end, and below its start.
+        draw(
+            &mut m,
+            &mut ed,
+            &map,
+            Tool::Line,
+            &[(40.0, -3.0), (110.0, -3.0)],
+        );
+        draw(
+            &mut m,
+            &mut ed,
+            &map,
+            Tool::Line,
+            &[(-20.0, -2.0), (12.0, -2.0)],
+        );
+        let [below, left] = [line_ids(&m, f)[0], line_ids(&m, f)[1]];
+        // `left` is the line below the start.
+        let old = conics(&m, f).remove(0);
+        let y = curves(&m, f, false)
+            .into_iter()
+            .find_map(|(id, c)| match c {
+                ResolvedCurve::Line { start, .. } if id == below => Some(start.y),
+                _ => None,
+            })
+            .unwrap();
+        let y_left = curves(&m, f, false)
+            .into_iter()
+            .find_map(|(id, c)| match c {
+                ResolvedCurve::Line { start, .. } if id == left => Some(start.y),
+                _ => None,
+            })
+            .unwrap();
+        let t_end = first_crossing(&old, 1.0, 1e-3, |p| p.y - y);
+        let t_start = first_crossing(&old, 0.0, -1e-3, |p| p.y - y_left);
+        let before = dof(&m, f);
+
+        // At the end: on along the conic, down to the line below.
+        let near_end = conic_point(old.0, old.1, 0.95) / MM;
+        ed.set_tool(Tool::Extend);
+        hover(&m, &mut ed, &map, near_end.x, near_end.y);
+        match ed.curve_edit.clone().unwrap().plan.unwrap().preview {
+            Preview::Piece(ResolvedCurve::Conic {
+                start,
+                control,
+                end,
+                weight,
+            }) => {
+                let added = ([start, control, end], weight);
+                assert!(on_conic(&added, &old));
+                assert!((start - old.0[2]).length() < 1e-12);
+                assert!((end - conic_point(old.0, old.1, t_end)).length() < 1e-9);
+            }
+            p => panic!("{p:?}"),
+        }
+        act(&mut m, &mut ed, Tool::Extend, near_end);
+        assert_eq!(conic_points(&m, f, conic), [start, control, end]);
+        let c = conics(&m, f).remove(0);
+        assert!((c.0[2] - conic_point(old.0, old.1, t_end)).length() < 1e-9);
+        assert!((c.0[0] - old.0[0]).length() < 1e-12);
+        assert!(on_conic(&c, &old));
+        assert!(
+            in_line(old.0[0], c.0[1], old.0[1]),
+            "the start keeps its tangent"
+        );
+        let on = |p: SketchId, l: SketchId| Constraint::PointOnCurve { point: p, curve: l };
+        assert_eq!(constraints(&m, f, |k| *k == on(end, below)), 1);
+        assert_eq!(dof(&m, f), before - 1);
+
+        // At the start: back along it to the line below it.
+        let near_start = conic_point(c.0, c.1, 0.02) / MM;
+        act(&mut m, &mut ed, Tool::Extend, near_start);
+        let c = conics(&m, f).remove(0);
+        assert!((c.0[0] - conic_point(old.0, old.1, t_start)).length() < 1e-9);
+        assert!(on_conic(&c, &old));
+        assert_eq!(constraints(&m, f, |k| *k == on(start, left)), 1);
+        assert_eq!(status(&m, f), SolveStatus::Solved);
+        assert_eq!(redundant(&m, f), 0);
+        assert_eq!(dof(&m, f), before - 2);
+        check_segment(&mut m, &mut ed, &c);
+    }
+
+    // Nothing beyond either end: refused.
+    let (mut m, mut ed, _) = setup();
+    draw_conic(&mut m, &mut ed, 16.0);
+    let c = conics(&m, ed.feature).remove(0);
+    let message = act(
+        &mut m,
+        &mut ed,
+        Tool::Extend,
+        conic_point(c.0, c.1, 0.9) / MM,
+    );
+    assert!(message.contains("Nothing to extend to"), "{message}");
+}
+
+#[test]
+fn a_piece_too_short_to_keep_its_shape_is_refused() {
+    // A long, flat conic (100 mm across, its corner 1 mm up; radius of
+    // curvature 2.5 m at its start) crossed half a millimetre from its
+    // start, where the piece's corner lies t² mm ≈ 0.025 µm off its chord.
+    let mut m = Model::new();
+    let f = m.add_sketch(openshape_core_model::PlaneRef::Top);
+    let mut b = Batch::default();
+    let p = [DVec2::ZERO, DVec2::new(50.0, 1.0), DVec2::new(100.0, 0.0)].map(|x| x * MM);
+    let [start, control, end] = p.map(|x| b.point(x));
+    b.entity(
+        Geometry::Conic {
+            start,
+            control,
+            end,
+            rho: 0.5,
+        },
+        false,
+    );
+    b.line(DVec2::new(0.5, -5.0) * MM, DVec2::new(0.5, 5.0) * MM, false);
+    m.edit_sketch(f, b.edits).unwrap();
+    let conic = conic_ids(&m, f)[0];
+    let r = m.sketch_result(f).unwrap();
+    let curves: Vec<(SketchId, ResolvedCurve)> =
+        r.curves.iter().map(|(id, _, c)| (*id, c.clone())).collect();
+    let sketch = r.solution.sketch.clone();
+    let cuts = trim::cuts(m.kernel(), &sketch, &curves, conic).unwrap();
+    let short = "too short to keep its shape";
+
+    // Keeping the short piece, or splitting one off, is refused.
+    let message = trim::trim(&sketch, &cuts, conic_point(p, 1.0, 0.8)).unwrap_err();
+    assert!(message.contains(short), "{message}");
+    let message = trim::split(&sketch, &curves, conic, conic_point(p, 1.0, 0.004)).unwrap_err();
+    assert!(message.contains(short), "{message}");
+
+    // Trimming it away keeps the long piece.
+    let plan = trim::trim(&sketch, &cuts, conic_point(p, 1.0, 0.002)).unwrap();
+    m.edit_sketch_checked(f, plan.edits).unwrap();
+    assert_eq!(status(&m, f), SolveStatus::Solved);
+    let c = conics(&m, f).remove(0);
+    assert!((c.0[0].x - 0.5 * MM).abs() < 1e-12, "{:?}", c.0);
+    assert!(on_conic(&c, &(p, 1.0)));
 }

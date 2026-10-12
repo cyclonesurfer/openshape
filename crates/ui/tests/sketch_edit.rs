@@ -12,7 +12,7 @@ use openshape_app::sketch_ops::{shapes, Batch};
 use openshape_app::Model;
 use openshape_core_model::sketch::{Constraint, ConstraintEntry, Geometry, TangentKind};
 use openshape_core_model::{DVec2, FeatureId, PlaneRef, SketchEdit, SketchId};
-use openshape_sketch_solver::{ResolvedCurve, SolveStatus};
+use openshape_sketch_solver::{conic, ResolvedCurve, SolveStatus};
 use proptest::prelude::*;
 use std::f64::consts::{PI, TAU};
 
@@ -839,6 +839,8 @@ enum Shape {
     /// As an ellipse, then the start anomaly and the extent, counter-
     /// clockwise in the plane.
     EllipticalArc(DVec2, DVec2, f64, f64, f64),
+    /// Start, control point, end, ρ.
+    Conic(DVec2, DVec2, DVec2, f64),
 }
 
 fn shape() -> impl Strategy<Value = Shape> {
@@ -853,7 +855,24 @@ fn shape() -> impl Strategy<Value = Shape> {
         1 => (p(), axis(), ratio()).prop_map(|(c, a, k)| Shape::Ellipse(c, a, k)),
         1 => (p(), axis(), ratio(), 0.0..TAU, 0.3..6.0f64)
             .prop_map(|(c, a, k, t, s)| Shape::EllipticalArc(c, a, k, t, s)),
+        1 => conic_points()
+            .prop_map(|((s, c, e), rho)| Shape::Conic(s, c, e, rho)),
     ]
+}
+
+/// A conic's start, control point and end, and its ρ.
+type ConicPoints = ((DVec2, DVec2, DVec2), f64);
+
+/// A random conic (millimetres) with a visible chord and the control point
+/// off it.
+fn conic_points() -> impl Strategy<Value = ConicPoints> {
+    let p = || (-50.0..50.0f64, -50.0..50.0f64).prop_map(|(x, y)| DVec2::new(x, y));
+    (
+        (p(), p(), p()).prop_filter("a visible conic", |(s, c, e)| {
+            (*e - *s).length() > 2.0 && shapes::conic_control_ok(*s, *e, *c)
+        }),
+        0.1..0.9f64,
+    )
 }
 
 /// A random first semi-axis (millimetres).
@@ -920,6 +939,20 @@ fn add_shapes(m: &mut Model, f: FeatureId, shapes: &[Shape]) {
                 };
                 b.entity(geometry, false);
             }
+            Shape::Conic(s, c, e, rho) => {
+                let start = b.point(*s * MM);
+                let control = b.point(*c * MM);
+                let end = b.point(*e * MM);
+                b.entity(
+                    Geometry::Conic {
+                        start,
+                        control,
+                        end,
+                        rho: *rho,
+                    },
+                    false,
+                );
+            }
         }
     }
     m.edit_sketch(f, b.edits).unwrap();
@@ -963,18 +996,19 @@ fn along(c: &ResolvedCurve, along: f64) -> DVec2 {
             control,
             end,
             weight,
-        } => openshape_sketch_solver::conic::point([*start, *control, *end], *weight, along),
+        } => conic::point([*start, *control, *end], *weight, along),
     }
 }
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Random trims, extends and splits of random lines, arcs and circles
-    /// never break the sketch: every plan commits through the checked path
-    /// (no failure, no new redundancy), the sketch stays solved with its
-    /// regions, points the plan did not move stay put, and moved points
-    /// land where planned.
+    /// Random trims, extends and splits of random lines, arcs, circles,
+    /// ellipses, elliptical arcs and conics never break the sketch: every
+    /// plan commits through the checked path (no failure, no new
+    /// redundancy), the sketch stays solved with its regions, points the
+    /// plan did not move stay put, moved points land where planned, and a
+    /// conic's pieces stay on the conic they were cut from.
     #[test]
     fn random_edits_keep_the_sketch_solved(
         shapes in proptest::collection::vec(shape(), 3..8),
@@ -1003,6 +1037,9 @@ enum Built {
     /// By the elliptical arc tool: the ellipse's three clicks, then the
     /// start and end anomalies.
     EllipticalArc(DVec2, DVec2, DVec2, f64, f64),
+    /// By the conic tool: start, control point, end, ρ, and whether a line
+    /// leads into the start tangent to the conic.
+    Conic(DVec2, DVec2, DVec2, f64, bool),
 }
 
 fn built() -> impl Strategy<Value = Built> {
@@ -1016,6 +1053,8 @@ fn built() -> impl Strategy<Value = Built> {
         (p(), p(), p()).prop_map(|(c, m, q)| Built::Ellipse(c, m, q)),
         (p(), p(), p(), 0.0..TAU, 0.3..6.0f64)
             .prop_map(|(c, m, q, t, s)| Built::EllipticalArc(c, m, q, t, s)),
+        (conic_points(), any::<bool>())
+            .prop_map(|(((s, c, e), rho), leg)| Built::Conic(s, c, e, rho, leg)),
     ]
 }
 
@@ -1072,6 +1111,22 @@ fn add_built(m: &mut Model, f: FeatureId, s: &Built) {
             }
             None => return,
         },
+        Built::Conic(s, c, e, rho, leg) => {
+            let made = shapes::conic(&mut b, &free(*s), &free(*e), &free(*c), *rho, false);
+            if made.is_ok() && *leg {
+                let (conic, start) = match b.edits.last() {
+                    Some(SketchEdit::AddEntity(entity)) => match entity.geometry {
+                        Geometry::Conic { start, .. } => (entity.id, start),
+                        _ => unreachable!("the conic tool ends with its conic"),
+                    },
+                    _ => unreachable!("the conic tool ends with its conic"),
+                };
+                let line = b.line((*s * 2.0 - *c) * MM, *s * MM, false);
+                b.coincident(line.end, start);
+                b.tangent_at(line.curve, conic, start);
+            }
+            made
+        }
     };
     if made.is_ok() {
         m.edit_sketch(f, b.edits).unwrap();
@@ -1083,7 +1138,9 @@ proptest! {
 
     /// As `random_edits_keep_the_sketch_solved`, on shapes that carry
     /// constraints (rectangles, slots with tangent joints, polygons on a
-    /// circle, joined chains), so the constraint hand-over is exercised.
+    /// circle, joined chains, ellipses with their semi-axes, conics with a
+    /// line held tangent into their start), so the constraint hand-over is
+    /// exercised.
     #[test]
     fn random_edits_of_constrained_shapes_keep_the_sketch_solved(
         shapes in proptest::collection::vec(built(), 2..5),
@@ -1182,6 +1239,28 @@ fn edit_randomly(
         }
         for (_, _, c) in &after.curves {
             prop_assert!(curve_size(c) > trim::CUT_GAP, "{:?}", c);
+        }
+        // A conic's pieces and continuation are the same conic: every
+        // conic the edit made or changed lies on the one it cut.
+        if let ResolvedCurve::Conic {
+            start,
+            control,
+            end,
+            weight,
+        } = curve
+        {
+            let p = [start, control, end];
+            for (id, _, c) in &after.curves {
+                let made = *id == target || !curves.iter().any(|(was, _)| was == id);
+                if let (true, ResolvedCurve::Conic { .. }) = (made, c) {
+                    for k in 0..=8 {
+                        let x = along(c, f64::from(k) / 8.0);
+                        let t = conic::parameter_of(p, weight, x);
+                        let off = (conic::point(p, weight, t) - x).length();
+                        prop_assert!(off < 1e-9, "{:?} is {} m off {:?}", c, off, p);
+                    }
+                }
+            }
         }
         for e in &sketch.entities {
             let Geometry::Point { at } = e.geometry else {

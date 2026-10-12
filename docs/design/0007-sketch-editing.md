@@ -156,6 +156,33 @@ intersection (closed forms for line and circle pairs, Bézier subdivision
 with Newton refinement for splines), so tools and region detection agree on
 where curves meet. Every contact satisfies |A(tₐ) − B(t_b)| ≤ tolerance.
 
+**Tangencies (as built).** Levenberg–Marquardt refinement of
+A(s) = B(t) does not converge at a tangency: the Jacobian has rank one
+there and the residual left is normal to both curves, out of reach of
+first-order steps, so it stops wherever the gap is too small to shrink
+further. The curves stay within the tolerance ε of each other for about
+√(2Rε) either side of the touch (R the radius of curvature), so that can
+be far along them: for a line along the tangent at the start of a conic
+whose radius of curvature there is 0.87 m (0.4 mm either side) it
+stopped at 1.9 and 3.7 µm, and one touch was reported as three contacts.
+Extend then moved the line's end 2 µm to the "next" contact and removed
+its tangency (found by the trim fuzz, 0009 §8.1). A refinement that ends
+above rounding level and within the tolerance is now finished by
+Newton's method on
+
+  G(s, t) = ((A − B)·B′, A′ × B′),
+
+whose root is A(s)'s foot on B where the tangents are parallel: the point
+of contact, or of closest approach. It is a simple root there: with
+A′ = αT and B′ = βT at a touch, det ∂G/∂(s, t) = α²β³(κ_B − κ_A) for
+the signed curvatures in the frame (T, N), non-zero unless the curves
+osculate, so Newton converges quadratically. Its closest iterate replaces
+the refinement's when it is a closer approach and every iterate stays
+within the tolerance; converged crossings and misses are untouched. A
+regression test draws lines through, from and to both ends of elliptic,
+parabolic and hyperbolic conics along their end tangents: one contact
+each, at the end to rounding (it fails without the step).
+
 ## 7. Trim, extend, split
 
 ### 7.1 Pieces

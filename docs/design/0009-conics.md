@@ -212,11 +212,87 @@ points and the conic, nothing else; the ρ is free until dimensioned.
 * Mirror and both patterns copy conics (§4.5).
 * Trim, extend and split: every piece of a conic arc is a conic arc
   (subdivide the homogeneous control points by de Casteljau, then restore
-  end weights 1 with w′ = w_mid/√(w₀ w₂), P&T §7.3); built in a later
-  step, refused with a message until then.
+  end weights 1 with w′ = w_mid/√(w₀ w₂), P&T §7.3); as built in §8.1.
 * Fillet: refused (§4.7).
 * Offset: refused; the offset of a conic is not a conic (Farouki & Neff,
   as for ellipses, 0008 §2).
+
+### 8.1 As built (trim, extend, split)
+
+* **Pieces.** The arc of the conic between parameters a and b, inside the
+  arc or past its ends, comes from the polar form (blossom) of the
+  quadratic's homogeneous control points H₀ = (P₀, 1), H₁ = (wP₁, w),
+  H₂ = (P₂, 1) (Farin, *Curves and Surfaces for CAGD*, ch. 4 and 13):
+
+    b(u, v) = (1 − u)(1 − v) H₀ + ((1 − u) v + u (1 − v)) H₁ + u v H₂,
+
+  the piece's homogeneous points are b(a, a), b(a, b), b(b, b), and its
+  end weights are made 1 again with w′ = |w₁|/√(w₀ w₂) (P&T §7.3). It is
+  a conic arc of the sketch only when w₀w₂ > 0 and w₀w₁ > 0 (it does not
+  pass through a point at infinity or turn half a turn), its ρ =
+  w′/(1 + w′) is in range (§4.6), and its control point is more than the
+  model tolerance (0.1 µm) from its chord. The last refuses a few microns
+  of a gently curved conic, which to the tolerance is a straight segment
+  whose ρ means nothing; the fuzz below found the solver flattening such
+  a piece altogether. Each refusal is a message, and nothing changes.
+* **Parameters.** A cut's parameter is the point's t on the rational form,
+  found exactly from its barycentric coordinates (τ₀, τ₁, τ₂) in the
+  control triangle. Lee's relation τ₁/τ₀ = 2wt/(1 − t) (§2) gives
+  t = τ₁/(τ₁ + 2wτ₀), or 2wτ₂/(τ₁ + 2wτ₂) when |τ₂| > |τ₀|, the form
+  that keeps its digits near that end; it holds past the arc's ends too.
+  Pieces are ordered, chosen and previewed by t as on a line.
+* **Corner and shoulder.** A kept piece's control point moves to the
+  piece's own (it stays on the kept end's tangent line, where the new
+  end's tangent meets it) and its ρ is set to the piece's. Constraints on
+  the old control point and a ρ dimension are removed and counted: they
+  described a corner and a shoulder that are no longer there.
+* **Points on the conic.** A point-on-curve constraint on the conic goes
+  to the piece that still contains its point (a point within the cut gap
+  of a piece's end counts as on it), and is removed with a piece that
+  goes.
+* **Trim.** An end piece moves that end to the cut, held on the cutter
+  as for lines (0007 §7.4a). A middle piece leaves a second conic from
+  the far cut to the old end, with its own control point and ρ, which
+  takes over the old end's constraints. The two are not tied to one conic
+  afterwards: they share no defining point, and saying "the same conic"
+  needs a constraint the solver does not have yet.
+* **Split.** The two pieces are joined by a coincidence and held tangent
+  there (`Tangent` at the joint), as they were; their curvatures can
+  differ once either is moved.
+* **Extend.** An end runs on along the same conic (from the start, as
+  the reversed arc does from its end). How far it may run is found by
+  a geometric scan of t − 1 from 10⁻⁴ by factors of 1.25 while the arc
+  from the kept end to t is a conic arc of the sketch, its control point
+  and end stay within four times the sketch's extent of its start, and
+  the added arc from the old end to t is one too; the first curve that
+  added arc meets is the new end. An ellipse closing on itself or a
+  hyperbola running to its asymptote stops the scan; an end that cannot
+  grow at all is refused with a message.
+* **Tangent touches.** The fuzz's tangent line into a conic's start
+  showed the kernel reporting that one touch as three contacts, 0, 1.9
+  and 3.7 µm along the line. Extend then moved the line's end to the
+  second one and removed its coincidence and tangency, and a later trim
+  of the conic kept the 2 µm between. The kernel now finishes such
+  contacts at the point of contact (0007 §6).
+* **Tests.** The solver tests check pieces against the conic's implicit
+  equation, inside the arc and past its ends, with their end points and
+  tangents; parameters round-trip for points on the curve; the whole arc
+  is its own piece and pieces join; and the limits of growth (an
+  ellipse's t < 1/(1 − w), a hyperbola's root of
+  1 + 2t(t − 1)(1 − w)). `crates/ui/tests/sketch_conic.rs` drives each
+  edit through the editor for elliptic, parabolic and hyperbolic conics:
+  every piece on the old conic, segment areas of the regions left against
+  the closed form r(w), the constraints handed on and removed, degrees of
+  freedom, no redundancy, previews, and the refusals (nothing to extend
+  to, a piece too short to keep its shape). Normalising a piece's weight
+  wrongly fails four of them. The trim fuzz (`crates/ui/tests/sketch_edit.rs`)
+  now also draws random conics, directly and with the conic tool's
+  builder with an optional line into its start held tangent there, and
+  checks that every conic an edit makes or changes lies on the one it cut
+  (nine points each, to 1e-9 m). In a 5,000-case run per property, 2,477
+  conic edits committed (1,067 trims, 1,044 splits, 366 extensions),
+  every one solved, without redundancy, on the conic it cut, with nothing
+  unplanned moving.
 
 ## 9. Tests
 

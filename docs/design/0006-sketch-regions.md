@@ -49,7 +49,8 @@ the left. Those curves feed `extrude`/`revolve` unchanged.
    circle–circle (arcs as their circles, then filtered by angle range with
    tolerance); Bézier clipping for anything involving a spline, refined by
    Newton to 1e-12 relative. Tangential contacts are found as double roots
-   and kept as one intersection. **Overlaps** (collinear segments, arcs on
+   and kept as one intersection (refined to the point of contact, design
+   note 0007 §6). **Overlaps** (collinear segments, arcs on
    the same circle, a spline overlapping itself or another curve within
    tolerance over an interval) are detected explicitly; the overlapping
    interval is kept once, on the curve with the lower index.

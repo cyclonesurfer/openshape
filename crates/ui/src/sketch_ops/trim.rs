@@ -1,8 +1,8 @@
 //! Trim, extend and split (design note 0007 §7): cut a curve where the
 //! other curves of the sketch meet it, and keep every constraint that still
 //! means the same thing. Every piece of a line, circle or ellipse is a line,
-//! arc or elliptical arc on the same points, so cuts are exact (design note
-//! 0008 §8).
+//! arc or elliptical arc on the same points, and every piece of a conic is
+//! a conic, so cuts are exact (design notes 0008 §8.1, 0009 §8.1).
 //!
 //! The planners are pure: they read the sketch and its solved curves and
 //! return one edit batch ([`Plan`]) for the editor to commit. Where a cut
@@ -14,11 +14,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::TAU;
 
 use glam::DVec2;
-use openshape_core_model::sketch::{Constraint, Geometry};
+use openshape_core_model::sketch::{Constraint, Geometry, TangentKind};
 use openshape_core_model::{SketchData, SketchEdit, SketchId};
 use openshape_features::kernel_curve;
-use openshape_kernel::{Kernel, ProfileCurve};
-use openshape_sketch_solver::ResolvedCurve;
+use openshape_kernel::{Kernel, ProfileCurve, Tolerance};
+use openshape_sketch_solver::{conic, ResolvedCurve, RHO_MIN};
 
 use super::shapes::{closest_anomaly, eccentric_anomaly, ellipse_point};
 use super::{coincidence_classes, deletion, own_axes, text, Batch, UnionFind};
@@ -36,9 +36,9 @@ pub const TANGENT_SIN: f64 = 1e-2;
 pub struct Cut {
     /// Parameter along the cut curve: a line's fraction, the angle
     /// travelled along an arc from its start, a circle's angle from +x (the
-    /// arrangement's conventions), and the eccentric anomaly turned
+    /// arrangement's conventions), the eccentric anomaly turned
     /// counter-clockwise in the plane from an elliptical arc's start or an
-    /// ellipse's first axis end.
+    /// ellipse's first axis end, and a conic's own parameter in [0, 1].
     pub t: f64,
     /// The point.
     pub point: DVec2,
@@ -333,8 +333,9 @@ pub fn trim(sketch: &SketchData, cuts: &Cuts, near: DVec2) -> Result<Plan, Strin
                         });
                     }
                     Carrier::Circle(_) => r.pending.push(Constraint::Equal { a: t, b: d.curve }),
-                    // The new piece's own points define its ellipse.
-                    Carrier::Ellipse { .. } => {}
+                    // The new piece's own points define its ellipse
+                    // (conics are trimmed by `trim_conic`).
+                    Carrier::Ellipse { .. } | Carrier::Conic { .. } => {}
                 }
                 Ok(r.finish(Preview::Piece(piece(&cuts.curve, lo.t, hi.t))))
             }
@@ -344,12 +345,144 @@ pub fn trim(sketch: &SketchData, cuts: &Cuts, near: DVec2) -> Result<Plan, Strin
              sketch's kinds (design note 0007 §7.5). Delete it, or redraw it in pieces"
                 .into(),
         ),
-        (Geometry::Conic { .. }, _) => Err(
-            "Trimming conics is not built yet (design note 0009 §8): delete the conic and \
-             redraw it between the curves"
-                .into(),
-        ),
+        (&Geometry::Conic { control, end, .. }, &ResolvedCurve::Conic { .. }) => {
+            trim_conic(sketch, cuts, near, control, end)
+        }
         _ => Err("this curve cannot be trimmed".into()),
+    }
+}
+
+/// Trims a conic (design note 0009 §8.1): what is kept is one or two exact
+/// pieces of it ([`conic::piece`]), each a conic with its own control
+/// point (where its end tangents meet) and ρ. The old control point moves
+/// to the kept piece's; constraints on it described the old corner and
+/// go, as does a ρ dimension.
+fn trim_conic(
+    sketch: &SketchData,
+    cuts: &Cuts,
+    near: DVec2,
+    control: SketchId,
+    end: SketchId,
+) -> Result<Plan, String> {
+    let t = cuts.target;
+    let (p, w) = conic_of(&cuts.curve).ok_or("the conic no longer exists")?;
+    let k = cuts.cuts.len();
+    let tn = param(&cuts.curve, near);
+    let i = cuts.cuts.iter().filter(|c| c.t < tn).count();
+    let mut r = Rewrite::new(sketch, t);
+    r.drop_rho();
+    r.detach(control)?;
+    if i == 0 || i == k {
+        // An end piece: that end moves to the cut next to it.
+        let (moved, cut, kept) = if i == 0 {
+            let start = match sketch.entity(t).map(|e| &e.geometry) {
+                Some(&Geometry::Conic { start, .. }) => start,
+                _ => return Err("the conic no longer exists".into()),
+            };
+            (start, &cuts.cuts[0], (cuts.cuts[0].t, 1.0))
+        } else {
+            (end, &cuts.cuts[k - 1], (0.0, cuts.cuts[k - 1].t))
+        };
+        let (q, wq) = conic_piece(p, w, kept.0, kept.1)?;
+        r.detach(moved)?;
+        r.moves.push((moved, cut.point));
+        r.moves.push((control, q[1]));
+        r.set_rho(t, wq)?;
+        r.attach(moved, cut);
+        r.points_on_conic(p, w, &[(kept.0, kept.1, t)]);
+        let gone = if i == 0 { (0.0, cut.t) } else { (cut.t, 1.0) };
+        Ok(r.finish(Preview::Piece(piece(&cuts.curve, gone.0, gone.1))))
+    } else {
+        // A middle piece: the conic keeps the part before it; a new conic
+        // takes the part after it and the old end.
+        let (lo, hi) = (&cuts.cuts[i - 1], &cuts.cuts[i]);
+        let (qa, wa) = conic_piece(p, w, 0.0, lo.t)?;
+        let (qb, wb) = conic_piece(p, w, hi.t, 1.0)?;
+        let carrier = Carrier::Conic {
+            control: qb[1],
+            rho: rho_of_weight(wb)?,
+        };
+        let d = r.continuation(end, carrier, hi.point)?;
+        r.moves.push((end, lo.point));
+        r.moves.push((control, qa[1]));
+        r.set_rho(t, wa)?;
+        r.attach(end, lo);
+        r.attach(d.start, hi);
+        r.points_on_conic(p, w, &[(0.0, lo.t, t), (hi.t, 1.0, d.curve)]);
+        Ok(r.finish(Preview::Piece(piece(&cuts.curve, lo.t, hi.t))))
+    }
+}
+
+const NO_PIECE: &str = "This piece of the conic is not a conic arc of its own";
+
+/// The piece of conic arc (`p`, `w`) from parameter `a` to `b`
+/// ([`conic::piece`]) as a conic of the sketch: refused when it is no conic
+/// arc of its own, or when its control point lies within the model
+/// tolerance of its chord. Such a piece (a few microns of a gently curved
+/// conic) is a straight segment to the tolerance: its ρ means nothing and
+/// the solver can flatten it altogether.
+fn conic_piece(p: [DVec2; 3], w: f64, a: f64, b: f64) -> Result<([DVec2; 3], f64), String> {
+    let (q, wq) = conic::piece(p, w, a, b).ok_or(NO_PIECE)?;
+    let chord = q[2] - q[0];
+    let height = chord.perp_dot(q[1] - q[0]).abs() / chord.length();
+    if height > Tolerance::default().linear {
+        Ok((q, wq))
+    } else {
+        Err(
+            "The conic's piece would be too short to keep its shape: its corner would lie \
+             within the model tolerance of its chord"
+                .into(),
+        )
+    }
+}
+
+/// A conic's control points and middle weight.
+fn conic_of(c: &ResolvedCurve) -> Option<([DVec2; 3], f64)> {
+    match *c {
+        ResolvedCurve::Conic {
+            start,
+            control,
+            end,
+            weight,
+        } => Some(([start, control, end], weight)),
+        _ => None,
+    }
+}
+
+/// How far past its end (t = 1) conic arc (`p`, `w`) can grow as one conic
+/// arc whose control point and end stay within `reach` of its start: the
+/// last t of a geometric scan of t − 1 (from 1e-4, by factors of 1.25)
+/// before the first where the arc from 0 to t is no conic arc of the
+/// sketch (it would turn half a turn, pass through infinity, or have a ρ
+/// out of range, [`rho_of_weight`]) or reaches too far. `None` when it
+/// cannot grow by 1e-4 of its parameter.
+fn conic_reach(p: [DVec2; 3], w: f64, reach: f64) -> Option<f64> {
+    let near = |x: DVec2| (x - p[0]).length() <= reach;
+    let ok = |t: f64| {
+        matches!(conic::piece(p, w, 0.0, t),
+            Some((q, wq)) if near(q[1]) && near(q[2]) && rho_of_weight(wq).is_ok())
+            && conic::piece(p, w, 1.0, t).is_some()
+    };
+    let mut best = None;
+    let mut h = 1e-4;
+    while h < 1e12 && ok(1.0 + h) {
+        best = Some(1.0 + h);
+        h *= 1.25;
+    }
+    best
+}
+
+/// The ρ of middle weight `w`, when a conic of the sketch can have it
+/// (design note 0009 §4.6): a piece cut very short is all but straight.
+fn rho_of_weight(w: f64) -> Result<f64, String> {
+    let rho = w / (1.0 + w);
+    if (RHO_MIN..=1.0 - RHO_MIN).contains(&rho) {
+        Ok(rho)
+    } else {
+        Err(format!(
+            "The conic's piece would be too {} to keep (ρ {rho:.1e})",
+            if rho < 0.5 { "flat" } else { "sharp" }
+        ))
     }
 }
 
@@ -396,7 +529,7 @@ fn trim_closed(
     Ok(r.finish(Preview::Piece(piece(&cuts.curve, lo.t, hi.t))))
 }
 
-/// Plans extending the end of line, arc or elliptical arc `target`
+/// Plans extending the end of line, arc, elliptical arc or conic `target`
 /// nearest `near` to the first curve beyond it (design note 0007 §7.3); the
 /// new end is not held on a text's letters (see [`cuts`]).
 pub fn extend(
@@ -411,25 +544,32 @@ pub fn extend(
         .find(|(id, _)| *id == target)
         .map(|(_, c)| c.clone())
         .ok_or("the curve no longer exists")?;
-    let (start, end) = match &sketch
+    let geometry = &sketch
         .entity(target)
         .ok_or("the curve no longer exists")?
-        .geometry
-    {
+        .geometry;
+    let (start, end) = match geometry {
         Geometry::Line { start, end }
         | Geometry::Arc { start, end, .. }
-        | Geometry::EllipticalArc { start, end, .. } => (*start, *end),
+        | Geometry::EllipticalArc { start, end, .. }
+        | Geometry::Conic { start, end, .. } => (*start, *end),
         g => return Err(cannot("extended", g)),
     };
     let (s, e) = end_points(&curve).ok_or("this curve has no ends to extend")?;
     let at_end = (near - e).length() <= (near - s).length();
     let (p, from, other) = if at_end { (end, e, s) } else { (start, s, e) };
+    let reach = 4.0 * extent(curves).max(from.length()).max(1e-3);
+    // A conic arc grows at its end as the arc of the same conic from its
+    // other end; at its start, as the reversed arc does at its end.
+    let grown = conic_of(&curve).map(|(c, w)| {
+        let c = if at_end { c } else { [c[2], c[1], c[0]] };
+        (c, w)
+    });
     // The way the end can go: a long ray, or the rest of the arc's circle
     // or ellipse, starting at the end.
     let proxy = match &curve {
         ResolvedCurve::Line { .. } => {
             let d = (from - other).normalize();
-            let reach = 4.0 * extent(curves).max(from.length()).max(1e-3);
             ProfileCurve::Line {
                 start: from,
                 end: from + d * reach,
@@ -481,6 +621,15 @@ pub fn extend(
             ProfileCurve::elliptical_arc(*center, *major, *minor, t0, sweep)
                 .map_err(|e| e.to_string())?
         }
+        ResolvedCurve::Conic { .. } => {
+            let (c, w) = grown.expect("a conic");
+            let far = conic_reach(c, w, reach).ok_or(
+                "This conic cannot be extended: a longer arc of it would not be one conic arc \
+                 (it would turn half a turn or more, or run off to infinity)",
+            )?;
+            let (q, wq) = conic::piece(c, w, 1.0, far).ok_or(NO_PIECE)?;
+            ProfileCurve::conic(q[0], q[1], q[2], wq).map_err(|e| e.to_string())?
+        }
         _ => return Err("this curve has no ends to extend".into()),
     };
     // The nearest contact beyond the end (not the curve's own other end),
@@ -511,6 +660,24 @@ pub fn extend(
     r.detach(p)?;
     r.moves.push((p, cut.point));
     r.attach(p, &cut);
+    if let (Some((c, w)), &Geometry::Conic { control, .. }) = (grown, geometry) {
+        // The longer arc of the same conic: its control point moves along
+        // the kept end's tangent to where the new end's tangent meets it.
+        let tx = conic::parameter_of(c, w, cut.point);
+        let (q, wq) = conic_piece(c, w, 0.0, tx)?;
+        let (added, wa) = conic::piece(c, w, 1.0, tx).ok_or(NO_PIECE)?;
+        r.drop_rho();
+        r.detach(control)?;
+        r.moves.push((control, q[1]));
+        r.set_rho(target, wq)?;
+        let [start, control, end] = added;
+        return Ok(r.finish(Preview::Piece(ResolvedCurve::Conic {
+            start,
+            control,
+            end,
+            weight: wa,
+        })));
+    }
     // The piece added, from the old end to the cut.
     let preview = match turned_to(&curve, cut.point) {
         Some(turned) if at_end => piece(&curve, span(&curve), turned),
@@ -523,8 +690,9 @@ pub fn extend(
     Ok(r.finish(Preview::Piece(preview)))
 }
 
-/// Plans splitting line, arc or elliptical arc `target` at its point
-/// nearest `near` into two curves joined there (design note 0007 §7.4).
+/// Plans splitting line, arc, elliptical arc or conic `target` at its
+/// point nearest `near` into two curves joined there (design note 0007
+/// §7.4).
 pub fn split(
     sketch: &SketchData,
     curves: &[(SketchId, ResolvedCurve)],
@@ -540,34 +708,62 @@ pub fn split(
         .entity(target)
         .ok_or("the curve no longer exists")?
         .geometry;
-    let (end, carrier) = match (geometry, Carrier::of(geometry)) {
-        (
-            Geometry::Line { end, .. }
-            | Geometry::Arc { end, .. }
-            | Geometry::EllipticalArc { end, .. },
-            Some(carrier),
-        ) => (*end, carrier),
-        (g, _) => return Err(cannot("split", g)),
+    let end = match geometry {
+        Geometry::Line { end, .. }
+        | Geometry::Arc { end, .. }
+        | Geometry::EllipticalArc { end, .. }
+        | Geometry::Conic { end, .. } => *end,
+        g => return Err(cannot("split", g)),
     };
     let (s, e) = end_points(&curve).ok_or("this curve has no ends to split between")?;
-    let q = point_at(&curve, param(&curve, near));
+    let tq = param(&curve, near);
+    let q = point_at(&curve, tq);
     if (q - s).length() <= CUT_GAP || (q - e).length() <= CUT_GAP {
         return Err("Too close to an end to split".into());
     }
     let mut r = Rewrite::new(sketch, target);
     r.drop_segment_measures();
+    // A conic's two pieces are conics of their own (design note 0009
+    // §8.1), the first with the old control point moved to its corner.
+    let conic_pieces = match (geometry, conic_of(&curve)) {
+        (&Geometry::Conic { control, .. }, Some((p, w))) => {
+            let (qa, wa) = conic_piece(p, w, 0.0, tq)?;
+            let (qb, wb) = conic_piece(p, w, tq, 1.0)?;
+            r.drop_rho();
+            r.detach(control)?;
+            r.moves.push((control, qa[1]));
+            r.set_rho(target, wa)?;
+            Some((p, w, qb[1], rho_of_weight(wb)?))
+        }
+        _ => None,
+    };
+    let carrier = match conic_pieces {
+        Some((_, _, control, rho)) => Carrier::Conic { control, rho },
+        None => Carrier::of(geometry).ok_or("this curve cannot be split")?,
+    };
     let d = r.continuation(end, carrier, q)?;
     r.moves.push((end, q));
     // An arc's new piece shares its centre and has its own radius; an
     // elliptical arc's shares its ellipse, which holds the joint once
-    // (design note 0008 §8).
+    // (design note 0008 §8.1); a conic's pieces are held tangent at the
+    // joint, as they were.
     r.pending
         .push(Constraint::Coincident { a: end, b: d.start });
-    if carrier == Carrier::Line {
-        r.pending.push(Constraint::PointOnCurve {
+    match carrier {
+        Carrier::Line => r.pending.push(Constraint::PointOnCurve {
             point: d.end,
             curve: target,
-        });
+        }),
+        Carrier::Conic { .. } => {
+            r.pending.push(Constraint::Tangent {
+                a: target,
+                b: d.curve,
+                kind: TangentKind::AtPoint { point: end },
+            });
+            let (p, w, ..) = conic_pieces.expect("a conic");
+            r.points_on_conic(p, w, &[(0.0, tq, target), (tq, 1.0, d.curve)]);
+        }
+        Carrier::Circle(_) | Carrier::Ellipse { .. } => {}
     }
     Ok(r.finish(Preview::Point(q)))
 }
@@ -591,15 +787,12 @@ fn cannot(verb: &str, g: &Geometry<SketchId>) -> String {
             "A spline cannot be {verb}: its pieces and extensions are not exact splines of the \
              sketch's kinds (design note 0007 §7.5)"
         ),
-        Geometry::Conic { .. } => {
-            format!("Conics cannot be {verb} yet (design note 0009 §8)")
-        }
-        _ => format!("Only lines, arcs and elliptical arcs can be {verb}"),
+        _ => format!("Only lines, arcs, elliptical arcs and conics can be {verb}"),
     }
 }
 
 /// What a cut curve lies on, which a new piece of it shares.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Carrier {
     /// A line: a new piece is held on it by constraints.
     Line,
@@ -612,6 +805,9 @@ enum Carrier {
         major: SketchId,
         minor: SketchId,
     },
+    /// A conic: a new piece is a conic of its own with this control point
+    /// and ρ, the piece of the old one (design note 0009 §8.1).
+    Conic { control: DVec2, rho: f64 },
 }
 
 impl Carrier {
@@ -633,8 +829,9 @@ impl Carrier {
         }
     }
 
-    /// A piece from `start` to `end` on it.
-    fn piece(self, start: SketchId, end: SketchId) -> Geometry<SketchId> {
+    /// A piece from `start` to `end` on it (adding any other point it
+    /// needs to `batch`).
+    fn piece(self, batch: &mut Batch, start: SketchId, end: SketchId) -> Geometry<SketchId> {
         match self {
             Carrier::Line => Geometry::Line { start, end },
             Carrier::Circle(center) => Geometry::Arc { center, start, end },
@@ -648,6 +845,12 @@ impl Carrier {
                 minor,
                 start,
                 end,
+            },
+            Carrier::Conic { control, rho } => Geometry::Conic {
+                start,
+                control: batch.point(control),
+                end,
+                rho,
             },
         }
     }
@@ -672,6 +875,8 @@ struct Rewrite<'a> {
     batch: Batch,
     /// Constraints to add once every new entity exists.
     pending: Vec<Constraint<SketchId>>,
+    /// Edits of existing entities after the moves (a conic's new ρ).
+    extra: Vec<SketchEdit>,
     removed: usize,
 }
 
@@ -685,6 +890,7 @@ impl<'a> Rewrite<'a> {
             moves: Vec::new(),
             batch: Batch::default(),
             pending: Vec::new(),
+            extra: Vec::new(),
             removed: 0,
         }
     }
@@ -839,9 +1045,8 @@ impl<'a> Rewrite<'a> {
         let construction = self.sketch.entity(t).is_some_and(|e| e.construction);
         let start = self.batch.point(at);
         let new_end = self.batch.point(old);
-        let curve = self
-            .batch
-            .entity(carrier.piece(start, new_end), construction);
+        let geometry = carrier.piece(&mut self.batch, start, new_end);
+        let curve = self.batch.entity(geometry, construction);
         let moved: Vec<(SketchId, Constraint<SketchId>)> =
             self.live()
                 .filter_map(|c| {
@@ -870,6 +1075,61 @@ impl<'a> Rewrite<'a> {
             start,
             end: new_end,
         })
+    }
+
+    /// Drops the target's ρ dimension: a piece of a conic has its own ρ.
+    fn drop_rho(&mut self) {
+        let t = self.target;
+        let gone: Vec<SketchId> = self
+            .live()
+            .filter(|c| matches!(c.constraint, Constraint::Rho { curve, .. } if curve == t))
+            .map(|c| c.id)
+            .collect();
+        for id in gone {
+            self.drop(id);
+        }
+    }
+
+    /// Sets the ρ of conic `curve` from a piece's middle weight `w`,
+    /// refusing a piece too flat or too sharp to be a conic of the sketch
+    /// (design note 0009 §4.6).
+    fn set_rho(&mut self, curve: SketchId, w: f64) -> Result<f64, String> {
+        let rho = rho_of_weight(w)?;
+        self.extra.push(SketchEdit::SetRho { entity: curve, rho });
+        Ok(rho)
+    }
+
+    /// Hands the target conic's point-on-curve constraints to the pieces
+    /// that keep their points: `pieces` are parameter ranges of the old arc
+    /// (`p`, `w`) with the curve that keeps each. A constraint whose point
+    /// was on a removed part goes: on a conic it means on the arc.
+    fn points_on_conic(&mut self, p: [DVec2; 3], w: f64, pieces: &[(f64, f64, SketchId)]) {
+        let t = self.target;
+        let on: Vec<(SketchId, SketchId)> = self
+            .live()
+            .filter_map(|c| match c.constraint {
+                Constraint::PointOnCurve { point, curve } if curve == t => Some((c.id, point)),
+                _ => None,
+            })
+            .collect();
+        for (id, point) in on {
+            let Some(at) = self.sketch.point(point) else {
+                continue;
+            };
+            let tq = conic::closest_param(p, w, at);
+            // A point at a piece's end (within the cut gap) is on it.
+            let holder = pieces.iter().find(|(a, b, _)| {
+                (a.min(*b)..=a.max(*b)).contains(&tq)
+                    || [a, b]
+                        .iter()
+                        .any(|x| (conic::point(p, w, **x) - at).length() <= CUT_GAP)
+            });
+            match holder {
+                Some(&(_, _, c)) if c == t => {}
+                Some(&(_, _, c)) => self.replace(id, Constraint::PointOnCurve { point, curve: c }),
+                None => self.drop(id),
+            }
+        }
     }
 
     /// Attaches the target's new end `p` to a curve through `cut`.
@@ -907,6 +1167,7 @@ impl<'a> Rewrite<'a> {
                 points: self.moves.clone(),
             });
         }
+        edits.append(&mut self.extra);
         for c in std::mem::take(&mut self.pending) {
             self.batch.constraint(c);
         }
@@ -947,8 +1208,8 @@ fn end_points(c: &ResolvedCurve) -> Option<(DVec2, DVec2)> {
     }
 }
 
-/// The parameter ([`Cut::t`]) of the point of a line, arc, circle, ellipse
-/// or elliptical arc nearest `p`, for a `p` near it.
+/// The parameter ([`Cut::t`]) of the point of a line, arc, circle,
+/// ellipse, elliptical arc or conic nearest `p`, for a `p` near it.
 fn param(c: &ResolvedCurve, p: DVec2) -> f64 {
     match c {
         ResolvedCurve::Line { start, end } => {
@@ -974,7 +1235,13 @@ fn param(c: &ResolvedCurve, p: DVec2) -> f64 {
             turned(c, closest_anomaly(*center, *major, *minor, p)),
             sweep_param.abs(),
         ),
-        ResolvedCurve::Spline { .. } | ResolvedCurve::Conic { .. } => 0.0,
+        ResolvedCurve::Conic {
+            start,
+            control,
+            end,
+            weight,
+        } => conic::closest_param([*start, *control, *end], *weight, p),
+        ResolvedCurve::Spline { .. } => 0.0,
     }
 }
 
@@ -1061,7 +1328,7 @@ fn span(c: &ResolvedCurve) -> f64 {
     }
 }
 
-/// The point of a line, arc, circle, ellipse or elliptical arc at
+/// The point of a line, arc, circle, ellipse, elliptical arc or conic at
 /// parameter `t` ([`Cut::t`]).
 fn point_at(c: &ResolvedCurve, t: f64) -> DVec2 {
     match c {
@@ -1085,13 +1352,18 @@ fn point_at(c: &ResolvedCurve, t: f64) -> DVec2 {
             ..
         } => ellipse_point(*center, *major, *minor, anomaly(c, t)),
         ResolvedCurve::Spline { points, .. } => points[0],
-        ResolvedCurve::Conic { start, .. } => *start,
+        ResolvedCurve::Conic {
+            start,
+            control,
+            end,
+            weight,
+        } => conic::point([*start, *control, *end], *weight, t),
     }
 }
 
-/// The piece of a line, arc, circle, ellipse or elliptical arc between
-/// parameters `a` and `b` (counter-clockwise from `a` to `b` on a closed
-/// curve).
+/// The piece of a line, arc, circle, ellipse, elliptical arc or conic
+/// between parameters `a` and `b` (counter-clockwise from `a` to `b` on a
+/// closed curve; a conic's piece is the exact conic arc, [`conic::piece`]).
 fn piece(c: &ResolvedCurve, a: f64, b: f64) -> ResolvedCurve {
     match c {
         ResolvedCurve::Line { .. } => ResolvedCurve::Line {
@@ -1142,7 +1414,21 @@ fn piece(c: &ResolvedCurve, a: f64, b: f64) -> ResolvedCurve {
             start_param: anomaly(c, a.min(b)),
             sweep_param: sweep_param.signum() * (b - a).abs(),
         },
-        ResolvedCurve::Spline { .. } | ResolvedCurve::Conic { .. } => c.clone(),
+        ResolvedCurve::Conic {
+            start,
+            control,
+            end,
+            weight,
+        } => match conic::piece([*start, *control, *end], *weight, a.min(b), a.max(b)) {
+            Some(([start, control, end], weight)) => ResolvedCurve::Conic {
+                start,
+                control,
+                end,
+                weight,
+            },
+            None => c.clone(),
+        },
+        ResolvedCurve::Spline { .. } => c.clone(),
     }
 }
 

@@ -427,6 +427,7 @@ impl Subdiv<'_, '_> {
             let s = p.piece.param_at(self.a, ua);
             let t = q.piece.param_at(self.b, ub);
             let (s, t) = refine(self.a, self.b, s, t, self.bounds);
+            let (s, t) = touch(self.a, self.b, s, t, self.bounds, tol);
             let pa = self.a.point(s);
             let pb = self.b.point(t);
             if (pa - pb).length() > tol {
@@ -507,6 +508,80 @@ pub(super) fn refine(
         }
     }
     (s, t)
+}
+
+/// Where [`refine`] stopped short of a tangency, the point of contact
+/// itself.
+///
+/// Where two curves touch, the Jacobian of `A(s) − B(t)` has rank one and
+/// the residual left is normal to both curves, which first-order steps
+/// cannot reduce: refinement stops wherever the gap is too small to shrink
+/// further, which can be microns along the curves from the touch (the
+/// curves stay within ε of each other for about √(2Rε) either side, R the
+/// radius of curvature). The point of contact, or of closest approach, is a
+/// root of
+///
+///   G(s, t) = ((A − B)·B′, A′ × B′)
+///
+/// (A(s)'s foot on B, where the tangents are parallel), and a simple one:
+/// at a touch with A′ = αT and B′ = βT, det ∂G/∂(s, t) = α²β³(κ_B − κ_A)
+/// for the signed curvatures in the frame (T, N), non-zero unless the
+/// curves osculate. Newton's method on G therefore converges to it
+/// quadratically. Its closest iterate replaces refinement's result when it
+/// is a closer approach and every iterate stays within the tolerance; a
+/// converged crossing (residual at rounding level) or a miss (beyond the
+/// tolerance) is returned unchanged.
+fn touch(
+    a: &Crv,
+    b: &Crv,
+    s0: f64,
+    t0: f64,
+    bounds: Option<[(f64, f64); 2]>,
+    tol: f64,
+) -> (f64, f64) {
+    let clamp = |c: &Crv, t: f64, k: usize| match bounds {
+        Some(bd) => t.clamp(bd[k].0, bd[k].1),
+        None => c.clamp(t),
+    };
+    let gap = |s: f64, t: f64| (a.point(s) - b.point(t)).length();
+    let (pa, pb) = (a.point(s0), b.point(t0));
+    let noise = 64.0 * f64::EPSILON * pa.abs().max_element().max(pb.abs().max_element());
+    let g0 = (pa - pb).length();
+    if !(g0 > noise && g0 <= tol) {
+        return (s0, t0);
+    }
+    let mut best = (s0, t0, g0);
+    let (mut s, mut t) = (s0, t0);
+    for _ in 0..32 {
+        let [pa, da, dda] = a.eval(s, true);
+        let [pb, db, ddb] = b.eval(t, true);
+        let f = pa - pb;
+        let g = [f.dot(db), da.perp_dot(db)];
+        let j = [
+            [da.dot(db), f.dot(ddb) - db.dot(db)],
+            [dda.perp_dot(db), da.perp_dot(ddb)],
+        ];
+        let det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
+        let ds = -(j[1][1] * g[0] - j[0][1] * g[1]) / det;
+        let dt = -(j[0][0] * g[1] - j[1][0] * g[0]) / det;
+        if !(ds.is_finite() && dt.is_finite()) {
+            break;
+        }
+        let (sn, tn) = (clamp(a, s + ds, 0), clamp(b, t + dt, 1));
+        let d = gap(sn, tn);
+        if d > tol {
+            return (s0, t0);
+        }
+        if d < best.2 {
+            best = (sn, tn, d);
+        }
+        let moved = (sn - s).abs() + (tn - t).abs();
+        (s, t) = (sn, tn);
+        if moved <= 1e-15 * (1.0 + s.abs() + t.abs()) {
+            break;
+        }
+    }
+    (best.0, best.1)
 }
 
 /// Self-contacts of a spline: pairs `(s, t)`, `s < t`, of distinct points of

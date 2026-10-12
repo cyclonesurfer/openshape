@@ -519,8 +519,10 @@ pub fn profile_has_cusp(prof: &[ProfileCurve], chord: f64) -> bool {
 /// of 1% of the body size, so profiles whose curves come closer than about
 /// twice that away from their joints (see [`profile_min_gap`]) are rejected
 /// although valid: the tessellated boundary crosses itself, a face bounded
-/// by a line and a shallow arc gets only two boundary samples, or a sliver
-/// face's tessellated boundary encloses nothing (no triangles). The
+/// by a line and a shallow arc gets only two boundary samples, a sliver
+/// face's tessellated boundary encloses nothing (no triangles), or a
+/// sliver's two sides are each one chord, so the tessellated shell
+/// encloses no volume and reads as inside-out. The
 /// same polylines cross near a cusp or a narrow V of the profile (two
 /// curves leaving a joint at a small angle, see [`profile_has_cusp`]). True
 /// if `e` is that rejection for `prof`.
@@ -529,6 +531,7 @@ pub fn extrude_limited(prof: &[ProfileCurve], h: f64, e: &KernelError) -> bool {
     let known = msg.contains("intersects itself in parameter space")
         || msg.contains("loop has fewer than three boundary samples")
         || msg.contains("face produced no triangles")
+        || msg.contains("outer shell is inside-out")
         || msg.contains("profile curves intersect or touch each other");
     let pts: Vec<DVec2> = prof
         .iter()
@@ -568,6 +571,16 @@ pub fn profile_pinched_at(prof: &[ProfileCurve], snap: f64) -> bool {
 /// [`profile_pinched_at`]).
 pub static EXTRUDE_PINCHED: AtomicUsize = AtomicUsize::new(0);
 
+/// Number of slivers of perturbed curves whose volume was computed to 1e-6
+/// because the integrals could not show 1e-10 (see
+/// [`extrude_all_within`]).
+pub static SLIVER_MASS: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of regions of perturbed curves whose profile was refused for a
+/// loop or edges below the profile builder's resolution (see
+/// [`extrude_all_within`]).
+pub static PROFILE_BELOW_RESOLUTION: AtomicUsize = AtomicUsize::new(0);
+
 /// Extrudes every region on its own: each must give a valid solid with
 /// volume = area × height, unless it is pinched (non-manifold profile) or
 /// pinched at the profile builder's resolution (see [`profile_pinched_at`])
@@ -579,11 +592,29 @@ pub fn extrude_all(curves: &[ProfileCurve], a: &SketchArrangement) -> usize {
 
 /// [`extrude_all`] for curves whose ends may miss each other by up to
 /// `gap`: the area of a region is then defined only up to about
-/// `gap` × perimeter, and the volume check allows for that.
+/// `gap` × perimeter, and the volume check allows for that; with a gap, a
+/// region's profile may also be refused for a loop or edges below the
+/// profile builder's resolution.
 pub fn extrude_all_within(curves: &[ProfileCurve], a: &SketchArrangement, gap: f64) -> usize {
     let mut n = 0;
     for r in 0..a.regions.len() {
-        let prof = k().region_profile(a, curves, &[r]).unwrap();
+        let prof = match k().region_profile(a, curves, &[r]) {
+            Ok(prof) => prof,
+            // Curves that miss each other can leave loops and edges
+            // between the tolerance and the profile builder's resolution
+            // (ten tolerances): the tiny triangle three curves leave near a
+            // point they would share, or the few microns between two
+            // crossings of nearly tangent circles. The builder refuses
+            // those by design (`region_profile_with_tolerance`).
+            Err(KernelError::InvalidInput(m))
+                if gap > 0.0 && m.contains("than the profile resolution") =>
+            {
+                let n = PROFILE_BELOW_RESOLUTION.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!("PROFILE_BELOW_RESOLUTION #{n}: {m}");
+                continue;
+            }
+            Err(e) => panic!("region {r} has no profile: {e}"),
+        };
         let area = a.regions[r].area;
         let h = area.sqrt().max(1e-6);
         match try_extrude(&prof, h) {
@@ -601,7 +632,25 @@ pub fn extrude_all_within(curves: &[ProfileCurve], a: &SketchArrangement, gap: f
                             .sum::<f64>()
                     })
                     .sum();
-                let got = volume(&body);
+                let got = match k().mass_properties(&body, 1e-10) {
+                    Ok(m) => m.volume,
+                    // A sliver between perturbed curves (a lens 0.3 µm wide
+                    // and 3 mm long on an arc of 3 m radius) is evaluated
+                    // with rounding of about 1e-16 of its coordinates, some
+                    // 1e-9 of its width, while the kernel's noise floor is
+                    // scaled to the body's size: its integrals cannot show
+                    // 1e-10 and say so. The volume check below allows more
+                    // than the sliver's whole volume for the gap anyway, so
+                    // it is computed to 1e-6.
+                    Err(KernelError::MassProperties(e))
+                        if gap > 0.0 && area < 10.0 * gap * perimeter =>
+                    {
+                        let n = SLIVER_MASS.fetch_add(1, Ordering::Relaxed) + 1;
+                        eprintln!("SLIVER_MASS #{n}: region {r}: {e}");
+                        k().mass_properties(&body, 1e-6).unwrap().volume
+                    }
+                    Err(e) => panic!("region {r}: {e}"),
+                };
                 let want = area * h;
                 assert!(
                     (got - want).abs() <= 1e-9 * want + 2.0 * gap * perimeter * h,

@@ -64,6 +64,52 @@ fn second(p: [DVec2; 3], w: f64, t: f64) -> DVec2 {
     (n2 - c1 * (2.0 * d1) - c * d2) / d
 }
 
+/// The arc of the conic from parameter `a` to parameter `b` (either
+/// order, and beyond `[0, 1]`: the curve continues past the arc's ends) as
+/// a conic arc in the same form: control points `[C(a), Q, C(b)]`, `Q`
+/// where its end tangents meet, and its middle weight.
+///
+/// The homogeneous control points `(P₀, 1)`, `(wP₁, w)`, `(P₂, 1)` are
+/// blossomed (the polar form of the quadratic, Farin, *Curves and
+/// Surfaces for CAGD*, ch. 4 and 13: the piece's homogeneous control points
+/// are `b(a, a)`, `b(a, b)`, `b(b, b)`), then the end weights are made 1
+/// again with `w′ = w₁/√(w₀w₂)` (Piegl & Tiller §7.3). `None` when the
+/// piece is no such arc: its homogeneous weights do not share a sign (it
+/// passes through a point at infinity, or turns half a turn or more), or
+/// `a = b`.
+pub fn piece(p: [DVec2; 3], w: f64, a: f64, b: f64) -> Option<([DVec2; 3], f64)> {
+    let blossom = |u: f64, v: f64| {
+        let (c0, c1, c2) = ((1.0 - u) * (1.0 - v), (1.0 - u) * v + u * (1.0 - v), u * v);
+        (p[0] * c0 + p[1] * (w * c1) + p[2] * c2, c0 + w * c1 + c2)
+    };
+    let (n0, w0) = blossom(a, a);
+    let (n1, w1) = blossom(a, b);
+    let (n2, w2) = blossom(b, b);
+    let valid = a != b && w0 * w2 > 0.0 && w0 * w1 > 0.0;
+    let q = [n0 / w0, n1 / w1, n2 / w2];
+    let wq = w1.abs() / (w0 * w2).sqrt();
+    (valid && wq.is_finite() && q.iter().all(|x| x.is_finite())).then_some((q, wq))
+}
+
+/// The parameter `t` of a point `x` of the conic, on its full curve
+/// (outside `[0, 1]` beyond the arc's ends). With `(τ₀, τ₁, τ₂)` the
+/// barycentric coordinates of `x` in the control triangle, a point of the
+/// curve has `τ₁/τ₀ = 2w·t/(1 − t)` and `τ₁/τ₂ = 2w(1 − t)/t` (Lee), so
+/// `t = τ₁/(τ₁ + 2wτ₀) = 2wτ₂/(τ₁ + 2wτ₂)`; the form whose `τ` is the
+/// larger is used, as the other loses digits near its end. Exact for
+/// points on the curve; for others, the parameter of a nearby point.
+pub fn parameter_of(p: [DVec2; 3], w: f64, x: DVec2) -> f64 {
+    let area = (p[1] - p[0]).perp_dot(p[2] - p[0]);
+    let tau0 = (p[1] - x).perp_dot(p[2] - x) / area;
+    let tau1 = (p[2] - x).perp_dot(p[0] - x) / area;
+    let tau2 = (p[0] - x).perp_dot(p[1] - x) / area;
+    if tau0.abs() >= tau2.abs() {
+        tau1 / (tau1 + 2.0 * w * tau0)
+    } else {
+        2.0 * w * tau2 / (tau1 + 2.0 * w * tau2)
+    }
+}
+
 /// Uniform samples of the parameter to start from.
 const START: usize = 32;
 /// Most samples [`samples`] takes.
@@ -301,6 +347,89 @@ mod tests {
                 );
             }
         }
+    }
+
+    proptest! {
+        /// A piece, inside the arc or reaching past its ends, is the same
+        /// curve: its points satisfy the conic's implicit equation, it
+        /// runs from C(a) to C(b) through C at the parameters between, and
+        /// its end tangents are the conic's.
+        #[test]
+        fn pieces_are_arcs_of_the_same_conic(
+            x1 in -2.0f64..2.0, y1 in 0.3f64..3.0, x2 in 1.0f64..4.0, y2 in -1.0f64..1.0,
+            u in -3.0f64..3.0, a in -0.6f64..1.6, b in -0.6f64..1.6, s in 0.0f64..1.0,
+        ) {
+            let p = [DVec2::ZERO, DVec2::new(x1, y1), DVec2::new(x2, y2)];
+            prop_assume!((p[1] - p[0]).perp_dot(p[2] - p[0]).abs() > 0.1);
+            prop_assume!((a - b).abs() > 1e-3);
+            let w = u.exp();
+            let Some((q, wq)) = piece(p, w, a, b) else {
+                // Refused only when a homogeneous weight changes sign
+                // between a and b.
+                let d = |t: f64| (1.0 - t) * (1.0 - t) + 2.0 * t * (1.0 - t) * w + t * t;
+                let mid = (1.0 - a) * (1.0 - b) + ((1.0 - a) * b + a * (1.0 - b)) * w + a * b;
+                prop_assert!(d(a) * d(b) <= 0.0 || d(a) * mid <= 0.0);
+                return Ok(());
+            };
+            let scale = 1.0 + point(p, w, a).length() + point(p, w, b).length();
+            prop_assert!((q[0] - point(p, w, a)).length() < 1e-12 * scale);
+            prop_assert!((q[2] - point(p, w, b)).length() < 1e-12 * scale);
+            let x = point(q, wq, s);
+            prop_assert!(implicit(p, w, x).abs() < 1e-9, "{}", implicit(p, w, x));
+            // The same point by its parameter on the conic.
+            let t = parameter_of(p, w, x);
+            prop_assert!((point(p, w, t) - x).length() < 1e-9 * scale);
+            prop_assert!((t - a) * (t - b) <= 1e-12, "{t} not between {a} and {b}");
+            // Tangent directions at the ends.
+            let (ta, tb) = (tangent(p, w, a), tangent(p, w, b));
+            prop_assert!((q[1] - q[0]).normalize().perp_dot(ta.normalize()).abs() < 1e-9);
+            prop_assert!((q[2] - q[1]).normalize().perp_dot(tb.normalize()).abs() < 1e-9);
+        }
+
+        /// The parameter of a point of the curve is found exactly, inside
+        /// the arc and beyond its ends.
+        #[test]
+        fn parameters_of_points_round_trip(
+            x1 in -2.0f64..2.0, y1 in 0.3f64..3.0, x2 in 1.0f64..4.0, y2 in -1.0f64..1.0,
+            u in -3.0f64..3.0, t in -0.5f64..1.5,
+        ) {
+            let p = [DVec2::ZERO, DVec2::new(x1, y1), DVec2::new(x2, y2)];
+            prop_assume!((p[1] - p[0]).perp_dot(p[2] - p[0]).abs() > 0.1);
+            let w = u.exp();
+            let d = (1.0 - t) * (1.0 - t) + 2.0 * t * (1.0 - t) * w + t * t;
+            prop_assume!(d > 1e-3);
+            let back = parameter_of(p, w, point(p, w, t));
+            prop_assert!((back - t).abs() < 1e-9 * (1.0 + t.abs()), "{back} vs {t}");
+        }
+    }
+
+    #[test]
+    fn the_whole_arc_is_its_own_piece_and_pieces_join() {
+        let p = [DVec2::ZERO, DVec2::new(1.0, 2.0), DVec2::new(3.0, 0.5)];
+        let w = weight(0.3);
+        let (q, wq) = piece(p, w, 0.0, 1.0).unwrap();
+        assert_eq!(q, p);
+        assert!((wq - w).abs() < 1e-15);
+        // Reversed, the same arc the other way.
+        let (q, wq) = piece(p, w, 1.0, 0.0).unwrap();
+        assert_eq!(q, [p[2], p[1], p[0]]);
+        assert!((wq - w).abs() < 1e-15);
+        // Two pieces meet at the split point with the same tangent line.
+        let (l, _) = piece(p, w, 0.0, 0.4).unwrap();
+        let (r, _) = piece(p, w, 0.4, 1.0).unwrap();
+        assert!((l[2] - r[0]).length() < 1e-15);
+        assert!((l[2] - l[1]).perp_dot(r[1] - r[0]).abs() < 1e-14);
+        // An ellipse's arc reaches past its end only while it turns less
+        // than half a turn: here until t = 1/(1 − w).
+        let limit = 1.0 / (1.0 - w);
+        assert!(piece(p, w, 0.0, limit * 0.999).is_some());
+        assert!(piece(p, w, 0.0, limit * 1.001).is_none());
+        // A hyperbola's until its point at infinity, where D(t) = 0.
+        let w = weight(0.8);
+        let tstar = 0.5 * (1.0 + (1.0 + 2.0 / (w - 1.0)).sqrt());
+        assert!(piece(p, w, 0.0, tstar * 0.999).is_some());
+        assert!(piece(p, w, 0.0, tstar * 1.001).is_none());
+        assert!(piece(p, w, 0.3, 0.3).is_none());
     }
 
     #[test]
