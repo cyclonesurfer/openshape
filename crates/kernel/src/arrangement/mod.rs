@@ -102,6 +102,66 @@ pub struct SketchArrangement {
     pub regions: Vec<Region>,
 }
 
+/// A point where two curves meet, see [`curve_contacts`].
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CurveContact {
+    /// The point on the first curve, `A(ta)`.
+    pub point: DVec2,
+    /// Its parameter on the first curve (see the module docs).
+    pub ta: f64,
+    /// The parameter of the matching point on the second curve.
+    pub tb: f64,
+}
+
+/// Where two curves meet (design note 0007, §6): transversal crossings,
+/// tangencies, end points of either curve lying on the other, and the two
+/// ends of an overlap, with the same intersection code and tolerance
+/// semantics as [`arrange`], so tools and regions agree on where curves
+/// meet. Parameters follow the module docs. Contacts closer than the
+/// tolerance to one another are merged (the one with the smaller `ta` is
+/// kept; for a closed first curve also across its seam), and the result is
+/// sorted by `ta`. Every contact satisfies `|A(ta) − B(tb)| ≤ tolerance`.
+///
+/// Degenerate curves are [`KernelError::InvalidInput`] naming the curve
+/// (0 for `a`, 1 for `b`), as in [`arrange`].
+pub fn curve_contacts(
+    a: &ProfileCurve,
+    b: &ProfileCurve,
+    tol: &Tolerance,
+) -> Result<Vec<CurveContact>, KernelError> {
+    if !(tol.linear.is_finite() && tol.linear > 0.0) {
+        return Err(KernelError::InvalidInput(
+            "the linear tolerance must be positive".into(),
+        ));
+    }
+    let ca = curve::Crv::new(0, a, tol.linear)?;
+    let cb = curve::Crv::new(1, b, tol.linear)?;
+    let mut ctx = intersect::Ctx {
+        tol: tol.linear,
+        budget: topology::BUDGET,
+    };
+    let mut pairs = intersect::pair_contacts(&ca, &cb, &mut ctx)?;
+    pairs.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.total_cmp(&y.1)));
+    let mut out: Vec<CurveContact> = Vec::with_capacity(pairs.len());
+    for (ta, tb) in pairs {
+        let point = ca.point(ta);
+        let near = |c: &CurveContact| (c.point - point).length() <= tol.linear;
+        let seam = ca.periodic && out.first().is_some_and(near);
+        if !(out.last().is_some_and(near) || seam) {
+            out.push(CurveContact { point, ta, tb });
+        }
+    }
+    Ok(out)
+}
+
+/// The point of `curve` at parameter `t` (see the module docs; `t` is
+/// clamped to the curve's domain). Degenerate curves are
+/// [`KernelError::InvalidInput`], as in [`arrange`].
+pub fn curve_point(curve: &ProfileCurve, t: f64, tol: &Tolerance) -> Result<DVec2, KernelError> {
+    let c = curve::Crv::new(0, curve, tol.linear)?;
+    Ok(c.point(c.clamp(t)))
+}
+
 /// Builds the arrangement of `curves` (design note 0006, §4).
 ///
 /// Degenerate curves (zero length or radius, non-finite values, coordinates

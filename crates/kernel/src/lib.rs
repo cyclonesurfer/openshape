@@ -22,7 +22,9 @@ mod topo;
 
 use std::sync::Arc;
 
-pub use arrangement::{ArrangementEdge, ArrangementVertex, Region, RegionLoop, SketchArrangement};
+pub use arrangement::{
+    ArrangementEdge, ArrangementVertex, CurveContact, Region, RegionLoop, SketchArrangement,
+};
 pub use geom::SurfaceKind;
 pub use glam::{DMat4, DVec2, DVec3};
 pub use math::{Frame, Tolerance};
@@ -224,6 +226,20 @@ pub trait Kernel: Send + Sync {
         curves: &[ProfileCurve],
         point: DVec2,
     ) -> Option<usize>;
+
+    /// Where two profile curves meet: crossings, tangencies, end points on
+    /// the other curve and the ends of overlaps, as parameter pairs in the
+    /// arrangement's conventions, sorted along `a` (design note 0007 §6).
+    /// For sketch tools such as trim and extend.
+    fn curve_contacts(
+        &self,
+        a: &ProfileCurve,
+        b: &ProfileCurve,
+    ) -> Result<Vec<CurveContact>, KernelError>;
+
+    /// The point of a profile curve at a parameter in the arrangement's
+    /// conventions (clamped to the curve's domain).
+    fn curve_point(&self, curve: &ProfileCurve, t: f64) -> Result<DVec2, KernelError>;
 }
 
 /// The built-in OpenShape kernel.
@@ -348,5 +364,17 @@ impl Kernel for OsKernel {
         point: DVec2,
     ) -> Option<usize> {
         arrangement::region_containing(arrangement, curves, point, &self.tol)
+    }
+
+    fn curve_contacts(
+        &self,
+        a: &ProfileCurve,
+        b: &ProfileCurve,
+    ) -> Result<Vec<CurveContact>, KernelError> {
+        arrangement::curve_contacts(a, b, &self.tol)
+    }
+
+    fn curve_point(&self, curve: &ProfileCurve, t: f64) -> Result<DVec2, KernelError> {
+        arrangement::curve_point(curve, t, &self.tol)
     }
 }

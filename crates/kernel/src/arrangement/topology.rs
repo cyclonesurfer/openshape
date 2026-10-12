@@ -39,7 +39,7 @@ use crate::{KernelError, ProfileCurve};
 /// ordered by their actual separation at a distance rather than by angle.
 const TIE_ANGLE: f64 = 1e-3;
 /// Total subdivision steps allowed for one arrangement.
-const BUDGET: u64 = 40_000_000;
+pub(super) const BUDGET: u64 = 40_000_000;
 /// Contacts whose tangents make at least this sine are transversal: their
 /// position is known to about the rounding error divided by the sine.
 const TRANSVERSAL_SINE: f64 = 1e-3;
