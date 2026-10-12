@@ -26,7 +26,8 @@ use openshape_sketch_solver::{
 };
 
 use crate::sketch_ops::shapes::{self, TangentStart};
-use crate::sketch_ops::{curve_ending_at, leaving_direction, Batch};
+use crate::sketch_ops::trim::{self, Cuts, Plan};
+use crate::sketch_ops::{curve_ending_at, deletion, leaving_direction, Batch};
 use crate::{geometry_edits, Model};
 
 /// Pick radius for points, in screen points.
@@ -939,11 +940,17 @@ pub enum Tool {
     Point,
     /// Spline through clicked points (finish with Enter or a double-click).
     Spline,
+    /// Removes the piece of a curve between the curves crossing it.
+    Trim,
+    /// Extends a line or arc to the next curve.
+    Extend,
+    /// Splits a line or arc in two at a point.
+    Split,
 }
 
 impl Tool {
     /// Every tool, in toolbar order.
-    pub const ALL: [Tool; 13] = [
+    pub const ALL: [Tool; 16] = [
         Tool::Select,
         Tool::Line,
         Tool::Rectangle,
@@ -957,6 +964,9 @@ impl Tool {
         Tool::Polygon,
         Tool::Point,
         Tool::Spline,
+        Tool::Trim,
+        Tool::Extend,
+        Tool::Split,
     ];
 
     /// The tools sharing one toolbar button with this one (shown in its
@@ -971,6 +981,7 @@ impl Tool {
             Tool::Arc | Tool::CenterArc | Tool::TangentArc => {
                 &[Tool::Arc, Tool::CenterArc, Tool::TangentArc]
             }
+            Tool::Trim | Tool::Extend | Tool::Split => &[Tool::Trim, Tool::Extend, Tool::Split],
             Tool::Select => &[Tool::Select],
             Tool::Line => &[Tool::Line],
             Tool::Circle => &[Tool::Circle],
@@ -997,7 +1008,15 @@ impl Tool {
             Tool::Polygon => "Polygon",
             Tool::Point => "Point",
             Tool::Spline => "Spline",
+            Tool::Trim => "Trim",
+            Tool::Extend => "Extend",
+            Tool::Split => "Split",
         }
+    }
+
+    /// True for the tools that edit existing curves (trim, extend, split).
+    pub fn edits_curves(self) -> bool {
+        matches!(self, Tool::Trim | Tool::Extend | Tool::Split)
     }
 
     /// Keyboard shortcut.
@@ -1009,13 +1028,16 @@ impl Tool {
             Tool::Arc => egui::Key::A,
             Tool::Point => egui::Key::P,
             Tool::Spline => egui::Key::S,
+            Tool::Trim => egui::Key::T,
             Tool::Select
             | Tool::CenterRectangle
             | Tool::AlignedRectangle
             | Tool::CenterArc
             | Tool::TangentArc
             | Tool::Slot
-            | Tool::Polygon => return None,
+            | Tool::Polygon
+            | Tool::Extend
+            | Tool::Split => return None,
         })
     }
 
@@ -1052,6 +1074,13 @@ impl Tool {
             (Tool::Point, _) => "Click to place a point",
             (Tool::Spline, 0) => "Click the first point",
             (Tool::Spline, _) => "Click more points; Enter or double-click finishes",
+            (Tool::Trim, _) => {
+                "Click the piece of a curve to remove (a curve nothing crosses is deleted)"
+            }
+            (Tool::Extend, _) => {
+                "Click near the end of a line or arc to extend it to the next curve"
+            }
+            (Tool::Split, _) => "Click a line or arc where it should be split",
         }
     }
 }
@@ -1570,6 +1599,19 @@ pub struct SketchEditor {
     pub prompt: Option<DimensionPrompt>,
     /// Feedback for the status bar.
     pub message: Option<String>,
+    /// What the trim, extend or split tool would do at the pointer.
+    pub curve_edit: Option<CurveEdit>,
+    /// The last cuts found for trim, with the curves they were found in.
+    cuts: Option<(Vec<(SketchId, ResolvedCurve)>, Cuts)>,
+}
+
+/// What the trim, extend or split tool would do at the pointer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CurveEdit {
+    /// The curve under the pointer.
+    pub target: SketchId,
+    /// The edit, or why it cannot be made there.
+    pub plan: Result<Plan, String>,
 }
 
 impl SketchEditor {
@@ -1593,6 +1635,8 @@ impl SketchEditor {
             preview: None,
             prompt: None,
             message: None,
+            curve_edit: None,
+            cuts: None,
         }
     }
 
@@ -1620,6 +1664,7 @@ impl SketchEditor {
 
     fn reset_tool(&mut self) {
         self.clicks.clear();
+        self.curve_edit = None;
         self.inferred = None;
         self.tangent_start = None;
         self.turn = 0.0;
@@ -1716,12 +1761,22 @@ impl SketchEditor {
         self.hover = None;
         self.cursor = None;
         self.inferred = None;
+        self.curve_edit = None;
         let (Some(pos), Some(d)) = (pos, self.display(model)) else {
             return;
         };
         if self.tool == Tool::Select {
             if self.drag.is_none() {
                 self.hover = pick(&d, &annotations(&d, map), map, pos);
+            }
+            return;
+        }
+        if self.tool.edits_curves() {
+            if let (Some((target, _)), Some(at)) =
+                (nearest_curve(&d, map, pos, CURVE_PICK), map.to_plane(pos))
+            {
+                let plan = self.plan_curve_edit(model, &d, target, at);
+                self.curve_edit = Some(CurveEdit { target, plan });
             }
             return;
         }
@@ -1763,6 +1818,68 @@ impl SketchEditor {
             self.last_angle = Some(a);
         }
         self.cursor = Some(s);
+    }
+
+    /// Plans the trim, extend or split of `target` at plane point `at`.
+    fn plan_curve_edit(
+        &mut self,
+        model: &Model,
+        d: &SketchDisplay,
+        target: SketchId,
+        at: DVec2,
+    ) -> Result<Plan, String> {
+        let curves: Vec<(SketchId, ResolvedCurve)> =
+            d.curves.iter().map(|c| (c.id, c.curve.clone())).collect();
+        match self.tool {
+            Tool::Trim => {
+                // Finding cuts intersects the curve with every other one;
+                // reuse them while the pointer stays on the same curve.
+                let fresh = !matches!(&self.cuts,
+                    Some((c, k)) if k.target == target && *c == curves);
+                if fresh {
+                    let k = trim::cuts(model.kernel(), &curves, target)?;
+                    self.cuts = Some((curves, k));
+                }
+                let (_, k) = self.cuts.as_ref().expect("cuts were just found");
+                trim::trim(&d.sketch, k, at)
+            }
+            Tool::Extend => trim::extend(model.kernel(), &d.sketch, &curves, target, at),
+            Tool::Split => trim::split(&d.sketch, &curves, target, at),
+            _ => Err("not a curve editing tool".into()),
+        }
+    }
+
+    /// Commits the trim, extend or split planned at `pos`.
+    fn edit_curve(&mut self, model: &mut Model, map: &ScreenMap, pos: Pos2) {
+        self.hover(model, map, Some(pos));
+        match self.curve_edit.take() {
+            Some(CurveEdit { plan: Ok(plan), .. }) => {
+                let verb = match self.tool {
+                    Tool::Trim => "Trimmed",
+                    Tool::Extend => "Extended",
+                    _ => "Split",
+                };
+                match model.edit_sketch_checked(self.feature, plan.edits) {
+                    Ok(_) => {
+                        self.message = self.solve_message(model).or(Some(match plan.removed {
+                            0 => verb.to_string(),
+                            1 => format!("{verb}; removed 1 constraint that no longer applied"),
+                            n => format!("{verb}; removed {n} constraints that no longer applied"),
+                        }));
+                        if let Some(def) = model.sketch_def(self.feature) {
+                            let sketch = &def.sketch;
+                            self.selection.retain(|id| {
+                                sketch.entity(*id).is_some() || sketch.constraint(*id).is_some()
+                            });
+                        }
+                    }
+                    Err(e) => self.message = Some(format!("Not done: {e}")),
+                }
+            }
+            Some(CurveEdit { plan: Err(e), .. }) => self.message = Some(e),
+            None => self.message = Some("Click a curve".into()),
+        }
+        self.hover(model, map, Some(pos));
     }
 
     /// The relation a line from `start` to `to` is close to (design note
@@ -1922,6 +2039,10 @@ impl SketchEditor {
             }
             return;
         }
+        if self.tool.edits_curves() {
+            self.edit_curve(model, map, pos);
+            return;
+        }
         // Use the hover state when it is for this position, so a click
         // lands where the user saw the snap.
         self.hover(model, map, Some(pos));
@@ -1937,7 +2058,8 @@ impl SketchEditor {
         };
         let construction = self.construction;
         match self.tool {
-            Tool::Select => {}
+            // Curve editing tools act on clicks directly (`edit_curve`).
+            Tool::Select | Tool::Trim | Tool::Extend | Tool::Split => {}
             Tool::Point => {
                 let mut b = Batch::default();
                 let p = b.snapped_point(&s);
@@ -2430,32 +2552,10 @@ impl SketchEditor {
         let Some(def) = model.sketch_def(self.feature) else {
             return;
         };
-        let sketch = &def.sketch;
         let selected: BTreeSet<SketchId> = self.selection.iter().copied().collect();
-        let kept_points: BTreeSet<SketchId> = sketch
-            .entities
-            .iter()
-            .filter(|e| !selected.contains(&e.id))
-            .flat_map(|e| e.geometry.referenced_points())
-            .collect();
-        let mut items = selected.clone();
-        for e in &sketch.entities {
-            if selected.contains(&e.id) {
-                items.extend(
-                    e.geometry
-                        .referenced_points()
-                        .into_iter()
-                        .filter(|p| !kept_points.contains(p)),
-                );
-            }
-        }
+        let items = deletion(&def.sketch, &selected);
         self.selection.clear();
-        self.commit(
-            model,
-            vec![SketchEdit::Delete {
-                items: items.into_iter().collect(),
-            }],
-        );
+        self.commit(model, vec![SketchEdit::Delete { items }]);
     }
 
     /// Toggles construction on the selected curves.

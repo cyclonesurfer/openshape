@@ -295,112 +295,17 @@ impl SketchDef {
 }
 
 fn resolve_entity(e: &Entity<SketchId>, op: OpId) -> Entity<SketchId> {
-    let r = |id: &SketchId| id.resolved(op);
-    let geometry = match &e.geometry {
-        Geometry::Point { at } => Geometry::Point { at: *at },
-        Geometry::Line { start, end } => Geometry::Line {
-            start: r(start),
-            end: r(end),
-        },
-        Geometry::Circle { center, radius } => Geometry::Circle {
-            center: r(center),
-            radius: *radius,
-        },
-        Geometry::Arc { center, start, end } => Geometry::Arc {
-            center: r(center),
-            start: r(start),
-            end: r(end),
-        },
-        Geometry::ControlSpline { control, degree } => Geometry::ControlSpline {
-            control: control.iter().map(r).collect(),
-            degree: *degree,
-        },
-        Geometry::InterpolatedSpline { through, params } => Geometry::InterpolatedSpline {
-            through: through.iter().map(r).collect(),
-            params: params.clone(),
-        },
-    };
     Entity {
-        id: r(&e.id),
-        geometry,
+        id: e.id.resolved(op),
+        geometry: e.geometry.map_keys(|id| id.resolved(op)),
         construction: e.construction,
     }
 }
 
 fn resolve_constraint(c: &ConstraintEntry<SketchId>, op: OpId) -> ConstraintEntry<SketchId> {
-    use Constraint as C;
-    let r = |id: &SketchId| id.resolved(op);
-    let constraint = match &c.constraint {
-        C::Coincident { a, b } => C::Coincident { a: r(a), b: r(b) },
-        C::PointOnCurve { point, curve } => C::PointOnCurve {
-            point: r(point),
-            curve: r(curve),
-        },
-        C::Horizontal { line } => C::Horizontal { line: r(line) },
-        C::Vertical { line } => C::Vertical { line: r(line) },
-        C::HorizontalPoints { a, b } => C::HorizontalPoints { a: r(a), b: r(b) },
-        C::VerticalPoints { a, b } => C::VerticalPoints { a: r(a), b: r(b) },
-        C::Parallel { a, b } => C::Parallel { a: r(a), b: r(b) },
-        C::Perpendicular { a, b } => C::Perpendicular { a: r(a), b: r(b) },
-        C::Equal { a, b } => C::Equal { a: r(a), b: r(b) },
-        C::Midpoint { point, line } => C::Midpoint {
-            point: r(point),
-            line: r(line),
-        },
-        C::Concentric { a, b } => C::Concentric { a: r(a), b: r(b) },
-        C::Symmetric { a, b, axis } => C::Symmetric {
-            a: r(a),
-            b: r(b),
-            axis: r(axis),
-        },
-        C::Tangent { a, b, kind } => C::Tangent {
-            a: r(a),
-            b: r(b),
-            kind: match kind {
-                TangentKind::AtPoint { point } => TangentKind::AtPoint { point: r(point) },
-                TangentKind::LineCircle { center_left } => TangentKind::LineCircle {
-                    center_left: *center_left,
-                },
-                TangentKind::CircleCircle { internal } => TangentKind::CircleCircle {
-                    internal: *internal,
-                },
-            },
-        },
-        C::Normal { line, curve } => C::Normal {
-            line: r(line),
-            curve: r(curve),
-        },
-        C::Fix { point, at } => C::Fix {
-            point: r(point),
-            at: *at,
-        },
-        C::Distance { a, b, kind, value } => C::Distance {
-            a: r(a),
-            b: r(b),
-            kind: *kind,
-            value: *value,
-        },
-        C::Length { line, value } => C::Length {
-            line: r(line),
-            value: *value,
-        },
-        C::Angle { a, b, value } => C::Angle {
-            a: r(a),
-            b: r(b),
-            value: *value,
-        },
-        C::Radius { curve, value } => C::Radius {
-            curve: r(curve),
-            value: *value,
-        },
-        C::Diameter { curve, value } => C::Diameter {
-            curve: r(curve),
-            value: *value,
-        },
-    };
     ConstraintEntry {
-        id: r(&c.id),
-        constraint,
+        id: c.id.resolved(op),
+        constraint: c.constraint.map_keys(|id| id.resolved(op)),
     }
 }
 

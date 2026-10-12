@@ -6,13 +6,15 @@
 
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 use openshape_core_model::{DVec2, SketchId};
-use openshape_features::EntityState;
+use openshape_features::{kernel_curve, EntityState};
 use openshape_sketch_solver::SolveStatus;
 use openshape_ui_kit::Theme;
 
 use crate::sketch_mode::{
-    annotations, Annotation, Pick, ScreenMap, SketchDisplay, SketchEditor, SnapTarget,
+    annotations, sample_curve, Annotation, CurveEdit, Pick, ScreenMap, SketchDisplay, SketchEditor,
+    SnapTarget, Tool,
 };
+use crate::sketch_ops::trim::Preview;
 
 const LABEL_FONT: f32 = 13.0;
 
@@ -69,7 +71,10 @@ pub fn paint_editor(
 ) {
     let k = &theme.sketch;
     let selected = |id: SketchId| editor.selection.contains(&id);
-    let hovered = |id: SketchId| editor.hover.map(Pick::id) == Some(id);
+    let hovered = |id: SketchId| {
+        editor.hover.map(Pick::id) == Some(id)
+            || editor.curve_edit.as_ref().map(|e| e.target) == Some(id)
+    };
     let color = |id: SketchId| {
         if selected(id) {
             theme.selection
@@ -131,6 +136,26 @@ pub fn paint_editor(
     }
     for a in annotations(d, map) {
         paint_annotation(painter, &a, d, editor, theme);
+    }
+    // What trim, extend or split would do.
+    if let Some(CurveEdit { plan: Ok(plan), .. }) = &editor.curve_edit {
+        match &plan.preview {
+            Preview::Piece(c) => {
+                let pts = sample_curve(&kernel_curve(c));
+                let (color, dashed) = match editor.tool {
+                    Tool::Trim => (theme.danger, false),
+                    _ => (theme.preselect, true),
+                };
+                stroke_polyline(painter, map, &pts, Stroke::new(HALO, k.halo), false);
+                stroke_polyline(painter, map, &pts, Stroke::new(2.5, color), dashed);
+            }
+            Preview::Point(q) => {
+                if let Some(p) = map.to_screen(*q) {
+                    painter.circle_filled(p, HALO, k.halo);
+                    painter.circle_stroke(p, 5.0, Stroke::new(2.0, theme.selection));
+                }
+            }
+        }
     }
     // The tool in progress.
     let band = Stroke::new(1.5, k.free);

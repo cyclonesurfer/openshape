@@ -270,6 +270,9 @@ impl Command {
                 Tool::Polygon => Icon::Polygon,
                 Tool::Point => Icon::Point,
                 Tool::Spline => Icon::Spline,
+                Tool::Trim => Icon::Trim,
+                Tool::Extend => Icon::Extend,
+                Tool::Split => Icon::Split,
             },
             Command::Construction => Icon::Construction,
             Command::Constrain(c) => match c {

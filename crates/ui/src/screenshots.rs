@@ -342,5 +342,24 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     d.key(Key::K, Modifiers::COMMAND)?;
     d.type_text("ex")?;
     save("07-command-palette.png", &d.settle()?)?;
+    d.key(Key::Escape, Modifiers::NONE)?;
+
+    // Trimming: a line across the plate, and the piece under the pointer
+    // that a click would remove.
+    d.app.enter_sketch(sketch);
+    d.settle()?;
+    let on_plane = |d: &AppDriver, x: f64, y: f64| {
+        ScreenMap::new(&d.app.camera, Frame::top(), d.app.layout().graphics)
+            .to_screen(DVec2::new(x, y) * 1e-3)
+            .ok_or("the sketch plane is off screen")
+    };
+    d.app.run(crate::commands::Command::Tool(Tool::Line));
+    d.click(on_plane(&d, -60.0, 0.0)?)?;
+    d.click(on_plane(&d, 60.0, 0.0)?)?;
+    d.key(Key::Escape, Modifiers::NONE)?;
+    d.app.run(crate::commands::Command::Tool(Tool::Trim));
+    d.hover(on_plane(&d, 26.0, 0.0)?)?;
+    save("08-trim-preview.png", &d.settle()?)?;
+    d.app.run(crate::commands::Command::CancelSketch);
     Ok(written)
 }

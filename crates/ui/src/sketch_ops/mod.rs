@@ -4,6 +4,9 @@
 //! compute the exact geometry and the constraints that keep it.
 
 pub mod shapes;
+pub mod trim;
+
+use std::collections::BTreeSet;
 
 use glam::DVec2;
 use openshape_core_model::sketch::{Constraint, ConstraintEntry, Entity, Geometry, TangentKind};
@@ -146,6 +149,30 @@ pub struct Arc {
     pub start: SketchId,
     /// Its end point.
     pub end: SketchId,
+}
+
+/// The items to delete for deleting `selected`: the selection plus the
+/// points that only selected curves use (the delete edit removes
+/// constraints on any of them).
+pub fn deletion(sketch: &SketchData, selected: &BTreeSet<SketchId>) -> Vec<SketchId> {
+    let kept_points: BTreeSet<SketchId> = sketch
+        .entities
+        .iter()
+        .filter(|e| !selected.contains(&e.id))
+        .flat_map(|e| e.geometry.referenced_points())
+        .collect();
+    let mut items = selected.clone();
+    for e in &sketch.entities {
+        if selected.contains(&e.id) {
+            items.extend(
+                e.geometry
+                    .referenced_points()
+                    .into_iter()
+                    .filter(|p| !kept_points.contains(p)),
+            );
+        }
+    }
+    items.into_iter().collect()
 }
 
 /// The left normal of `v` (turned a quarter counter-clockwise).

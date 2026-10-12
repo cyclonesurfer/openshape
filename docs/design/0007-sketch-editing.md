@@ -182,6 +182,46 @@ Clicking a line or arc splits it at the pointer's closest point into C and
 D as in the middle-piece trim, with D's start coincident with C's new end.
 Circles cannot be split at one point.
 
+### 7.4a As built (trim, extend, split)
+
+Implementing and fuzzing §7.1–7.4 changed four details; the reasons are
+the solver's rank test, which reports a constraint as redundant when its
+equation is implied to first order.
+
+* **Attaching a cut end** uses a point-on-curve constraint, never a
+  coincidence with a point of the cutter. At a T junction the cutter's
+  end usually already lies on the cut curve; a coincidence would say that
+  twice.
+* **Touching is not crossing.** A cut end is attached only to a curve that
+  crosses the cut curve there at more than about 0.6° (sine 0.01), and is
+  not constrained tangent to it. Where curves touch (a tangency, a curve
+  running along the same line or circle), point-on-curve has a double
+  root: redundant when the tangency is constrained, even indirectly, and
+  ill-conditioned when it is not. Such a cut still cuts; its end is left
+  free along its own curve.
+* **Arcs share the centre point.** The new arc of a middle trim or a split
+  uses the cut arc's centre point entity rather than a concentric
+  constraint: a middle trim adds equal radii, a split adds nothing (its
+  joint is a coincidence of two points on the one circle).
+* **Joints survive a moved end.** When an end that other curves met at
+  moves, its coincidences are removed but the remaining points stay
+  coincident with one another (links are added only where the other
+  coincidences do not already join them), and a tangency of two other
+  curves at that joint moves to a remaining point. A tangency of the cut
+  curve at that end goes with the end.
+
+Every plan is committed through a checked edit: if the sketch solved
+before and would fail or gain a redundant constraint after, the edit is
+refused with the reason. A property test applies random trims, extends
+and splits to random lines, arcs and circles and to constrained shapes
+(rectangles, slots, polygons, joined chains): every plan commits, the
+sketch stays solved without redundancy, no point the plan did not move
+moves, and no curve shrinks below 1 µm. Region detection can still refuse
+a sliver thinner than the tolerance that an edit creates (for example a
+line extended past the tangent joint of a large arc next to another edge);
+that is the arrangement's documented refusal (design note 0006), not a
+wrong region.
+
 ### 7.5 Splines
 
 Neither spline type of the sketch (uniform clamped control-point splines,

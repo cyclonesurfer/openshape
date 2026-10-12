@@ -15,7 +15,7 @@ use crate::app::{Action, FileAction, OpenShapeApp, Selection};
 use crate::commands::Command;
 use crate::dialogs::FieldKind;
 use crate::profile_pick::SweepKind;
-use crate::sketch_mode::Tool;
+use crate::sketch_mode::{CurveEdit, Tool};
 use crate::sketch_ops::shapes::{MAX_SIDES, MIN_SIDES};
 use crate::sketch_paint;
 use crate::Model;
@@ -349,7 +349,11 @@ impl OpenShapeApp {
         let status_color = display
             .as_ref()
             .map_or(theme.text_muted, |d| sketch_paint::status_color(d, &theme));
-        let hint = ed.tool.hint(ed.clicks.len());
+        // Why the trim, extend or split under the pointer cannot be done.
+        let hint = match &ed.curve_edit {
+            Some(CurveEdit { plan: Err(why), .. }) => why.clone(),
+            _ => ed.tool.hint(ed.clicks.len()).to_string(),
+        };
         let message = ed.message.clone();
         let tool = ed.tool;
         let mut sides = ed.polygon_sides;

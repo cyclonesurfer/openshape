@@ -420,6 +420,38 @@ impl Model {
         }
     }
 
+    /// Like [`Model::edit_sketch`], for edits that must never break a
+    /// sketch (trim, extend, split and the other editing tools): a batch
+    /// after which a sketch that solves no longer does, or has more
+    /// redundant constraints than before, is refused with the reason and
+    /// nothing is applied.
+    pub fn edit_sketch_checked(
+        &mut self,
+        feature: FeatureId,
+        edits: Vec<SketchEdit>,
+    ) -> Result<OpId, String> {
+        let def = self
+            .sketch_def(feature)
+            .ok_or("the sketch no longer exists")?;
+        let options = SolveOptions::default();
+        let before = match self.sketch_result(feature) {
+            Some(r) => r.solution.clone(),
+            None => solve(&def.sketch, &options),
+        };
+        let mut trial = def.clone();
+        trial.apply_edits(OpId::NULL, &edits)?;
+        let after = solve(&trial.sketch, &options);
+        if !matches!(before.status, SolveStatus::Failed(_)) {
+            if let SolveStatus::Failed(e) = &after.status {
+                return Err(format!("the sketch would no longer solve ({e})"));
+            }
+            if after.redundant.len() > before.redundant.len() {
+                return Err("the sketch would have redundant constraints".into());
+            }
+        }
+        self.edit_sketch(feature, edits)
+    }
+
     /// A fresh name like "Extrude 3" for a new feature of this type.
     pub fn next_name(&self, type_name: &str) -> String {
         let n = self

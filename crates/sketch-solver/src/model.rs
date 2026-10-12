@@ -88,6 +88,34 @@ impl<K: SketchKey> Geometry<K> {
     pub fn is_curve(&self) -> bool {
         !matches!(self, Geometry::Point { .. })
     }
+
+    /// The same geometry with every referenced key passed through `f`.
+    pub fn map_keys<L>(&self, f: impl Fn(K) -> L) -> Geometry<L> {
+        match self {
+            Geometry::Point { at } => Geometry::Point { at: *at },
+            Geometry::Line { start, end } => Geometry::Line {
+                start: f(*start),
+                end: f(*end),
+            },
+            Geometry::Circle { center, radius } => Geometry::Circle {
+                center: f(*center),
+                radius: *radius,
+            },
+            Geometry::Arc { center, start, end } => Geometry::Arc {
+                center: f(*center),
+                start: f(*start),
+                end: f(*end),
+            },
+            Geometry::ControlSpline { control, degree } => Geometry::ControlSpline {
+                control: control.iter().map(|k| f(*k)).collect(),
+                degree: *degree,
+            },
+            Geometry::InterpolatedSpline { through, params } => Geometry::InterpolatedSpline {
+                through: through.iter().map(|k| f(*k)).collect(),
+                params: params.clone(),
+            },
+        }
+    }
 }
 
 /// A sketch entity.
@@ -321,6 +349,80 @@ impl<K: SketchKey> Constraint<K> {
         }
     }
 
+    /// The same constraint with every referenced key passed through `f`
+    /// (values and flags are kept).
+    pub fn map_keys<L>(&self, f: impl Fn(K) -> L) -> Constraint<L> {
+        use Constraint as C;
+        match self {
+            C::Coincident { a, b } => C::Coincident { a: f(*a), b: f(*b) },
+            C::PointOnCurve { point, curve } => C::PointOnCurve {
+                point: f(*point),
+                curve: f(*curve),
+            },
+            C::Horizontal { line } => C::Horizontal { line: f(*line) },
+            C::Vertical { line } => C::Vertical { line: f(*line) },
+            C::HorizontalPoints { a, b } => C::HorizontalPoints { a: f(*a), b: f(*b) },
+            C::VerticalPoints { a, b } => C::VerticalPoints { a: f(*a), b: f(*b) },
+            C::Parallel { a, b } => C::Parallel { a: f(*a), b: f(*b) },
+            C::Perpendicular { a, b } => C::Perpendicular { a: f(*a), b: f(*b) },
+            C::Equal { a, b } => C::Equal { a: f(*a), b: f(*b) },
+            C::Midpoint { point, line } => C::Midpoint {
+                point: f(*point),
+                line: f(*line),
+            },
+            C::Concentric { a, b } => C::Concentric { a: f(*a), b: f(*b) },
+            C::Symmetric { a, b, axis } => C::Symmetric {
+                a: f(*a),
+                b: f(*b),
+                axis: f(*axis),
+            },
+            C::Tangent { a, b, kind } => C::Tangent {
+                a: f(*a),
+                b: f(*b),
+                kind: match kind {
+                    TangentKind::AtPoint { point } => TangentKind::AtPoint { point: f(*point) },
+                    TangentKind::LineCircle { center_left } => TangentKind::LineCircle {
+                        center_left: *center_left,
+                    },
+                    TangentKind::CircleCircle { internal } => TangentKind::CircleCircle {
+                        internal: *internal,
+                    },
+                },
+            },
+            C::Normal { line, curve } => C::Normal {
+                line: f(*line),
+                curve: f(*curve),
+            },
+            C::Fix { point, at } => C::Fix {
+                point: f(*point),
+                at: *at,
+            },
+            C::Distance { a, b, kind, value } => C::Distance {
+                a: f(*a),
+                b: f(*b),
+                kind: *kind,
+                value: *value,
+            },
+            C::Length { line, value } => C::Length {
+                line: f(*line),
+                value: *value,
+            },
+            C::Angle { a, b, value } => C::Angle {
+                a: f(*a),
+                b: f(*b),
+                value: *value,
+            },
+            C::Radius { curve, value } => C::Radius {
+                curve: f(*curve),
+                value: *value,
+            },
+            C::Diameter { curve, value } => C::Diameter {
+                curve: f(*curve),
+                value: *value,
+            },
+        }
+    }
+
     /// Every entity key this constraint references, in a fixed order.
     pub fn referenced(&self) -> Vec<K> {
         match self {
@@ -396,5 +498,110 @@ impl<K: SketchKey> Sketch<K> {
     /// The constraint with key `id`.
     pub fn constraint(&self, id: K) -> Option<&ConstraintEntry<K>> {
         self.constraints.iter().find(|c| c.id == id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_keys_maps_exactly_the_referenced_keys() {
+        let all: Vec<Constraint<u32>> = vec![
+            Constraint::Coincident { a: 1, b: 2 },
+            Constraint::PointOnCurve { point: 1, curve: 2 },
+            Constraint::Horizontal { line: 1 },
+            Constraint::Vertical { line: 1 },
+            Constraint::HorizontalPoints { a: 1, b: 2 },
+            Constraint::VerticalPoints { a: 1, b: 2 },
+            Constraint::Parallel { a: 1, b: 2 },
+            Constraint::Perpendicular { a: 1, b: 2 },
+            Constraint::Equal { a: 1, b: 2 },
+            Constraint::Midpoint { point: 1, line: 2 },
+            Constraint::Concentric { a: 1, b: 2 },
+            Constraint::Symmetric {
+                a: 1,
+                b: 2,
+                axis: 3,
+            },
+            Constraint::Tangent {
+                a: 1,
+                b: 2,
+                kind: TangentKind::AtPoint { point: 3 },
+            },
+            Constraint::Tangent {
+                a: 1,
+                b: 2,
+                kind: TangentKind::LineCircle { center_left: true },
+            },
+            Constraint::Tangent {
+                a: 1,
+                b: 2,
+                kind: TangentKind::CircleCircle { internal: true },
+            },
+            Constraint::Normal { line: 1, curve: 2 },
+            Constraint::Fix {
+                point: 1,
+                at: DVec2::new(1.0, 2.0),
+            },
+            Constraint::Distance {
+                a: 1,
+                b: 2,
+                kind: DistanceKind::Vertical,
+                value: 0.5,
+            },
+            Constraint::Length {
+                line: 1,
+                value: 0.5,
+            },
+            Constraint::Angle {
+                a: 1,
+                b: 2,
+                value: 0.5,
+            },
+            Constraint::Radius {
+                curve: 1,
+                value: 0.5,
+            },
+            Constraint::Diameter {
+                curve: 1,
+                value: 0.5,
+            },
+        ];
+        for c in &all {
+            let m = c.map_keys(|k| k + 10);
+            let expected: Vec<u32> = c.referenced().iter().map(|k| k + 10).collect();
+            assert_eq!(m.referenced(), expected, "{c:?}");
+            assert_eq!(m.value(), c.value(), "{c:?}");
+            // Mapping back gives the original, flags and values included.
+            assert_eq!(m.map_keys(|k| k - 10), *c);
+        }
+        let geometry: Vec<Geometry<u32>> = vec![
+            Geometry::Point { at: DVec2::X },
+            Geometry::Line { start: 1, end: 2 },
+            Geometry::Circle {
+                center: 1,
+                radius: 0.5,
+            },
+            Geometry::Arc {
+                center: 1,
+                start: 2,
+                end: 3,
+            },
+            Geometry::ControlSpline {
+                control: vec![1, 2, 3],
+                degree: 2,
+            },
+            Geometry::InterpolatedSpline {
+                through: vec![1, 2],
+                params: vec![0.0, 1.0],
+            },
+        ];
+        for g in &geometry {
+            let m = g.map_keys(|k| k + 10);
+            let expected: Vec<u32> = g.referenced_points().iter().map(|k| k + 10).collect();
+            assert_eq!(m.referenced_points(), expected);
+            assert_eq!(m.map_keys(|k| k - 10), *g);
+        }
     }
 }

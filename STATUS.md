@@ -102,11 +102,22 @@ application shell done; sketch editing tools next.
   parallel (to the line it continues or one the pointer passed); dragging with
   live solving; box selection and delete; colour-coded state (free, fully
   constrained, redundant, conflicting) with constraint glyphs and dimension
-  labels placed outside the sketch. Every edit is one undoable op; Cancel
+  labels placed outside the sketch. Trim (a piece between crossings; an
+  uncrossed curve is deleted; a circle cut twice becomes an arc), extend (a
+  line along its ray, an arc around its circle, to the next curve) and split
+  (design note 0007 §7): cut ends are put on the crossing curve, the far end
+  of a trimmed middle piece moves to a new curve with every constraint it
+  had (tangencies included), curves that met at a moved end stay joined,
+  and only constraints that no longer mean anything (a moved end's, a
+  segment's length) are removed and counted; each edit is refused rather
+  than committed if the sketch would stop solving or gain a redundant
+  constraint. Fuzzed on random lines, arcs, circles, rectangles, slots,
+  polygons and joined chains (12,000 sketches, about 15,000 edits, every
+  one solved with nothing unplanned moving). Every edit is one undoable op; Cancel
   undoes the whole sketch session. The editor is UI-toolkit independent and
   tested end to end by driving it with screen clicks.
 - **UI kit** (`openshape-ui-kit`): the application's look in one place
-  (ADR 0012): theme tokens with pinned contrast ratios, 60 original icons
+  (ADR 0012): theme tokens with pinned contrast ratios, 73 original icons
   drawn in code, a view cube, the command palette and search field, and an
   offscreen egui renderer used for screenshots and UI tests.
 - **I/O** (`openshape-io`): STL export, ASCII and binary.
@@ -179,9 +190,11 @@ application shell done; sketch editing tools next.
 
 ## Not yet / known limits
 
-- Sketch editing tools are not done: trim, extend, split, offset, sketch
-  fillet, mirror, patterns (in progress, design note 0007), and ellipses,
-  conics, text, use/project.
+- Sketch editing tools are not done: offset, sketch fillet, mirror,
+  patterns (in progress, design note 0007), and ellipses, conics, text,
+  use/project. Trim cuts one piece per click (no drag across several
+  curves yet), and splines can be trimmed only whole: their pieces are not
+  exact splines of the sketch's two kinds (§7.5).
 - Shell gaps: features reorder with Move up/down but not by dragging rows;
   dimension labels are placed automatically (outside the sketch) and cannot
   be dragged; feature dialogs do not preview the result live, and there is
@@ -215,9 +228,8 @@ application shell done; sketch editing tools next.
 
 ## Next steps
 
-1. Sketch editing tools (design note 0007): trim, extend, split, sketch
-   fillet, mirror, offset, linear and circular patterns; draggable
-   dimension labels.
+1. Sketch editing tools (design note 0007): sketch fillet, mirror, offset,
+   linear and circular patterns; draggable dimension labels.
 2. Live preview in feature dialogs.
 3. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.
