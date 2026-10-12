@@ -71,11 +71,16 @@ runs start immediately. The app runs natively on Wayland or X11 and uses
 Vulkan by default. `OPENSHAPE_WGPU_BACKEND=gl` forces OpenGL if Vulkan
 misbehaves; `RUST_LOG=openshape_render=info` prints the adapter in use.
 
-Controls: the Insert menu adds features (box, cylinder, plate with hole,
-ring, spline vase). Left-drag orbits, right- or middle-drag pans, the scroll
-wheel zooms, F fits the view. Ctrl+Z undoes, Ctrl+Shift+Z or Ctrl+Y redoes.
-Right-click a feature in the tree to edit, rename, suppress, reorder or
-delete it. The File menu saves and opens `.osdoc` documents and exports STL.
+Controls: the toolbar adds sketches (S), extrudes (E), revolves (V), a box
+and templates (cylinder, plate with hole, ring, spline vase); Ctrl+K opens
+the command search. Right-drag orbits (left-drag too, outside sketch mode),
+middle-drag or Ctrl+right-drag pans, the scroll wheel zooms, F fits the
+view, and the view cube turns it. Ctrl+Z undoes, Ctrl+Shift+Z or Ctrl+Y
+redoes. Right-click a feature in the list to edit, rename, suppress, move or
+delete it; drag the rollback bar to roll the history back. The menu at the
+top left saves and opens `.osdoc` documents and exports STL.
+`cargo run -p openshape -- --screenshots out/` writes screenshots of the
+whole app rendered offscreen.
 
 The windowed app has so far been tested only offscreen in CI; please report
 anything that looks wrong on real hardware.

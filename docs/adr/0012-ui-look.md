@@ -51,6 +51,14 @@ Layout:
 * **Element tabs** along the bottom, with a button to add an element (only
   element kinds that are implemented are offered).
 * **Context menus** on features, parts, tabs and the graphics area.
+* **Mouse and keys** follow the field's common convention, the same in a
+  Part Studio and in sketch mode: right-drag orbits, middle-drag (or
+  Ctrl+right-drag) pans, the wheel zooms, a click selects, a double-click
+  edits, a right-click without dragging opens the context menu. In sketch
+  mode left-drag moves geometry or box-selects; in a Part Studio left-drag
+  also orbits until parts can be box-selected. Enter accepts a dialog,
+  Escape cancels it; every command's shortcut is in its tooltip and in the
+  command search.
 * Light, compact, crisp: thin borders, small radii, one blue accent for
   selection and primary actions, a lighter blue for preselection.
 
@@ -65,6 +73,26 @@ Visual language:
   (`crates/ui-kit/src/theme.rs`, `Theme::light()`); every part of the UI,
   including sketch and selection colours, takes its colours from the theme,
   so OpenShape can be re-themed (a dark theme later) by adding a `Theme`.
+* **Palette: the feel, not the values.** The project owner asked for the
+  colours to feel like the browser-based CAD tools users know (2026-10-11).
+  That feel is a functional convention of the field: light neutral
+  surfaces, dark text, thin grey borders, one blue accent for selection and
+  primary actions, a lighter blue for preselection. OpenShape follows it
+  with values chosen here, from that description and these criteria, never
+  by sampling, eyedropping or copying another product's colours, screenshots
+  or style sheets:
+  * neutrals are cool greys stepped for hierarchy (chrome `#EEF0F3` behind
+    white panels, headers `#F6F7F9`, borders `#D5D9DF`/`#AEB4BD`);
+  * the accent `#2B6CD4` is a mid blue dark enough for white text on it and
+    for blue text on white (both 5.0:1, WCAG 2.x AA), with a hover shade,
+    a soft tint for selected rows and a lighter preselection blue;
+  * body text is 15.8:1 on panels, secondary text 6.0:1, status colours
+    for error text at least 4.5:1 and for icons at least 3:1;
+  * sketch colours keep the field's meaning (constrained geometry near
+    black, free geometry blue, conflicts red) and selection is shown with
+    a halo so it stays distinct from free geometry.
+  `crates/ui-kit/tests/theme.rs` pins these contrast ratios, so a later
+  change to the palette has to keep them.
 * **Name and logo** are OpenShape's. No other product's name appears in the
   product; `crates/ui/tests/cleanroom.rs` enforces it.
 

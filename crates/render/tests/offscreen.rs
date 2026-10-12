@@ -678,3 +678,46 @@ fn edge_width_is_respected() {
     r.scene_mut().set_edge_width(100.0);
     assert_eq!(r.scene().edge_width(), 16.0);
 }
+
+/// A mesh's own edge colour overrides the scene's, and only for that mesh.
+#[test]
+fn per_mesh_edge_colour() {
+    let mut r = renderer();
+    let camera = Camera::front().fitted([-1.6, -0.5, -0.5], [1.6, 0.5, 0.5]);
+    let left = MeshData {
+        edge_color: Some([0.9, 0.1, 0.1, 1.0]),
+        ..unit_cube().transformed(&Mat4::from_translation(glam::Vec3::new(-1.0, 0.0, 0.0)))
+    };
+    let right = unit_cube().transformed(&Mat4::from_translation(glam::Vec3::new(1.0, 0.0, 0.0)));
+    r.set_meshes(&[left, right]).unwrap();
+    r.scene_mut().set_display_mode(DisplayMode::Wireframe);
+    r.scene_mut().set_edge_color([0.1, 0.1, 0.9, 1.0]);
+    let img = r.render_rgba(&camera, W, H).unwrap();
+    maybe_dump("per_mesh_edge_colour", &img);
+    let (mut red, mut blue) = (Vec::new(), Vec::new());
+    for y in 0..H {
+        for x in 0..W {
+            let [pr, pg, pb, _] = img.pixel(x, y);
+            let (pr, pg, pb) = (i32::from(pr), i32::from(pg), i32::from(pb));
+            if pr > pg + 100 && pr > pb + 100 {
+                red.push(x);
+            }
+            if pb > pg + 60 && pb > pr + 60 {
+                blue.push(x);
+            }
+        }
+    }
+    assert!(
+        red.len() > 100 && blue.len() > 100,
+        "{} red, {} blue",
+        red.len(),
+        blue.len()
+    );
+    // Seen from the front the cubes are apart: every red pixel is left of
+    // every blue one.
+    let (red_max, blue_min) = (red.iter().max().unwrap(), blue.iter().min().unwrap());
+    assert!(
+        red_max < blue_min,
+        "red up to x={red_max}, blue from x={blue_min}"
+    );
+}

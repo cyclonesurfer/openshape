@@ -14,6 +14,49 @@ const fn hex(rgb: u32) -> Color32 {
     Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
+/// Colours of sketch geometry, annotations and other graphics-area overlays.
+/// Selection and preselection use [`Theme::selection`] and
+/// [`Theme::preselect`], drawn with a [`SketchColors::halo`] under them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SketchColors {
+    /// Fully constrained geometry.
+    pub constrained: Color32,
+    /// Geometry that can still move (under-constrained).
+    pub free: Color32,
+    /// Geometry and constraints in conflict.
+    pub conflict: Color32,
+    /// Redundant constraints.
+    pub redundant: Color32,
+    /// Sketches that are not being edited.
+    pub inactive: Color32,
+    /// Dimension text and lines.
+    pub dimension: Color32,
+    /// Constraint glyphs.
+    pub glyph: Color32,
+    /// Background of dimension and glyph labels.
+    pub label_fill: Color32,
+    /// Translucent band drawn under selected or preselected geometry.
+    pub halo: Color32,
+    /// Fill of picked profile regions.
+    pub region: Color32,
+    /// Fill of the region under the pointer while picking.
+    pub region_hover: Color32,
+    /// The sketch plane's x axis.
+    pub axis_x: Color32,
+    /// The sketch plane's y axis.
+    pub axis_y: Color32,
+    /// Fill of the default planes in the 3D view.
+    pub plane: Color32,
+    /// Outline of the default planes.
+    pub plane_edge: Color32,
+    /// Fill of a selected or hovered default plane.
+    pub plane_active: Color32,
+    /// Outline of a selected or hovered default plane.
+    pub plane_active_edge: Color32,
+    /// Plane labels.
+    pub plane_label: Color32,
+}
+
 /// The app's visual tokens. [`Theme::light`] (also [`Default`]) is the only
 /// palette today.
 #[derive(Clone, Debug, PartialEq)]
@@ -58,6 +101,8 @@ pub struct Theme {
     pub viewport_top: Color32,
     /// Bottom colour of the graphics-area background gradient.
     pub viewport_bottom: Color32,
+    /// Sketch and 3D-view colours.
+    pub sketch: SketchColors,
 
     /// Corner radius of widgets, windows and menus, in points.
     pub rounding: f32,
@@ -111,6 +156,26 @@ impl Theme {
             danger: hex(0xCC3D33),
             viewport_top: hex(0xFFFFFF),
             viewport_bottom: hex(0xD9E0E8),
+            sketch: SketchColors {
+                constrained: hex(0x1E2329),
+                free: hex(0x2F62C4),
+                conflict: hex(0xCC3D33),
+                redundant: hex(0xC98112),
+                inactive: hex(0x55627A),
+                dimension: hex(0x24407E),
+                glyph: hex(0x4A525E),
+                label_fill: Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 0xE0),
+                halo: Color32::from_rgba_unmultiplied(0x2B, 0x6C, 0xD4, 0x40),
+                region: Color32::from_rgba_unmultiplied(0x2B, 0x6C, 0xD4, 0x55),
+                region_hover: Color32::from_rgba_unmultiplied(0x2B, 0x6C, 0xD4, 0x28),
+                axis_x: hex(0xC8423A),
+                axis_y: hex(0x2E9A57),
+                plane: Color32::from_rgba_unmultiplied(0x7E, 0x9C, 0xC8, 0x18),
+                plane_edge: Color32::from_rgba_unmultiplied(0x6A, 0x86, 0xB4, 0x90),
+                plane_active: Color32::from_rgba_unmultiplied(0x2B, 0x6C, 0xD4, 0x30),
+                plane_active_edge: hex(0x2B6CD4),
+                plane_label: hex(0x5B6470),
+            },
 
             rounding: 3.0,
             item_spacing: Vec2::new(6.0, 4.0),

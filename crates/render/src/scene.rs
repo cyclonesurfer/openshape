@@ -77,10 +77,31 @@ struct GpuVertex {
 
 const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4];
-/// Per-instance attributes of an edge segment: its two end points, read
-/// from the packed line-list buffer (two vertices per segment).
-const EDGE_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+/// Per-instance attributes of an edge segment ([`EdgeInstance`]): its two
+/// end points and its colour.
+const EDGE_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
+
+/// One edge segment as the edge pipeline reads it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct EdgeInstance {
+    a: [f32; 3],
+    b: [f32; 3],
+    /// Linear RGB and alpha; a negative alpha means the scene's edge colour.
+    color: [f32; 4],
+}
+
+/// [`EdgeInstance::color`] for a mesh's [`MeshData::edge_color`].
+fn edge_instance_color(color: Option<[f32; 4]>) -> [f32; 4] {
+    match color {
+        Some([r, g, b, a]) => {
+            let [r, g, b] = srgb_to_linear3([r, g, b]);
+            [r, g, b, a.clamp(0.0, 1.0)]
+        }
+        None => [0.0, 0.0, 0.0, -1.0],
+    }
+}
 
 /// Uniform block; layout must match `Globals` in `shader.wgsl`.
 #[repr(C)]
@@ -118,7 +139,7 @@ struct MeshBatch {
 
 struct EdgeBatch {
     vertices: wgpu::Buffer,
-    vertex_count: u32,
+    segments: u32,
 }
 
 struct Attachments {
@@ -353,7 +374,11 @@ impl SceneRenderer {
                 batcher.push(device, &mesh);
             }
             stats.edge_segments += mesh.edge_segment_count();
-            edges.push(device, &mesh.edge_lines);
+            edges.push(
+                device,
+                &mesh.edge_lines,
+                edge_instance_color(mesh.edge_color),
+            );
         }
 
         self.opaque = opaque.finish(device);
@@ -461,7 +486,7 @@ impl SceneRenderer {
             for batch in &self.edges {
                 // One instance per segment, six vertices (two triangles) each.
                 pass.set_vertex_buffer(0, batch.vertices.slice(..));
-                pass.draw(0..6, 0..batch.vertex_count / 2);
+                pass.draw(0..6, 0..batch.segments);
             }
         }
         if draw_surfaces && !self.transparent.is_empty() {
@@ -701,47 +726,51 @@ impl MeshBatcher {
     }
 }
 
-/// Accumulates edge line vertices into vertex buffers of bounded size.
+/// Accumulates edge segments into instance buffers of bounded size.
 struct EdgeBatcher {
-    max_vertices: usize,
-    vertices: Vec<[f32; 3]>,
+    max_segments: usize,
+    segments: Vec<EdgeInstance>,
     done: Vec<EdgeBatch>,
 }
 
 impl EdgeBatcher {
     fn new(max_bytes: u64) -> Self {
-        // Keep an even count so segments never straddle two batches.
-        let max_vertices = ((max_bytes / 12) as usize) & !1;
+        let max_segments = (max_bytes as usize / std::mem::size_of::<EdgeInstance>()).max(1);
         EdgeBatcher {
-            max_vertices,
-            vertices: Vec::new(),
+            max_segments,
+            segments: Vec::new(),
             done: Vec::new(),
         }
     }
 
-    fn push(&mut self, device: &wgpu::Device, lines: &[[f32; 3]]) {
-        for chunk in lines.chunks(self.max_vertices.max(2)) {
-            if self.vertices.len() + chunk.len() > self.max_vertices {
+    /// Adds the segments of a line list (vertex pairs) in one colour.
+    fn push(&mut self, device: &wgpu::Device, lines: &[[f32; 3]], color: [f32; 4]) {
+        for pair in lines.chunks_exact(2) {
+            if self.segments.len() == self.max_segments {
                 self.flush(device);
             }
-            self.vertices.extend_from_slice(chunk);
+            self.segments.push(EdgeInstance {
+                a: pair[0],
+                b: pair[1],
+                color,
+            });
         }
     }
 
     fn flush(&mut self, device: &wgpu::Device) {
-        if self.vertices.is_empty() {
+        if self.segments.is_empty() {
             return;
         }
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("openshape-render edge vertices"),
-            contents: bytemuck::cast_slice(&self.vertices),
+            label: Some("openshape-render edge segments"),
+            contents: bytemuck::cast_slice(&self.segments),
             usage: wgpu::BufferUsages::VERTEX,
         });
         self.done.push(EdgeBatch {
             vertices,
-            vertex_count: self.vertices.len() as u32,
+            segments: self.segments.len() as u32,
         });
-        self.vertices.clear();
+        self.segments.clear();
     }
 
     fn finish(mut self, device: &wgpu::Device) -> Vec<EdgeBatch> {
@@ -774,7 +803,7 @@ impl PipelineBuilder<'_> {
             attributes: &MESH_ATTRIBUTES,
         };
         let edge_layout = wgpu::VertexBufferLayout {
-            array_stride: 24,
+            array_stride: std::mem::size_of::<EdgeInstance>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &EDGE_ATTRIBUTES,
         };

@@ -20,6 +20,7 @@ cargo test --workspace
 cargo deny check            # licenses, advisories, bans, sources
 cargo run -p openshape      # desktop app (needs a GPU or Mesa)
 cargo run -p openshape -- --headless-demo out/   # offscreen proof, writes PNGs
+cargo run -p openshape -- --screenshots out/     # screenshots of the whole app
 cargo run --release -p openshape -- --bench out/ 600   # offscreen frame times
 scripts/gpu-check.sh        # build, tests, demo, bench on a real GPU (docs/RUNNING.md)
 ```
@@ -45,7 +46,7 @@ container without a GPU, install Mesa's software Vulkan (lavapipe):
 | `crates/render` | `openshape-render` | wgpu viewport renderer + offscreen renderer; no kernel/egui deps |
 | `crates/io` | `openshape-io` | import/export formats (STL today) |
 | `crates/ui-kit` | `openshape-ui-kit` | the look: theme tokens, original icon set, view cube, offscreen egui rendering (ADR 0012) |
-| `crates/ui` | `openshape` (bin) | egui/eframe application shell |
+| `crates/ui` | `openshape` (bin) | egui/eframe application shell (ADR 0012), offscreen screenshots and end-to-end UI tests |
 
 Planned crates (not yet created; see docs/ARCHITECTURE.md): `naming`, `regen`,
 `mate-solver`, `script`, `drawing`, `sim`, `cam`,

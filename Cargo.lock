@@ -2276,6 +2276,7 @@ dependencies = [
  "openshape-render",
  "openshape-sketch-solver",
  "openshape-ui-kit",
+ "proptest",
 ]
 
 [[package]]

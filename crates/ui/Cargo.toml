@@ -23,6 +23,7 @@ openshape-features.workspace = true
 openshape-render.workspace = true
 openshape-io.workspace = true
 openshape-sketch-solver.workspace = true
+openshape-ui-kit.workspace = true
 glam.workspace = true
 eframe = { workspace = true, default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11", "accesskit"] }
 egui.workspace = true
@@ -31,7 +32,7 @@ log.workspace = true
 env_logger.workspace = true
 
 [dev-dependencies]
-openshape-ui-kit.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true

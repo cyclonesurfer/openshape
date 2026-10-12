@@ -1,35 +1,23 @@
 //! Painting sketches, sketch-mode feedback and picked regions over the 3D
-//! view with egui's painter.
+//! view with egui's painter. Every colour comes from the theme
+//! ([`Theme::sketch`], [`Theme::selection`], [`Theme::preselect`]);
+//! selected and preselected geometry is drawn in those colours over a
+//! translucent halo.
 
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 use openshape_core_model::{DVec2, SketchId};
 use openshape_features::EntityState;
 use openshape_sketch_solver::SolveStatus;
+use openshape_ui_kit::Theme;
 
 use crate::sketch_mode::{
     annotations, Annotation, Pick, ScreenMap, SketchDisplay, SketchEditor, SnapTarget,
 };
 
-/// Fully constrained geometry.
-pub const CONSTRAINED: Color32 = Color32::from_rgb(18, 20, 26);
-/// Geometry that can still move.
-pub const FREE: Color32 = Color32::from_rgb(25, 95, 225);
-/// Geometry or constraints in conflict.
-pub const CONFLICT: Color32 = Color32::from_rgb(215, 35, 35);
-/// Redundant constraints.
-pub const REDUNDANT: Color32 = Color32::from_rgb(220, 120, 0);
-/// Selected items.
-pub const SELECTED: Color32 = Color32::from_rgb(255, 135, 0);
-/// The item under the pointer.
-pub const HOVERED: Color32 = Color32::from_rgb(255, 185, 70);
-/// Sketches that are not being edited.
-pub const INACTIVE: Color32 = Color32::from_rgb(45, 65, 120);
-/// Picked profile regions.
-pub const REGION_FILL: Color32 = Color32::from_rgba_premultiplied(30, 80, 170, 90);
-/// The region under the pointer while picking.
-pub const REGION_HOVER: Color32 = Color32::from_rgba_premultiplied(60, 110, 190, 45);
-
 const LABEL_FONT: f32 = 13.0;
+
+/// Width of the halo under selected and preselected curves, in points.
+const HALO: f32 = 7.0;
 
 fn dimmed(c: Color32) -> Color32 {
     c.gamma_multiply(0.55)
@@ -52,12 +40,13 @@ fn stroke_polyline(
 }
 
 /// Draws a sketch that is not being edited.
-pub fn paint_inactive(painter: &Painter, map: &ScreenMap, d: &SketchDisplay) {
+pub fn paint_inactive(painter: &Painter, map: &ScreenMap, d: &SketchDisplay, theme: &Theme) {
+    let inactive = theme.sketch.inactive;
     for c in &d.curves {
         let color = if c.construction {
-            dimmed(INACTIVE)
+            dimmed(inactive)
         } else {
-            INACTIVE
+            inactive
         };
         stroke_polyline(
             painter,
@@ -71,22 +60,38 @@ pub fn paint_inactive(painter: &Painter, map: &ScreenMap, d: &SketchDisplay) {
 
 /// Draws the sketch being edited with its diagnostics, constraint glyphs,
 /// dimensions and the editor's feedback.
-pub fn paint_editor(painter: &Painter, map: &ScreenMap, d: &SketchDisplay, editor: &SketchEditor) {
+pub fn paint_editor(
+    painter: &Painter,
+    map: &ScreenMap,
+    d: &SketchDisplay,
+    editor: &SketchEditor,
+    theme: &Theme,
+) {
+    let k = &theme.sketch;
     let selected = |id: SketchId| editor.selection.contains(&id);
     let hovered = |id: SketchId| editor.hover.map(Pick::id) == Some(id);
     let color = |id: SketchId| {
         if selected(id) {
-            SELECTED
+            theme.selection
         } else if hovered(id) {
-            HOVERED
+            theme.preselect
         } else if d.conflicted.contains(&id) {
-            CONFLICT
+            k.conflict
         } else if d.states.get(&id) == Some(&EntityState::Constrained) {
-            CONSTRAINED
+            k.constrained
         } else {
-            FREE
+            k.free
         }
     };
+    // Halos first, so every curve and point is drawn over them.
+    for c in d.curves.iter().filter(|c| selected(c.id) || hovered(c.id)) {
+        stroke_polyline(painter, map, &c.polyline, Stroke::new(HALO, k.halo), false);
+    }
+    for (_, at) in d.points().filter(|(id, _)| selected(*id) || hovered(*id)) {
+        if let Some(s) = map.to_screen(at) {
+            painter.circle_filled(s, HALO, k.halo);
+        }
+    }
     // Plane origin and axes.
     if let (Some(o), Some(x), Some(y)) = (
         map.to_screen(DVec2::ZERO),
@@ -94,15 +99,9 @@ pub fn paint_editor(painter: &Painter, map: &ScreenMap, d: &SketchDisplay, edito
         map.to_screen(DVec2::Y),
     ) {
         let axis = |to: Pos2| (to - o).normalized() * 28.0;
-        painter.line_segment(
-            [o, o + axis(x)],
-            Stroke::new(1.5, Color32::from_rgb(200, 50, 50)),
-        );
-        painter.line_segment(
-            [o, o + axis(y)],
-            Stroke::new(1.5, Color32::from_rgb(40, 150, 60)),
-        );
-        painter.circle_filled(o, 3.0, CONSTRAINED);
+        painter.line_segment([o, o + axis(x)], Stroke::new(1.5, k.axis_x));
+        painter.line_segment([o, o + axis(y)], Stroke::new(1.5, k.axis_y));
+        painter.circle_filled(o, 3.0, k.constrained);
     }
     for c in &d.curves {
         let col = color(c.id);
@@ -131,21 +130,21 @@ pub fn paint_editor(painter: &Painter, map: &ScreenMap, d: &SketchDisplay, edito
         }
     }
     for a in annotations(d, map) {
-        paint_annotation(painter, &a, d, editor);
+        paint_annotation(painter, &a, d, editor, theme);
     }
     // The tool in progress.
-    let band = Stroke::new(1.5, FREE);
+    let band = Stroke::new(1.5, k.free);
     for pts in editor.rubber_band() {
         stroke_polyline(painter, map, &pts, band, true);
     }
     for s in &editor.clicks {
         if let Some(p) = map.to_screen(s.at) {
-            painter.rect_filled(Rect::from_center_size(p, Vec2::splat(5.0)), 0.0, FREE);
+            painter.rect_filled(Rect::from_center_size(p, Vec2::splat(5.0)), 0.0, k.free);
         }
     }
     if let Some(cursor) = editor.cursor {
         if let Some(p) = map.to_screen(cursor.at) {
-            let ring = Stroke::new(1.5, SELECTED);
+            let ring = Stroke::new(1.5, theme.selection);
             match cursor.target {
                 SnapTarget::Point(_) | SnapTarget::Origin => {
                     painter.circle_stroke(p, 7.0, ring);
@@ -156,7 +155,7 @@ pub fn paint_editor(painter: &Painter, map: &ScreenMap, d: &SketchDisplay, edito
                     painter.line_segment([p + Vec2::new(-k, k), p + Vec2::new(k, -k)], ring);
                 }
                 SnapTarget::Free => {
-                    painter.circle_filled(p, 2.0, FREE);
+                    painter.circle_filled(p, 2.0, k.free);
                 }
             }
             if let Some(h) = editor.inferred {
@@ -165,43 +164,51 @@ pub fn paint_editor(painter: &Painter, map: &ScreenMap, d: &SketchDisplay, edito
                     Align2::LEFT_TOP,
                     if h { "H" } else { "V" },
                     FontId::proportional(LABEL_FONT),
-                    FREE,
+                    k.free,
                 );
             }
         }
     }
     if let Some(r) = editor.selection_box() {
-        painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(255, 135, 0, 30));
-        painter.rect_stroke(r, 0.0, Stroke::new(1.0, SELECTED), egui::StrokeKind::Inside);
+        painter.rect_filled(r, 0.0, k.halo.gamma_multiply(0.5));
+        painter.rect_stroke(
+            r,
+            0.0,
+            Stroke::new(1.0, theme.selection),
+            egui::StrokeKind::Inside,
+        );
     }
 }
 
-fn paint_annotation(painter: &Painter, a: &Annotation, d: &SketchDisplay, editor: &SketchEditor) {
+fn paint_annotation(
+    painter: &Painter,
+    a: &Annotation,
+    d: &SketchDisplay,
+    editor: &SketchEditor,
+    theme: &Theme,
+) {
+    let k = &theme.sketch;
     let id = a.constraint;
     let color = if editor.selection.contains(&id) {
-        SELECTED
+        theme.selection
     } else if editor.hover == Some(Pick::Constraint(id)) {
-        HOVERED
+        theme.preselect
     } else if d.conflicting.contains(&id) {
-        CONFLICT
+        k.conflict
     } else if d.redundant.contains(&id) {
-        REDUNDANT
+        k.redundant
     } else if a.dimension {
-        Color32::from_rgb(20, 40, 110)
+        k.dimension
     } else {
-        Color32::from_rgb(60, 60, 70)
+        k.glyph
     };
     for l in &a.lines {
         painter.line_segment(*l, Stroke::new(1.0, color));
     }
-    painter.rect_filled(
-        a.rect,
-        3.0,
-        Color32::from_rgba_unmultiplied(255, 255, 255, 215),
-    );
+    painter.rect_filled(a.rect, theme.rounding, k.label_fill);
     painter.rect_stroke(
         a.rect,
-        3.0,
+        theme.rounding,
         Stroke::new(1.0, color),
         egui::StrokeKind::Inside,
     );
@@ -236,12 +243,13 @@ pub fn paint_region(painter: &Painter, map: &ScreenMap, outline: &[Vec<DVec2>], 
     }
 }
 
-/// A one-line summary of a sketch's solve state, with its colour.
-pub fn status_color(d: &SketchDisplay) -> Color32 {
+/// The colour of a sketch's solve state.
+pub fn status_color(d: &SketchDisplay, theme: &Theme) -> Color32 {
+    let k = &theme.sketch;
     match d.status {
-        SolveStatus::Failed(_) => CONFLICT,
-        SolveStatus::Redundant => REDUNDANT,
-        SolveStatus::Solved if d.dof == 0 => CONSTRAINED,
-        SolveStatus::Solved => FREE,
+        SolveStatus::Failed(_) => k.conflict,
+        SolveStatus::Redundant => k.redundant,
+        SolveStatus::Solved if d.dof == 0 => k.constrained,
+        SolveStatus::Solved => k.free,
     }
 }

@@ -450,6 +450,9 @@ fn screen_midpoint(runs: &[Vec<Pos2>]) -> Option<(Pos2, Vec2)> {
 pub fn annotations(d: &SketchDisplay, map: &ScreenMap) -> Vec<Annotation> {
     let mut slots: BTreeMap<SketchId, usize> = BTreeMap::new();
     let points: BTreeMap<SketchId, DVec2> = d.points().collect();
+    let centre = (!points.is_empty())
+        .then(|| points.values().copied().sum::<DVec2>() / points.len() as f64)
+        .and_then(|c| map.to_screen(c));
     let mut out = Vec::new();
     for c in &d.sketch.constraints {
         if c.constraint.value().is_some() {
@@ -465,9 +468,16 @@ pub fn annotations(d: &SketchDisplay, map: &ScreenMap) -> Vec<Annotation> {
                 map.to_screen(*p)
                     .map(|s| s + Vec2::new(12.0 + 15.0 * k, -12.0))
             } else if let Some(curve) = d.curve(anchor) {
+                // Inside, towards the sketch's centre (dimensions go
+                // outside); above when the curve passes through it.
                 screen_midpoint(&map.polyline(&curve.polyline)).map(|(m, t)| {
                     let mut n = Vec2::new(-t.y, t.x);
-                    if n.y > 0.0 {
+                    let inward = centre.map_or(0.0, |c| (c - m).dot(n));
+                    if inward.abs() > 0.5 {
+                        if inward < 0.0 {
+                            n = -n;
+                        }
+                    } else if n.y > 0.0 {
                         n = -n;
                     }
                     m + n * 13.0 + t * (15.0 * k)
@@ -543,16 +553,29 @@ fn dimension_annotation(
     })?;
     let ppp = map.plane_per_point(map.to_screen(anchor)?);
     let off = 24.0 * ppp;
+    // Labels go outside: on the side away from the sketch's centre, or
+    // above (to the left) when the dimension passes through it.
+    let centre = if points.is_empty() {
+        DVec2::ZERO
+    } else {
+        points.values().copied().sum::<DVec2>() / points.len() as f64
+    };
+    let tiny = 1e-9 * (1.0 + centre.length());
     let aligned = |a: DVec2, b: DVec2| -> (Vec<[DVec2; 2]>, DVec2) {
         let mut n = perp((b - a).normalize_or_zero());
-        // Labels go above or to the left in the plane, consistently.
-        if n.y < 0.0 || (n.y == 0.0 && n.x > 0.0) {
+        let away = ((a + b) * 0.5 - centre).dot(n);
+        if away.abs() > tiny {
+            if away < 0.0 {
+                n = -n;
+            }
+        } else if n.y < 0.0 || (n.y == 0.0 && n.x > 0.0) {
             n = -n;
         }
         let (a2, b2) = (a + n * off, b + n * off);
         (
             vec![[a, a + n * off * 1.25], [b, b + n * off * 1.25], [a2, b2]],
-            (a2 + b2) * 0.5 + n * off * 0.55,
+            // The label sits on the dimension line, covering its middle.
+            (a2 + b2) * 0.5,
         )
     };
     let (lines, at) = match &c.constraint {
@@ -565,21 +588,29 @@ fn dimension_annotation(
                 (Some(pa), Some(pb)) => match kind {
                     DistanceKind::Aligned => aligned(pa, pb),
                     DistanceKind::Horizontal => {
-                        let y = pa.y.max(pb.y) + off;
+                        let below = (pa.y + pb.y) * 0.5 < centre.y - tiny;
+                        let s = if below { -1.0 } else { 1.0 };
+                        let y = if below {
+                            pa.y.min(pb.y)
+                        } else {
+                            pa.y.max(pb.y)
+                        } + s * off;
                         let (a2, b2) = (DVec2::new(pa.x, y), DVec2::new(pb.x, y));
-                        let up = DVec2::new(0.0, off * 0.25);
+                        let out = DVec2::new(0.0, s * off * 0.25);
                         (
-                            vec![[pa, a2 + up], [pb, b2 + up], [a2, b2]],
-                            (a2 + b2) * 0.5 + DVec2::new(0.0, off * 0.55),
+                            vec![[pa, a2 + out], [pb, b2 + out], [a2, b2]],
+                            (a2 + b2) * 0.5,
                         )
                     }
                     DistanceKind::Vertical => {
-                        let x = pa.x.max(pb.x) + off;
+                        let left = (pa.x + pb.x) * 0.5 < centre.x - tiny;
+                        let s = if left { -1.0 } else { 1.0 };
+                        let x = if left { pa.x.min(pb.x) } else { pa.x.max(pb.x) } + s * off;
                         let (a2, b2) = (DVec2::new(x, pa.y), DVec2::new(x, pb.y));
-                        let right = DVec2::new(off * 0.25, 0.0);
+                        let out = DVec2::new(s * off * 0.25, 0.0);
                         (
-                            vec![[pa, a2 + right], [pb, b2 + right], [a2, b2]],
-                            (a2 + b2) * 0.5 + DVec2::new(off * 1.2, 0.0),
+                            vec![[pa, a2 + out], [pb, b2 + out], [a2, b2]],
+                            (a2 + b2) * 0.5,
                         )
                     }
                 },
@@ -922,7 +953,7 @@ fn ccw(a: f64, b: f64) -> f64 {
 // ---------------------------------------------------------------------------
 
 /// A sketch tool.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tool {
     /// Select, drag, delete.
     Select,
@@ -1009,7 +1040,7 @@ impl Tool {
 }
 
 /// A geometric constraint applied to the selection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ConstraintTool {
     /// Two points coincide, or a point lies on a curve.
     Coincident,

@@ -236,7 +236,7 @@ pub fn run(out: &Path) -> Result<DemoReport, String> {
     Ok(report)
 }
 
-/// Frame-time measurements from [`bench`].
+/// Frame-time measurements from [`bench()`].
 #[derive(Debug, Default)]
 pub struct BenchReport {
     /// Adapter description (name, backend, driver).

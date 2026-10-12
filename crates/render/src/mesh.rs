@@ -37,6 +37,11 @@ pub struct MeshData {
     pub edge_lines: Vec<[f32; 3]>,
     /// Body colour: sRGB-encoded RGB and linear alpha, each in `0.0..=1.0`.
     pub color: [f32; 4],
+    /// Colour of this mesh's edge lines (sRGB-encoded RGB and linear alpha),
+    /// or `None` for the scene's edge colour
+    /// ([`crate::SceneRenderer::set_edge_color`]).
+    #[serde(default)]
+    pub edge_color: Option<[f32; 4]>,
 }
 
 impl MeshData {
@@ -127,6 +132,7 @@ impl MeshData {
             indices: self.indices.clone(),
             edge_lines: self.edge_lines.iter().map(xf).collect(),
             color: self.color,
+            edge_color: self.edge_color,
         }
     }
 

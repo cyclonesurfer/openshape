@@ -6,7 +6,7 @@ Feature-area checklists below the phases list the full functional scope; each
 item is delivered in the phase noted.
 
 ## Phase 0 — Foundations
-- [x] ADRs: kernel (0001), UI toolkit (0002), persistent naming (0003), op-log & sync (0004), native format (0005), units & tolerance (0006), rendering (0007), periodic face splitting (0008), dependency licensing (0009)
+- [x] ADRs: kernel (0001), UI toolkit (0002), persistent naming (0003), op-log & sync (0004), native format (0005), units & tolerance (0006), rendering (0007), periodic face splitting (0008), dependency licensing (0009); later: solver linear algebra (0010), sketch document model (0011), UI look (0012), rollback bar (0013)
 - [x] Cargo workspace, CLAUDE.md, ARCHITECTURE, ROADMAP, STATUS
 - [x] CI: fmt, clippy `-D warnings`, tests, `cargo-deny` (licenses/advisories/bans/sources)
 - [x] Op-log skeleton: stable IDs, causal ordering, deterministic replay, undo/redo as ops, history-at-heads, CBOR container, convergence property test
@@ -34,6 +34,7 @@ item is delivered in the phase noted.
 - [x] Property tests over random constraint systems; fuzzing (constructive and garbage-input proptests)
 - [x] Region detection from arbitrary sketch curves (intersections) feeding extrude/revolve (design note 0006)
 - [ ] Sketch tools and constraints (see §2 below; core set done, editing tools pending)
+- [x] Application shell in the common parametric-CAD layout with our own look (ADR 0012), driven end to end by offscreen UI tests
 
 ## Phase 3 — Booleans and core features
 - [ ] Curve/curve, curve/surface, surface/surface intersection (design note first)
@@ -77,7 +78,7 @@ item is delivered in the phase noted.
 ## Full functional scope
 
 ### 1. Documents and data management
-- [ ] Tabs: Part Studios, Assemblies, Drawings, Variable Studios, scripts, attached files (PDF, images, other) — *Part Studio data model only so far*
+- [ ] Tabs: Part Studios ✔ (add, rename, delete, switch), Assemblies, Drawings, Variable Studios, scripts, attached files (PDF, images, other)
 - [ ] Folders, labels, search, recents, thumbnails, public/private (server)
 - [x] Undo/Redo (op-log based)
 - [ ] Full edit history with restore-to-any-point (log support ✔, UI pending)
@@ -160,7 +161,7 @@ Inspection and appearance
 ### 5. Rendering
 - [ ] Shaded ✔, wireframe ✔, hidden-line display
 - [ ] Silhouette edges, transparency, section caps
-- [ ] Named views (presets ✔), perspective ✔ / orthographic ✔, view cube
+- [ ] Named views (presets ✔), perspective ✔ / orthographic ✔, view cube ✔
 - [ ] GPU picking with selection filters; box/lasso select
 - [ ] LOD and instancing; 60 fps at 1,000+ parts on RADV
 - [ ] Render studio: PBR, HDRI, decals, progressive path tracer (wgpu compute)
@@ -200,8 +201,8 @@ Inspection and appearance
 - [ ] WASM plugins: features, panels, importers
 
 ### 12. UX baseline
-- [ ] Feature tree: rollback bar, suppress ✔, reorder, edit-in-place, failure indicators ✔
-- [ ] Context menus, remappable shortcuts, command palette
+- [ ] Feature tree: rollback bar ✔, suppress ✔, reorder (move up/down ✔, drag pending), edit-in-place ✔, failure indicators ✔
+- [ ] Context menus ✔, remappable shortcuts, command palette ✔
 - [ ] 3D mouse via spacenavd
 - [ ] Light/dark themes, HiDPI, multi-window
 - [ ] Autosave and crash recovery from the op log

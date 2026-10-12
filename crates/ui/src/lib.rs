@@ -2,13 +2,24 @@
 //!
 //! [`Model`] is the UI-independent controller: an editing [`Session`] (the op
 //! log and its derived document), the geometry kernel, and the regenerated
-//! parts with their display meshes. The egui front end lives in [`app`];
-//! [`demo`] drives the same model offscreen to prove the pipeline end to end.
+//! parts with their display meshes. The egui front end lives in [`app`]
+//! (with [`shell`], [`feature_list`], [`graphics`] and [`floating`] for its
+//! parts and [`commands`] for what it can do); [`screenshots`] renders it
+//! offscreen, and [`demo`] drives the model offscreen to prove the pipeline
+//! end to end.
 
 pub mod app;
+pub mod commands;
 pub mod demo;
 pub mod dialogs;
+pub mod feature_list;
+pub mod floating;
+pub mod graphics;
+pub mod picking;
+pub mod planes;
 pub mod profile_pick;
+pub mod screenshots;
+pub mod shell;
 pub mod sketch_mode;
 pub mod sketch_paint;
 pub mod viewport;
@@ -19,8 +30,8 @@ use std::collections::BTreeMap;
 
 use openshape_core_model::sketch::Geometry;
 use openshape_core_model::{
-    ElementId, Feature, FeatureEntry, FeatureId, InsertAt, ModelOp, OpId, PartStudio, PlaneRef,
-    ReplicaId, Session, SketchData, SketchDef, SketchEdit, SketchId,
+    Element, ElementId, ElementKind, Feature, FeatureEntry, FeatureId, InsertAt, ModelOp, OpId,
+    PartStudio, PlaneRef, ReplicaId, Session, SketchData, SketchDef, SketchEdit, SketchId,
 };
 use openshape_features::{regenerate, FeatureStatus, SketchResult, StudioResult};
 use openshape_kernel::{Body, BodyMesh, Kernel, OsKernel, TessellationOptions};
@@ -65,10 +76,16 @@ pub fn to_mesh_data(mesh: &BodyMesh, color: [f32; 4]) -> MeshData {
 /// The application model: document session, kernel, and regenerated parts.
 pub struct Model {
     session: Session,
+    /// The element being edited; the first one when unset or deleted.
+    active: Option<ElementId>,
     kernel: OsKernel,
     result: StudioResult<Body>,
     meshes: Vec<MeshData>,
+    mesh_owners: Vec<FeatureId>,
     tessellation: TessellationOptions,
+    /// The feature being edited: the model shows the history up to and
+    /// including it.
+    edit_point: Option<FeatureId>,
     /// Incremented whenever the display meshes change.
     pub generation: u64,
 }
@@ -88,13 +105,16 @@ impl Model {
     fn from_session(session: Session) -> Self {
         let mut m = Model {
             session,
+            active: None,
             kernel: OsKernel::default(),
             result: StudioResult::default(),
             meshes: Vec::new(),
+            mesh_owners: Vec::new(),
             tessellation: TessellationOptions {
                 chord_tolerance: 2e-5,
                 max_angle: 12f64.to_radians(),
             },
+            edit_point: None,
             generation: 0,
         };
         m.regenerate();
@@ -130,11 +150,95 @@ impl Model {
             .map_err(|e| e.to_string())
     }
 
-    /// The Part Studio being edited.
+    /// The Part Studio being edited: the active element, or the first one
+    /// when the active element no longer exists (deleted, or its creation
+    /// undone).
     pub fn studio_id(&self) -> ElementId {
-        self.session
-            .first_studio()
-            .expect("a document always has its genesis Part Studio")
+        self.active
+            .filter(|id| self.session.document().element(*id).is_some())
+            .or_else(|| self.session.first_studio())
+            .expect("a document always keeps at least one element")
+    }
+
+    /// The document's elements (tabs), in order.
+    pub fn elements(&self) -> &[Element] {
+        &self.session.document().elements
+    }
+
+    /// Makes `element` the one being edited and regenerates it.
+    pub fn set_active(&mut self, element: ElementId) {
+        if self.session.document().element(element).is_some() && element != self.studio_id() {
+            self.active = Some(element);
+            self.regenerate();
+        }
+    }
+
+    /// Adds a Part Studio after the existing elements and makes it active.
+    pub fn add_part_studio(&mut self) -> ElementId {
+        let n = (1..)
+            .map(|i| format!("Part Studio {i}"))
+            .find(|name| self.elements().iter().all(|e| e.name != *name))
+            .expect("some number is free");
+        let id = ElementId(self.session.apply(ModelOp::CreateElement {
+            name: n,
+            kind: ElementKind::PartStudio,
+        }));
+        self.active = Some(id);
+        self.regenerate();
+        id
+    }
+
+    /// Renames an element.
+    pub fn rename_element(&mut self, element: ElementId, name: &str) -> Result<(), String> {
+        self.apply(ModelOp::RenameElement {
+            element,
+            name: name.to_string(),
+        })
+        .map(|_| ())
+    }
+
+    /// Deletes an element (undoable). The last element cannot be deleted.
+    pub fn delete_element(&mut self, element: ElementId) -> Result<(), String> {
+        if self.elements().len() <= 1 {
+            return Err("A document keeps at least one tab".into());
+        }
+        let was_active = element == self.studio_id();
+        if was_active {
+            // Activate a neighbour: the next tab, or the previous one.
+            let i = self
+                .elements()
+                .iter()
+                .position(|e| e.id == element)
+                .ok_or("The tab no longer exists")?;
+            let next = self
+                .elements()
+                .get(i + 1)
+                .or(self.elements().get(i.wrapping_sub(1)));
+            self.active = next.map(|e| e.id);
+        }
+        self.apply(ModelOp::DeleteElement { element }).map(|_| ())
+    }
+
+    /// Moves the active Part Studio's rollback bar.
+    pub fn set_rollback(&mut self, at: InsertAt) {
+        if self.studio().rollback != at {
+            let element = self.studio_id();
+            // Positions offered by the UI are valid; a stale one is recorded
+            // as a conflict and leaves the bar where it is.
+            let _ = self.apply(ModelOp::SetRollback { element, at });
+        }
+    }
+
+    /// Undoes this session's actions back to an earlier
+    /// [`Session::undo_depth`] (cancelling everything done since).
+    pub fn undo_to(&mut self, depth: usize) {
+        let mut changed = false;
+        while self.session.undo_depth() > depth && self.session.undo() {
+            changed = true;
+        }
+        if changed {
+            self.regenerate();
+        }
     }
 
     /// The Part Studio's feature list.
@@ -172,6 +276,12 @@ impl Model {
         &self.meshes
     }
 
+    /// The feature that made each display mesh's part (parallel to
+    /// [`Model::meshes`]).
+    pub fn mesh_owners(&self) -> &[FeatureId] {
+        &self.mesh_owners
+    }
+
     /// Bounds of all display meshes.
     pub fn bounds(&self) -> Option<([f32; 3], [f32; 3])> {
         self.meshes
@@ -185,18 +295,32 @@ impl Model {
             })
     }
 
-    /// Applies an edit through the op log and regenerates.
-    pub fn apply(&mut self, op: ModelOp) {
-        self.session.apply(op);
+    /// Applies an edit through the op log and regenerates. An edit that
+    /// cannot apply (e.g. its feature was deleted) is recorded in the log as
+    /// a conflict; its reason is returned.
+    pub fn apply(&mut self, op: ModelOp) -> Result<OpId, String> {
+        let id = self.session.apply(op);
         self.regenerate();
+        match self
+            .session
+            .document()
+            .conflicts
+            .iter()
+            .find(|c| c.op == id)
+        {
+            Some(c) => Err(c.reason.clone()),
+            None => Ok(id),
+        }
     }
 
-    /// Appends a feature at the end of the Part Studio.
+    /// Inserts a feature at the active Part Studio's rollback bar (at the
+    /// end when the bar is at the end); the bar moves past it.
     pub fn add_feature(&mut self, name: &str, feature: Feature) -> FeatureId {
         let element = self.studio_id();
+        let at = self.studio().rollback;
         let id = self.session.apply(ModelOp::InsertFeature {
             element,
-            at: InsertAt::End,
+            at,
             name: name.to_string(),
             feature,
         });
@@ -307,14 +431,42 @@ impl Model {
         &self.result.sketches
     }
 
+    /// While `feature` is being edited, shows the history up to and
+    /// including it, as if the rollback bar were just below it (the
+    /// document's bar does not move); `None` shows the history up to the
+    /// rollback bar again. Regenerates when this changes.
+    pub fn set_edit_point(&mut self, feature: Option<FeatureId>) {
+        if self.edit_point != feature {
+            self.edit_point = feature;
+            self.regenerate();
+        }
+    }
+
+    /// The feature being edited, see [`Model::set_edit_point`].
+    pub fn edit_point(&self) -> Option<FeatureId> {
+        self.edit_point
+    }
+
     /// Regenerates all parts and rebuilds display meshes.
     pub fn regenerate(&mut self) {
-        let studio = self.studio().clone();
+        let mut studio = self.studio().clone();
+        if let Some(f) = self.edit_point {
+            if studio
+                .index_of(f)
+                .is_some_and(|i| i < studio.rollback_index())
+            {
+                studio.rollback = InsertAt::After(f);
+            }
+        }
         self.result = regenerate(&self.kernel, &studio);
         let mut meshes = Vec::new();
+        let mut owners = Vec::new();
         for (i, b) in self.result.bodies.iter().enumerate() {
             match self.kernel.tessellate(&b.body, &self.tessellation) {
-                Ok(m) => meshes.push(to_mesh_data(&m, PART_COLORS[i % PART_COLORS.len()])),
+                Ok(m) => {
+                    meshes.push(to_mesh_data(&m, PART_COLORS[i % PART_COLORS.len()]));
+                    owners.push(b.feature);
+                }
                 Err(e) => {
                     if let Some(s) = self
                         .result
@@ -328,6 +480,7 @@ impl Model {
             }
         }
         self.meshes = meshes;
+        self.mesh_owners = owners;
         self.generation += 1;
     }
 }

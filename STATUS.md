@@ -1,7 +1,7 @@
 # OpenShape status
 
-Updated 2026-10-11, Phase 2 (sketcher): core sketcher done; editing tools
-and the new application shell in progress.
+Updated 2026-10-12, Phase 2 (sketcher): core sketcher and the new
+application shell done; sketch editing tools next.
 
 ## What works
 
@@ -12,7 +12,9 @@ and the new application shell in progress.
   check undo/redo against a reference model and replica convergence.
 - **Document model** (`openshape-core-model`): documents with element tabs, a
   Part Studio feature list as data (insert, edit, rename, suppress, move,
-  delete), a reducer over the op log, units parsing of single quantities
+  delete), a rollback bar stored in the op log (ADR 0013; its rules are
+  property-tested against an independent model), element tabs that can be
+  added, renamed and deleted, a reducer over the op log, units parsing of single quantities
   (`"25.4 mm"`, `"1 in"`, `"90 deg"`; bare numbers use the default unit).
   Expressions and variables come with Variable Studios.
 - **NURBS** (`openshape-nurbs`, kernel-private): rational curves and surfaces
@@ -54,14 +56,37 @@ and the new application shell in progress.
   revolve.
 - **Rendering** (`openshape-render`): wgpu renderer for the window and an
   offscreen renderer; shaded parts with edges, perspective/orthographic
-  camera, orbit/pan/zoom, view presets, fit. Vulkan first, GL fallback.
-- **App** (`openshape` binary, egui/eframe): File (new, open/save `.osdoc`,
-  export STL), Edit (undo/redo, Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y), Insert
-  (sketch on the top, front or right plane; extrude and revolve from picked
-  sketch regions; templates), View (presets, fit with F, perspective/ortho,
-  show sketches). Feature tree with status icons; right-click to edit,
-  rename, suppress, move up/down, delete. Properties panel shows mass
-  properties. Dialogs take values with units.
+  camera, orbit/pan/zoom, view presets, fit, translucent meshes, and an
+  edge colour per mesh (used for selection, sketches and plane outlines).
+  Vulkan first, GL fallback.
+- **App shell** (`openshape` binary, egui/eframe; ADR 0012), in the familiar
+  parametric-CAD layout with OpenShape's own icons, palette and name:
+  - top bar: application menu (new, open, save, export STL, quit),
+    document name, undo/redo, command search (Ctrl+K, fuzzy matching over
+    every command with its shortcut), display modes, perspective/ortho,
+    fit;
+  - feature toolbar (sketch with a plane menu, extrude, revolve, box,
+    templates, roll to end); in sketch mode the sketch toolbar (tools,
+    construction, dimension, 12 constraints, Finish);
+  - feature list: origin and the three default planes (show/hide, hover
+    highlight, double-click to sketch), the features with status icons and
+    tooltips, the draggable rollback bar, the parts with show/hide, and a
+    properties card (volume, area, centroid, topology) for the selected
+    part; inline rename; context menus (edit, rename, suppress, roll history
+    here, move up/down across the bar, delete);
+  - graphics area: the default planes as translucent outlined squares sized
+    to the model, part and plane picking (click to select, double-click to
+    edit), sketches drawn in 3D and hidden by the parts in front of them,
+    the view cube, a context menu (views, display modes, show/hide
+    sketches and planes), and messages;
+  - floating feature dialogs with accept and cancel in their header; Enter
+    accepts, Escape cancels; editing a feature shows the history up to it
+    and greys the features after it (ADR 0013);
+  - element tabs: add, switch, rename (double-click), delete;
+  - right-drag orbits, middle-drag or Ctrl+right-drag pans, the wheel
+    zooms, in both Part Studio and sketch mode.
+  `openshape --screenshots <dir>` writes review screenshots of the whole
+  app rendered offscreen.
 - **Sketch mode**: line (chained), corner rectangle, circle, 3-point arc,
   centre arc, point, through-point spline, construction toggle; 12
   constraint tools and dimensions (length, distance aligned/horizontal/
@@ -69,12 +94,13 @@ and the new application shell in progress.
   curves and the origin with horizontal/vertical inference; dragging with
   live solving; box selection and delete; colour-coded state (free, fully
   constrained, redundant, conflicting) with constraint glyphs and dimension
-  labels. Every edit is one undoable op. The editor is UI-toolkit
-  independent and tested end to end by driving it with screen clicks.
+  labels placed outside the sketch. Every edit is one undoable op; Cancel
+  undoes the whole sketch session. The editor is UI-toolkit independent and
+  tested end to end by driving it with screen clicks.
 - **UI kit** (`openshape-ui-kit`): the application's look in one place
-  (ADR 0012): theme tokens, 60 original icons drawn in code, a view cube,
-  and an offscreen egui renderer used for screenshots and UI tests. Not yet
-  wired into the application shell.
+  (ADR 0012): theme tokens with pinned contrast ratios, 60 original icons
+  drawn in code, a view cube, the command palette and search field, and an
+  offscreen egui renderer used for screenshots and UI tests.
 - **I/O** (`openshape-io`): STL export, ASCII and binary.
 - **Headless demo**: `cargo run -p openshape -- --headless-demo out/` builds
   a box through the op log, orbits, adds three more parts, undoes and redoes,
@@ -132,6 +158,16 @@ and the new application shell in progress.
   solver reported success. Any result with a zero-length line or a
   zero-radius circle or arc now fails, and the constraint that caused the
   collapse is reported as conflicting.
+- App shell, 2026-10-12, on Mesa lavapipe: fmt, clippy with `-D warnings`,
+  455 tests and `cargo deny` pass. `crates/ui/tests/shell.rs` drives the
+  real application offscreen with synthetic mouse and keyboard input (13
+  end-to-end tests: toolbar, dialogs, sketch from a plane row, cancel,
+  edit-in-place, dragging the rollback bar, moving features across it,
+  context menus, tabs, command search, picking, view cube, dimension
+  placement). Writing them found two real defects, both fixed: Enter never
+  reached feature dialogs (the global shortcuts consumed it), and the screen
+  shots showed sketches drawn over the parts that hide them (they are now
+  rendered in 3D with depth).
 
 ## Not yet / known limits
 
@@ -139,9 +175,18 @@ and the new application shell in progress.
   mirror, patterns, slots, polygons, ellipses, conics, tangent arcs, centre
   and aligned rectangles, text, use/project. Parallel, perpendicular and
   tangent inference while drawing is not done.
-- The application shell still has the Phase 1 layout; the new layout
-  (ADR 0012: feature list with rollback bar, feature toolbar, view cube,
-  element tabs, command search) is next.
+- Shell gaps: features reorder with Move up/down but not by dragging rows;
+  dimension labels are placed automatically (outside the sketch) and cannot
+  be dragged; feature dialogs do not preview the result live, and there is
+  no toggle to see the final model while editing; parts highlight when
+  selected but not on hover; there is no box selection of parts; shortcuts
+  are not remappable; only the light theme exists; File > Open and Save use
+  a text path prompt, not a native file picker.
+- Edges where the kernel splits a periodic face (ADR 0008) are drawn like
+  real edges, so cylinders and revolved parts show seam lines (a line down
+  a cylinder's side, a diameter across a revolved disc). The display should
+  hide edges between two pieces of the same surface; the kernel has to
+  report which edges those are.
 - Sketches can only be placed on the three standard planes until Phase 3
   brings faces and construction planes.
 - Extrude rejects some valid but extreme sketch regions with an error (never
@@ -162,19 +207,15 @@ and the new application shell in progress.
   the whole studio (Phase 3). Features don't reference model geometry yet, so
   nothing can break on upstream edits today.
 - Non-manifold topology deferred to Phase 3.
-- File dialogs are a text path prompt, not a native picker.
 - No STEP or other exchange formats beyond STL (Phase 4; see docs/FORMATS.md).
 
 ## Next steps
 
-1. The application shell (ADR 0012): adopt `openshape-ui-kit`; feature list
-   with default geometry, rollback bar (model support in core-model and
-   regeneration) and parts; feature toolbar and sketch toolbar with the
-   original icons; view cube; floating feature dialogs; element tabs;
-   context menus; command search; headless screenshots of the whole app.
-2. Sketch editing tools: trim, extend, offset, sketch fillet, mirror,
+1. Sketch editing tools: trim, extend, offset, sketch fillet, mirror,
    patterns, slots, polygons, centre/aligned rectangles, tangent arcs;
-   parallel/perpendicular/tangent inference.
+   parallel/perpendicular/tangent inference; draggable dimension labels.
+2. Hide seam edges of split periodic faces in the display (kernel reports
+   them); live preview in feature dialogs.
 3. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.
 4. Phase 3 groundwork: design notes for curve/surface intersection, booleans

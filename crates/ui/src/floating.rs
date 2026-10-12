@@ -1,0 +1,571 @@
+//! Floating dialogs over the graphics area (ADR 0012): feature dialogs with
+//! accept and cancel in their header, sketch mode's dialog, the dimension
+//! prompt, the file prompt and the command palette.
+
+use eframe::egui;
+use egui::{
+    Align, Area, Id, Key, Layout, Order, Pos2, Rect, Response, RichText, Sense, Stroke, Ui, Vec2,
+};
+use openshape_core_model::sketch::DistanceKind;
+use openshape_core_model::ModelOp;
+use openshape_ui_kit::palette::{PaletteEntry, PaletteOutcome};
+use openshape_ui_kit::{icon_button, paint_icon, Icon, Theme};
+
+use crate::app::{Action, FileAction, OpenShapeApp, Selection};
+use crate::commands::Command;
+use crate::dialogs::FieldKind;
+use crate::profile_pick::SweepKind;
+use crate::sketch_paint;
+use crate::Model;
+
+/// Width of a feature dialog, in points.
+pub const DIALOG_WIDTH: f32 = 264.0;
+
+/// What the user did with a dialog this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogAction {
+    /// Nothing yet.
+    None,
+    /// Accept (the check mark, or Enter where a dialog allows it).
+    Accept,
+    /// Cancel (the cross, or Escape).
+    Cancel,
+}
+
+/// The accept button of a dialog header: a check mark on the accent.
+fn accept_button(ui: &mut Ui, theme: &Theme, tooltip: &str) -> Response {
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(30.0, 24.0), Sense::click());
+    let fill = if r.hovered() {
+        theme.accent_hover
+    } else {
+        theme.accent
+    };
+    ui.painter().rect_filled(rect, theme.rounding, fill);
+    paint_icon(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), Vec2::splat(18.0)),
+        Icon::Check,
+        theme.on_accent,
+    );
+    r.on_hover_text(tooltip)
+}
+
+/// A dialog anchored at `at` with an icon and title, accept and cancel in
+/// its header, and `body` below. Returns the action and the dialog's rect.
+pub fn floating_dialog(
+    ctx: &egui::Context,
+    theme: &Theme,
+    id: &str,
+    at: Pos2,
+    icon: Icon,
+    title: &str,
+    body: impl FnOnce(&mut Ui),
+) -> (DialogAction, Rect) {
+    let mut action = DialogAction::None;
+    let r = Area::new(Id::new(("floating dialog", id)))
+        .order(Order::Middle)
+        .fixed_pos(at)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(theme.panel)
+                .stroke(Stroke::new(1.0, theme.border))
+                .corner_radius(theme.rounding + 1.0)
+                .shadow(ui.style().visuals.popup_shadow)
+                .inner_margin(10)
+                .show(ui, |ui| {
+                    ui.set_width(DIALOG_WIDTH);
+                    ui.horizontal(|ui| {
+                        let (ir, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                        paint_icon(ui.painter(), ir, icon, theme.accent);
+                        ui.label(
+                            RichText::new(title)
+                                .strong()
+                                .size(theme.heading_size)
+                                .color(theme.text),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            if accept_button(ui, theme, "Accept").clicked() {
+                                action = DialogAction::Accept;
+                            }
+                            let cancel = icon_button(ui, theme, Icon::Close, "Cancel", false, true);
+                            if cancel.clicked() {
+                                action = DialogAction::Cancel;
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                    let (line, _) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+                    ui.painter().rect_filled(line, 0.0, theme.border);
+                    ui.add_space(6.0);
+                    body(ui);
+                });
+        });
+    (action, r.response.rect)
+}
+
+/// A labelled text field with a unit after it.
+fn field(ui: &mut Ui, theme: &Theme, label: &str, text: &mut String, unit: &str) {
+    ui.label(RichText::new(label).color(theme.text_muted));
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(text).desired_width(110.0));
+        if !unit.is_empty() {
+            ui.label(RichText::new(unit).color(theme.text_muted));
+        }
+    });
+    ui.end_row();
+}
+
+impl OpenShapeApp {
+    fn dialog_anchor(&self) -> Pos2 {
+        self.layout.graphics.min + Vec2::new(12.0, 12.0)
+    }
+
+    pub(crate) fn floating_dialogs(&mut self, ctx: &egui::Context) {
+        self.template_dialog(ctx);
+        self.pick_dialog(ctx);
+        self.sketch_dialog(ctx);
+        self.dimension_prompt(ctx);
+        self.file_prompt(ctx);
+    }
+
+    fn template_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut d) = self.dialog.take() else {
+            return;
+        };
+        let theme = self.theme.clone();
+        let title = match d.editing.and_then(|id| self.model.feature(id)) {
+            Some(f) => f.name.clone(),
+            None => d.template.label().to_string(),
+        };
+        let icon = Command::Template(d.template).icon().unwrap_or(Icon::Box);
+        let (mut action, rect) = floating_dialog(
+            ctx,
+            &theme,
+            "template",
+            self.dialog_anchor(),
+            icon,
+            &title,
+            |ui| {
+                egui::Grid::new("fields")
+                    .num_columns(2)
+                    .spacing([10.0, 6.0])
+                    .show(ui, |ui| {
+                        for f in &mut d.fields {
+                            match f.kind {
+                                FieldKind::Flag => {
+                                    ui.label(RichText::new(f.label).color(theme.text_muted));
+                                    let mut b = f.text == "true";
+                                    ui.checkbox(&mut b, "");
+                                    f.text = b.to_string();
+                                    ui.end_row();
+                                }
+                                FieldKind::Length | FieldKind::Angle => {
+                                    field(ui, &theme, f.label, &mut f.text, "");
+                                }
+                            }
+                        }
+                    });
+                if let Some(e) = &d.error {
+                    ui.add_space(4.0);
+                    ui.colored_label(theme.danger, e);
+                }
+            },
+        );
+        self.layout.dialog = Some(rect);
+        if ctx.input(|i| i.key_pressed(Key::Enter)) {
+            action = DialogAction::Accept;
+        }
+        match action {
+            DialogAction::Accept => match d.build() {
+                Ok(feature) => {
+                    let element = self.model.studio_id();
+                    match d.editing {
+                        Some(id) => self.actions.push(Action::Apply(ModelOp::EditFeature {
+                            element,
+                            feature: id,
+                            definition: feature,
+                        })),
+                        None => {
+                            let name = self.model.next_name(feature.type_name());
+                            let first = self.model.meshes().is_empty();
+                            let id = self.model.add_feature(&name, feature);
+                            self.selection = Some(Selection::Feature(id));
+                            self.fit_pending = first;
+                        }
+                    }
+                }
+                Err(e) => {
+                    d.error = Some(e);
+                    self.dialog = Some(d);
+                }
+            },
+            DialogAction::Cancel => {}
+            DialogAction::None => self.dialog = Some(d),
+        }
+    }
+
+    fn pick_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut p) = self.pick.take() else {
+            return;
+        };
+        let theme = self.theme.clone();
+        let title = match p.editing.and_then(|id| self.model.feature(id)) {
+            Some(f) => f.name.clone(),
+            None => p.title().to_string(),
+        };
+        let icon = match p.kind {
+            SweepKind::Extrude => Icon::Extrude,
+            SweepKind::Revolve => Icon::Revolve,
+        };
+        let picked = p.picked(&self.model).len();
+        let (action, rect) = floating_dialog(
+            ctx,
+            &theme,
+            "pick",
+            self.dialog_anchor(),
+            icon,
+            &title,
+            |ui| {
+                ui.label(
+                    RichText::new(p.hint())
+                        .color(theme.text_muted)
+                        .size(theme.small_size),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let (ir, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                    paint_icon(ui.painter(), ir, Icon::Sketch, theme.text);
+                    ui.label(format!(
+                        "{picked} region{} picked",
+                        if picked == 1 { "" } else { "s" }
+                    ));
+                    if picked != p.regions.len() {
+                        ui.colored_label(
+                            theme.danger,
+                            format!("({} missing)", p.regions.len() - picked),
+                        );
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.small_button("Clear").clicked() {
+                            p.regions.clear();
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                egui::Grid::new("sweep")
+                    .num_columns(2)
+                    .spacing([10.0, 6.0])
+                    .show(ui, |ui| match p.kind {
+                        SweepKind::Extrude => {
+                            field(ui, &theme, "Depth", &mut p.distance, "mm");
+                            ui.label(RichText::new("Symmetric").color(theme.text_muted));
+                            ui.checkbox(&mut p.symmetric, "");
+                            ui.end_row();
+                        }
+                        SweepKind::Revolve => {
+                            ui.label(RichText::new("Axis").color(theme.text_muted));
+                            ui.horizontal(|ui| {
+                                ui.label(if p.axis.is_some() {
+                                    "Sketch line"
+                                } else {
+                                    "None"
+                                });
+                                if ui.selectable_label(p.picking_axis, "Pick…").clicked() {
+                                    p.picking_axis = !p.picking_axis;
+                                }
+                            });
+                            ui.end_row();
+                            field(ui, &theme, "Angle", &mut p.angle, "°");
+                        }
+                    });
+                if let Some(e) = &p.error {
+                    ui.add_space(4.0);
+                    ui.colored_label(theme.danger, e);
+                }
+            },
+        );
+        self.layout.dialog = Some(rect);
+        let action = if ctx.input(|i| i.key_pressed(Key::Enter)) {
+            DialogAction::Accept
+        } else {
+            action
+        };
+        match action {
+            DialogAction::Accept => match p.build() {
+                Ok(feature) => {
+                    let element = self.model.studio_id();
+                    match p.editing {
+                        Some(id) => self.actions.push(Action::Apply(ModelOp::EditFeature {
+                            element,
+                            feature: id,
+                            definition: feature,
+                        })),
+                        None => {
+                            let name = self.model.next_name(feature.type_name());
+                            let first = self.model.meshes().is_empty();
+                            let id = self.model.add_feature(&name, feature);
+                            self.selection = Some(Selection::Feature(id));
+                            self.fit_pending = first;
+                        }
+                    }
+                }
+                Err(e) => {
+                    p.error = Some(e);
+                    self.pick = Some(p);
+                }
+            },
+            DialogAction::Cancel => {}
+            DialogAction::None => self.pick = Some(p),
+        }
+    }
+
+    fn sketch_dialog(&mut self, ctx: &egui::Context) {
+        let Some(ed) = self.sketch.as_ref() else {
+            return;
+        };
+        let theme = self.theme.clone();
+        let model: &Model = &self.model;
+        let name = model
+            .feature(ed.feature)
+            .map(|f| f.name.clone())
+            .unwrap_or_default();
+        let plane = model
+            .sketch_def(ed.feature)
+            .map(|d| {
+                crate::planes::StdPlane::ALL
+                    .into_iter()
+                    .find(|p| p.plane_ref() == d.plane)
+                    .map_or("Custom plane".to_string(), |p| {
+                        format!("{} plane", p.label())
+                    })
+            })
+            .unwrap_or_default();
+        let display = ed.display(model);
+        let status = ed.status(model);
+        let status_color = display
+            .as_ref()
+            .map_or(theme.text_muted, |d| sketch_paint::status_color(d, &theme));
+        let hint = ed.tool.hint(ed.clicks.len());
+        let message = ed.message.clone();
+        let (action, rect) = floating_dialog(
+            ctx,
+            &theme,
+            "sketch",
+            self.dialog_anchor(),
+            Icon::Sketch,
+            &name,
+            |ui| {
+                egui::Grid::new("sketch info")
+                    .num_columns(2)
+                    .spacing([10.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Plane").color(theme.text_muted));
+                        ui.label(&plane);
+                        ui.end_row();
+                        ui.label(RichText::new("State").color(theme.text_muted));
+                        ui.label(RichText::new(&status).color(status_color));
+                        ui.end_row();
+                    });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(hint)
+                        .size(theme.small_size)
+                        .color(theme.text_muted),
+                );
+                if let Some(m) = &message {
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(m).size(theme.small_size).color(theme.text));
+                }
+            },
+        );
+        self.layout.dialog = Some(rect);
+        match action {
+            DialogAction::Accept => self.actions.push(Action::Run(Command::FinishSketch)),
+            DialogAction::Cancel => self.actions.push(Action::Run(Command::CancelSketch)),
+            DialogAction::None => {}
+        }
+    }
+
+    fn dimension_prompt(&mut self, ctx: &egui::Context) {
+        let Some(ed) = self.sketch.as_mut() else {
+            return;
+        };
+        let Some(mut prompt) = ed.prompt.clone() else {
+            return;
+        };
+        let theme = self.theme.clone();
+        let mut commit = false;
+        let mut cancel = false;
+        let mut kind = None;
+        Area::new(Id::new("dimension prompt"))
+            .order(Order::Foreground)
+            .fixed_pos(prompt.at + Vec2::new(16.0, 16.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    if let Some(k) = prompt.distance_kind() {
+                        ui.horizontal(|ui| {
+                            for (name, v) in [
+                                ("Aligned", DistanceKind::Aligned),
+                                ("Horizontal", DistanceKind::Horizontal),
+                                ("Vertical", DistanceKind::Vertical),
+                            ] {
+                                if ui.selectable_label(k == v, name).clicked() && k != v {
+                                    kind = Some(v);
+                                }
+                            }
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        let r = ui
+                            .add(egui::TextEdit::singleline(&mut prompt.text).desired_width(90.0));
+                        if !r.has_focus() && !r.lost_focus() {
+                            r.request_focus();
+                        }
+                        ui.label(
+                            RichText::new(if prompt.is_angle() { "°" } else { "mm" })
+                                .color(theme.text_muted),
+                        );
+                        if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                            commit = true;
+                        }
+                        if ui.input(|i| i.key_pressed(Key::Escape)) {
+                            cancel = true;
+                        }
+                        if accept_button(ui, &theme, "Apply").clicked() {
+                            commit = true;
+                        }
+                    });
+                    if let Some(e) = &prompt.error {
+                        ui.colored_label(theme.danger, e);
+                    }
+                });
+            });
+        if cancel {
+            ed.prompt = None;
+            return;
+        }
+        if let Some(p) = ed.prompt.as_mut() {
+            p.text = prompt.text.clone();
+        }
+        if let Some(k) = kind {
+            ed.set_prompt_kind(&self.model, k);
+        } else if commit {
+            ed.commit_prompt(&mut self.model);
+        }
+    }
+
+    fn file_prompt(&mut self, ctx: &egui::Context) {
+        let Some((action, mut path)) = self.file_prompt.take() else {
+            return;
+        };
+        let theme = self.theme.clone();
+        let title = match action {
+            FileAction::Open => "Open document",
+            FileAction::Save => "Save document",
+            FileAction::ExportStl => "Export STL (millimetres)",
+        };
+        let mut keep = true;
+        let mut ok = false;
+        egui::Modal::new(Id::new("file prompt")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(RichText::new(title).strong().size(theme.heading_size));
+            ui.add_space(6.0);
+            ui.label(RichText::new("Path").color(theme.text_muted));
+            let r = ui.add(egui::TextEdit::singleline(&mut path).desired_width(f32::INFINITY));
+            if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                ok = true;
+            }
+            ui.add_space(8.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let label = match action {
+                    FileAction::Open => "Open",
+                    FileAction::Save => "Save",
+                    FileAction::ExportStl => "Export",
+                };
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new(label).color(theme.on_accent))
+                            .fill(theme.accent),
+                    )
+                    .clicked()
+                {
+                    ok = true;
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                    keep = false;
+                }
+            });
+        });
+        if ok {
+            keep = false;
+            let p = std::path::PathBuf::from(&path);
+            let r = match action {
+                FileAction::Open => Model::open(&p).map(|m| {
+                    self.model = m;
+                    self.selection = None;
+                    self.hidden_parts.clear();
+                    self.sketch = None;
+                    self.pick = None;
+                    self.dialog = None;
+                    self.fit_pending = true;
+                    self.doc_name = p
+                        .file_stem()
+                        .map_or(path.clone(), |s| s.to_string_lossy().into_owned());
+                }),
+                FileAction::Save => self.model.save(&p).map(|()| {
+                    self.doc_name = p
+                        .file_stem()
+                        .map_or(path.clone(), |s| s.to_string_lossy().into_owned());
+                }),
+                FileAction::ExportStl => self.model.export_stl(&p),
+            };
+            self.notify(match r {
+                Ok(()) => format!("{title}: {path}"),
+                Err(e) => format!("{title} failed: {e}"),
+            });
+        }
+        if keep {
+            self.file_prompt = Some((action, path));
+        }
+    }
+
+    pub(crate) fn command_palette(&mut self, ctx: &egui::Context) {
+        let Some(mut palette) = self.palette.take() else {
+            return;
+        };
+        let mode = self.mode();
+        let commands: Vec<Command> = Command::all()
+            .into_iter()
+            .filter(|c| c.available_in(mode))
+            .collect();
+        let texts: Vec<(String, Option<String>)> = commands
+            .iter()
+            .map(|c| (c.label(), c.shortcut_text()))
+            .collect();
+        let entries: Vec<PaletteEntry<'_>> = commands
+            .iter()
+            .zip(&texts)
+            .map(|(c, (label, shortcut))| PaletteEntry {
+                label,
+                detail: c.group(),
+                icon: c.icon(),
+                shortcut: shortcut.as_deref(),
+                keywords: c.keywords(),
+                enabled: self.enabled(*c),
+            })
+            .collect();
+        let anchor = Pos2::new(
+            self.layout
+                .search
+                .map_or(ctx.content_rect().center().x, |r| r.center().x),
+            self.layout.search.map_or(60.0, |r| r.top()),
+        );
+        match palette.show(ctx, &self.theme, anchor, 440.0, &entries) {
+            PaletteOutcome::Open => self.palette = Some(palette),
+            PaletteOutcome::Run(i) => self.actions.push(Action::Run(commands[i])),
+            PaletteOutcome::Closed => {}
+        }
+    }
+}

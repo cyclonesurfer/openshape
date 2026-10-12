@@ -1,4 +1,4 @@
-//! Renders the UI kit offscreen and writes three review images:
+//! Renders the UI kit offscreen and writes four review images:
 //!
 //! - `icons.png`: every icon at 16, 20, 24 and 32 px on the panel colour,
 //!   with its name (and `icons@2x.png`, the same at twice the scale);
@@ -6,7 +6,9 @@
 //!   hovered cell;
 //! - `widgets.png`: themed buttons, icon buttons in every state, a list with
 //!   a selected and a hovered row, a text field, a tooltip-like panel and
-//!   the colour tokens.
+//!   the colour tokens;
+//! - `palette.png`: the top bar's command search field and, under it, the
+//!   command palette open with the query "ex" (one match disabled).
 //!
 //! ```sh
 //! cargo run -p openshape-ui-kit --example gallery -- <out-dir>
@@ -16,7 +18,10 @@ use egui::emath::GuiRounding as _;
 use egui::{Color32, Pos2, Rect, RichText, Sense, Vec2};
 use openshape_render::{write_png, Camera};
 use openshape_ui_kit::view_cube::{self, CubeEdge, CubeTarget, CENTER_HALF};
-use openshape_ui_kit::{icon_button, paint_icon, Icon, Theme, UiSnapshot};
+use openshape_ui_kit::{
+    icon_button, paint_icon, search_field, CommandPalette, Icon, PaletteEntry, PaletteOutcome,
+    Theme, UiSnapshot,
+};
 use std::path::{Path, PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,6 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     icons(&out, &theme, 2.0, "icons@2x.png")?;
     cubes(&out, &theme)?;
     widgets(&out, &theme)?;
+    palette(&out, &theme)?;
     println!("wrote gallery images to {}", out.display());
     Ok(())
 }
@@ -413,4 +419,117 @@ fn widgets(out: &Path, theme: &Theme) -> Result<(), Box<dyn std::error::Error>> 
                 }
             });
     })
+}
+
+/// The commands of a part studio, as the app would list them.
+fn commands() -> Vec<PaletteEntry<'static>> {
+    let entry = |label, detail, icon, shortcut, keywords, enabled| PaletteEntry {
+        label,
+        detail,
+        icon: Some(icon),
+        shortcut,
+        keywords,
+        enabled,
+    };
+    vec![
+        entry(
+            "Sketch",
+            "Feature",
+            Icon::Sketch,
+            Some("Shift+S"),
+            &["draw", "profile"],
+            true,
+        ),
+        entry(
+            "Extrude",
+            "Feature",
+            Icon::Extrude,
+            Some("Shift+E"),
+            &["pad", "boss", "pocket", "cut"],
+            true,
+        ),
+        entry(
+            "Revolve",
+            "Feature",
+            Icon::Revolve,
+            Some("Shift+W"),
+            &["lathe", "turn"],
+            true,
+        ),
+        entry("Box", "Feature", Icon::Box, None, &["cube", "block"], true),
+        entry("Cylinder", "Feature", Icon::Cylinder, None, &["rod"], true),
+        entry(
+            "Export STL",
+            "File",
+            Icon::Export,
+            None,
+            &["save", "mesh", "print"],
+            true,
+        ),
+        entry("Undo", "Edit", Icon::Undo, Some("Ctrl+Z"), &[], true),
+        entry("Redo", "Edit", Icon::Redo, Some("Ctrl+Y"), &[], true),
+        entry(
+            "Fit view",
+            "View",
+            Icon::ZoomFit,
+            Some("F"),
+            &["zoom", "extents"],
+            true,
+        ),
+        // Only available while a sketch is being edited.
+        entry(
+            "Exit sketch",
+            "Sketch",
+            Icon::FinishSketch,
+            None,
+            &["finish", "done"],
+            false,
+        ),
+    ]
+}
+
+fn palette(out: &Path, theme: &Theme) -> Result<(), Box<dyn std::error::Error>> {
+    let (ppp, size) = (2.0, Vec2::new(720.0, 340.0));
+    let mut snap = UiSnapshot::new([(size.x * ppp) as u32, (size.y * ppp) as u32], ppp)?;
+    theme.apply(snap.context());
+    let entries = commands();
+    let mut palette = CommandPalette::new();
+    palette.query = "ex".to_owned();
+    let bar = Rect::from_min_size(Pos2::ZERO, Vec2::new(size.x, 40.0));
+    let field = Rect::from_center_size(bar.center(), Vec2::new(320.0, theme.interact_height));
+    let anchor = field.center_bottom() + Vec2::new(0.0, theme.item_spacing.y + 2.0);
+    let mut run = |ui: &mut egui::Ui| {
+        let full = ui.max_rect();
+        gradient(
+            ui.painter(),
+            full,
+            theme.viewport_top,
+            theme.viewport_bottom,
+        );
+        ui.painter().rect_filled(bar, 0.0, theme.panel);
+        ui.painter().rect_filled(
+            Rect::from_min_size(bar.left_bottom(), Vec2::new(bar.width(), 1.0)),
+            0.0,
+            theme.border,
+        );
+        ui.painter().text(
+            Pos2::new(bar.left() + 12.0, bar.center().y),
+            egui::Align2::LEFT_CENTER,
+            "Part Studio 1",
+            egui::FontId::proportional(theme.body_size),
+            theme.text,
+        );
+        let mut slot = ui.new_child(egui::UiBuilder::new().max_rect(field));
+        let _ = search_field(&mut slot, theme, "Search commands", "Ctrl+K", field.width());
+        let outcome = palette.show(ui.ctx(), theme, anchor, 480.0, &entries);
+        assert_eq!(outcome, PaletteOutcome::Open);
+    };
+    // The palette's area is sized in its first frame and drawn from the
+    // second; a few more let the text cursor and fades settle.
+    for _ in 0..5 {
+        snap.frame_ui(egui::RawInput::default(), &mut run)?;
+    }
+    let image = snap.frame_ui(egui::RawInput::default(), &mut run)?;
+    write_png(out.join("palette.png"), &image)?;
+    Ok(())
 }

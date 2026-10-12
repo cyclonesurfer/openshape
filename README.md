@@ -4,8 +4,10 @@ A native Linux, pure-Rust, history-based parametric 3D CAD system.
 License: GPL-3.0-or-later.
 
 OpenShape is early: Phase 0 (foundations), Phase 1 (kernel core) and the
-first Phase 2 milestone (the sketcher: constraint solver, sketch mode,
-dimensions, region extrude and revolve) are in place. See [STATUS.md](STATUS.md) for what works today and
+first Phase 2 milestones (the sketcher: constraint solver, sketch mode,
+dimensions, region extrude and revolve; and the application shell: feature
+list with rollback bar, toolbars, view cube, floating dialogs, tabs, command
+search) are in place. See [STATUS.md](STATUS.md) for what works today and
 [docs/ROADMAP.md](docs/ROADMAP.md) for the plan.
 
 ## Build and run (Linux)
@@ -26,10 +28,12 @@ distribution, the desktop app, developer checks, the offscreen demo and
 benchmark, and `scripts/gpu-check.sh` for checking a GPU machine (including a
 headless server) end to end.
 
-In the app: Insert menu to add features; drag with the left mouse button to
-orbit, right or middle button to pan, scroll to zoom, F to fit; Ctrl+Z and
-Ctrl+Shift+Z to undo and redo; right-click a feature for edit, suppress,
-reorder and delete; File menu to save/open documents and export STL.
+In the app: the toolbar adds sketches and features (S sketch, E extrude,
+V revolve) and Ctrl+K searches every command; right-drag orbits, middle-drag
+pans, the wheel zooms, F fits; Ctrl+Z and Ctrl+Shift+Z undo and redo;
+right-click a feature to edit, rename, suppress, move or delete it, and drag
+the rollback bar to roll the history back; the menu at the top left saves,
+opens and exports STL.
 
 ## Layout
 

@@ -86,3 +86,69 @@ fn failed_feature_does_not_stop_later_features() {
     let r = regenerate(&k, &s.document().elements[0].studio);
     assert_eq!(r.bodies.len(), 2);
 }
+
+#[test]
+fn features_after_the_rollback_bar_are_not_regenerated() {
+    use openshape_core_model::{SketchData, SketchDef};
+    let k = OsKernel::default();
+    let mut s = Session::new_document(ReplicaId(1));
+    let el = s.first_studio().unwrap();
+    let boxed = |x: f64| Feature::Box {
+        corner: DVec3::new(x, 0.0, 0.0),
+        size: DVec3::splat(0.01),
+    };
+    let a = insert(&mut s, "A", boxed(0.0));
+    let sketch = insert(
+        &mut s,
+        "Sketch",
+        Feature::Sketch(SketchDef {
+            plane: PlaneRef::Top,
+            sketch: SketchData::default(),
+        }),
+    );
+    let b = insert(&mut s, "B", boxed(0.02));
+    let regen = |s: &Session| regenerate(&k, &s.document().elements[0].studio);
+
+    let r = regen(&s);
+    assert_eq!(r.bodies.len(), 2);
+    assert_eq!(r.sketches.len(), 1);
+
+    s.apply(ModelOp::SetRollback {
+        element: el,
+        at: InsertAt::After(a),
+    });
+    let r = regen(&s);
+    assert_eq!(r.statuses.len(), 3, "every feature has a status");
+    assert_eq!(r.status(a), Some(&FeatureStatus::Ok));
+    assert_eq!(r.status(sketch), Some(&FeatureStatus::RolledBack));
+    assert_eq!(r.status(b), Some(&FeatureStatus::RolledBack));
+    assert_eq!(r.bodies.len(), 1);
+    assert_eq!(r.bodies[0].feature, a);
+    assert!(r.sketches.is_empty(), "a rolled-back sketch is not solved");
+
+    s.apply(ModelOp::SetRollback {
+        element: el,
+        at: InsertAt::Start,
+    });
+    let r = regen(&s);
+    assert!(r.bodies.is_empty());
+    assert!(r
+        .statuses
+        .iter()
+        .all(|(_, st)| *st == FeatureStatus::RolledBack));
+
+    // A suppressed feature after the bar reports the bar, not suppression.
+    s.apply(ModelOp::SetSuppressed {
+        element: el,
+        feature: b,
+        suppressed: true,
+    });
+    assert_eq!(regen(&s).status(b), Some(&FeatureStatus::RolledBack));
+    s.apply(ModelOp::SetRollback {
+        element: el,
+        at: InsertAt::End,
+    });
+    let r = regen(&s);
+    assert_eq!(r.status(b), Some(&FeatureStatus::Suppressed));
+    assert_eq!(r.bodies.len(), 1);
+}

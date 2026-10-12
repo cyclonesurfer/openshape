@@ -30,6 +30,8 @@ pub enum FeatureStatus {
     Warning(String),
     /// Skipped because it is suppressed.
     Suppressed,
+    /// Not regenerated because it is after the rollback bar.
+    RolledBack,
     /// Failed; the message is shown in the feature tree.
     Failed(String),
 }
@@ -389,14 +391,20 @@ pub fn evaluate_feature<K: Kernel>(
     }
 }
 
-/// Regenerates a Part Studio from scratch.
+/// Regenerates a Part Studio from scratch, up to its rollback bar; the
+/// features after the bar are reported as [`FeatureStatus::RolledBack`].
 pub fn regenerate<K: Kernel>(kernel: &K, studio: &PartStudio) -> StudioResult<K::Body> {
     let mut out = StudioResult {
         statuses: Vec::with_capacity(studio.features.len()),
         bodies: Vec::new(),
         sketches: Vec::new(),
     };
-    for f in &studio.features {
+    let bar = studio.rollback_index();
+    for (i, f) in studio.features.iter().enumerate() {
+        if i >= bar {
+            out.statuses.push((f.id, FeatureStatus::RolledBack));
+            continue;
+        }
         if f.suppressed {
             out.statuses.push((f.id, FeatureStatus::Suppressed));
             continue;

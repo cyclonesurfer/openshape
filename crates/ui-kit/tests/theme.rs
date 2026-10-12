@@ -158,3 +158,51 @@ fn proportional_text_has_the_constraint_glyphs() {
         );
     }
 }
+
+/// WCAG 2.x relative luminance of an sRGB colour.
+fn luminance(c: Color32) -> f64 {
+    let lin = |v: u8| {
+        let v = f64::from(v) / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+}
+
+/// WCAG 2.x contrast ratio.
+fn contrast(a: Color32, b: Color32) -> f64 {
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+#[test]
+fn the_palette_keeps_its_contrast_ratios() {
+    // The criteria ADR 0012 chose the palette by.
+    let t = Theme::light();
+    let at_least = |name: &str, a: Color32, b: Color32, min: f64| {
+        let r = contrast(a, b);
+        assert!(r >= min, "{name}: {r:.2} < {min}");
+    };
+    at_least("text on panel", t.text, t.panel, 7.0);
+    at_least("text on chrome", t.text, t.chrome, 7.0);
+    at_least("text on selected row", t.text, t.accent_soft, 7.0);
+    at_least("muted text on panel", t.text_muted, t.panel, 4.5);
+    at_least("muted text on chrome", t.text_muted, t.chrome, 4.5);
+    at_least("text on accent", t.on_accent, t.accent, 4.5);
+    at_least("accent text on panel", t.accent, t.panel, 4.5);
+    at_least("error text on panel", t.danger, t.panel, 4.5);
+    at_least("warning icon on panel", t.warning, t.panel, 3.0);
+    at_least("success icon on panel", t.success, t.panel, 3.0);
+    at_least("accent icon on selected row", t.accent, t.accent_soft, 3.0);
+    let k = &t.sketch;
+    for bg in [t.viewport_top, t.viewport_bottom] {
+        at_least("constrained sketch", k.constrained, bg, 7.0);
+        at_least("free sketch", k.free, bg, 3.0);
+        at_least("conflicting sketch", k.conflict, bg, 3.0);
+        at_least("inactive sketch", k.inactive, bg, 3.0);
+    }
+    at_least("dimension on its label", k.dimension, t.panel, 7.0);
+}

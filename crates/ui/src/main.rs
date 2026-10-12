@@ -4,12 +4,13 @@
 //! openshape                         # windowed app (Wayland or X11)
 //! openshape <file.osdoc>            # open a document
 //! openshape --headless-demo <dir>   # offscreen end-to-end demo, writes PNGs
+//! openshape --screenshots <dir>     # the application shell offscreen, writes PNGs
 //! openshape --bench <dir> [frames]  # offscreen frame-time benchmark
 //! ```
 
 use std::path::PathBuf;
 
-use openshape_app::{app::OpenShapeApp, demo, Model};
+use openshape_app::{app::OpenShapeApp, demo, screenshots, Model};
 
 fn main() -> std::process::ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
@@ -33,6 +34,21 @@ fn main() -> std::process::ExitCode {
             }
             Err(e) => {
                 eprintln!("headless demo failed: {e}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+    if args.first().map(String::as_str) == Some("--screenshots") {
+        let out = PathBuf::from(args.get(1).map(String::as_str).unwrap_or("screenshots"));
+        return match screenshots::run(&out) {
+            Ok(paths) => {
+                for p in paths {
+                    println!("wrote {}", p.display());
+                }
+                std::process::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("screenshots failed: {e}");
                 std::process::ExitCode::FAILURE
             }
         };

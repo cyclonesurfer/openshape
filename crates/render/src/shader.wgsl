@@ -147,19 +147,30 @@ fn edge_clip(position: vec3<f32>) -> vec4<f32> {
     return g.proj * vec4<f32>(biased, 1.0);
 }
 
+struct EdgeOut {
+    @builtin(position) position: vec4<f32>,
+    // Linear RGB and alpha of this segment.
+    @location(0) @interpolate(flat) color: vec4<f32>,
+};
+
 @vertex
 fn vs_edge(
     @builtin(vertex_index) vi: u32,
     @location(0) a: vec3<f32>,
     @location(1) b: vec3<f32>,
-) -> @builtin(position) vec4<f32> {
+    // A negative alpha selects the scene's edge colour.
+    @location(2) color: vec4<f32>,
+) -> EdgeOut {
+    var out: EdgeOut;
+    out.color = select(color, g.edge_color, color.a < 0.0);
     var ca = edge_clip(a);
     var cb = edge_clip(b);
     // Keep both ends in front of the eye before dividing by w; the hardware
     // near-plane clip handles the rest.
     let min_w = 1e-6;
     if ca.w < min_w && cb.w < min_w {
-        return vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        return out;
     }
     if ca.w < min_w {
         ca = mix(ca, cb, (min_w - ca.w) / (cb.w - ca.w));
@@ -183,10 +194,11 @@ fn vs_edge(
     let along = select(-1.0, 1.0, at_b);
     let offset_px = normal * (side * half_width) + dir * (along * half_width);
     let c = select(ca, cb, at_b);
-    return vec4<f32>(c.xy + offset_px * 2.0 / size * c.w, c.z, c.w);
+    out.position = vec4<f32>(c.xy + offset_px * 2.0 / size * c.w, c.z, c.w);
+    return out;
 }
 
 @fragment
-fn fs_edge() -> @location(0) vec4<f32> {
-    return vec4<f32>(encode_output(g.edge_color.rgb), g.edge_color.a);
+fn fs_edge(in: EdgeOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(encode_output(in.color.rgb), in.color.a);
 }
