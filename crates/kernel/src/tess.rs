@@ -335,32 +335,144 @@ pub(crate) fn same_surface(a: &Face, b: &Face) -> bool {
     }
 }
 
-/// Tessellates every face and edge of `brep`.
-pub(crate) fn tessellate(brep: &Brep, opts: &TessellationOptions) -> Result<BrepTess, KernelError> {
+/// Rounds of boundary refinement before giving up (design note 0002 §5).
+const REFINE_ROUNDS: usize = 60;
+
+/// Tessellates every face and edge of `brep`. Edges are discretized to the
+/// chord and angle tolerances, then refined where a face's boundary needs
+/// it (design note 0002 §5); no segment shorter than `tol` is split.
+pub(crate) fn tessellate(
+    brep: &Brep,
+    opts: &TessellationOptions,
+    tol: &Tolerance,
+) -> Result<BrepTess, KernelError> {
     if !(opts.chord_tolerance > 0.0 && opts.max_angle > 0.0) {
         return Err(KernelError::InvalidInput(
             "tessellation tolerances must be positive".into(),
         ));
     }
-    let edges: Vec<Vec<DVec3>> = brep
+    let mut params: Vec<Vec<f64>> = brep
         .edges
         .iter()
         .map(|e| {
-            let ts = e
-                .curve
-                .discretize(e.t0, e.t1, opts.chord_tolerance, opts.max_angle);
-            let mut pts: Vec<DVec3> = ts.iter().map(|&t| e.curve.point(t)).collect();
-            // Pin the ends to the vertices so loops close exactly.
-            let n = pts.len();
-            pts[0] = brep.vertex(e.v0).point;
-            pts[n - 1] = brep.vertex(e.v1).point;
-            pts
+            e.curve
+                .discretize(e.t0, e.t1, opts.chord_tolerance, opts.max_angle)
         })
         .collect();
+    let points = |params: &[Vec<f64>]| -> Vec<Vec<DVec3>> {
+        brep.edges
+            .iter()
+            .zip(params)
+            .map(|(e, ts)| {
+                let mut pts: Vec<DVec3> = ts.iter().map(|&t| e.curve.point(t)).collect();
+                // Pin the ends to the vertices so loops close exactly.
+                let n = pts.len();
+                pts[0] = brep.vertex(e.v0).point;
+                pts[n - 1] = brep.vertex(e.v1).point;
+                pts
+            })
+            .collect()
+    };
+    let cusps = find_cusps(brep, opts.max_angle);
+    let mut edges = points(&params);
+    if match_cusps(brep, &cusps, &mut params, &edges, tol.linear).contains(&true) {
+        edges = points(&params);
+    }
+    let mut loops: Vec<Vec<Vec<Sample>>> = brep.faces.iter().map(|f| loops_uv(f, &edges)).collect();
+    // Refinement is local; a boundary growing past this many samples is
+    // chasing something bisection cannot resolve (the triangulation then
+    // reports it).
+    let budget = 8 * params.iter().map(Vec::len).sum::<usize>() + 100_000;
+    for _ in 0..REFINE_ROUNDS {
+        if params.iter().map(Vec::len).sum::<usize>() > budget {
+            break;
+        }
+        let runs: Vec<CuspRuns> = cusps
+            .iter()
+            .map(|c| cusp_runs(brep, c, &params, &edges, tol.linear))
+            .collect();
+        let mut split: Vec<Vec<usize>> = vec![Vec::new(); brep.edges.len()];
+        for (fi, (face, l)) in brep.faces.iter().zip(&loops).enumerate() {
+            let matched: Vec<&CuspRuns> = cusps
+                .iter()
+                .zip(&runs)
+                .filter(|(c, _)| c.face == fi)
+                .map(|(_, r)| r)
+                .collect();
+            for (e, i) in boundary_conflicts(brep, face, l, &params, &matched) {
+                split[e].push(i);
+            }
+        }
+        let mut changed = vec![false; brep.edges.len()];
+        for (e, segs) in split.iter_mut().enumerate() {
+            if segs.is_empty() {
+                continue;
+            }
+            segs.sort_unstable();
+            segs.dedup();
+            let ts = &params[e];
+            let pts = &edges[e];
+            let curve = &brep.edges[e].curve;
+            let mut out: Vec<f64> = Vec::with_capacity(ts.len() + segs.len());
+            let mut next = segs.iter().peekable();
+            for i in 0..ts.len() {
+                out.push(ts[i]);
+                if next.peek() == Some(&&i) {
+                    next.next();
+                    // In a cusp's matched run, halve the distance along its
+                    // direction instead, so that both sides split at the
+                    // same abscissa and stay matched.
+                    let cusp = cusps
+                        .iter()
+                        .zip(&runs)
+                        .find_map(|(c, r)| r.has((e, i)).then_some(c));
+                    let mid = cusp
+                        .and_then(|c| {
+                            let d = 0.5 * (pts[i] - c.v + pts[i + 1] - c.v).dot(c.dir);
+                            solve_monotone(
+                                |t| (curve.point(t) - c.v).dot(c.dir) - d,
+                                ts[i],
+                                ts[i + 1],
+                            )
+                        })
+                        .unwrap_or(0.5 * (ts[i] + ts[i + 1]));
+                    if (pts[i + 1] - pts[i]).length() > tol.linear && mid > ts[i] && mid < ts[i + 1]
+                    {
+                        out.push(mid);
+                        changed[e] = true;
+                    }
+                }
+            }
+            params[e] = out;
+        }
+        if changed.contains(&true) {
+            edges = points(&params);
+            // Bisection near a cusp breaks its matching; restore it.
+            let rematched = match_cusps(brep, &cusps, &mut params, &edges, tol.linear);
+            if rematched.contains(&true) {
+                edges = points(&params);
+                for (c, r) in changed.iter_mut().zip(rematched) {
+                    *c |= r;
+                }
+            }
+        } else {
+            break;
+        }
+        for (face, l) in brep.faces.iter().zip(&mut loops) {
+            let touched = face
+                .loops
+                .iter()
+                .flat_map(|lp| &lp.coedges)
+                .any(|c| changed[c.edge.idx()]);
+            if touched {
+                *l = loops_uv(face, &edges);
+            }
+        }
+    }
     let mut faces = Vec::with_capacity(brep.faces.len());
-    for (i, face) in brep.faces.iter().enumerate() {
+    for (i, (face, l)) in brep.faces.iter().zip(loops).enumerate() {
         faces.push(
-            tessellate_face(brep, face, &edges, opts)
+            tessellate_face(face, l, opts)
                 .map_err(|e| KernelError::Tessellation(format!("face {i}: {e}")))?,
         );
     }
@@ -371,10 +483,535 @@ pub(crate) fn tessellate(brep: &Brep, opts: &TessellationOptions) -> Result<Brep
     })
 }
 
+/// A vertex of a face's loop at which the two boundary curves leave in
+/// directions less than the angle tolerance apart: a cusp (design note
+/// 0002 §5). Near it the curves run side by side, closer than any
+/// deviation bound, so their samples are matched instead.
+struct Cusp {
+    /// The face.
+    face: usize,
+    /// The vertex.
+    v: DVec3,
+    /// Unit direction halfway between the two curves' directions there.
+    dir: DVec3,
+    /// The two edges leaving the vertex, each with `true` if the vertex is
+    /// at the edge's start.
+    sides: [(usize, bool); 2],
+}
+
+/// The cusps of every face of `brep`.
+fn find_cusps(brep: &Brep, max_angle: f64) -> Vec<Cusp> {
+    let mut out = Vec::new();
+    for (fi, f) in brep.faces.iter().enumerate() {
+        for lp in &f.loops {
+            let n = lp.coedges.len();
+            for k in 0..n {
+                let prev = &lp.coedges[(k + n - 1) % n];
+                let next = &lp.coedges[k];
+                let (ep, en) = (brep.edge(prev.edge), brep.edge(next.edge));
+                // Each side as (edge, vertex at its start), and the
+                // direction in which its curve leaves the vertex.
+                let leave = |e: &crate::topo::Edge, at_start: bool| {
+                    let d = if at_start {
+                        e.curve.deriv(e.t0)
+                    } else {
+                        -e.curve.deriv(e.t1)
+                    };
+                    d.normalize_or_zero()
+                };
+                let sp = (prev.edge.idx(), !prev.forward);
+                let sn = (next.edge.idx(), next.forward);
+                let (a, b) = (leave(ep, sp.1), leave(en, sn.1));
+                if a == DVec3::ZERO || b == DVec3::ZERO || a.angle_between(b) > max_angle {
+                    continue;
+                }
+                let v = if next.forward { en.v0 } else { en.v1 };
+                out.push(Cusp {
+                    face: fi,
+                    v: brep.vertex(v).point,
+                    dir: (a + b).normalize(),
+                    sides: [sp, sn],
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The samples of one side of a cusp over which its curve runs away from
+/// the vertex as a graph over the cusp's direction: (sample index, distance
+/// along the direction), outward, the vertex itself excluded.
+fn cusp_run(
+    brep: &Brep,
+    c: &Cusp,
+    (e, at_start): (usize, bool),
+    params: &[f64],
+    pts: &[DVec3],
+) -> Vec<(usize, f64)> {
+    let curve = &brep.edges[e].curve;
+    let n = pts.len();
+    let sign = if at_start { 1.0 } else { -1.0 };
+    let mut out = Vec::new();
+    let mut last = 0.0;
+    for k in 1..n {
+        let j = if at_start { k } else { n - 1 - k };
+        let d = (pts[j] - c.v).dot(c.dir);
+        // Each segment turns by less than the angle tolerance, so tangents
+        // within 60° of the direction at both ends keep it monotonic.
+        let tangent = (curve.deriv(params[j]) * sign).normalize_or_zero();
+        if d <= last || tangent.dot(c.dir) < 0.5 {
+            break;
+        }
+        out.push((j, d));
+        last = d;
+    }
+    out
+}
+
+/// The segments of each side of a cusp within its matched run: (edge,
+/// first segment, end segment), segment `i` running from sample `i` to
+/// `i + 1`.
+struct CuspRuns {
+    sides: [(usize, usize, usize); 2],
+}
+
+fn on_side((e, i): (usize, usize), (edge, lo, hi): (usize, usize, usize)) -> bool {
+    e == edge && i >= lo && i < hi
+}
+
+impl CuspRuns {
+    /// True if edge segments `x` and `y` lie on opposite sides of the cusp,
+    /// both within its matched run.
+    fn pairs(&self, x: (usize, usize), y: (usize, usize)) -> bool {
+        let [a, b] = self.sides;
+        (on_side(x, a) && on_side(y, b)) || (on_side(x, b) && on_side(y, a))
+    }
+
+    /// True if edge segment `x` lies within the matched run of either side.
+    fn has(&self, x: (usize, usize)) -> bool {
+        self.sides.iter().any(|&s| on_side(x, s))
+    }
+}
+
+/// The matched runs of a cusp: each side's samples out to where the
+/// shorter of the two runs ends.
+fn cusp_runs(brep: &Brep, c: &Cusp, params: &[Vec<f64>], pts: &[Vec<DVec3>], tol: f64) -> CuspRuns {
+    let run = |s: (usize, bool)| cusp_run(brep, c, s, &params[s.0], &pts[s.0]);
+    let (ra, rb) = (run(c.sides[0]), run(c.sides[1]));
+    let dmax = match (ra.last(), rb.last()) {
+        (Some(a), Some(b)) => a.1.min(b.1) + tol,
+        _ => 0.0,
+    };
+    let side = |(e, at_start): (usize, bool), r: &[(usize, f64)]| {
+        let k = r.iter().take_while(|(_, d)| *d <= dmax).count();
+        let n = pts[e].len();
+        if at_start {
+            (e, 0, k)
+        } else {
+            (e, n - 1 - k, n - 1)
+        }
+    };
+    CuspRuns {
+        sides: [side(c.sides[0], &ra), side(c.sides[1], &rb)],
+    }
+}
+
+/// Gives the two sides of every cusp samples at the same distances along
+/// its direction, out to where the shorter run ends (design note 0002 §5):
+/// two curves that are graphs over one line, sampled at the same abscissae,
+/// have polygons that never cross, however close the curves run. A sample
+/// closer than `tol` to an existing one is not added. Returns, per edge,
+/// whether its samples changed.
+fn match_cusps(
+    brep: &Brep,
+    cusps: &[Cusp],
+    params: &mut [Vec<f64>],
+    pts: &[Vec<DVec3>],
+    tol: f64,
+) -> Vec<bool> {
+    let mut add: Vec<Vec<f64>> = vec![Vec::new(); params.len()];
+    for c in cusps {
+        let runs = c
+            .sides
+            .map(|s| cusp_run(brep, c, s, &params[s.0], &pts[s.0]));
+        let (Some(la), Some(lb)) = (runs[0].last(), runs[1].last()) else {
+            continue;
+        };
+        let dmax = la.1.min(lb.1) + tol;
+        for (from, to) in [(0, 1), (1, 0)] {
+            let (e, at_start) = c.sides[to];
+            let curve = &brep.edges[e].curve;
+            let ts = &params[e];
+            let vertex = if at_start { 0 } else { ts.len() - 1 };
+            // The target run with the vertex in front, at distance zero.
+            let mut target = vec![(vertex, 0.0)];
+            target.extend(runs[to].iter().copied());
+            for &(_, d) in runs[from].iter().take_while(|(_, d)| *d <= dmax) {
+                let k = target.partition_point(|(_, x)| *x < d);
+                if k == 0 || k == target.len() {
+                    continue;
+                }
+                let ((j0, d0), (j1, d1)) = (target[k - 1], target[k]);
+                if d - d0 <= tol || d1 - d <= tol {
+                    continue;
+                }
+                let f = |t: f64| (curve.point(t) - c.v).dot(c.dir) - d;
+                if let Some(t) = solve_monotone(f, ts[j0], ts[j1]) {
+                    add[e].push(t);
+                }
+            }
+        }
+    }
+    let mut changed = vec![false; params.len()];
+    for (e, mut extra) in add.into_iter().enumerate() {
+        if extra.is_empty() {
+            continue;
+        }
+        extra.sort_by(f64::total_cmp);
+        let curve = &brep.edges[e].curve;
+        let mut out: Vec<f64> = Vec::with_capacity(params[e].len() + extra.len());
+        let old = &params[e];
+        let mut next = extra.into_iter().peekable();
+        for (i, &t) in old.iter().enumerate() {
+            if i > 0 {
+                while let Some(&x) = next.peek() {
+                    if x >= t {
+                        break;
+                    }
+                    next.next();
+                    let prev = *out.last().unwrap_or(&old[0]);
+                    let p = curve.point(x);
+                    if x > prev
+                        && (p - curve.point(prev)).length() > tol
+                        && (curve.point(t) - p).length() > tol
+                    {
+                        out.push(x);
+                        changed[e] = true;
+                    }
+                }
+            }
+            out.push(t);
+        }
+        params[e] = out;
+    }
+    changed
+}
+
+/// The root of `f` between `a` and `b` (in either order), if `f` changes
+/// sign there: safeguarded regula falsi (Illinois), to rounding.
+fn solve_monotone(f: impl Fn(f64) -> f64, a: f64, b: f64) -> Option<f64> {
+    let (mut a, mut b) = (a.min(b), a.max(b));
+    let (mut fa, mut fb) = (f(a), f(b));
+    if fa == 0.0 {
+        return Some(a);
+    }
+    if fb == 0.0 {
+        return Some(b);
+    }
+    if fa.signum() == fb.signum() {
+        return None;
+    }
+    let mut side = 0;
+    for _ in 0..200 {
+        let mut x = (a * fb - b * fa) / (fb - fa);
+        if !(x > a && x < b) {
+            x = 0.5 * (a + b);
+        }
+        let fx = f(x);
+        if fx == 0.0 || b - a <= 4.0 * f64::EPSILON * a.abs().max(b.abs()) {
+            return Some(x);
+        }
+        if fx.signum() == fa.signum() {
+            a = x;
+            fa = fx;
+            if side == -1 {
+                fb *= 0.5;
+            }
+            side = -1;
+        } else {
+            b = x;
+            fb = fx;
+            if side == 1 {
+                fa *= 0.5;
+            }
+            side = 1;
+        }
+    }
+    Some(0.5 * (a + b))
+}
+
+/// Edge segments (edge, index of the segment's first point) to bisect so
+/// that `face`'s boundary polygon has the topology of its exact boundary
+/// (design note 0002 §5), in the face's scaled parameter space:
+/// * every segment of a loop with fewer than three samples;
+/// * of two segments that cross or touch other than at a shared end, or
+///   whose curves may come closer than their chords show (the chords are
+///   within the sum of the curves' deviations from them), the one that
+///   deviates more (both when within 10%), or failing that the longer;
+/// * of two segments sharing an end, one whose curve may pass the other's
+///   far end (the far end is within its deviation of its chord).
+///
+/// A segment's deviation is 1.25 times the largest distance from its chord
+/// of the curve's points at a quarter, half and three quarters of the
+/// segment, mapped into the parameter space. Two segments on the two sides
+/// of a cusp, within its matched runs (`cusps`), conflict only if they
+/// cross or touch: the curves there come closer than any deviation bound,
+/// and matching keeps their polygons apart. Nor do deviations alone make
+/// two segments of one loop conflict across a monotone stretch
+/// ([`monotone_between`]).
+fn boundary_conflicts(
+    brep: &Brep,
+    face: &Face,
+    loops: &[Vec<Sample>],
+    params: &[Vec<f64>],
+    cusps: &[&CuspRuns],
+) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for l in loops {
+        if l.len() < 3 {
+            out.extend(l.iter().filter_map(|smp| smp.seg));
+        }
+    }
+    if !out.is_empty() {
+        return out;
+    }
+    let s = &face.surface;
+    let Ok(scale) = param_scale(s, loops) else {
+        return out;
+    };
+    let is_planar = matches!(s, Surface::Plane(_));
+    struct BSeg {
+        a: DVec2,
+        b: DVec2,
+        lo: DVec2,
+        hi: DVec2,
+        seg: Option<(usize, usize)>,
+        chord: f64,
+        dev: f64,
+        lp: usize,
+        idx: usize,
+        len: usize,
+    }
+    let mut segs: Vec<BSeg> = Vec::new();
+    for (li, l) in loops.iter().enumerate() {
+        for k in 0..l.len() {
+            let (p, q) = (l[k], l[(k + 1) % l.len()]);
+            let (a, b) = (p.uv * scale, q.uv * scale);
+            let dev = match p.seg {
+                Some((e, i)) => {
+                    let (t0, t1) = (params[e][i], params[e][i + 1]);
+                    let c = &brep.edges[e].curve;
+                    let mut d = 0.0f64;
+                    for f in [0.25, 0.5, 0.75] {
+                        let x = c.point(t0 + (t1 - t0) * f);
+                        let w = if is_planar {
+                            let (u, v) = s.project(x);
+                            DVec2::new(u, v)
+                        } else {
+                            // From the chord's point, so the parameter
+                            // stays on the segment's side of any closure
+                            // point or seam.
+                            project_near(s, x, p.uv.lerp(q.uv, f))
+                        };
+                        d = d.max(point_segment(w * scale, a, b));
+                    }
+                    // A smooth segment turning less than the angle
+                    // tolerance strays from its chord by a fraction of its
+                    // length; more is a projection artefact.
+                    (1.25 * d).min(0.5 * (b - a).length())
+                }
+                None => 0.0,
+            };
+            segs.push(BSeg {
+                a,
+                b,
+                lo: a.min(b) - DVec2::splat(dev),
+                hi: a.max(b) + DVec2::splat(dev),
+                seg: p.seg,
+                chord: (q.p - p.p).length(),
+                dev,
+                lp: li,
+                idx: k,
+                len: l.len(),
+            });
+        }
+    }
+    // Of a conflicting pair, the segment(s) to bisect.
+    let pick = |x: &BSeg, y: &BSeg, out: &mut Vec<(usize, usize)>| {
+        let (kx, ky) = if x.dev + y.dev > 0.0 {
+            (x.dev, y.dev)
+        } else {
+            (x.chord, y.chord)
+        };
+        if let Some(sx) = x.seg.filter(|_| kx >= 0.9 * ky || y.seg.is_none()) {
+            out.push(sx);
+        }
+        if let Some(sy) = y.seg.filter(|_| ky >= 0.9 * kx || x.seg.is_none()) {
+            out.push(sy);
+        }
+    };
+    segs.sort_by(|x, y| x.lo.x.total_cmp(&y.lo.x));
+    for i in 0..segs.len() {
+        let x = &segs[i];
+        for y in &segs[i + 1..] {
+            if y.lo.x > x.hi.x {
+                break;
+            }
+            if y.lo.y > x.hi.y || x.lo.y > y.hi.y {
+                continue;
+            }
+            let consecutive =
+                x.lp == y.lp && ((x.idx + 1) % x.len == y.idx || (y.idx + 1) % y.len == x.idx);
+            let shared = [(x.a, y.b), (x.a, y.a), (x.b, y.a), (x.b, y.b)]
+                .into_iter()
+                .find(|(p, q)| p == q);
+            let matched = match (x.seg, y.seg) {
+                (Some(sx), Some(sy)) => cusps.iter().any(|c| c.pairs(sx, sy)),
+                _ => false,
+            };
+            if matched {
+                if !(consecutive || shared.is_some()) && segments_touch(x.a, x.b, y.a, y.b) {
+                    pick(x, y, &mut out);
+                }
+                continue;
+            }
+            if consecutive || shared.is_some() {
+                // The far ends of each, against the other's deviation.
+                let far = |z: &BSeg, w: &BSeg| if z.a == w.a || z.a == w.b { z.b } else { z.a };
+                if let Some(sx) = x.seg {
+                    if x.dev > 0.0 && point_segment(far(y, x), x.a, x.b) <= x.dev {
+                        out.push(sx);
+                    }
+                }
+                if let Some(sy) = y.seg {
+                    if y.dev > 0.0 && point_segment(far(x, y), y.a, y.b) <= y.dev {
+                        out.push(sy);
+                    }
+                }
+                continue;
+            }
+            if segments_touch(x.a, x.b, y.a, y.b)
+                || (segment_distance(x.a, x.b, y.a, y.b) <= x.dev + y.dev
+                    && !(x.lp == y.lp && monotone_between(&loops[x.lp], scale, x.idx, y.idx)))
+            {
+                pick(x, y, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// Segments of boundary between two segments of one loop beyond which
+/// [`monotone_between`] gives up.
+const MONOTONE_SPAN: usize = 32;
+
+/// True if the boundary polygon `l` (scaled by `scale`) runs from segment
+/// `i` to segment `j` (the shorter way round, both included, at most
+/// [`MONOTONE_SPAN`] segments) within 45° of one direction. Each segment's
+/// curve turns by less than the angle tolerance, so the curve along that
+/// stretch is a graph over the direction too: two segments of it cannot
+/// meet, however close their deviation bands come where short segments
+/// lie between them (design note 0002 §5).
+fn monotone_between(l: &[Sample], scale: DVec2, i: usize, j: usize) -> bool {
+    let n = l.len();
+    let (fwd, back) = ((j + n - i) % n, (i + n - j) % n);
+    let (start, span) = if fwd <= back { (i, fwd) } else { (j, back) };
+    if span > MONOTONE_SPAN {
+        return false;
+    }
+    let at = |k: usize| l[k % n].uv * scale;
+    let dir = at(start + span + 1) - at(start);
+    (start..=start + span).all(|k| {
+        let d = at(k + 1) - at(k);
+        d.dot(dir) >= std::f64::consts::FRAC_1_SQRT_2 * d.length() * dir.length()
+    })
+}
+
+/// The parameters of the point of `s` nearest to `p`, by Gauss–Newton
+/// steps from `guess` (enough for points near the guess's surface point).
+fn project_near(s: &Surface, p: DVec3, guess: DVec2) -> DVec2 {
+    let mut uv = guess;
+    for _ in 0..6 {
+        let (su, sv) = s.derivs(uv.x, uv.y);
+        let r = p - s.point(uv.x, uv.y);
+        let (a, b, c) = (su.dot(su), su.dot(sv), sv.dot(sv));
+        let det = a * c - b * b;
+        let (r0, r1) = (su.dot(r), sv.dot(r));
+        let step = if det.abs() > 1e-14 * a.max(c).max(1e-300).powi(2) {
+            DVec2::new((c * r0 - b * r1) / det, (a * r1 - b * r0) / det)
+        } else if a < c {
+            DVec2::new(0.0, r1 / c.max(1e-300))
+        } else {
+            DVec2::new(r0 / a.max(1e-300), 0.0)
+        };
+        if !step.is_finite() {
+            break;
+        }
+        uv += step;
+        if step.length() <= 1e-12 * (1.0 + uv.length()) {
+            break;
+        }
+    }
+    uv
+}
+
+/// Distance from `p` to the segment `ab`.
+fn point_segment(p: DVec2, a: DVec2, b: DVec2) -> f64 {
+    let ab = b - a;
+    let l2 = ab.length_squared();
+    let s = if l2 > 0.0 {
+        ((p - a).dot(ab) / l2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (a + ab * s - p).length()
+}
+
+/// Distance between two segments that do not cross.
+fn segment_distance(a: DVec2, b: DVec2, c: DVec2, d: DVec2) -> f64 {
+    point_segment(a, c, d)
+        .min(point_segment(b, c, d))
+        .min(point_segment(c, a, b))
+        .min(point_segment(d, a, b))
+}
+
+fn orient(a: DVec2, b: DVec2, c: DVec2) -> f64 {
+    robust::orient2d(
+        robust::Coord { x: a.x, y: a.y },
+        robust::Coord { x: b.x, y: b.y },
+        robust::Coord { x: c.x, y: c.y },
+    )
+}
+
+/// True if the closed segments `ab` and `cd` cross or touch (exact
+/// orientation tests, Shewchuk).
+fn segments_touch(a: DVec2, b: DVec2, c: DVec2, d: DVec2) -> bool {
+    let o1 = orient(a, b, c);
+    let o2 = orient(a, b, d);
+    let o3 = orient(c, d, a);
+    let o4 = orient(c, d, b);
+    if ((o1 > 0.0 && o2 < 0.0) || (o1 < 0.0 && o2 > 0.0))
+        && ((o3 > 0.0 && o4 < 0.0) || (o3 < 0.0 && o4 > 0.0))
+    {
+        return true;
+    }
+    let on = |p: DVec2, q: DVec2, r: DVec2| {
+        r.x >= p.x.min(q.x) && r.x <= p.x.max(q.x) && r.y >= p.y.min(q.y) && r.y <= p.y.max(q.y)
+    };
+    (o1 == 0.0 && on(a, b, c))
+        || (o2 == 0.0 && on(a, b, d))
+        || (o3 == 0.0 && on(c, d, a))
+        || (o4 == 0.0 && on(c, d, b))
+}
+
 #[derive(Clone, Copy)]
 struct Sample {
     uv: DVec2,
     p: DVec3,
+    /// The edge segment (edge, index of its first point) from this sample
+    /// to the next along the loop; `None` between the two parameter-space
+    /// points of a split singular point.
+    seg: Option<(usize, usize)>,
 }
 
 fn singular_dir(s: &Surface, uv: DVec2) -> Option<bool> {
@@ -448,34 +1085,32 @@ fn unwrap_closure(s: &Surface, samples: &mut [Sample]) {
     }
 }
 
-fn face_loops_uv(
-    brep: &Brep,
-    face: &Face,
-    edges: &[Vec<DVec3>],
-) -> Result<Vec<Vec<Sample>>, String> {
+/// The boundary loops of `face` in its parameter space, each sample tagged
+/// with the edge segment that starts at it.
+fn loops_uv(face: &Face, edges: &[Vec<DVec3>]) -> Vec<Vec<Sample>> {
     let s = &face.surface;
     let mut out = Vec::new();
     for lp in &face.loops {
-        let mut pts: Vec<DVec3> = Vec::new();
+        let mut pts: Vec<(DVec3, (usize, usize))> = Vec::new();
         for c in &lp.coedges {
-            let ep = &edges[c.edge.idx()];
+            let e = c.edge.idx();
+            let ep = &edges[e];
+            let n = ep.len();
             if c.forward {
-                pts.extend_from_slice(&ep[..ep.len() - 1]);
+                pts.extend((0..n - 1).map(|i| (ep[i], (e, i))));
             } else {
-                pts.extend(ep.iter().rev().take(ep.len() - 1));
+                // Walking back from point i, the segment is [i − 1, i].
+                pts.extend((1..n).rev().map(|i| (ep[i], (e, i - 1))));
             }
-        }
-        let _ = brep;
-        if pts.len() < 3 {
-            return Err("loop has fewer than three boundary samples".into());
         }
         let mut raw: Vec<Sample> = pts
             .iter()
-            .map(|&p| {
+            .map(|&(p, seg)| {
                 let (u, v) = s.project(p);
                 Sample {
                     uv: DVec2::new(u, v),
                     p,
+                    seg: Some(seg),
                 }
             })
             .collect();
@@ -495,16 +1130,48 @@ fn face_loops_uv(
                     } else {
                         (DVec2::new(cur.uv.x, prev.y), DVec2::new(cur.uv.x, next.y))
                     };
-                    fixed.push(Sample { uv: a, p: cur.p });
                     if (a - b).length() > 1e-12 {
-                        fixed.push(Sample { uv: b, p: cur.p });
+                        fixed.push(Sample {
+                            uv: a,
+                            p: cur.p,
+                            seg: None,
+                        });
+                        fixed.push(Sample { uv: b, ..cur });
+                    } else {
+                        fixed.push(Sample { uv: a, ..cur });
                     }
                 }
             }
         }
         out.push(fixed);
     }
-    Ok(out)
+    out
+}
+
+/// Parameter-space scaling for a roughly isometric triangulation: the
+/// largest `|S_u|` and `|S_v|` over a grid on the loops' bounding box.
+fn param_scale(s: &Surface, loops: &[Vec<Sample>]) -> Result<DVec2, String> {
+    let (mut lo, mut hi) = (DVec2::splat(f64::MAX), DVec2::splat(f64::MIN));
+    for l in loops {
+        for smp in l {
+            lo = lo.min(smp.uv);
+            hi = hi.max(smp.uv);
+        }
+    }
+    let mut su = 0.0f64;
+    let mut sv = 0.0f64;
+    for fu in [0.25, 0.5, 0.75] {
+        for fv in [0.25, 0.5, 0.75] {
+            let uv = lo + (hi - lo) * DVec2::new(fu, fv);
+            let (a, b) = s.derivs(uv.x, uv.y);
+            su = su.max(a.length());
+            sv = sv.max(b.length());
+        }
+    }
+    if !(su > 0.0 && sv > 0.0 && su.is_finite() && sv.is_finite()) {
+        return Err("degenerate surface parameterization".into());
+    }
+    Ok(DVec2::new(su, sv))
 }
 
 /// Triangles inside the constrained boundary, found by flood fill from the
@@ -548,15 +1215,14 @@ fn inside_triangles(cdt: &ConstrainedDelaunayTriangulation<Point2<f64>>) -> Vec<
 }
 
 fn tessellate_face(
-    brep: &Brep,
     face: &Face,
-    edges: &[Vec<DVec3>],
+    loops: Vec<Vec<Sample>>,
     opts: &TessellationOptions,
 ) -> Result<FaceTess, String> {
     let s = &face.surface;
-    let loops = face_loops_uv(brep, face, edges)?;
-
-    // Parameter-space scaling for a roughly isometric triangulation.
+    if loops.iter().any(|l| l.len() < 3) {
+        return Err("loop has fewer than three boundary samples".into());
+    }
     let (mut lo, mut hi) = (DVec2::splat(f64::MAX), DVec2::splat(f64::MIN));
     for l in &loops {
         for smp in l {
@@ -564,20 +1230,7 @@ fn tessellate_face(
             hi = hi.max(smp.uv);
         }
     }
-    let mut su = 0.0f64;
-    let mut sv = 0.0f64;
-    for fu in [0.25, 0.5, 0.75] {
-        for fv in [0.25, 0.5, 0.75] {
-            let uv = lo + (hi - lo) * DVec2::new(fu, fv);
-            let (a, b) = s.derivs(uv.x, uv.y);
-            su = su.max(a.length());
-            sv = sv.max(b.length());
-        }
-    }
-    if !(su > 0.0 && sv > 0.0 && su.is_finite() && sv.is_finite()) {
-        return Err("degenerate surface parameterization".into());
-    }
-    let scale = DVec2::new(su, sv);
+    let scale = param_scale(s, &loops)?;
 
     let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> =
         ConstrainedDelaunayTriangulation::new();

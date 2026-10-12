@@ -971,3 +971,142 @@ fn a_smooth_joint_between_revolved_spline_pieces_is_no_crease() {
         );
     }
 }
+
+/// Area of the part of a disc (centre on the x axis at `cx`, radius `r`)
+/// to the right of the line `x = c`.
+fn disc_right_of(cx: f64, r: f64, c: f64) -> f64 {
+    let d = c - cx;
+    r * r * (d / r).acos() - d * (r * r - d * d).sqrt()
+}
+
+/// The upper half of the crescent between the circle of radius 2 about the
+/// origin and a circle of radius `r2` inside it, tangent at (2, 0), cut by
+/// the line `x = c`: a region ending in a cusp at (2, 0).
+fn crescent(r2: f64, c: f64) -> (Profile, f64, f64) {
+    let (r1, cx) = (2.0, 2.0 - r2);
+    let (y1, y2) = (
+        (r1 * r1 - c * c).sqrt(),
+        (r2 * r2 - (c - cx) * (c - cx)).sqrt(),
+    );
+    let (a1, a2) = ((c / r1).acos(), ((c - cx) / r2).acos());
+    let p = Profile {
+        plane: Frame::WORLD,
+        curves: vec![
+            ProfileCurve::Arc {
+                center: DVec2::ZERO,
+                radius: r1,
+                start_angle: 0.0,
+                sweep_angle: a1,
+            },
+            ProfileCurve::Line {
+                start: DVec2::new(c, y1),
+                end: DVec2::new(c, y2),
+            },
+            ProfileCurve::Arc {
+                center: DVec2::new(cx, 0.0),
+                radius: r2,
+                start_angle: a2,
+                sweep_angle: -a2,
+            },
+        ],
+    };
+    let area = 0.5 * (disc_right_of(0.0, r1, c) - disc_right_of(cx, r2, c));
+    let perimeter = r1 * a1 + (y1 - y2) + r2 * a2;
+    (p, area, perimeter)
+}
+
+/// Crescents ending in a cusp, from circles of very different radii to
+/// nearly equal ones (radii 2 and 2 − 2e-5: the arcs stay within the
+/// tolerance of each other for 0.2 of their length near the cusp). Their
+/// polygons near the cusp are kept apart by matched samples (design note
+/// 0002 §5); without that, refinement chased the cusp down to rounding and
+/// the cap could not be triangulated.
+#[test]
+fn crescents_with_a_cusp() {
+    for (r2, c) in [(1.0, 0.5), (1.9, 0.0), (2.0 - 2e-3, 0.0), (2.0 - 2e-5, 0.0)] {
+        let (p, area, perimeter) = crescent(r2, c);
+        let h = 0.25;
+        let b = k()
+            .extrude(
+                &p,
+                &ExtrudeSpec {
+                    distance: h,
+                    symmetric: false,
+                },
+            )
+            .unwrap_or_else(|e| panic!("radius {r2}: {e}"));
+        check(
+            &b,
+            Expect {
+                volume: area * h,
+                area: 2.0 * area + perimeter * h,
+                counts: Some((6, 9, 5)),
+                genus: 0,
+                solids: 1,
+                rel: 1e-9,
+            },
+        );
+    }
+}
+
+/// A square whose left side stops (3e-7, 4e-7) short of the corner it
+/// shares with the bottom: within the ten tolerances in which profile ends
+/// join, so one vertex. The edge curves end up to five tolerances from
+/// their vertices; the volume is that of the region the curves bound with
+/// the straight closing chord, to rounding (the gap's strips, design note
+/// 0003), not just to the gap's area.
+#[test]
+fn square_with_a_gap_at_a_corner() {
+    let g = DVec2::new(3e-7, 4e-7);
+    let p = Profile {
+        plane: Frame::WORLD,
+        curves: vec![
+            ProfileCurve::Line {
+                start: DVec2::ZERO,
+                end: DVec2::new(1.0, 0.0),
+            },
+            ProfileCurve::Line {
+                start: DVec2::new(1.0, 0.0),
+                end: DVec2::new(1.0, 1.0),
+            },
+            ProfileCurve::Line {
+                start: DVec2::new(1.0, 1.0),
+                end: DVec2::new(0.0, 1.0),
+            },
+            ProfileCurve::Line {
+                start: DVec2::new(0.0, 1.0),
+                end: g,
+            },
+        ],
+    };
+    let h = 0.5;
+    let b = k()
+        .extrude(
+            &p,
+            &ExtrudeSpec {
+                distance: h,
+                symmetric: false,
+            },
+        )
+        .unwrap();
+    let area = polygon_area(&[
+        DVec2::ZERO,
+        DVec2::new(1.0, 0.0),
+        DVec2::new(1.0, 1.0),
+        DVec2::new(0.0, 1.0),
+        g,
+    ]);
+    let m = k().mass_properties(&b, 1e-12).unwrap();
+    assert_close(m.volume, area * h, 1e-12, "volume");
+    check(
+        &b,
+        Expect {
+            volume: area * h,
+            area: 2.0 * area + 4.0 * h,
+            counts: Some((8, 12, 6)),
+            genus: 0,
+            solids: 1,
+            rel: 1e-6,
+        },
+    );
+}

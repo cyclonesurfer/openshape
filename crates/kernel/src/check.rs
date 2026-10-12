@@ -153,7 +153,7 @@ pub(crate) fn validate(b: &Brep, tol: &Tolerance) -> Vec<String> {
             chord_tolerance: bounding_size(b).max(1e-9) * 1e-2,
             max_angle: 0.6,
         };
-        match tess::tessellate(b, &opts) {
+        match tess::tessellate(b, &opts, tol) {
             Ok(t) => {
                 for (si, solid) in b.solids.iter().enumerate() {
                     for (k, sh) in solid.shells.iter().enumerate() {

@@ -11,7 +11,9 @@ use arrangement_util::oracle::{in_polygon, polyline_distance, CellGrid, Shape, S
 use arrangement_util::raster::Raster;
 use arrangement_util::*;
 use openshape_kernel::arrangement::region_containing;
-use openshape_kernel::{DVec2, Kernel, KernelError, ProfileCurve, SketchArrangement, Tolerance};
+use openshape_kernel::{
+    DVec2, Kernel, KernelError, ProfileCurve, SketchArrangement, TessellationOptions, Tolerance,
+};
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 
@@ -819,4 +821,151 @@ proptest! {
             prop_assert!(profile_ok(&all));
         }
     }
+}
+
+/// A star spline, a copy of it and a circle (found by the spline test):
+/// merging end points within the profile resolution leaves curves ending
+/// up to five tolerances from their vertices, and the volume of the
+/// thinnest region (9.5e-6 m² across 3 mm) came out 1.6e-5 too large, the
+/// others about 1e-7. The mass integrals now add the strips between the
+/// faces at such edges (design note 0003, "Tolerant edges"): every region
+/// extrudes to its area times its height to rounding.
+#[test]
+fn spline_regions_with_gaps_at_their_corners() {
+    let pts = [
+        (0.4818694727975632, 0.7864187619457422),
+        (0.15792576455547414, 0.709641639616739),
+        (0.47652928489534063, 0.8010583290072294),
+        (0.07337953831637799, 0.5890827940081099),
+        (0.4196278947616869, 1.1008831126058214),
+    ];
+    let sp = star_spline(v(0.3846918524776183, 0.2963251627834522), &pts, None);
+    let curves = vec![
+        circle(
+            v(0.9328493582114393, 1.2898108772907018),
+            0.35892775470743915,
+        ),
+        spline_copy(&sp, 1),
+        sp,
+    ];
+    let a = arrange_checked(&curves);
+    assert_eq!(a.regions.len(), 3);
+    for (r, reg) in a.regions.iter().enumerate() {
+        let prof = k().region_profile(&a, &curves, &[r]).unwrap();
+        let h = reg.area.sqrt();
+        let body = extrude_profile(&prof, h);
+        let got = k().mass_properties(&body, 1e-10).unwrap().volume;
+        let want = reg.area * h;
+        assert!(
+            (got - want).abs() <= 1e-12 * want,
+            "region {r}: volume {got} vs area × height {want}"
+        );
+    }
+}
+
+/// Two circles tangent inside each other, moved by 0.3 tolerances, with a
+/// line and an arc across them (found by the lattice test once extrusion
+/// stopped exempting regions with cusps). The crescent between the circles
+/// ends in a cusp where they run within rounding of each other; refining
+/// the cap's boundary towards it went down to segments a tolerance long
+/// whose polygons crossed by rounding, and the cap could not be
+/// triangulated. The arcs' samples are now matched near the cusp (design
+/// note 0002 §5).
+#[test]
+fn lattice_crescent_between_tangent_circles() {
+    let items = [
+        (Lat::Circle(1, 2, 3), [0.0, 0.0, -0.3, 0.0]),
+        (Lat::Line(1, 0, 6, 2), [0.3, 0.0, 0.0, 0.0]),
+        (Lat::Circle(1, 1, 2), [0.0, 0.0, -0.3, 0.0]),
+        (Lat::Arc(1, 0, 2, 0, -3), [0.0; 4]),
+    ];
+    for scale in [1.0, 1e-3, 1e3] {
+        check_lattice(&items, true, scale).unwrap_or_else(|e| panic!("scale {scale}: {e}"));
+    }
+}
+
+/// Two circles crossing at 26° with two arcs of one and a chord, at scale
+/// 10³ (found by the scale test). The corner's two arcs are matched (design
+/// note 0002 §5); bisecting the segments next to a matched pair at their
+/// parameter midpoints put the two sides' new samples a fraction of a
+/// millimetre apart, matching added each to the other, and the next round
+/// split the long segments beside those short ones again: the samples
+/// doubled every round, 25,000 per edge and 166 s for one extrude. Matched
+/// segments now split at the midpoint of their distance along the
+/// corner's direction, so both sides split at the same place; the rule of
+/// [`arc_matched_at_both_ends_refines_finitely`] also stops the doubling,
+/// and either change alone passes this test.
+#[test]
+fn corner_of_crossing_circles_refines_finitely() {
+    let (c1, r1) = (v(-1743.8922710693805, 256.285413635741), 1098.3865848109058);
+    let curves = vec![
+        arc(c1, r1, 1.0419343308000297, 1.6549154442504042),
+        line(
+            v(-2735.429253856537, 728.8396448705352),
+            v(-2611.4359452673784, -417.3770115087846),
+        ),
+        arc(c1, r1, 3.801849790784589, 1.041497901332066),
+        arc(
+            v(-1263.2695122803489, 159.38281500752558),
+            1047.8155243635983,
+            4.384755719658632,
+            -2.88422941640058,
+        ),
+    ];
+    let body = extrude_profile(&curves, 1.0448334017902616e3);
+    // The validator's own tessellation settings.
+    let opts = TessellationOptions {
+        chord_tolerance: 2.5e3 * 1e-2,
+        max_angle: 0.6,
+    };
+    let mesh = k().tessellate(&body, &opts).unwrap();
+    let samples: usize = mesh.edges.iter().map(Vec::len).sum();
+    assert!(samples < 200, "{samples} edge samples");
+}
+
+/// Two circles of 1 km tangent at a point, a third crossing the lower one
+/// at 34° twice, at scale 10³ (found by the lattice test). The third
+/// circle's arc is matched at both of its corners, along two directions:
+/// where the two matched runs overlap it took samples from both partners,
+/// some a few millimetres apart, and the long segments on either side of
+/// such a short one conflicted (their deviation bands overlap across it):
+/// the samples doubled every round, 12,000 per edge and 74 s for one
+/// extrude. Two segments of one loop with a stretch between them that runs
+/// within 45° of one direction no longer conflict by deviation alone.
+#[test]
+fn arc_matched_at_both_ends_refines_finitely() {
+    let curves = vec![
+        arc(
+            v(2999.99999989, 4000.00000001),
+            1000.00000011,
+            4.712398980455024,
+            -2.0000030668931856e-5,
+        ),
+        arc(
+            v(3000.0, 2000.0),
+            1000.0,
+            -4.712378980314353,
+            0.37182426490708576,
+        ),
+        arc(
+            v(2000.0, 0.0),
+            3000.0,
+            1.3569450483151677,
+            -0.4995926610421544,
+        ),
+        arc(
+            v(3000.0, 2000.0),
+            1000.0,
+            -6.011518463363724,
+            1.299119483018699,
+        ),
+    ];
+    let body = extrude_profile(&curves, 4.956080048447882e2);
+    let opts = TessellationOptions {
+        chord_tolerance: 1.5e3 * 1e-2,
+        max_angle: 0.6,
+    };
+    let mesh = k().tessellate(&body, &opts).unwrap();
+    let samples: usize = mesh.edges.iter().map(Vec::len).sum();
+    assert!(samples < 200, "{samples} edge samples");
 }

@@ -355,6 +355,79 @@ fn face_integrals(
     acc
 }
 
+/// Flux integrals through the thin strip between an edge's projections onto
+/// the surfaces of its two faces (design note 0003, "Tolerant edges").
+///
+/// Each face integral follows the edge as projected onto its own surface,
+/// so where an edge lies on its surfaces only within the tolerance (a
+/// vertex merged from end points that miss each other, a tolerant
+/// intersection curve), the two faces trace two slightly different
+/// curves and the boundary is open along a strip between them. The flux
+/// through an open surface depends on the origin of the integrands, which
+/// made the volume of such a body wrong by about the strip's width times
+/// its length times the distance to the origin. Closing it with the strip
+/// leaves only errors of the order of the width squared.
+///
+/// `forward` is the direction in which `face`'s loop runs along the edge;
+/// `other` uses it the other way. The strip is ruled between the two
+/// projections; its flux is taken at the edge curve with the edge's
+/// tangent, which differs from the exact ruled strip's by terms of the
+/// order of the width squared. The area integrand is left out: the strip
+/// is no part of the surface.
+#[allow(clippy::too_many_arguments)]
+fn strip_integrals(
+    b: &Brep,
+    edge: usize,
+    face: &Face,
+    forward: bool,
+    other: &Face,
+    origin: DVec3,
+    relative: f64,
+    floor: &Acc,
+    gl_edge: &[(f64, f64)],
+) -> Quad {
+    let e = &b.edges[edge];
+    let (s1, s2) = (&face.surface, &other.surface);
+    let on = |s: &Surface, p: DVec3| {
+        let (u, v) = s.project(p);
+        s.point(u, v)
+    };
+    let width = |t: f64| {
+        let p = e.curve.point(t);
+        on(s2, p) - on(s1, p)
+    };
+    let mut acc = Quad {
+        value: [0.0; 11],
+        converged: true,
+    };
+    // Edges on both surfaces to rounding (all exact geometry) need nothing.
+    let scale = 1.0 + (e.curve.point(e.t0) - origin).length();
+    if (0..=8).all(|j| {
+        let t = e.t0 + (e.t1 - e.t0) * j as f64 / 8.0;
+        width(t).length() <= 1e-14 * scale
+    }) {
+        return acc;
+    }
+    let sign = if forward { -1.0 } else { 1.0 };
+    let g = |t: f64| -> Acc {
+        let mut val = integrand_at(e.curve.point(t) - origin, e.curve.deriv(t), width(t));
+        val[0] = 0.0;
+        val.map(|x| x * sign)
+    };
+    let span = (e.t1 - e.t0).abs();
+    let quad = Adaptive {
+        g: &g,
+        gl: gl_edge,
+        relative,
+        floor: floor.map(|x| x / span),
+    };
+    for w in e.curve.smooth_breaks(e.t0, e.t1).windows(2) {
+        let (whole, _) = rule(&g, w[0], w[1], gl_edge);
+        quad.run(w[0], w[1], &whole, 0, &mut acc);
+    }
+    acc
+}
+
 /// Mass properties of a body with unit density: each integral to within
 /// `relative_accuracy` (no finer than [`NOISE`]) of the boundary integral
 /// of its integrand's magnitude, as estimated by [`Adaptive`], plus a
@@ -386,15 +459,47 @@ pub(crate) fn mass_properties(
     let floor: Acc = dims.map(|d| share * size.powi(d));
     let relative = relative_accuracy.max(NOISE);
     let mut acc = [0.0; 11];
-    for f in &b.faces {
+    let refuse = || {
+        KernelError::MassProperties(format!(
+            "the boundary integrals did not converge to a relative accuracy of \
+             {relative_accuracy:e}"
+        ))
+    };
+    // The faces using each edge, with the direction of their loops.
+    let mut uses: Vec<Vec<(usize, bool)>> = vec![Vec::new(); b.edges.len()];
+    for (fi, f) in b.faces.iter().enumerate() {
         let fa = face_integrals(b, f, origin, relative, &floor, &gl_edge, &gl_inner);
         if !fa.converged {
-            return Err(KernelError::MassProperties(format!(
-                "the boundary integrals did not converge to a relative accuracy of \
-                 {relative_accuracy:e}"
-            )));
+            return Err(refuse());
         }
         add(&mut acc, &fa.value, 1.0);
+        for l in &f.loops {
+            for c in &l.coedges {
+                uses[c.edge.idx()].push((fi, c.forward));
+            }
+        }
+    }
+    for (e, u) in uses.iter().enumerate() {
+        if let [(f1, fwd), (f2, _)] = u[..] {
+            if f1 == f2 {
+                continue;
+            }
+            let st = strip_integrals(
+                b,
+                e,
+                &b.faces[f1],
+                fwd,
+                &b.faces[f2],
+                origin,
+                relative,
+                &floor,
+                &gl_edge,
+            );
+            if !st.converged {
+                return Err(refuse());
+            }
+            add(&mut acc, &st.value, 1.0);
+        }
     }
     let volume = acc[1];
     let first = DVec3::new(acc[2], acc[3], acc[4]);

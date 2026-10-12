@@ -451,99 +451,6 @@ fn to_segs(c: &ProfileCurve, tol: &Tolerance) -> Result<Vec<Seg>, KernelError> {
     }
 }
 
-/// Signed area of a closed polyline (positive = counter-clockwise).
-fn signed_area(poly: &[DVec2]) -> f64 {
-    let n = poly.len();
-    (0..n)
-        .map(|i| poly[i].perp_dot(poly[(i + 1) % n]))
-        .sum::<f64>()
-        * 0.5
-}
-
-fn loop_polyline(l: &SegLoop) -> Vec<DVec2> {
-    let mut out = Vec::new();
-    for s in l {
-        let pts = s.sample(48);
-        out.extend_from_slice(&pts[..pts.len() - 1]);
-    }
-    out
-}
-
-fn point_in_polygon(p: DVec2, poly: &[DVec2]) -> bool {
-    let mut inside = false;
-    let n = poly.len();
-    for i in 0..n {
-        let a = poly[i];
-        let b = poly[(i + 1) % n];
-        if (a.y > p.y) != (b.y > p.y) {
-            let x = a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x);
-            if p.x < x {
-                inside = !inside;
-            }
-        }
-    }
-    inside
-}
-
-fn orient(a: DVec2, b: DVec2, c: DVec2) -> f64 {
-    robust::orient2d(
-        robust::Coord { x: a.x, y: a.y },
-        robust::Coord { x: b.x, y: b.y },
-        robust::Coord { x: c.x, y: c.y },
-    )
-}
-
-/// True if the closed segments `ab` and `cd` properly intersect or touch.
-fn segments_touch(a: DVec2, b: DVec2, c: DVec2, d: DVec2) -> bool {
-    let o1 = orient(a, b, c);
-    let o2 = orient(a, b, d);
-    let o3 = orient(c, d, a);
-    let o4 = orient(c, d, b);
-    if ((o1 > 0.0 && o2 < 0.0) || (o1 < 0.0 && o2 > 0.0))
-        && ((o3 > 0.0 && o4 < 0.0) || (o3 < 0.0 && o4 > 0.0))
-    {
-        return true;
-    }
-    let on = |p: DVec2, q: DVec2, r: DVec2| {
-        r.x >= p.x.min(q.x) && r.x <= p.x.max(q.x) && r.y >= p.y.min(q.y) && r.y <= p.y.max(q.y)
-    };
-    (o1 == 0.0 && on(a, b, c))
-        || (o2 == 0.0 && on(a, b, d))
-        || (o3 == 0.0 && on(c, d, a))
-        || (o4 == 0.0 && on(c, d, b))
-}
-
-/// Checks loops (as polylines) for self- and mutual intersections.
-fn check_intersections(polys: &[Vec<DVec2>]) -> Result<(), KernelError> {
-    let mut segs: Vec<(usize, usize, DVec2, DVec2)> = Vec::new();
-    for (li, p) in polys.iter().enumerate() {
-        for i in 0..p.len() {
-            segs.push((li, i, p[i], p[(i + 1) % p.len()]));
-        }
-    }
-    for i in 0..segs.len() {
-        let (la, ia, a, b) = segs[i];
-        let (bmin, bmax) = (a.min(b), a.max(b));
-        for &(lb, ib, c, d) in &segs[i + 1..] {
-            if la == lb {
-                let n = polys[la].len();
-                if ib == (ia + 1) % n || ia == (ib + 1) % n {
-                    continue; // adjacent segments share an end point
-                }
-            }
-            if c.max(d).cmplt(bmin).any() || c.min(d).cmpgt(bmax).any() {
-                continue;
-            }
-            if segments_touch(a, b, c, d) {
-                return Err(KernelError::InvalidInput(
-                    "profile curves intersect or touch each other".into(),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Chains curves into closed loops, orients them and groups them into regions.
 pub(crate) fn regions(profile: &Profile, tol: &Tolerance) -> Result<Vec<Region>, KernelError> {
     if !profile.plane.is_valid(1e-9) {
@@ -552,8 +459,12 @@ pub(crate) fn regions(profile: &Profile, tol: &Tolerance) -> Result<Vec<Region>,
         ));
     }
     let mut segs: Vec<Seg> = Vec::new();
-    for c in &profile.curves {
-        segs.extend(to_segs(c, tol)?);
+    // The profile curve of each segment.
+    let mut seg_curve: Vec<usize> = Vec::new();
+    for (ci, c) in profile.curves.iter().enumerate() {
+        let s = to_segs(c, tol)?;
+        seg_curve.extend(std::iter::repeat_n(ci, s.len()));
+        segs.extend(s);
     }
     if segs.is_empty() {
         return Err(KernelError::InvalidInput("profile is empty".into()));
@@ -589,25 +500,32 @@ pub(crate) fn regions(profile: &Profile, tol: &Tolerance) -> Result<Vec<Region>,
             format!("profile branches at ({:.6}, {:.6})", verts[v].x, verts[v].y)
         }));
     }
-    // Walk loops.
+    // Walk loops, recording each loop's profile curves in order (the
+    // segments of one curve are consecutive, starting from its first).
     let mut used = vec![false; segs.len()];
     let mut loops: Vec<SegLoop> = Vec::new();
+    let mut loop_curves: Vec<Vec<(usize, bool)>> = Vec::new();
     for start in 0..segs.len() {
         if used[start] {
             continue;
         }
         let mut lp: SegLoop = Vec::new();
+        let mut lc: Vec<(usize, bool)> = Vec::new();
         let mut cur = start;
         let mut at = ends[start].0; // vertex we are leaving from
         loop {
             used[cur] = true;
             let (a, b) = ends[cur];
-            let (seg, next_at) = if a == at {
+            let fwd = a == at;
+            let (seg, next_at) = if fwd {
                 (segs[cur].clone(), b)
             } else {
                 (segs[cur].reversed(), a)
             };
             lp.push(seg);
+            if lc.last() != Some(&(seg_curve[cur], fwd)) {
+                lc.push((seg_curve[cur], fwd));
+            }
             at = next_at;
             let next = incident[at].iter().copied().find(|&s| s != cur && !used[s]);
             match next {
@@ -615,13 +533,33 @@ pub(crate) fn regions(profile: &Profile, tol: &Tolerance) -> Result<Vec<Region>,
                 None => break,
             }
         }
+        if lc.len() > 1 && lc.first() == lc.last() {
+            lc.pop();
+        }
         loops.push(lp);
+        loop_curves.push(lc);
     }
     // Snap segment ends exactly onto shared vertices is left to the B-rep
-    // builder (vertices are shared); here we only orient and nest.
-    let polys: Vec<Vec<DVec2>> = loops.iter().map(loop_polyline).collect();
-    check_intersections(&polys)?;
-    let areas: Vec<f64> = polys.iter().map(|p| signed_area(p)).collect();
+    // builder (vertices are shared); here the loops are checked for
+    // contacts away from their vertices, oriented and nested, all on the
+    // exact curves (design note 0001).
+    let mut curve_ends = vec![(usize::MAX, usize::MAX); profile.curves.len()];
+    for (k, &c) in seg_curve.iter().enumerate() {
+        if curve_ends[c].0 == usize::MAX {
+            curve_ends[c].0 = ends[k].0;
+        }
+        curve_ends[c].1 = ends[k].1;
+    }
+    let facts = crate::arrangement::ProfileLoops {
+        curves: &profile.curves,
+        loops: &loop_curves,
+        ends: &curve_ends,
+        verts: &verts,
+        snap,
+        tol: tol.linear,
+    }
+    .check()?;
+    let areas = facts.areas;
     if areas.iter().any(|a| a.abs() <= tol.linear * tol.linear) {
         return Err(KernelError::InvalidInput(
             "profile loop has zero area".into(),
@@ -632,10 +570,9 @@ pub(crate) fn regions(profile: &Profile, tol: &Tolerance) -> Result<Vec<Region>,
     let mut parent: Vec<Option<usize>> = vec![None; n];
     let mut depth = vec![0usize; n];
     for i in 0..n {
-        let probe = polys[i][0];
         let mut best: Option<usize> = None;
         for j in 0..n {
-            if i != j && point_in_polygon(probe, &polys[j]) {
+            if facts.inside[i][j] {
                 depth[i] += 1;
                 if best.is_none_or(|b| areas[j].abs() < areas[b].abs()) {
                     best = Some(j);
@@ -675,7 +612,27 @@ pub(crate) fn regions(profile: &Profile, tol: &Tolerance) -> Result<Vec<Region>,
 
 #[cfg(test)]
 mod tests {
+    use std::f64::consts::FRAC_PI_2;
+
     use super::*;
+
+    /// Signed area of a closed polyline (positive = counter-clockwise).
+    fn signed_area(poly: &[DVec2]) -> f64 {
+        let n = poly.len();
+        (0..n)
+            .map(|i| poly[i].perp_dot(poly[(i + 1) % n]))
+            .sum::<f64>()
+            * 0.5
+    }
+
+    fn loop_polyline(l: &SegLoop) -> Vec<DVec2> {
+        let mut out = Vec::new();
+        for s in l {
+            let pts = s.sample(48);
+            out.extend_from_slice(&pts[..pts.len() - 1]);
+        }
+        out
+    }
 
     #[test]
     fn rectangle_with_hole_gives_one_region() {
@@ -748,6 +705,62 @@ mod tests {
             1.0,
         ));
         assert!(regions(&two, &Tolerance::default()).is_err());
+    }
+
+    /// The exact contact check (design note 0001, "Intersection check"):
+    /// a hole three microns inside the outer loop is fine, however coarse
+    /// a sampling would have been; a hole touching it is refused, naming
+    /// where.
+    #[test]
+    fn holes_near_and_touching_the_outer_loop() {
+        let rect = || Profile::rectangle(Frame::WORLD, DVec2::ZERO, DVec2::new(4.0, 3.0));
+        let near = rect().with(Profile::circle(
+            Frame::WORLD,
+            DVec2::new(2.0, 0.5 + 3e-6),
+            0.5,
+        ));
+        let r = regions(&near, &Tolerance::default()).unwrap();
+        assert_eq!((r.len(), r[0].loops.len()), (1, 2));
+        let touching = rect().with(Profile::circle(Frame::WORLD, DVec2::new(2.0, 0.5), 0.5));
+        match regions(&touching, &Tolerance::default()) {
+            Err(KernelError::InvalidInput(m)) => {
+                assert!(m.contains("touch each other near (2.0000"), "{m}")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// Two arcs leaving a vertex tangentially (a cusp, here between
+    /// circles of radii 2 and 1.999 tangent at (2, 0)) touch only at that
+    /// vertex, though they run within the tolerance of each other for
+    /// 28 mm from it: accepted.
+    #[test]
+    fn arcs_leaving_a_cusp_are_accepted() {
+        let (r2, cx): (f64, f64) = (1.999, 0.001);
+        let a2 = (-cx / r2).acos();
+        let p = Profile {
+            plane: Frame::WORLD,
+            curves: vec![
+                ProfileCurve::Arc {
+                    center: DVec2::ZERO,
+                    radius: 2.0,
+                    start_angle: 0.0,
+                    sweep_angle: FRAC_PI_2,
+                },
+                ProfileCurve::Line {
+                    start: DVec2::new(0.0, 2.0),
+                    end: DVec2::new(0.0, (r2 * r2 - cx * cx).sqrt()),
+                },
+                ProfileCurve::Arc {
+                    center: DVec2::new(cx, 0.0),
+                    radius: r2,
+                    start_angle: a2,
+                    sweep_angle: -a2,
+                },
+            ],
+        };
+        let r = regions(&p, &Tolerance::default()).unwrap();
+        assert_eq!((r.len(), r[0].loops.len(), r[0].loops[0].len()), (1, 1, 3));
     }
 
     #[test]

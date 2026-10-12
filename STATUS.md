@@ -6,7 +6,9 @@ continuity, text, smooth closed splines, trimming of ellipses and conics,
 and curvature combs done; region detection now absorbs faces thinner than
 the tolerance instead of refusing them. Phase 3 groundwork started: the
 design notes for intersections (0011), booleans (0012) and persistent
-naming (0013) are written; their implementation is next.
+naming (0013) are written, and the kernel's profile check is now exact
+and its tessellation adapts to local feature size, so every region of the
+random sketch tests extrudes; implementing the notes is next.
 
 ## What works
 
@@ -44,13 +46,26 @@ naming (0013) are written; their implementation is next.
     geometric and errs towards showing an edge (a tangent joint between
     different curves stays visible). A NURBS split a rounding step from a
     knot splits at the knot, so no piece ends on a sliver knot span.
+    The edge samples adapt to each face's boundary (design note 0002 §5):
+    pieces of boundary that cross, or may come closer than their chords
+    show, are bisected on the exact curves until the polygon has the
+    face's topology, and where two curves leave a vertex tangentially (a
+    cusp) their samples are matched at equal distances along the common
+    direction, so their polygons cannot cross however close the curves
+    run.
+  - Profiles are checked for curves that touch or cross with the exact
+    contact finder of the sketch arrangement (design note 0001), not on
+    sampled polylines, and measured with its exact areas and winding
+    numbers; the refusal names the place.
   - Exact mass properties (volume, area, centroid, inertia) by boundary
     integration with adaptive Gauss–Legendre quadrature (design note
     0003): accurate to the relative accuracy the caller asks (down to
     1e-13), measured against the boundary integral of the integrand's
     magnitude; a computation that cannot reach it fails with an error
     instead of returning an unvouched value. The golden corpus checks
-    1e-9 relative and better.
+    1e-9 relative and better. Edges that lie on their two faces only
+    within the tolerance (merged end points) get the flux of the strip
+    between the faces added, so such bodies are exact to rounding too.
 - **Features** (`openshape-features`): regenerates a Part Studio through the
   kernel with per-feature status (ok, warning, suppressed, failed with
   message). A failing feature never blocks the others. Sketch features are
@@ -479,6 +494,30 @@ naming (0013) are written; their implementation is next.
   with a second line starting 0.11 µm from that end, made the
   arrangement inconsistent (Euler's formula fails) and it refused the
   sketch (see the known issues).
+- Feature-size-adaptive tessellation and exact profile checks,
+  2026-10-12, on Mesa lavapipe: fmt, clippy with `-D warnings`, 830 tests
+  and `cargo deny` pass. The random sketch tests no longer exempt any
+  region from extrusion (they had excused the kernel's refusals of
+  slivers, narrow notches and cusps). Making that pass found and fixed:
+  mass properties wrong by up to 1.6e-5 (a sliver) and about 1e-7
+  (ordinary bodies) wherever merged end points leave edges off their
+  faces by up to five tolerances (now exact to rounding: design note
+  0003, "Tolerant edges"); a thin lens tessellated as an inside-out
+  triangle; and a crescent between tangent circles whose cusp refinement
+  chased to rounding (now matched samples, 0002 §5). Drafts of the
+  refinement also exhausted memory on an ellipse (a closure-point
+  projection) and ran away at two sharp corners (166 s and 74 s for one
+  extrude); the final version takes milliseconds there. Each case is a
+  regression test, checked to fail without its fix.
+  Stress runs at raised case counts: polygons and circles 2,000, grids
+  2,000, scale invariance 1,000, splines 500, garbage input 20,000, all
+  passed; the lattice test's 40,000-case run was still going at commit
+  time (its result is added here when it ends). Documented refusals so
+  far: lattice
+  inputs perturbed by about a tolerance or more refused as unresolvable
+  (194), profile loops below the builder's resolution (13), slivers whose
+  mass cannot show 1e-10 (52, computed to 1e-6) and pinched profiles
+  (27); none was a wrong result.
 - Curvature combs and region robustness, 2026-10-12, on Mesa lavapipe:
   fmt, clippy with `-D warnings`, 822 tests and `cargo deny` pass. The
   comb's samples are checked against closed forms (circle, ellipse,
@@ -598,22 +637,17 @@ naming (0013) are written; their implementation is next.
   a cylinder's sides show by shading alone.
 - Sketches can only be placed on the three standard planes until Phase 3
   brings faces and construction planes.
-- Extrude rejects some valid but extreme sketch regions with an error (never
-  with wrong geometry): in the random arrangement stress tests, 92 region
-  extrudes over about 1,900 random sketches failed in the kernel's
-  tessellation or profile checks (slivers and narrow notches between curves,
-  tolerance-scale cusps), because tessellation validates with a chord
-  tolerance of 1% of the body size and the profile builder checks
-  self-intersection on 48-sample polylines. Realistic cases probed all
-  extrude exactly (volume within 1.2e-9 relative): walls down to 0.01 mm next to a
-  hole, cusp regions next to circles tangent to two sides, 0.2 mm slots,
-  0.01 mm slivers, V notches. Making both checks adapt to local feature
-  size is on the kernel list. Mass properties have the same blind spot:
-  their rounding floor scales with the body's size, not with the
-  coordinates the curves are evaluated in, so a sliver 0.3 µm wide on an
-  arc of 3 m radius cannot be integrated to 1e-10 and the kernel says
-  so (it converges to 1e-6; the random region test computes such slivers
-  there).
+- Tessellation (and so extrude's validation) still fails with an error,
+  never wrong geometry, where two boundary curves of a face cross or
+  touch within the tolerance in its parameter space (refinement stops at
+  segments a tolerance long) or where a face's boundary would need more
+  than eight times its initial samples plus 100,000. In the random sketch
+  tests every region now extrudes, cusps and slivers included (design
+  note 0002 §5). Mass properties keep one blind spot: their rounding
+  floor scales with the body's size, not with the coordinates the curves
+  are evaluated in, so a sliver 0.3 µm wide on an arc of 3 m radius
+  cannot be integrated to 1e-10 and the kernel says so (it converges to
+  1e-6; the random region test computes such slivers there).
 - Region detection refuses a sketch with a long sliver thinner than the
   tolerance that has three or more sides (design note 0006 §4.2 absorbs
   the other kinds), naming where; and the profile builder, which merges
@@ -635,9 +669,8 @@ naming (0013) are written; their implementation is next.
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Phase 3 groundwork: make the kernel's tessellation and profile checks
-   adapt to local feature size, and scale the mass-property rounding floor
-   to the coordinates curves are evaluated in.
+2. Phase 3 groundwork: scale the mass-property rounding floor to the
+   coordinates curves are evaluated in (the sliver blind spot above).
 3. Phase 3, in the order the design notes give: origin tables and entity
    handles for box, extrude and revolve (design note 0013 §10); the
    boolean pipeline end to end on polyhedral solids with plane/plane

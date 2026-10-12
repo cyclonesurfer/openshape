@@ -20,10 +20,10 @@ item is delivered in the phase noted.
 - [x] NURBS surfaces: evaluation, derivatives, normals, closest point, revolution/extrusion construction
 - [x] Analytic curves (line, circle) and surfaces (plane, extrusion, revolution with cylinder/cone/sphere/torus classification)
 - [x] B-rep topology (solid/shell/face/loop/coedge/edge/vertex) with validation (closed loops, manifold edge use, edges on surfaces, Euler–Poincaré, outward orientation)
-- [x] Tessellation with chord/angle tolerance, watertight across faces, singular points handled
+- [x] Tessellation with chord/angle tolerance, watertight across faces, singular points handled, refined to local feature size and matched at cusps (design note 0002 §5)
 - [x] Extrude (blind, symmetric; profiles with holes and multiple regions; lines, arcs, circles, splines)
 - [x] Revolve (full and partial; profiles touching the axis; cones, spheres, tori)
-- [x] Mass properties (volume, area, centroid, inertia) by exact boundary integration (1e-9 relative on the golden corpus)
+- [x] Mass properties (volume, area, centroid, inertia) by exact boundary integration (1e-9 relative on the golden corpus; tolerant edges closed by strips, design note 0003)
 - [x] Golden corpus: volume, area, topology counts, validity, watertightness
 - [x] STL export (ASCII and binary)
 - [ ] Non-manifold topology (deferred to Phase 3 with booleans)

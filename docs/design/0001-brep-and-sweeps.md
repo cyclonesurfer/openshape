@@ -29,10 +29,27 @@ tessellation). A failing check discards the result with an error.
 Curves are converted to oriented segments; arcs over π and closed splines
 are split (ADR 0008). End points are clustered within 10× tolerance into
 vertices, every vertex must have degree 2 (open/branching profiles are
-rejected), loops are walked, intersecting loops are rejected using
-Shewchuk's robust `orient2d` on fine polylines, and nesting depth decides
-outer loops (even depth, CCW) and holes (odd depth, CW). Each outer loop with
-its direct holes is a region; each region becomes a solid (lump).
+rejected), loops are walked, intersecting loops are rejected (below), and
+nesting depth decides outer loops (even depth, CCW) and holes (odd depth,
+CW), from the arrangement's exact loop areas and winding numbers. Each
+outer loop with its direct holes is a region; each region becomes a solid
+(lump).
+
+Intersection check (exact since 2026-10-12; before, 48-point polylines
+per segment, which refused curves closer than their chord error and could
+in principle miss two crossings inside one chord). Every pair of profile
+curves is intersected with the sketch arrangement's contact finder
+(design note 0006 §4: closed forms for lines and circles, Bézier clipping
+for splines, self-contacts of splines), at the model tolerance. A contact
+is allowed only where the two curves (or the two ends of one closed
+curve) end at the same profile vertex and the contact is part of that
+vertex: within the vertex resolution (10 tolerances) of it, or at the end
+of a run along which the two curves stay within twice the tolerance of
+each other all the way from the vertex (two curves leaving a vertex
+tangentially, as a horn between a line and a tangent arc). Every other
+contact refuses the profile, naming where: crossing curves, a hole
+touching its outer loop, a curve touching another away from a shared
+vertex.
 
 ## Extrude
 

@@ -71,6 +71,43 @@ Two cases found while building it are regression tests:
   parameter range are merged into their neighbours (their contribution is
   below rounding) (`spline_crossing_a_line_several_times`).
 
+## Tolerant edges (2026-10-12)
+
+Each face integral follows an edge as projected onto that face's own
+surface (the parameter velocity above). Where an edge lies on its two
+surfaces only within the tolerance, the two faces trace two slightly
+different curves, and the closed surface the divergence theorem needs is
+open along a thin strip between them. That happens wherever profile end
+points up to ten tolerances apart were merged into one vertex: the edge
+curves end up to five tolerances from the vertex, so the edge swept from
+the vertex lies off one of its two side faces by as much. The flux through
+an open surface depends on the integrands' origin, so the volume was wrong
+by about the strip's area times its distance from the origin: 1.6e-5 of
+the volume of a 3 mm sliver with a 0.47 µm gap, about 1e-7 on ordinary
+bodies, far outside the requested accuracy and invisible to every check
+that compared the kernel with itself.
+
+Following the tolerant-modelling view that an edge is a tube of tolerance
+radius about its curve, inside which its faces may meet anywhere (D. J.
+Jackson, "Boundary representation modelling with local tolerances", Proc.
+3rd ACM Symposium on Solid Modeling and Applications, 1995), the strip
+between the two projections is added to the boundary. For every edge used
+by two different faces, with `w(t)` the vector from its projection onto
+the first face's surface to its projection onto the second's, the strip is
+ruled between them and its flux taken along the edge curve, `n dA ≈
+(C′ × w) dt`, with the loop direction's sign; that differs from the exact
+ruled strip by terms of the order of the width squared. The area integral
+leaves the strip out (it is no part of the surface). Edges on both
+surfaces to rounding (width at most 1e-14 of the distance from the origin
+at nine points) are skipped, so exact bodies cost nothing extra; the others
+use the same adaptive rule as the faces.
+
+Regression tests: a square whose side stops (3e-7, 4e-7) short of a
+corner now has the volume of the region its curves bound with the closing
+chord to 4e-14 of its volume (it was 5e-8 off) (`square_with_a_gap_at_a_corner`), and
+the three regions of a spline sketch with merged end points extrude to
+area × height within 1e-12 (`spline_regions_with_gaps_at_their_corners`).
+
 The golden corpus checks cuboids, cylinders (including inertia tensors),
 cones, spheres, tori, partial revolves, plates with holes, spline
 extrusions and spline revolves (against Pappus' theorem) to relative error

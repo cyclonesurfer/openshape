@@ -319,7 +319,7 @@ impl Kernel for OsKernel {
     }
 
     fn tessellate(&self, body: &Body, opts: &TessellationOptions) -> Result<BodyMesh, KernelError> {
-        let t = tess::tessellate(&body.brep, opts)?;
+        let t = tess::tessellate(&body.brep, opts, &self.tol)?;
         Ok(BodyMesh {
             faces: t
                 .faces

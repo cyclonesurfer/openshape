@@ -390,10 +390,6 @@ pub fn extrude_region(curves: &[ProfileCurve], a: &SketchArrangement, sel: &[usi
     assert_rel(volume(&body), area * h, 1e-9);
 }
 
-/// Number of extrusions rejected because of the documented extrude
-/// limitation (see [`extrude_limited`]).
-pub static EXTRUDE_EXEMPT: AtomicUsize = AtomicUsize::new(0);
-
 /// Distance from `p` to a polyline.
 fn to_polyline(p: DVec2, poly: &[DVec2]) -> f64 {
     poly.windows(2)
@@ -481,75 +477,6 @@ fn end_radius(c: &ProfileCurve, t: f64, towards: f64) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
-/// True if two consecutive curves of a profile meet at a cusp or a narrow
-/// V for a tessellation with chord tolerance `chord`: they leave their
-/// common point at an angle below 0.1 rad, or below
-/// `√(2·chord/R₁) + √(2·chord/R₂)` for radii of curvature `R₁`, `R₂` there.
-/// A chord of a curve of radius `R` with sagitta `chord` is `√(8·R·chord)`
-/// long and lies up to `(L − s)·s / 2R` inside the curve at distance `s`
-/// from the joint, so it can cross the other curve, which is `s·θ` away,
-/// whenever `θ` is below that bound.
-pub fn profile_has_cusp(prof: &[ProfileCurve], chord: f64) -> bool {
-    // (start point, direction leaving it, radius there), (end point,
-    // direction back along the curve from it, radius there).
-    type End = (DVec2, DVec2, f64);
-    let ends: Vec<(End, End)> = prof
-        .iter()
-        .map(|c| {
-            let (a, b) = domain(c);
-            let h = (b - a) * 1e-4;
-            let (s, e) = (curve_point(c, a), curve_point(c, b));
-            let ds = (curve_point(c, a + h) - s).normalize_or_zero();
-            let de = (curve_point(c, b - h) - e).normalize_or_zero();
-            ((s, ds, end_radius(c, a, b)), (e, de, end_radius(c, b, a)))
-        })
-        .collect();
-    ends.iter().enumerate().any(|(i, (_, (e, de, re)))| {
-        ends.iter().enumerate().any(|(j, ((s, ds, rs), _))| {
-            let angle = de.dot(*ds).clamp(-1.0, 1.0).acos();
-            let narrow = (2.0 * chord / re).sqrt() + (2.0 * chord / rs).sqrt();
-            i != j && (*e - *s).length() < 1e-6 && angle < narrow.max(0.1)
-        })
-    })
-}
-
-/// Known limitation of the kernel's extrude (outside the arrangement): the
-/// profile check (`profile.rs`) samples curves as 48-point polylines and the
-/// body validator (`check.rs`, `tess.rs`) tessellates with a chord tolerance
-/// of 1% of the body size, so profiles whose curves come closer than about
-/// twice that away from their joints (see [`profile_min_gap`]) are rejected
-/// although valid: the tessellated boundary crosses itself, a face bounded
-/// by a line and a shallow arc gets only two boundary samples, a sliver
-/// face's tessellated boundary encloses nothing (no triangles), or a
-/// sliver's two sides are each one chord, so the tessellated shell
-/// encloses no volume and reads as inside-out. The
-/// same polylines cross near a cusp or a narrow V of the profile (two
-/// curves leaving a joint at a small angle, see [`profile_has_cusp`]). True
-/// if `e` is that rejection for `prof`.
-pub fn extrude_limited(prof: &[ProfileCurve], h: f64, e: &KernelError) -> bool {
-    let msg = e.to_string();
-    let known = msg.contains("intersects itself in parameter space")
-        || msg.contains("loop has fewer than three boundary samples")
-        || msg.contains("face produced no triangles")
-        || msg.contains("outer shell is inside-out")
-        || msg.contains("profile curves intersect or touch each other");
-    let pts: Vec<DVec2> = prof
-        .iter()
-        .flat_map(|c| {
-            let (a, b) = domain(c);
-            piece_samples(c, a, b, true, 64)
-        })
-        .collect();
-    let lo = pts
-        .iter()
-        .fold(DVec2::splat(f64::INFINITY), |m, p| m.min(*p));
-    let hi = pts
-        .iter()
-        .fold(DVec2::splat(f64::NEG_INFINITY), |m, p| m.max(*p));
-    let diag = ((hi - lo).length_squared() + h * h).sqrt();
-    known && (profile_min_gap(prof) < 0.02 * diag || profile_has_cusp(prof, 0.01 * diag))
-}
-
 /// True if a profile comes back within `snap` of itself: two different
 /// joints (start points of two different curves) within `snap` of each
 /// other, or two curves closer than `snap` away from where they meet (see
@@ -584,8 +511,7 @@ pub static PROFILE_BELOW_RESOLUTION: AtomicUsize = AtomicUsize::new(0);
 /// Extrudes every region on its own: each must give a valid solid with
 /// volume = area × height, unless it is pinched (non-manifold profile) or
 /// pinched at the profile builder's resolution (see [`profile_pinched_at`])
-/// and refused as invalid input, or hits the documented extrude limitation
-/// ([`extrude_limited`]). Returns the number extruded.
+/// and refused as invalid input. Returns the number extruded.
 pub fn extrude_all(curves: &[ProfileCurve], a: &SketchArrangement) -> usize {
     extrude_all_within(curves, a, 0.0)
 }
@@ -656,11 +582,6 @@ pub fn extrude_all_within(curves: &[ProfileCurve], a: &SketchArrangement, gap: f
                     (got - want).abs() <= 1e-9 * want + 2.0 * gap * perimeter * h,
                     "region {r}: volume {got} vs area × height {want}"
                 );
-            }
-            Err(e) if extrude_limited(&prof, h, &e) => {
-                let n = EXTRUDE_EXEMPT.fetch_add(1, Ordering::Relaxed) + 1;
-                eprintln!("EXTRUDE_EXEMPT #{n}: {e}");
-                continue;
             }
             Err(e @ KernelError::InvalidInput(_)) if profile_pinched_at(&prof, 10.0 * tol()) => {
                 let n = EXTRUDE_PINCHED.fetch_add(1, Ordering::Relaxed) + 1;

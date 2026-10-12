@@ -23,9 +23,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{KernelError, ProfileCurve, Tolerance};
 
+pub(crate) use loops::ProfileLoops;
+
 mod bezier;
 mod curve;
 mod intersect;
+mod loops;
 mod measure;
 mod output;
 mod topology;
