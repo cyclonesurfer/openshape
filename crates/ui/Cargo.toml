@@ -27,6 +27,11 @@ openshape-text.workspace = true
 openshape-ui-kit.workspace = true
 glam.workspace = true
 eframe = { workspace = true, default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11", "accesskit"] }
+# Not used directly: turns on the GNOME-style (Adwaita) title bar winit
+# draws on Wayland desktops that leave decorations to the app (GNOME), in
+# place of its bare fallback frame. eframe's defaults would enable it, but
+# they are off here.
+winit = { workspace = true, features = ["wayland-csd-adwaita"] }
 egui.workspace = true
 egui-wgpu.workspace = true
 log.workspace = true

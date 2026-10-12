@@ -48,6 +48,7 @@ wgpu = "30"
 pollster = "1"
 png = "0.18"
 eframe = { version = "0.36", default-features = false }
+winit = { version = "0.30", default-features = false }
 egui = "0.36"
 egui-wgpu = "0.36"
 proptest = "1"

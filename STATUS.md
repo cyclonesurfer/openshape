@@ -293,7 +293,31 @@ trimming next.
   antialiased edges and across full-range and dark gradients, which is
   stricter than before, and fails if the encoder is replaced by a plain
   gamma 2.2 curve. Confirming run on RADV pending.
-- The windowed app has not yet been run on real hardware. Building the
+- Re-run on the same machine, 2026-10-12, commit 4de454a: build, demo
+  (12/12), benchmark (0.153 ms mean, 0.224 ms p99 at 1080p, one run) and
+  render timing (1,000 instances 0.3 ms per frame) pass; the test step
+  stopped at its first failing binary after 307 passes, so the render
+  tests (and the sRGB confirmation) did not run. The failure was in a
+  test's reference formula, not the product: huginn builds with Fedora's
+  Rust 1.95, whose `f64::acosh` computes ln(w + √(w² − 1)) and is 25 units
+  in the last place off at w = 1 + 1e-5 (reproduced here; Rust 1.97's is
+  correctly rounded), and the conic segment-area reference cancels that
+  into a 4e-10 error against a 1e-10 check. The conic tests now compute
+  arcosh with `ln_1p`; no product code uses `acosh`. The whole suite then
+  passed on Rust 1.95 here (780 of 780, release), and
+  `scripts/gpu-check.sh` now runs every test binary and lists each
+  failing test.
+- Second machine, 2026-10-12, commit 4de454a: AMD Radeon RX 7600 (RADV
+  NAVI33, Mesa 26.2.4, Fedora 44, rustup Rust 1.99): every step passed,
+  780 of 780 tests, so the sRGB test's bound holds on RADV (on this card;
+  the 8060S re-run is still to come). Demo 12/12; 1080p benchmark 0.215
+  ms mean, 0.301 ms p99 (4,660 fps); 1,000 instances 0.9 ms per frame
+  steady including readback.
+- The windowed app ran on a desktop for the first time on 2026-10-12, on
+  an AMD RX 7600 (RADV NAVI33) under GNOME on Wayland, with the 3D view's
+  brightness right. Its title bar was winit's bare fallback frame (GNOME
+  leaves decorations to applications); it is now winit's GNOME-style bar
+  (ADR 0012 addendum). Building the
   offscreen UI renderer exposed a Phase 1 defect there: egui samples native
   textures as gamma-encoded bytes, but the app handed it the 3D view's sRGB
   view, so the window showed the 3D view darker than the offscreen renders.
@@ -525,8 +549,9 @@ trimming next.
    trim/extend/split of ellipses and conics, and a curvature comb
    display. Project/convert,
    intersection curves and pierce wait for Phase 3 faces.
-2. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
-   run the windowed app on a desktop.
+2. Re-run `scripts/gpu-check.sh` on the 8060S (docs/huginn-tasks.md
+   prompt 1): its render tests did not run on 2026-10-12. Check the new
+   title bar on GNOME.
 3. Phase 3 groundwork: design notes for curve/surface intersection, booleans
    and persistent naming; make the kernel's tessellation and profile checks
    adapt to local feature size.

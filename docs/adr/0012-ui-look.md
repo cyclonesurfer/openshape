@@ -110,3 +110,21 @@ application crate only composes it.
   display.
 * Changing the look later means editing tokens and icons in one crate, not
   hunting colours through the application.
+
+## Addendum (2026-10-12): the window's title bar
+
+GNOME on Wayland leaves window decorations to each application (it offers
+no server-side decorations); KDE and X11 window managers draw them
+themselves. With eframe's default features off, winit fell back to a bare
+dark frame with no title on GNOME (seen on the first desktop run). Options:
+winit's GNOME-style (Adwaita) title bar with the title; the same without the
+title text; window buttons drawn in our own top bar; or nothing. Pat chose
+the GNOME-style bar with the title. `crates/ui` enables winit's
+`wayland-csd-adwaita` feature (it uses no winit API directly). That bar
+comes from the `sctk-adwaita` crate, which renders the title with
+`ab_glyph`, whose font parser is `ttf-parser` (declared unmaintained,
+RUSTSEC-2026-0192; allowed as a transitive dependency by `deny.toml`, and
+used here only on the desktop's own UI font), and which asks `fc-match`,
+`gsettings` and `dbus-send` for the font and the light or dark preference.
+Checked under a headless Weston, which also leaves decorations to the
+application.
