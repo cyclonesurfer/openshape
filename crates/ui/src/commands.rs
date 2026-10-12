@@ -273,6 +273,7 @@ impl Command {
                 Tool::Trim => Icon::Trim,
                 Tool::Extend => Icon::Extend,
                 Tool::Split => Icon::Split,
+                Tool::SketchFillet => Icon::SketchFillet,
             },
             Command::Construction => Icon::Construction,
             Command::Constrain(c) => match c {

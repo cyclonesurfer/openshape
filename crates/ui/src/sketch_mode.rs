@@ -25,6 +25,7 @@ use openshape_sketch_solver::{
     measure, resolve_curves, solve, ResolvedCurve, SolveError, SolveOptions, SolveStatus,
 };
 
+use crate::sketch_ops::fillet::fillet;
 use crate::sketch_ops::shapes::{self, TangentStart};
 use crate::sketch_ops::trim::{self, Cuts, Plan};
 use crate::sketch_ops::{curve_ending_at, deletion, leaving_direction, Batch};
@@ -946,11 +947,13 @@ pub enum Tool {
     Extend,
     /// Splits a line or arc in two at a point.
     Split,
+    /// Rounds the corner where two lines or arcs meet.
+    SketchFillet,
 }
 
 impl Tool {
     /// Every tool, in toolbar order.
-    pub const ALL: [Tool; 16] = [
+    pub const ALL: [Tool; 17] = [
         Tool::Select,
         Tool::Line,
         Tool::Rectangle,
@@ -967,6 +970,7 @@ impl Tool {
         Tool::Trim,
         Tool::Extend,
         Tool::Split,
+        Tool::SketchFillet,
     ];
 
     /// The tools sharing one toolbar button with this one (shown in its
@@ -989,6 +993,7 @@ impl Tool {
             Tool::Polygon => &[Tool::Polygon],
             Tool::Point => &[Tool::Point],
             Tool::Spline => &[Tool::Spline],
+            Tool::SketchFillet => &[Tool::SketchFillet],
         }
     }
 
@@ -1011,12 +1016,17 @@ impl Tool {
             Tool::Trim => "Trim",
             Tool::Extend => "Extend",
             Tool::Split => "Split",
+            Tool::SketchFillet => "Sketch fillet",
         }
     }
 
-    /// True for the tools that edit existing curves (trim, extend, split).
+    /// True for the tools that edit existing curves (trim, extend, split,
+    /// fillet).
     pub fn edits_curves(self) -> bool {
-        matches!(self, Tool::Trim | Tool::Extend | Tool::Split)
+        matches!(
+            self,
+            Tool::Trim | Tool::Extend | Tool::Split | Tool::SketchFillet
+        )
     }
 
     /// Keyboard shortcut.
@@ -1037,7 +1047,8 @@ impl Tool {
             | Tool::Slot
             | Tool::Polygon
             | Tool::Extend
-            | Tool::Split => return None,
+            | Tool::Split
+            | Tool::SketchFillet => return None,
         })
     }
 
@@ -1081,6 +1092,7 @@ impl Tool {
                 "Click near the end of a line or arc to extend it to the next curve"
             }
             (Tool::Split, _) => "Click a line or arc where it should be split",
+            (Tool::SketchFillet, _) => "Click the corner point where two lines or arcs meet",
         }
     }
 }
@@ -1584,6 +1596,8 @@ pub struct SketchEditor {
     pub clicks: Vec<Snap>,
     /// Number of sides for the polygon tool.
     pub polygon_sides: u32,
+    /// Radius of the sketch fillet tool (metres).
+    pub fillet_radius: f64,
     /// The last line the pointer passed over while drawing lines (for
     /// parallel and perpendicular inference).
     last_line: Option<SketchId>,
@@ -1627,6 +1641,7 @@ impl SketchEditor {
             inferred: None,
             clicks: Vec::new(),
             polygon_sides: 6,
+            fillet_radius: 0.005,
             last_line: None,
             tangent_start: None,
             turn: 0.0,
@@ -1771,6 +1786,18 @@ impl SketchEditor {
             }
             return;
         }
+        if self.tool == Tool::SketchFillet {
+            if let Some((corner, _)) = nearest_point(&d, map, pos, POINT_PICK, &[]) {
+                let curves: Vec<(SketchId, ResolvedCurve)> =
+                    d.curves.iter().map(|c| (c.id, c.curve.clone())).collect();
+                let plan = fillet(&d.sketch, &curves, corner, self.fillet_radius);
+                self.curve_edit = Some(CurveEdit {
+                    target: corner,
+                    plan,
+                });
+            }
+            return;
+        }
         if self.tool.edits_curves() {
             if let (Some((target, _)), Some(at)) =
                 (nearest_curve(&d, map, pos, CURVE_PICK), map.to_plane(pos))
@@ -1857,6 +1884,7 @@ impl SketchEditor {
                 let verb = match self.tool {
                     Tool::Trim => "Trimmed",
                     Tool::Extend => "Extended",
+                    Tool::SketchFillet => "Filleted",
                     _ => "Split",
                 };
                 match model.edit_sketch_checked(self.feature, plan.edits) {
@@ -1877,6 +1905,9 @@ impl SketchEditor {
                 }
             }
             Some(CurveEdit { plan: Err(e), .. }) => self.message = Some(e),
+            None if self.tool == Tool::SketchFillet => {
+                self.message = Some("Click the corner point where two lines or arcs meet".into())
+            }
             None => self.message = Some("Click a curve".into()),
         }
         self.hover(model, map, Some(pos));
@@ -2059,7 +2090,7 @@ impl SketchEditor {
         let construction = self.construction;
         match self.tool {
             // Curve editing tools act on clicks directly (`edit_curve`).
-            Tool::Select | Tool::Trim | Tool::Extend | Tool::Split => {}
+            Tool::Select | Tool::Trim | Tool::Extend | Tool::Split | Tool::SketchFillet => {}
             Tool::Point => {
                 let mut b = Batch::default();
                 let p = b.snapped_point(&s);

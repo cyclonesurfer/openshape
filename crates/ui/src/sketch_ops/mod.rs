@@ -3,10 +3,11 @@
 //! [`crate::sketch_mode`] decides *what* the user asked for; these functions
 //! compute the exact geometry and the constraints that keep it.
 
+pub mod fillet;
 pub mod shapes;
 pub mod trim;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use glam::DVec2;
 use openshape_core_model::sketch::{Constraint, ConstraintEntry, Entity, Geometry, TangentKind};
@@ -239,4 +240,49 @@ pub fn leaving_direction(curve: &ResolvedCurve, at_end: bool) -> Option<DVec2> {
     };
     let len = d.length();
     (len.is_finite() && len > 0.0).then(|| d / len)
+}
+
+/// A small union-find over sketch ids.
+#[derive(Default)]
+pub(crate) struct UnionFind(BTreeMap<SketchId, SketchId>);
+
+impl UnionFind {
+    pub(crate) fn find(&mut self, x: SketchId) -> SketchId {
+        let mut root = x;
+        while let Some(&p) = self.0.get(&root) {
+            if p == root {
+                break;
+            }
+            root = p;
+        }
+        self.0.insert(x, root);
+        root
+    }
+
+    pub(crate) fn union(&mut self, a: SketchId, b: SketchId) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra != rb {
+            self.0.insert(ra, rb);
+        }
+    }
+}
+
+/// Each point's coincidence class (points in no coincidence are absent).
+pub(crate) fn coincidence_classes(sketch: &SketchData) -> BTreeMap<SketchId, usize> {
+    let mut uf = UnionFind::default();
+    for c in &sketch.constraints {
+        if let Constraint::Coincident { a, b } = c.constraint {
+            uf.union(a, b);
+        }
+    }
+    let points: Vec<SketchId> = uf.0.keys().copied().collect();
+    let mut roots: BTreeMap<SketchId, usize> = BTreeMap::new();
+    let mut out = BTreeMap::new();
+    for p in points {
+        let r = uf.find(p);
+        let n = roots.len();
+        let class = *roots.entry(r).or_insert(n);
+        out.insert(p, class);
+    }
+    out
 }

@@ -18,7 +18,7 @@ use openshape_features::kernel_curve;
 use openshape_kernel::{Kernel, ProfileCurve};
 use openshape_sketch_solver::ResolvedCurve;
 
-use super::{deletion, Batch};
+use super::{coincidence_classes, deletion, Batch, UnionFind};
 
 /// Cuts closer than this to one another, or to the cut curve's ends, are
 /// one cut (metres): a piece a micron long is not a piece anyone meant.
@@ -778,51 +778,6 @@ impl<'a> Rewrite<'a> {
             preview,
         }
     }
-}
-
-/// A small union-find over sketch ids.
-#[derive(Default)]
-struct UnionFind(BTreeMap<SketchId, SketchId>);
-
-impl UnionFind {
-    fn find(&mut self, x: SketchId) -> SketchId {
-        let mut root = x;
-        while let Some(&p) = self.0.get(&root) {
-            if p == root {
-                break;
-            }
-            root = p;
-        }
-        self.0.insert(x, root);
-        root
-    }
-
-    fn union(&mut self, a: SketchId, b: SketchId) {
-        let (ra, rb) = (self.find(a), self.find(b));
-        if ra != rb {
-            self.0.insert(ra, rb);
-        }
-    }
-}
-
-/// Each point's coincidence class (points in no coincidence are absent).
-fn coincidence_classes(sketch: &SketchData) -> BTreeMap<SketchId, usize> {
-    let mut uf = UnionFind::default();
-    for c in &sketch.constraints {
-        if let Constraint::Coincident { a, b } = c.constraint {
-            uf.union(a, b);
-        }
-    }
-    let points: Vec<SketchId> = uf.0.keys().copied().collect();
-    let mut roots: BTreeMap<SketchId, usize> = BTreeMap::new();
-    let mut out = BTreeMap::new();
-    for p in points {
-        let r = uf.find(p);
-        let n = roots.len();
-        let class = *roots.entry(r).or_insert(n);
-        out.insert(p, class);
-    }
-    out
 }
 
 /// A line's or arc's start and end points.

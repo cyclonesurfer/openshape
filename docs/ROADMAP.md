@@ -93,7 +93,7 @@ item is delivered in the phase noted.
 Sketch tools
 - [ ] Lines ✔, arcs (3-point ✔, tangent ✔, center ✔), circles ✔, ellipses, splines (through-point ✔, control-point), conics, rectangles (corner ✔, center ✔, aligned ✔), polygons ✔, slots ✔, points ✔
 - [ ] Construction geometry ✔, text, image tracing
-- [ ] Use/project/convert, offset, trim ✔, extend ✔, split ✔, sketch fillet, mirror, linear/circular sketch patterns, transform, intersection curves
+- [ ] Use/project/convert, offset, trim ✔, extend ✔, split ✔, sketch fillet ✔, mirror, linear/circular sketch patterns, transform, intersection curves
 
 Sketch constraints
 - [ ] Coincident ✔, concentric ✔, parallel ✔, perpendicular ✔, horizontal ✔, vertical ✔, tangent ✔, equal ✔, midpoint ✔, normal ✔, pierce, symmetric ✔, fix ✔, curvature

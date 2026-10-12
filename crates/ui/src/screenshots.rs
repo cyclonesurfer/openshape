@@ -360,6 +360,14 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     d.app.run(crate::commands::Command::Tool(Tool::Trim));
     d.hover(on_plane(&d, 26.0, 0.0)?)?;
     save("08-trim-preview.png", &d.settle()?)?;
+    // A fillet of the plate's corner, previewed.
+    d.app
+        .run(crate::commands::Command::Tool(Tool::SketchFillet));
+    if let Some(ed) = d.app.sketch_editor_mut() {
+        ed.fillet_radius = 0.008;
+    }
+    d.hover(on_plane(&d, 40.0, 25.0)?)?;
+    save("09-fillet-preview.png", &d.settle()?)?;
     d.app.run(crate::commands::Command::CancelSketch);
     Ok(written)
 }

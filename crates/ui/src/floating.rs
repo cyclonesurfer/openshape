@@ -357,6 +357,7 @@ impl OpenShapeApp {
         let message = ed.message.clone();
         let tool = ed.tool;
         let mut sides = ed.polygon_sides;
+        let mut radius_mm = ed.fillet_radius * 1e3;
         let (action, rect) = floating_dialog(
             ctx,
             &theme,
@@ -380,6 +381,16 @@ impl OpenShapeApp {
                             ui.add(egui::DragValue::new(&mut sides).range(MIN_SIDES..=MAX_SIDES));
                             ui.end_row();
                         }
+                        if tool == Tool::SketchFillet {
+                            ui.label(RichText::new("Radius").color(theme.text_muted));
+                            ui.add(
+                                egui::DragValue::new(&mut radius_mm)
+                                    .range(0.001..=100_000.0)
+                                    .speed(0.1)
+                                    .suffix(" mm"),
+                            );
+                            ui.end_row();
+                        }
                     });
                 ui.add_space(4.0);
                 ui.label(
@@ -396,6 +407,9 @@ impl OpenShapeApp {
         self.layout.dialog = Some(rect);
         if let Some(ed) = self.sketch.as_mut() {
             ed.polygon_sides = sides;
+            if radius_mm != ed.fillet_radius * 1e3 {
+                ed.fillet_radius = radius_mm * 1e-3;
+            }
         }
         match action {
             DialogAction::Accept => self.actions.push(Action::Run(Command::FinishSketch)),

@@ -113,7 +113,14 @@ application shell done; sketch editing tools next.
   than committed if the sketch would stop solving or gain a redundant
   constraint. Fuzzed on random lines, arcs, circles, rectangles, slots,
   polygons and joined chains (12,000 sketches, about 15,000 edits, every
-  one solved with nothing unplanned moving). Every edit is one undoable op; Cancel
+  one solved with nothing unplanned moving). Sketch fillet rounds the
+  corner of two lines or arcs with a tangent arc of the radius typed in the
+  sketch dialog (line–line, line–arc, arc–arc; the centre from the curves'
+  offsets); constraints on the corner, a filleted line's length and
+  construction curves ending there (a centre-point rectangle's diagonals)
+  move to a virtual sharp, so a dimensioned shape keeps its size and the
+  degrees of freedom do not change; fuzzed over about 4,000 fillets of
+  rectangles, polygons, chains and line/arc corners. Every edit is one undoable op; Cancel
   undoes the whole sketch session. The editor is UI-toolkit independent and
   tested end to end by driving it with screen clicks.
 - **UI kit** (`openshape-ui-kit`): the application's look in one place
@@ -190,9 +197,11 @@ application shell done; sketch editing tools next.
 
 ## Not yet / known limits
 
-- Sketch editing tools are not done: offset, sketch fillet, mirror,
-  patterns (in progress, design note 0007), and ellipses, conics, text,
-  use/project. Trim cuts one piece per click (no drag across several
+- Sketch editing tools are not done: offset, mirror, patterns (in
+  progress, design note 0007), and ellipses, conics, text, use/project.
+  A fillet removes (and reports) equal-length and midpoint constraints on
+  the filleted lines, so a filleted regular polygon is no longer held
+  regular; equal distances between virtual sharps are not expressible yet. Trim cuts one piece per click (no drag across several
   curves yet), and splines can be trimmed only whole: their pieces are not
   exact splines of the sketch's two kinds (§7.5).
 - Shell gaps: features reorder with Move up/down but not by dragging rows;
@@ -228,8 +237,8 @@ application shell done; sketch editing tools next.
 
 ## Next steps
 
-1. Sketch editing tools (design note 0007): sketch fillet, mirror, offset,
-   linear and circular patterns; draggable dimension labels.
+1. Sketch editing tools (design note 0007): mirror, offset, linear and
+   circular patterns; draggable dimension labels.
 2. Live preview in feature dialogs.
 3. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.

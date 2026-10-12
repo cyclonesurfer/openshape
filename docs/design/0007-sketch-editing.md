@@ -255,6 +255,34 @@ filleted lines are removed and reported. DOF are unchanged by a fillet
 (the arc's five freedoms meet five equations; the virtual sharp's two meet
 two).
 
+### 8.1 As built
+
+* The candidate centres are the intersections of the two curves' offsets
+  at ±r (parallel lines; concentric circles R ± r). A candidate is kept
+  when both tangent points lie strictly inside their curves (1 µm from
+  either end) and the arc continues the first curve smoothly into the
+  second (travelling along the first towards the corner, the arc must
+  arrive on the second heading away from it); the nearest to the corner
+  wins. One rule covers line–line, line–arc and arc–arc.
+* The arc's ends are new points coincident with the moved curve ends
+  (not the same point entities), so a later trim can move either end on
+  its own.
+* Construction curves ending at a corner of two real curves (the
+  diagonals of a centre-point rectangle) do not count as sides; they stay
+  coincident with the virtual sharp.
+* A smooth joint (tangents within 0.6°) or a fold-back is refused, as is
+  a radius whose tangent points would not fit on the curves.
+* A constraint that would collapse onto the sharp twice (between the two
+  ends) is dropped, and one putting an end on the other curve is not
+  repeated (the sharp already lies on both).
+
+A property test fillets random corners of rectangles, polygons, joined
+chains and line/arc corners with random radii: every fillet commits
+through the checked edit, the sketch stays solved without redundancy, the
+degrees of freedom change only by what removed equal-length (one) and
+midpoint (two) constraints held, and no point but the two moved ends
+moves.
+
 ## 9. Derived geometry in the solver
 
 Mirror, offset and patterns create copies that must follow their source.
