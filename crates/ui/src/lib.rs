@@ -9,6 +9,7 @@
 //! end to end.
 
 pub mod app;
+pub mod comb;
 pub mod commands;
 pub mod demo;
 pub mod dialogs;

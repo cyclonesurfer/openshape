@@ -353,6 +353,21 @@ impl Crv {
         self.bmax = hi;
     }
 
+    /// Size of the coordinates the curve is evaluated from (its end
+    /// points, its centre plus radius, or its control points' bounds): its
+    /// points carry rounding errors of about this times the machine
+    /// epsilon.
+    pub fn magnitude(&self) -> f64 {
+        match &self.geom {
+            Geom::Line { a, b } => a.abs().max(b.abs()).max_element(),
+            Geom::Arc { c, r, .. } => c.abs().max_element() + r,
+            Geom::Spline { spans } => spans
+                .iter()
+                .map(|s| s.lo.abs().max(s.hi.abs()).max_element())
+                .fold(0.0, f64::max),
+        }
+    }
+
     /// Spline spans, if this is a spline.
     pub fn spans(&self) -> &[Span] {
         match &self.geom {

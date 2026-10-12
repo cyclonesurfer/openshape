@@ -80,6 +80,75 @@ Any inconsistency (an odd number of crossings found where an even number is
 required, a face whose area doesn't match the sum of its pieces) is a
 `KernelError`, never a silently wrong region.
 
+### 4.1 As built: vertices and the order around them
+
+Tolerance merging chains: points within the tolerance of each other merge
+into one vertex, so a vertex's members can lie several tolerances apart
+(more than four is refused as "too many curve features within the
+tolerance"). Two consequences, both found by the random lattice test with
+inputs perturbed by about a tolerance, and both once internal errors
+(inconsistent faces, never wrong regions):
+
+* **Routing.** A curve is routed through a vertex when it passes within the
+  tolerance of the vertex's mean or of any of its members' own points. Two
+  unit circles 0.9 tolerances apart overlap; a third circle touching one of
+  them 0.8 tolerances away merges into a vertex 1.3 tolerances from the
+  other. Measured from the mean only, that circle stayed whole, the
+  overlap's pieces no longer ran between the same vertices, and they were
+  not recognised as duplicates.
+* **Order.** Inside a few tolerances of a vertex its members' positions
+  are noise: a half-edge starts up to the vertex's spread from it, and its
+  tangent there can disagree with where it actually runs (two pieces a few
+  tolerances long, from a vertex merged from points 0.11 µm apart, leave at
+  0° and 45° by their tangents but cross in the opposite order). So the
+  half-edges at a vertex are ordered by the angles at which they cross a
+  circle about it just beyond its merged points, of radius
+  `r0 = max(2 tol, 3 · farthest start)`; a half-edge too short to reach
+  that circle is seen at its middle, and one starting at the vertex to
+  within rounding (`64 ε` of the coordinates' magnitude) by its exact
+  tangent. Angles closer than `10⁻³ rad` plus four times the rounding noise
+  of a point at that radius (`64 ε · (magnitude + r) / r`, where the
+  magnitude is the larger of the vertex's coordinates and the curves' own,
+  so that a tangency 3 km from the origin is not decided by noise) are
+  tied, transitively along the angle order. Each tied run is ordered by
+  where its half-edges cross circles of radius doubling from `r0` up to
+  0.45 of the shortest extent among them, split wherever two angles differ
+  by more than the noise at that radius, then by signed curvature (equal
+  curvature is refused as coincident curves). This is the order in which
+  the edges leave the vertex as seen beyond the tolerance; for long edges
+  it is the tangent order.
+
+### 4.2 As built: faces thinner than the tolerance
+
+Moving curves by a fraction of the tolerance can open faces that no point
+is the tolerance inside (found by the lattice test, perturbations of 0.3
+tolerances). Before refusing such a face as "degenerate" or "thinner than
+the tolerance", the builder absorbs the two kinds that are artefacts of
+the tolerance itself, then builds again (at most eight rounds; each merges
+vertices or removes a piece, and all such faces are taken at once):
+
+* **A face within the tolerance of one point.** Three curves crossing
+  nearly at one point cross pairwise 1.3 to 1.4 tolerances apart, too far
+  to merge pairwise, and bound a triangle 0.4 tolerances across. If a
+  bounded face stays within twice the tolerance of the mean of its corners
+  and each of its sides passes within the tolerance of that point, it is a
+  point at the tolerance (snapping would have made it one had its corners
+  been a little closer): its corners merge into one vertex.
+* **A two-sided face thinner than the tolerance.** Nearly tangent curves
+  stay within the tolerance of each other over a stretch (6 µm for arcs of
+  1 and 2 mm moved by 0.1 tolerances), and contacts chained along it can
+  split off a face between two pieces joining the same two vertices that
+  is up to 1.1 tolerances wide: not within the tolerance everywhere, so
+  not an overlap by §4 step 3, yet with no point the tolerance inside. If
+  each piece is within twice the tolerance of the other, the face is
+  absorbed as an overlap: the later piece (by curve, then parameter) is
+  dropped, as overlaps are.
+
+The regions then differ from the exact curves' by at most the absorbed
+faces, each within about twice the tolerance of their kept boundary.
+Other thin faces (long slivers with three or more sides) are still
+refused, naming where.
+
 ## 5. Naming regions (sketch level)
 
 The features crate maps curve indices to sketch entity ids and derives a
@@ -108,3 +177,9 @@ feature fails with "profile region no longer exists" (never a guess).
   equals the area of the union computed independently; every region's
   boundary profile extrudes to a valid solid whose volume is area × height.
 * Scale invariance at 1e-4 and 1e3.
+* Lattice property test: lines, circles and arcs on an integer lattice
+  (exact tangencies, overlaps, curves through crossings) moved by
+  fractions or multiples of the tolerance at three scales, checked against
+  a raster of the exact curves; moves of at most 0.3 tolerances must
+  succeed. Each case it found is kept as a regression test with the
+  regions of the exact curves (§4.1, §4.2).

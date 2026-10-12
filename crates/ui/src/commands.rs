@@ -60,6 +60,8 @@ pub enum Command {
     Tool(Tool),
     /// Toggles construction geometry.
     Construction,
+    /// Shows or hides the curvature combs of the selected curves.
+    CurvatureComb,
     /// Adds a constraint to the sketch selection.
     Constrain(ConstraintTool),
     /// Dimensions the sketch selection.
@@ -110,6 +112,7 @@ impl Command {
         v.extend([Command::FinishSketch, Command::CancelSketch]);
         v.extend(Tool::ALL.map(Command::Tool));
         v.push(Command::Construction);
+        v.push(Command::CurvatureComb);
         v.push(Command::Dimension);
         v.push(Command::ResetLabels);
         v.extend(ConstraintTool::ALL.map(Command::Constrain));
@@ -170,6 +173,7 @@ impl Command {
             Command::TogglePlanes => "Show or hide planes".into(),
             Command::Tool(t) => t.label().into(),
             Command::Construction => "Construction".into(),
+            Command::CurvatureComb => "Curvature comb".into(),
             Command::Constrain(c) => c.label().into(),
             Command::Dimension => "Dimension".into(),
             Command::ResetLabels => "Reset dimension label positions".into(),
@@ -203,6 +207,7 @@ impl Command {
             | Command::TogglePlanes => "View",
             Command::Tool(_)
             | Command::Construction
+            | Command::CurvatureComb
             | Command::Dimension
             | Command::ResetLabels
             | Command::DeleteSelection
@@ -230,6 +235,14 @@ impl Command {
             Command::FinishSketch => &["accept", "done", "exit", "ok"],
             Command::CancelSketch => &["discard", "abort", "exit"],
             Command::RollToEnd => &["rollback", "history"],
+            Command::CurvatureComb => &[
+                "show curvature",
+                "hide curvature",
+                "porcupine",
+                "analysis",
+                "smoothness",
+                "continuity",
+            ],
             Command::NewPartStudio => &["tab", "element"],
             _ => &[],
         }
@@ -295,6 +308,7 @@ impl Command {
                 Tool::Scale => Icon::Scale,
             },
             Command::Construction => Icon::Construction,
+            Command::CurvatureComb => Icon::CurvatureComb,
             Command::Constrain(c) => match c {
                 ConstraintTool::Coincident => Icon::Coincident,
                 ConstraintTool::Horizontal => Icon::Horizontal,

@@ -23,7 +23,8 @@ mod topo;
 use std::sync::Arc;
 
 pub use arrangement::{
-    ArrangementEdge, ArrangementVertex, CurveContact, Region, RegionLoop, SketchArrangement,
+    ArrangementEdge, ArrangementVertex, CurvatureSample, CurveContact, Region, RegionLoop,
+    SketchArrangement,
 };
 pub use geom::SurfaceKind;
 pub use glam::{DMat4, DVec2, DVec3};
@@ -247,6 +248,15 @@ pub trait Kernel: Send + Sync {
     /// The point of a profile curve at a parameter in the arrangement's
     /// conventions (clamped to the curve's domain).
     fn curve_point(&self, curve: &ProfileCurve, t: f64) -> Result<DVec2, KernelError>;
+
+    /// Points, unit tangents and signed curvatures along a profile curve,
+    /// `n + 1` evenly spaced by length plus both sides of any curvature jump
+    /// at a spline knot: for curvature combs.
+    fn curvature_samples(
+        &self,
+        curve: &ProfileCurve,
+        n: usize,
+    ) -> Result<Vec<CurvatureSample>, KernelError>;
 }
 
 /// The built-in OpenShape kernel.
@@ -383,5 +393,13 @@ impl Kernel for OsKernel {
 
     fn curve_point(&self, curve: &ProfileCurve, t: f64) -> Result<DVec2, KernelError> {
         arrangement::curve_point(curve, t, &self.tol)
+    }
+
+    fn curvature_samples(
+        &self,
+        curve: &ProfileCurve,
+        n: usize,
+    ) -> Result<Vec<CurvatureSample>, KernelError> {
+        arrangement::curvature_samples(curve, n, &self.tol)
     }
 }

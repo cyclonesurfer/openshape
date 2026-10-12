@@ -2,7 +2,7 @@
 
 mod arrangement_util;
 
-use std::f64::consts::{FRAC_PI_2, PI, TAU};
+use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
 use arrangement_util::*;
 use openshape_kernel::arrangement::{arrange, region_containing, region_profile_with_tolerance};
@@ -1014,4 +1014,166 @@ fn spline_overlapping_part_of_another_spline() {
     assert_eq!(a.edges.iter().filter(|e| e.curve == 0).count(), 1);
     assert_eq!(a.edges.iter().filter(|e| e.curve == 1).count(), 2);
     extrude_all(&c, &a);
+}
+
+/// A line tangent to a circle at its end, and a second line starting
+/// 0.11 µm below that end and crossing the circle 0.14 µm away (found by
+/// the random lattice test): the end and the second line's start merge
+/// into one vertex, from which a piece of the circle and a piece of the
+/// second line, each about a tolerance long, run to the crossing. Their
+/// tangents leave at 180° and 135°, but the line runs below the circle:
+/// ordered by angle the faces were inconsistent (Euler's formula failed,
+/// an internal error). Ordered by where they run, the face between them is
+/// found; it fits within the tolerance of one point, so it merges into the
+/// vertex, and what is left is the circle with the lines dangling off it.
+#[test]
+fn short_edges_from_a_spread_vertex_are_ordered_by_where_they_run() {
+    let t = tol();
+    let curves = vec![
+        line(v(3.0, 3.0), v(4.0, 3.0)),
+        circle(v(3.0, 1.0), 2.0 + 0.3 * t),
+        line(v(3.0, 3.0 - 1.1 * t), v(2.0, 4.0)),
+    ];
+    let a = k().sketch_regions(&curves).unwrap();
+    assert_eq!(a.regions.len(), 1);
+    // The overlap of the first line and the circle keeps the line: the
+    // circle's cap over it, 0.35 mm long and 0.03 µm high, is left out.
+    assert_rel(a.regions[0].area, PI * (2.0 + 0.3 * t).powi(2), 1e-12);
+    extrude_all_within(&curves, &a, 3.3 * t);
+}
+
+/// Three curves meeting within a few tolerances (found by the random
+/// lattice test at millimetre scale): a unit circle, a chord of it and a
+/// circle of three internally tangent to it where the chord ends. At their
+/// merged vertex a short piece leaving at 45° is tied, by where it runs, to
+/// one leaving at 90° beyond a third leaving at 90° that is tied to
+/// neither. Grouping ties only between angle neighbours split them and
+/// ordered the vertex wrongly (Euler's formula failed, an internal error).
+/// With ties joined across the run between them, the vertex is ordered by
+/// where its edges run, the face there smaller than the tolerance merges
+/// into it, and the regions are those of the exact curves: the circle's
+/// two segments and the big circle around it.
+#[test]
+fn ties_reach_past_a_neighbour_they_are_not_tied_to() {
+    let t = tol();
+    let s = 1e-3;
+    let curves = vec![
+        circle(v(0.0, 3.0) * s + v(0.0, 0.1) * t, 1.0 * s),
+        line(v(0.0, 4.0) * s + v(-3.0, 0.0) * t, v(-3.0, 1.0) * s),
+        circle(v(2.0, 3.0) * s + v(-1.1, 0.0) * t, 3.0 * s - 0.1 * t),
+    ];
+    let a = k().sketch_regions(&curves).unwrap();
+    let mut areas: Vec<f64> = a.regions.iter().map(|r| r.area / (s * s)).collect();
+    areas.sort_by(f64::total_cmp);
+    // The chord's end moved by 0.3 µm changes the small segment by about
+    // 1e-3 of itself.
+    let segment = FRAC_PI_4 - 0.5;
+    assert_eq!(areas.len(), 3);
+    assert_rel(areas[0], segment, 2e-3);
+    assert_rel(areas[1], PI - segment, 2e-4);
+    assert_rel(areas[2], 8.0 * PI, 1e-4);
+    // Curves moved by up to three tolerances: each region's area is known
+    // to about that much times its perimeter.
+    extrude_all_within(&curves, &a, 9.0 * t);
+}
+/// Two unit circles 0.9 tolerances apart (an overlap: they coincide within
+/// the tolerance) and a third touching one of them 0.8 tolerances away, so
+/// 1.7 tolerances from the other (found by the random lattice test). The
+/// touch merges into a vertex 1.3 tolerances from the far circle; left off
+/// it, the overlap's pieces did not pair up and the faces were inconsistent
+/// (an internal error). Routed through it, the overlap is one boundary.
+#[test]
+fn an_overlap_follows_a_vertex_merged_beside_it() {
+    let t = tol();
+    let curves = vec![
+        circle(v(3.0, 4.0) + v(0.9, 0.0) * t, 1.0),
+        circle(v(3.0, 4.0), 1.0),
+        circle(v(1.0, 4.0) + v(0.3, 0.0) * t, 1.0 - 1.1 * t),
+    ];
+    let a = k().sketch_regions(&curves).unwrap();
+    assert_eq!(a.regions.len(), 2);
+    extrude_all(&curves, &a);
+}
+
+/// A line, an arc ending on it and a circle through the same point, each
+/// moved by about a tolerance (found by the random lattice test): the
+/// meeting splits into two vertices 0.18 µm apart joined by two pieces as
+/// short. Ordered by tangents and by where pieces start inside the merged
+/// points (noise there), the faces were inconsistent (an internal error);
+/// ordered by where edges cross a circle beyond the merged points, the
+/// tiny face between the pieces is found, and since it fits within the
+/// tolerance of one point it merges into one vertex: the regions are those
+/// of the exact curves.
+#[test]
+fn vertices_a_few_tolerances_apart_are_ordered_beyond_their_merged_points() {
+    let t = tol();
+    let curves = vec![
+        line(v(2.0, 1.0), v(6.0, 5.0) + v(0.9, -0.3) * t),
+        arc(v(4.0, 1.0) + v(-0.3, 0.0) * t, 2.0, FRAC_PI_2, FRAC_PI_2),
+        arc(v(3.0, 3.0) + v(-0.1, 0.0) * t, 1.0 - 1.1 * t, 0.0, -TAU),
+    ];
+    let a = k().sketch_regions(&curves).unwrap();
+    let mut areas: Vec<f64> = a.regions.iter().map(|r| r.area).collect();
+    areas.sort_by(f64::total_cmp);
+    // The quarter arc's segment D (area π − 2) and the unit circle C (π)
+    // overlap in the lens of the two circles less C's segment beyond the
+    // chord, (π/2 − 1)/2; the regions are that segment, D without C, the
+    // overlap and the rest of C.
+    let small = (PI / 2.0 - 1.0) / 2.0;
+    let r5 = 5f64.sqrt();
+    let lens = (1.0 / r5).acos() + 4.0 * (2.0 / r5).acos() - 2.0;
+    let both = lens - small;
+    assert_eq!(areas.len(), 4);
+    assert_rel(areas[0], small, 1e-6);
+    assert_rel(areas[1], PI - 2.0 - both, 1e-6);
+    assert_rel(areas[2], both, 1e-6);
+    assert_rel(areas[3], PI - small - both, 1e-6);
+    extrude_all_within(&curves, &a, 3.3 * t);
+}
+
+/// A line tangent to a large circle where both start, 3 km from the
+/// circle's centre (found by the random lattice test at scale 10³): their
+/// points within micrometres of the vertex carry rounding errors of about
+/// 1e-12 m, far more than they separate there, so the order between them
+/// is decided farther out, where they separate beyond the noise of
+/// coordinates that large.
+#[test]
+fn a_tangency_far_from_the_origin_is_ordered_beyond_the_rounding_noise() {
+    let s = 1000.0;
+    let curves = vec![
+        circle(v(3.0, 0.0) * s, 3.0 * s),
+        line(v(0.0, 0.0), v(0.0, -1.0) * s),
+        line(v(0.0, 0.0), v(-1.0, -1.0) * s),
+        circle(v(0.0, 0.0), 1.0 * s),
+    ];
+    let a = k().sketch_regions(&curves).unwrap();
+    assert_eq!(a.regions.len(), 5);
+    extrude_all(&curves, &a);
+}
+
+/// Two circles and their common chord's line, each moved by a fraction of
+/// the tolerance: the three pairwise crossings land 1.3 to 1.4 tolerances
+/// apart, too far to merge pairwise, and bound a triangle 0.4 tolerances
+/// across. Every curve passes within the tolerance of the triangle's
+/// middle, so the triangle is a point at the tolerance: one vertex where
+/// all three cross, and one region.
+#[test]
+fn three_curves_crossing_nearly_at_one_point_meet_at_one_vertex() {
+    let t = tol();
+    let curves = vec![
+        circle(v(3.0, 2.0) + v(0.0, 0.3) * t, 3.0),
+        arc(v(1.0, 0.0) + v(0.3, -0.3) * t, 3.0 + 0.3 * t, 0.0, -PI),
+        line(v(2.0, 1.0), v(4.0, -1.0) + v(0.0, -0.3) * t),
+    ];
+    let a = k().sketch_regions(&curves).unwrap();
+    assert_eq!(a.regions.len(), 1);
+    let p = v(2.0, 1.0) + v(1.0, -1.0) * (3.5f64).sqrt();
+    let at: Vec<_> = a
+        .vertices
+        .iter()
+        .filter(|x| (x.point - p).length() < 4.0 * t)
+        .collect();
+    assert_eq!(at.len(), 1, "{:?}", a.vertices);
+    assert_eq!(at[0].curves, vec![0, 1, 2]);
+    extrude_all_within(&curves, &a, 0.9 * t);
 }

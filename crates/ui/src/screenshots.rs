@@ -608,7 +608,7 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
         })
         .unwrap_or_default();
     if let Some(ed) = d.app.sketch_editor_mut() {
-        ed.selection = joined;
+        ed.selection = joined.clone();
     }
     d.app.run(crate::commands::Command::Constrain(
         crate::sketch_mode::ConstraintTool::Curvature,
@@ -616,6 +616,17 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     d.app.select(None);
     d.hover(on_plane(&d, 120.0, -80.0)?)?;
     save("25-curvature.png", &d.settle()?)?;
+    // Their curvature combs: the teeth equally long where they join.
+    if let Some(ed) = d.app.sketch_editor_mut() {
+        ed.selection = joined;
+    }
+    d.app.run(crate::commands::Command::CurvatureComb);
+    d.app.select(None);
+    if let Some(ed) = d.app.sketch_editor_mut() {
+        ed.selection.clear();
+    }
+    d.hover(on_plane(&d, 120.0, -80.0)?)?;
+    save("26-curvature-comb.png", &d.settle()?)?;
     d.app.run(crate::commands::Command::CancelSketch);
 
     // Text in a new part: being placed (the box growing towards the
@@ -633,7 +644,7 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     }
     t.click(on_plane(&t, -60.0, -8.0)?)?;
     t.hover(on_plane(&t, -30.0, 12.0)?)?;
-    save("26-text-placing.png", &t.settle()?)?;
+    save("27-text-placing.png", &t.settle()?)?;
     t.click(on_plane(&t, -30.0, 12.0)?)?;
     t.app.run(crate::commands::Command::Tool(Tool::Select));
     let text = t
@@ -652,7 +663,7 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
         ed.selection = vec![text];
     }
     t.hover(on_plane(&t, 90.0, -60.0)?)?;
-    save("27-text.png", &t.settle()?)?;
+    save("28-text.png", &t.settle()?)?;
     t.app.run(crate::commands::Command::FinishSketch);
     // Every letter's ink (not the counters inside O, p, a and e).
     let interiors: Vec<DVec2> = t
@@ -693,7 +704,7 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
         .set_view(openshape_ui_kit::view_cube::CubeTarget::HOME);
     t.app.camera.target = DVec3::new(-0.011, 0.002, 0.002);
     t.app.camera.distance *= 0.4;
-    save("28-text-extruded.png", &t.settle()?)?;
+    save("29-text-extruded.png", &t.settle()?)?;
 
     // Smooth closed splines (ADR 0016) in a new part: a control-point
     // spline with the pointer back on its first point (the closed curve
@@ -716,7 +727,7 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
         c.click(on_plane(&c, x, y)?)?;
     }
     c.hover(on_plane(&c, cam[0].0, cam[0].1)?)?;
-    save("29-closed-spline-closing.png", &c.settle()?)?;
+    save("30-closed-spline-closing.png", &c.settle()?)?;
     c.click(on_plane(&c, cam[0].0, cam[0].1)?)?;
     c.app.run(crate::commands::Command::Tool(Tool::Spline));
     let blob = [(20.0, -20.0), (44.0, 30.0), (70.0, 18.0), (64.0, -24.0)];
@@ -726,7 +737,7 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     c.click(on_plane(&c, blob[0].0, blob[0].1)?)?;
     c.app.run(crate::commands::Command::Tool(Tool::Select));
     c.hover(on_plane(&c, 90.0, -60.0)?)?;
-    save("30-closed-splines.png", &c.settle()?)?;
+    save("31-closed-splines.png", &c.settle()?)?;
     c.app.run(crate::commands::Command::FinishSketch);
     let inside: Vec<DVec2> = c
         .app
@@ -756,7 +767,7 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     c.app
         .set_view(openshape_ui_kit::view_cube::CubeTarget::HOME);
     c.app.camera.distance *= 0.6;
-    save("31-closed-splines-extruded.png", &c.settle()?)?;
+    save("32-closed-splines-extruded.png", &c.settle()?)?;
     Ok(written)
 }
 

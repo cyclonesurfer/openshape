@@ -184,6 +184,46 @@ meant to adapt; so:
   constraints).
 * The kernel needs nothing: the constraint only positions geometry.
 
+### 5.1 Curvature combs
+
+To see what the constraint does (and where a joint is only tangent) the
+sketcher draws curvature combs, the standard fairing aid (Farin's
+curvature plots, §2): at points along a curve, a tooth along the normal
+as long as the curvature there, with the tips joined. Our choices:
+
+* **Samples** (`Kernel::curvature_samples`): κ = (C′ × C″)/|C′|³ from the
+  kernel's exact first and second derivatives, at points evenly spaced by
+  arc length (the length of each piece by Simpson's rule on the speed
+  over a fine parameter grid, 64 cells per spline span, then each target
+  length found by three Newton steps on the speed), so teeth are equally
+  spaced however the curve is parametrized. At a spline knot where the
+  curvature jumps (more than 1e-9 relative) both sides are sampled, the
+  left limit then the right, so the comb shows the jump as a step rather
+  than a slope.
+* **Drawing**: 96 intervals per curve; each tooth stands on the side away
+  from the centre of curvature (outside the turn), so the comb never
+  crosses the curve except at an inflection; one scale for all combs
+  shown, the largest |κ| drawing 72 screen points, so combs on different
+  curves compare directly (at a G2 joint the two teeth coincide). The
+  colours are our own theme tokens (a magenta tooth, a darker envelope),
+  chosen to stand apart from the sketch's blue, black and green states.
+* **Commands**: the Curvature comb command toggles the combs of the
+  selected arcs, circles, ellipses, conics and splines; right-clicking a
+  curve with the Select tool selects it and opens a sketch menu offering
+  "Show curvature comb" or "Hide curvature comb". Combs belong to the
+  editing session (not saved with the sketch) and follow their curves
+  through edits.
+
+Tests: the kernel's samples against closed forms (a circle's 1/r and its
+direction of travel, an ellipse's ab/(a² sin²θ + b² cos²θ)^{3/2}, a
+parabola's 2/(1 + 4x²)^{3/2}, equal arc lengths by an independent
+quadrature, both sides of a quadratic spline's knots against exact
+one-sided differences of the curve's own points); in the editor, a G2
+joint's two sides equal to 1e-9 and to the solved curves' end-derivative
+curvature, a tangent-only joint's jump, which selections take a comb, and
+the right-click menu showing and hiding a circle's comb in the rendered
+image (`crates/ui/tests/sketch_comb.rs`).
+
 ## 6. Tests
 
 Solver (`crates/sketch-solver/tests/curvature.rs`):

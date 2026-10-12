@@ -268,6 +268,10 @@ impl OpenShapeApp {
             let theme = self.theme.clone();
             response.context_menu(|ui| self.view_menu(ui, &theme));
         }
+        if self.sketch.as_ref().is_some_and(|ed| ed.menu_ready()) {
+            let theme = self.theme.clone();
+            response.context_menu(|ui| self.sketch_menu(ui, &theme));
+        }
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
@@ -374,6 +378,52 @@ impl OpenShapeApp {
         }
     }
 
+    /// The context menu of sketch mode: commands on the selection, then
+    /// fitting the view.
+    fn sketch_menu(&mut self, ui: &mut Ui, theme: &Theme) {
+        let comb = if self.active(Command::CurvatureComb) {
+            "Hide curvature comb".to_string()
+        } else {
+            "Show curvature comb".to_string()
+        };
+        let rows = [
+            (Command::CurvatureComb, comb),
+            (Command::Construction, Command::Construction.label()),
+            (Command::DeleteSelection, Command::DeleteSelection.label()),
+        ];
+        for (c, label) in rows {
+            let shortcut = c.shortcut_text();
+            if menu_row(
+                ui,
+                theme,
+                c.icon(),
+                &label,
+                shortcut.as_deref(),
+                self.enabled(c),
+            )
+            .clicked()
+            {
+                self.actions.push(Action::Run(c));
+                ui.close();
+            }
+        }
+        ui.separator();
+        let c = Command::FitView;
+        if menu_row(
+            ui,
+            theme,
+            c.icon(),
+            &c.label(),
+            c.shortcut_text().as_deref(),
+            true,
+        )
+        .clicked()
+        {
+            self.actions.push(Action::Run(c));
+            ui.close();
+        }
+    }
+
     fn render_scene(&mut self, ui: &Ui, rs: Option<&egui_wgpu::RenderState>, rect: Rect, ppp: f32) {
         let key = self.scene_key();
         let meshes = (self.viewport.as_ref().and_then(|v| v.uploaded.as_ref()) != Some(&key))
@@ -467,7 +517,13 @@ impl OpenShapeApp {
             }
         }
         if response.secondary_clicked() {
-            ed.escape();
+            // With nothing in progress the click opens the sketch's context
+            // menu, for what is under the pointer; otherwise it cancels.
+            if ed.menu_ready() {
+                ed.select_hovered();
+            } else {
+                ed.escape();
+            }
         }
         if !response.dragged() {
             ed.hover(model, &map, response.hover_pos());

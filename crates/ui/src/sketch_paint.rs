@@ -11,6 +11,7 @@ use openshape_features::EntityState;
 use openshape_sketch_solver::SolveStatus;
 use openshape_ui_kit::Theme;
 
+use crate::comb;
 use crate::sketch_mode::{
     annotations, sample_resolved, Annotation, CurveEdit, DisplayCurve, Pick, ScreenMap,
     SketchDisplay, SketchEditor, SnapTarget, Tool,
@@ -72,6 +73,54 @@ fn chained<'a>(
     out
 }
 
+/// Draws the curvature combs of `d`, under its curves. One scale serves
+/// every comb, so teeth compare across curves (equally long where two
+/// curves join with curvature continuity): the tightest bend shown gets
+/// [`comb::LONGEST_TOOTH`] on screen.
+fn paint_combs(painter: &Painter, map: &ScreenMap, d: &SketchDisplay, theme: &Theme) {
+    let peak = comb::peak(d.combs.iter().flat_map(|(_, s)| s.iter()));
+    if peak <= 0.0 {
+        return;
+    }
+    // Screen points per plane metre about the combs' middle.
+    let pts: Vec<DVec2> = d
+        .combs
+        .iter()
+        .flat_map(|(_, s)| s.iter().map(|p| p.point))
+        .collect();
+    let (lo, hi) = pts.iter().fold(
+        (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+        |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+    );
+    let (mid, h) = (0.5 * (lo + hi), 1e-3 * (hi - lo).length());
+    let (Some(a), Some(bx), Some(by)) = (
+        map.to_screen(mid),
+        map.to_screen(mid + DVec2::X * h),
+        map.to_screen(mid + DVec2::Y * h),
+    ) else {
+        return;
+    };
+    let per_metre = (bx - a).length().max((by - a).length()) as f64 / h;
+    if !(per_metre.is_finite() && per_metre > 0.0) {
+        return;
+    }
+    let scale = comb::LONGEST_TOOTH as f64 / per_metre / peak;
+    let k = &theme.sketch;
+    for (_, s) in &d.combs {
+        let c = comb::comb(s, scale);
+        for t in &c.teeth {
+            stroke_polyline(painter, map, t, Stroke::new(1.0, k.comb), false);
+        }
+        stroke_polyline(
+            painter,
+            map,
+            &c.envelope,
+            Stroke::new(1.5, k.comb_envelope),
+            false,
+        );
+    }
+}
+
 /// Draws a sketch that is not being edited.
 pub fn paint_inactive(painter: &Painter, map: &ScreenMap, d: &SketchDisplay, theme: &Theme) {
     let inactive = theme.sketch.inactive;
@@ -128,6 +177,7 @@ pub fn paint_editor(
             painter.circle_filled(s, HALO, k.halo);
         }
     }
+    paint_combs(painter, map, d, theme);
     // Plane origin and axes.
     if let (Some(o), Some(x), Some(y)) = (
         map.to_screen(DVec2::ZERO),

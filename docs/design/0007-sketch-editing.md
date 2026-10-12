@@ -270,11 +270,13 @@ refused with the reason. A property test applies random trims, extends
 and splits to random lines, arcs and circles and to constrained shapes
 (rectangles, slots, polygons, joined chains): every plan commits, the
 sketch stays solved without redundancy, no point the plan did not move
-moves, and no curve shrinks below 1 µm. Region detection can still refuse
-a sliver thinner than the tolerance that an edit creates (for example a
-line extended past the tangent joint of a large arc next to another edge);
-that is the arrangement's documented refusal (design note 0006), not a
-wrong region.
+moves, and no curve shrinks below 1 µm. Region detection absorbs faces
+thinner than the tolerance that are artefacts of it (a face within the
+tolerance of one point, a two-sided sliver; design note 0006 §4.2), but
+can still refuse a longer sliver with three or more sides that an edit
+creates (for example a line extended past the tangent joint of a large
+arc next to another edge); that is the arrangement's documented refusal,
+naming where, not a wrong region.
 
 ### 7.5 Splines
 

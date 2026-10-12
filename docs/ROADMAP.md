@@ -33,7 +33,7 @@ item is delivered in the phase noted.
 - [x] Constraint solver (Newton/LM with DOF analysis, over/under-constraint diagnostics; design note 0005)
 - [x] Property tests over random constraint systems; fuzzing (constructive and garbage-input proptests)
 - [x] Region detection from arbitrary sketch curves (intersections) feeding extrude/revolve (design note 0006)
-- [ ] Sketch tools and constraints (see §2 below; core set, editing tools, ellipses, conics, transform, curvature and text done; project/convert, intersection curves and pierce need Phase 3 faces)
+- [ ] Sketch tools and constraints (see §2 below; core set, editing tools, ellipses, conics, transform, curvature, curvature combs and text done; project/convert, intersection curves and pierce need Phase 3 faces)
 - [x] Application shell in the common parametric-CAD layout with our own look (ADR 0012), driven end to end by offscreen UI tests
 
 ## Phase 3 — Booleans and core features
@@ -92,7 +92,7 @@ item is delivered in the phase noted.
 ### 2. Part Studio
 Sketch tools
 - [ ] Lines ✔, arcs (3-point ✔, tangent ✔, center ✔), circles ✔, ellipses and elliptical arcs ✔ (with trim/extend/split ✔), splines (through-point ✔, control-point ✔, smooth closed ✔), conics ✔ (with trim/extend/split ✔), rectangles (corner ✔, center ✔, aligned ✔), polygons ✔, slots ✔, points ✔
-- [ ] Construction geometry ✔, text ✔ (one line, six bundled faces), image tracing
+- [ ] Construction geometry ✔, text ✔ (one line, six bundled faces), curvature combs ✔, image tracing
 - [ ] Use/project/convert, offset ✔, trim ✔, extend ✔, split ✔, sketch fillet ✔, mirror ✔, linear/circular sketch patterns ✔, transform (move/rotate/scale, copy) ✔, intersection curves
 
 Sketch constraints

@@ -400,6 +400,10 @@ impl OpenShapeApp {
                 .sketch
                 .as_ref()
                 .is_some_and(|ed| !ed.selection.is_empty()),
+            Command::CurvatureComb => self
+                .sketch
+                .as_ref()
+                .is_some_and(|ed| !ed.comb_candidates(&self.model).is_empty()),
             Command::ResetLabels => self
                 .sketch
                 .as_ref()
@@ -413,6 +417,10 @@ impl OpenShapeApp {
         match c {
             Command::Tool(t) => self.sketch.as_ref().is_some_and(|ed| ed.tool == t),
             Command::Construction => self.sketch.as_ref().is_some_and(|ed| ed.construction),
+            Command::CurvatureComb => self
+                .sketch
+                .as_ref()
+                .is_some_and(|ed| ed.combs_shown(&self.model)),
             Command::Display(m) => self.display_mode == m,
             Command::Perspective => {
                 matches!(self.camera.projection, Projection::Perspective { .. })
@@ -520,6 +528,11 @@ impl OpenShapeApp {
             Command::Constrain(t) => {
                 if let Some(ed) = self.sketch.as_mut() {
                     ed.constrain(&mut self.model, t);
+                }
+            }
+            Command::CurvatureComb => {
+                if let Some(ed) = self.sketch.as_mut() {
+                    ed.toggle_combs(&self.model);
                 }
             }
             Command::Dimension => {
@@ -904,10 +917,12 @@ impl OpenShapeApp {
         });
         let sketching = self.sketch.is_some();
         // Enter finishes a sketch; elsewhere it is left for the open
-        // dialog, which accepts on it.
+        // dialog, which accepts on it. Escape with a menu open is left for
+        // the menu, which closes on it, and does nothing else.
+        let menu_open = egui::Popup::is_any_open(ctx);
         let (escape, enter, backspace) = ctx.input_mut(|i| {
             (
-                i.consume_key(Modifiers::NONE, Key::Escape),
+                !menu_open && i.consume_key(Modifiers::NONE, Key::Escape),
                 sketching && i.consume_key(Modifiers::NONE, Key::Enter),
                 i.consume_key(Modifiers::NONE, Key::Backspace),
             )

@@ -213,6 +213,10 @@ pub enum Icon {
     /// A line running into a curve at a dot, the curve's curvature comb
     /// rising from zero at the joint.
     Curvature,
+    /// An S-shaped curve with its curvature comb: teeth on the side away
+    /// from the centre of curvature, as long as the curvature, changing
+    /// side at the inflection, their tips joined.
+    CurvatureComb,
     /// Two equal horizontal bars (an equals sign).
     Equal,
     /// A segment with end ticks, a dot at its middle and a solid triangle
@@ -310,6 +314,7 @@ impl Icon {
         Icon::Perpendicular,
         Icon::Tangent,
         Icon::Curvature,
+        Icon::CurvatureComb,
         Icon::Equal,
         Icon::Midpoint,
         Icon::Concentric,
@@ -397,6 +402,7 @@ impl Icon {
             Icon::Perpendicular => "Perpendicular",
             Icon::Tangent => "Tangent",
             Icon::Curvature => "Curvature",
+            Icon::CurvatureComb => "Curvature comb",
             Icon::Equal => "Equal",
             Icon::Midpoint => "Midpoint",
             Icon::Concentric => "Concentric",
@@ -1309,6 +1315,48 @@ fn draw(pen: &Pen<'_>, icon: Icon) {
             }
             pen.poly(&tips);
             pen.dot(ctrl[0], 1.8);
+        }
+        Icon::CurvatureComb => {
+            // A cubic with an inflection, its comb sampled at seven points:
+            // each tooth along the normal, away from the centre of
+            // curvature, its length proportional to the curvature.
+            let ctrl = [(4.0, 13.5), (10.0, 4.0), (14.0, 20.0), (20.0, 10.5)];
+            let bez = |t: f32| {
+                let s = 1.0 - t;
+                let b = [s * s * s, 3.0 * s * s * t, 3.0 * s * t * t, t * t * t];
+                let d1 = [
+                    -3.0 * s * s,
+                    3.0 * s * (s - 2.0 * t),
+                    3.0 * t * (2.0 * s - t),
+                    3.0 * t * t,
+                ];
+                let d2 = [
+                    6.0 * s,
+                    6.0 * (3.0 * t - 2.0),
+                    6.0 * (1.0 - 3.0 * t),
+                    6.0 * t,
+                ];
+                let at = |w: [f32; 4]| {
+                    let x: f32 = (0..4).map(|k| w[k] * ctrl[k].0).sum();
+                    let y: f32 = (0..4).map(|k| w[k] * ctrl[k].1).sum();
+                    (x, y)
+                };
+                (at(b), at(d1), at(d2))
+            };
+            let curve: Vec<P> = (0..=32).map(|i| bez(i as f32 / 32.0).0).collect();
+            pen.poly(&curve);
+            let mut tips = Vec::new();
+            for i in 0..=6 {
+                let (p, d1, d2) = bez(i as f32 / 6.0);
+                let n = d1.0.hypot(d1.1);
+                let k = (d1.0 * d2.1 - d1.1 * d2.0) / (n * n * n);
+                let (nx, ny) = (-d1.1 / n, d1.0 / n);
+                let len = -k * 26.0;
+                let tip = (p.0 + nx * len, p.1 + ny * len);
+                pen.line(p, tip);
+                tips.push(tip);
+            }
+            pen.poly(&tips);
         }
         Icon::Equal => {
             pen.line((5.0, 9.0), (19.0, 9.0));

@@ -421,10 +421,11 @@ proptest! {
     /// (no two lattice curves come closer than 0.12 without touching):
     /// * every raster component lies in one region or none, and the
     ///   unbounded component in none;
-    /// * unperturbed, or perturbed by at most 0.3 tolerances (so every
-    ///   contact stays within the tolerance): the arrangement must succeed,
-    ///   every large enclosed component lies in a region, and no region
-    ///   covers two separate components;
+    /// * unperturbed, or perturbed by at most 0.3 tolerances: the
+    ///   arrangement must succeed (faces thinner than the tolerance that
+    ///   such small moves open up are absorbed), every large enclosed
+    ///   component lies in a region, and no region covers two separate
+    ///   components;
     /// * perturbed by about the tolerance or more: an `InvalidInput` error
     ///   is allowed, a wrong region is not.
     #[test]
@@ -433,53 +434,114 @@ proptest! {
         perturb in prop::bool::weighted(0.5),
         scale in prop::sample::select(vec![1.0, 1e-3, 1e3]),
     ) {
-        let exact: Vec<ProfileCurve> = items.iter().map(|(l, _)| lat_curve(l, 1.0, [0.0; 4])).collect();
-        let curves: Vec<ProfileCurve> = items
-            .iter()
-            .map(|(l, j)| lat_curve(l, scale, if perturb { *j } else { [0.0; 4] }))
-            .collect();
-        let big = perturb && items.iter().any(|(_, j)| j.iter().any(|x| x.abs() > 0.5));
-        let a = match k().sketch_regions(&curves) {
-            Ok(a) => a,
-            Err(KernelError::InvalidInput(m)) if big => {
-                let n = LATTICE_REJECTED.fetch_add(1, Ordering::Relaxed) + 1;
-                eprintln!("LATTICE_REJECTED #{n}: {m}");
-                return Ok(());
-            }
-            Err(e) => return Err(TestCaseError::fail(format!("{e}"))),
-        };
-        check_invariants(&curves, &a);
-        let raster = Raster::new(&exact, v(-5.0, -5.0), v(9.0, 9.0), 1.0 / 64.0);
-        let mut owner: HashMap<usize, usize> = HashMap::new();
-        for (id, pts) in raster.samples(6).iter().enumerate() {
-            if pts.is_empty() {
-                continue;
-            }
-            let got: Vec<Option<usize>> = pts
-                .iter()
-                .map(|p| region_containing(&a, &curves, *p * scale, &Tolerance::default()))
-                .collect();
-            prop_assert!(got.iter().all(|g| *g == got[0]), "one raster component in regions {:?} at {:?}", got, pts);
-            if raster.outer[id] {
-                prop_assert_eq!(got[0], None, "unbounded area at {:?} in a region", pts[0]);
-                continue;
-            }
-            if big || raster.sizes[id] < 256 {
-                continue;
-            }
-            let Some(r) = got[0] else {
-                return Err(TestCaseError::fail(format!("enclosed area at {:?} is in no region", pts[0])));
-            };
-            if let Some(other) = owner.insert(r, id) {
-                return Err(TestCaseError::fail(format!(
-                    "region {r} covers separate areas at {:?} and {:?}",
-                    pts[0],
-                    raster.samples(1)[other]
-                )));
-            }
+        check_lattice(&items, perturb, scale)?;
+    }
+}
+
+/// The checks of [`lattice_lines_circles_and_arcs`] for one input.
+fn check_lattice(
+    items: &[(Lat, [f64; 4])],
+    perturb: bool,
+    scale: f64,
+) -> Result<(), TestCaseError> {
+    let exact: Vec<ProfileCurve> = items
+        .iter()
+        .map(|(l, _)| lat_curve(l, 1.0, [0.0; 4]))
+        .collect();
+    let curves: Vec<ProfileCurve> = items
+        .iter()
+        .map(|(l, j)| lat_curve(l, scale, if perturb { *j } else { [0.0; 4] }))
+        .collect();
+    let big = perturb && items.iter().any(|(_, j)| j.iter().any(|x| x.abs() > 0.5));
+    let a = match k().sketch_regions(&curves) {
+        Ok(a) => a,
+        Err(KernelError::InvalidInput(m)) if big => {
+            let n = LATTICE_REJECTED.fetch_add(1, Ordering::Relaxed) + 1;
+            eprintln!("LATTICE_REJECTED #{n}: {m}");
+            return Ok(());
         }
-        let jmax = items.iter().flat_map(|(_, j)| j.iter()).fold(0.0f64, |m, x| m.max(x.abs()));
-        extrude_all_within(&curves, &a, if perturb { 3.0 * jmax * tol() } else { 0.0 });
+        Err(e) => return Err(TestCaseError::fail(format!("{e}"))),
+    };
+    check_invariants(&curves, &a);
+    let raster = Raster::new(&exact, v(-5.0, -5.0), v(9.0, 9.0), 1.0 / 64.0);
+    let mut owner: HashMap<usize, usize> = HashMap::new();
+    for (id, pts) in raster.samples(6).iter().enumerate() {
+        if pts.is_empty() {
+            continue;
+        }
+        let got: Vec<Option<usize>> = pts
+            .iter()
+            .map(|p| region_containing(&a, &curves, *p * scale, &Tolerance::default()))
+            .collect();
+        prop_assert!(
+            got.iter().all(|g| *g == got[0]),
+            "one raster component in regions {:?} at {:?}",
+            got,
+            pts
+        );
+        if raster.outer[id] {
+            prop_assert_eq!(got[0], None, "unbounded area at {:?} in a region", pts[0]);
+            continue;
+        }
+        if big || raster.sizes[id] < 256 {
+            continue;
+        }
+        let Some(r) = got[0] else {
+            return Err(TestCaseError::fail(format!(
+                "enclosed area at {:?} is in no region",
+                pts[0]
+            )));
+        };
+        if let Some(other) = owner.insert(r, id) {
+            return Err(TestCaseError::fail(format!(
+                "region {r} covers separate areas at {:?} and {:?}",
+                pts[0],
+                raster.samples(1)[other]
+            )));
+        }
+    }
+    let jmax = items
+        .iter()
+        .flat_map(|(_, j)| j.iter())
+        .fold(0.0f64, |m, x| m.max(x.abs()));
+    extrude_all_within(&curves, &a, if perturb { 3.0 * jmax * tol() } else { 0.0 });
+    Ok(())
+}
+
+/// Two circles and the line through both their crossings, each moved by
+/// 0.3 tolerances (found by the lattice test): the three crossings land
+/// 1.3 to 1.4 tolerances apart and bound a triangle 0.4 tolerances across,
+/// once refused as a degenerate face. It merges into one vertex.
+#[test]
+fn lattice_near_concurrent_crossings() {
+    let items = [
+        (Lat::Circle(3, 2, 3), [0.0, 0.3, 0.0, 0.0]),
+        (Lat::Arc(1, 0, 3, 0, -2), [0.3, -0.3, 0.3, 0.0]),
+        (Lat::Line(2, 1, 7, 2), [0.0, 0.0, 0.0, -0.3]),
+    ];
+    for scale in [1.0, 1e-3, 1e3] {
+        check_lattice(&items, true, scale).unwrap();
+    }
+}
+
+/// Four arcs tangent at one point, one of them twice (a copy moved by 0.3
+/// tolerances), at millimetre scale (found by the lattice test). Nearly
+/// tangent curves stay within the tolerance of each other for microns, and
+/// contacts chained along that stretch split off a sliver between two of
+/// them 6 µm long and up to 1.1 tolerances wide, once refused as a region
+/// thinner than the tolerance. It is absorbed as an overlap.
+#[test]
+fn lattice_tangent_arcs_leave_no_sliver() {
+    let items = [
+        (Lat::Arc(1, 2, 2, 0, 2), [0.0, -0.1, 0.0, 0.0]),
+        (Lat::Arc(3, 3, 1, 2, 2), [-0.1, 0.0, 0.0, 0.0]),
+        (Lat::Arc(0, 3, 2, 3, 1), [0.0; 4]),
+        (Lat::Arc(4, 3, 2, 2, 1), [0.0; 4]),
+        (Lat::Line(3, 1, 3, 2), [0.0, 0.1, 0.0, 0.0]),
+        (Lat::Arc(4, 3, 2, 2, -4), [0.0, -0.3, -0.3, 0.0]),
+    ];
+    for scale in [1.0, 1e-3, 1e3] {
+        check_lattice(&items, true, scale).unwrap();
     }
 }
 

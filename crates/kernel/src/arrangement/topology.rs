@@ -18,7 +18,11 @@
 //!    vertices and lie within the tolerance of each other are overlaps; the
 //!    piece of the lower curve index (then lower parameter) is kept. Vertices
 //!    that only split one curve inside such an overlap are removed again.
-//! 4. The result is checked: Euler's formula per connected component, exactly
+//! 4. Faces thinner than the tolerance that are artefacts of it are
+//!    absorbed: a face within the tolerance of one point merges into one
+//!    vertex, and a two-sided face whose sides are within twice the
+//!    tolerance of each other is an overlap (design note 0006 §4.2).
+//! 5. The result is checked: Euler's formula per connected component, exactly
 //!    one outer boundary per component, positive region areas, an interior
 //!    point at least the tolerance from each region's boundary, and no
 //!    region's interior point inside another region. Any failure is an
@@ -35,14 +39,18 @@ use super::measure::{self, RegionShape, Side};
 use super::{ArrangementEdge, ArrangementVertex, Region, RegionLoop, SketchArrangement};
 use crate::{KernelError, ProfileCurve};
 
-/// Half-edges whose tangents differ by less than this angle (radians) are
-/// ordered by their actual separation at a distance rather than by angle.
+/// Half-edges seen from their vertex in directions closer than this angle
+/// (radians) are ordered by where they run farther out.
 const TIE_ANGLE: f64 = 1e-3;
 /// Total subdivision steps allowed for one arrangement.
 pub(super) const BUDGET: u64 = 40_000_000;
 /// Contacts whose tangents make at least this sine are transversal: their
 /// position is known to about the rounding error divided by the sine.
 const TRANSVERSAL_SINE: f64 = 1e-3;
+/// Rebuilds allowed after absorbing faces thinner than the tolerance (each
+/// merges at least two vertices or drops a piece, and all such faces are
+/// absorbed at once, so a few rounds settle any real sketch).
+const ABSORB_ROUNDS: usize = 8;
 
 /// How precisely an incidence locates its vertex, best first.
 mod rank {
@@ -151,7 +159,6 @@ struct Vtx {
 #[derive(Clone, Copy)]
 struct Tied {
     he: usize,
-    dir: DVec2,
     kappa: f64,
 }
 
@@ -183,21 +190,62 @@ pub(super) fn build(curves: &[ProfileCurve], tol: f64) -> Result<SketchArrangeme
     };
     b.collect()?;
     b.cluster();
-    b.snap()?;
-    let (mut verts, vert_of) = b.vertices()?;
-    let mut pieces = b.split(&mut verts, &vert_of);
-    b.eliminate(&mut pieces);
-    b.cleanup(&mut pieces, &mut verts);
-    let used: Vec<bool> = {
-        let mut u = vec![false; verts.len()];
-        for p in pieces.iter().filter(|p| p.state == State::Alive) {
-            u[p.v0] = true;
-            u[p.v1] = true;
+    let mut rounds = 0;
+    'build: loop {
+        b.snap()?;
+        let (mut verts, vert_of) = b.vertices()?;
+        let mut pieces = b.split(&mut verts, &vert_of);
+        b.eliminate(&mut pieces);
+        // Vertices with pieces before pruning (dangling ends stay vertices).
+        let mut used: Option<Vec<bool>> = None;
+        loop {
+            b.cleanup(&mut pieces, &mut verts);
+            let used = used.get_or_insert_with(|| {
+                let mut u = vec![false; verts.len()];
+                for p in pieces.iter().filter(|p| p.state == State::Alive) {
+                    u[p.v0] = true;
+                    u[p.v1] = true;
+                }
+                u
+            });
+            prune(&mut pieces, verts.len());
+            rounds += 1;
+            match b.finish(&verts, used, &pieces, rounds <= ABSORB_ROUNDS)? {
+                Finished::Done(a) => return Ok(a),
+                Finished::Absorb { merge, drop } => {
+                    if merge.is_empty() {
+                        for k in drop {
+                            pieces[k].state = State::Duplicate;
+                        }
+                        continue;
+                    }
+                    // Merged corners change the vertices: build again (the
+                    // slivers, if still there, are found again).
+                    for g in merge {
+                        for w in g.windows(2) {
+                            b.uf.union(w[0], w[1]);
+                        }
+                    }
+                    continue 'build;
+                }
+            }
         }
-        u
-    };
-    prune(&mut pieces, verts.len());
-    b.finish(&verts, &used, &pieces)
+    }
+}
+
+/// What [`Builder::finish`] made of the pieces.
+enum Finished {
+    /// The checked arrangement.
+    Done(SketchArrangement),
+    /// Faces thinner than the tolerance, to absorb before building again.
+    Absorb {
+        /// Faces within the tolerance of one point, each as the incidences
+        /// of its corners, to merge into one vertex.
+        merge: Vec<Vec<usize>>,
+        /// Pieces bounding a two-sided sliver with a kept piece, by index,
+        /// to drop as overlaps of it.
+        drop: Vec<usize>,
+    },
 }
 
 impl Builder<'_> {
@@ -381,8 +429,12 @@ impl Builder<'_> {
             .collect()
     }
 
-    /// Routes every curve passing within the tolerance of a vertex through
-    /// it, until nothing changes.
+    /// Routes every curve passing within the tolerance of a vertex, or of
+    /// one of the points merged into it, through it, until nothing changes.
+    /// The members matter where tolerances chain: a circle 0.9 tolerances
+    /// from a coincident one (an overlap) that a third curve touches 0.8
+    /// tolerances away passes 1.3 tolerances from the merged vertex, and
+    /// left off it, the overlap's pieces no longer pair up.
     fn snap(&mut self) -> Result<(), KernelError> {
         let tol = self.tol;
         for _ in 0..12 {
@@ -390,17 +442,31 @@ impl Builder<'_> {
             let mut new: Vec<(usize, f64, usize)> = Vec::new();
             for g in &groups {
                 let pos = self.mean(g);
+                let reach = tol
+                    + g.iter()
+                        .map(|&m| (self.incs[m].p - pos).length())
+                        .fold(0.0, f64::max);
                 // This group's additions so far (a suffix of `new`).
                 let first_new = new.len();
                 for (ci, c) in self.crvs.iter().enumerate() {
-                    if pos.x < c.bmin.x - tol
-                        || pos.y < c.bmin.y - tol
-                        || pos.x > c.bmax.x + tol
-                        || pos.y > c.bmax.y + tol
+                    if pos.x < c.bmin.x - reach
+                        || pos.y < c.bmin.y - reach
+                        || pos.x > c.bmax.x + reach
+                        || pos.y > c.bmax.y + reach
                     {
                         continue;
                     }
-                    for (t, d) in self.near_params(ci, pos) {
+                    let mut near = self.near_params(ci, pos);
+                    if near.iter().all(|&(_, d)| d > tol) && near.iter().any(|&(_, d)| d <= reach) {
+                        // Within reach of the mean but not the tolerance:
+                        // try the members' own points.
+                        near = g
+                            .iter()
+                            .filter(|&&m| self.incs[m].curve != ci)
+                            .flat_map(|&m| self.near_params(ci, self.incs[m].p))
+                            .collect();
+                    }
+                    for (t, d) in near {
                         if d > tol {
                             continue;
                         }
@@ -585,9 +651,9 @@ impl Builder<'_> {
         pieces
     }
 
-    /// True if every point of `p` is within the tolerance of `q` (end points
-    /// within twice the tolerance, since both ends may be off their vertex).
-    fn one_sided(&self, p: &Piece, q: &Piece) -> bool {
+    /// True if every point of `p` is within `lim` of `q` (end points within
+    /// twice the tolerance or `lim`, since both ends may be off their vertex).
+    fn one_sided(&self, p: &Piece, q: &Piece, lim: f64) -> bool {
         let cp = &self.crvs[p.curve];
         let cq = &self.crvs[q.curve];
         let n = match &cp.geom {
@@ -606,9 +672,9 @@ impl Builder<'_> {
                 p.t0 + (p.t1 - p.t0) * k as f64 / n as f64
             };
             let lim = if k == 0 || k == n {
-                2.0 * self.tol
+                lim.max(2.0 * self.tol)
             } else {
-                self.tol
+                lim
             };
             if cq.closest(cp.point(t), q.t0, q.t1).1 > lim {
                 return false;
@@ -633,7 +699,8 @@ impl Builder<'_> {
             let mut kept: Vec<usize> = Vec::new();
             for &k in g {
                 let dup = kept.iter().any(|&q| {
-                    self.one_sided(&pieces[k], &pieces[q]) && self.one_sided(&pieces[q], &pieces[k])
+                    self.one_sided(&pieces[k], &pieces[q], self.tol)
+                        && self.one_sided(&pieces[q], &pieces[k], self.tol)
                 });
                 if dup {
                     pieces[k].state = State::Duplicate;
@@ -722,20 +789,20 @@ impl Builder<'_> {
         (dir, if kappa.is_finite() { kappa } else { 0.0 })
     }
 
-    /// Lateral offset (left positive) from `v` along `dir` of the point where
-    /// the half-edge first reaches the longitudinal distance `x`.
-    fn probe(&self, p: &Piece, fwd: bool, v: DVec2, dir: DVec2, x: f64) -> Option<f64> {
-        let c = &self.crvs[p.curve];
+    /// Parameter where the half-edge first reaches the distance `r` from
+    /// `c` (its start if that is already farther), or `None` if it never
+    /// gets that far.
+    fn reach(&self, p: &Piece, fwd: bool, c: DVec2, r: f64) -> Option<f64> {
+        let crv = &self.crvs[p.curve];
         let (ts, te) = if fwd { (p.t0, p.t1) } else { (p.t1, p.t0) };
-        let f = |t: f64| (c.point(t) - v).dot(dir);
-        let lat = |t: f64| dir.perp_dot(c.point(t) - v);
-        if f(ts) >= x {
-            return Some(lat(ts));
+        let f = |t: f64| (crv.point(t) - c).length();
+        if f(ts) >= r {
+            return Some(ts);
         }
         let sgn = (te - ts).signum();
-        let speed = c.eval(ts, fwd)[1].length();
-        let mut h = if speed > 0.0 && (x / speed).is_finite() {
-            x / speed
+        let speed = crv.eval(ts, fwd)[1].length();
+        let mut h = if speed > 0.0 && (r / speed).is_finite() {
+            r / speed
         } else {
             (te - ts).abs() * 1e-6
         };
@@ -747,7 +814,7 @@ impl Builder<'_> {
             if past {
                 tt = te;
             }
-            if f(tt) >= x {
+            if f(tt) >= r {
                 hi = Some(tt);
                 break;
             }
@@ -763,63 +830,83 @@ impl Builder<'_> {
             if m == lo || m == hi {
                 break;
             }
-            if f(m) >= x {
+            if f(m) >= r {
                 hi = m;
             } else {
                 lo = m;
             }
         }
-        Some(lat(hi))
+        Some(hi)
     }
 
-    /// Orders tangent-tied half-edges (all leaving `v` in nearly the same
-    /// direction) counter-clockwise: by their lateral separation at
-    /// increasing distances along the common direction (the order in which
-    /// they cross a small circle about the vertex), then by signed curvature.
+    /// Angle (counter-clockwise from `dir`, in (-π, π]) about `c` at which
+    /// the half-edge is seen at the distance `r`: where it first gets that
+    /// far, or, for an edge too short to get that far, its middle (as if it
+    /// ran straight to there).
+    fn seen(&self, p: &Piece, fwd: bool, c: DVec2, dir: DVec2, r: f64) -> f64 {
+        let crv = &self.crvs[p.curve];
+        let t = self.reach(p, fwd, c, r).unwrap_or(0.5 * (p.t0 + p.t1));
+        let d = crv.point(t) - c;
+        dir.perp_dot(d).atan2(dir.dot(d))
+    }
+
+    /// Rounding noise (radians) of an angle seen at the distance `r` from
+    /// `c` on curves whose coordinates are about `scale` large.
+    fn angle_noise(c: DVec2, scale: f64, r: f64) -> f64 {
+        64.0 * f64::EPSILON * (c.abs().max_element().max(scale) + r) / r
+    }
+
+    /// Coordinate size of the curves of half-edges `hes`.
+    fn magnitude(&self, pieces: &[Piece], hes: impl Iterator<Item = usize>) -> f64 {
+        hes.map(|he| self.crvs[pieces[he / 2].curve].magnitude())
+            .fold(0.0, f64::max)
+    }
+
+    /// Orders a run of half-edges seen in nearly the same direction from
+    /// `c` (tangent curves) counter-clockwise, starting from the clockwise
+    /// side of `dir` (the middle of the run): by the angles at which they
+    /// are seen at distances doubling from `r0`, split wherever two differ
+    /// by more than the rounding noise, then by signed curvature.
     fn order_tied(
         &self,
         pieces: &[Piece],
-        v: DVec2,
+        c: DVec2,
+        dir: DVec2,
+        r0: f64,
         tied: &[Tied],
     ) -> Result<Vec<usize>, KernelError> {
-        let dir = tied
-            .iter()
-            .map(|t| t.dir)
-            .sum::<DVec2>()
-            .try_normalize()
-            .unwrap_or(tied[0].dir);
+        // Out to 0.45 of the shortest extent among the members that reach
+        // past `r0` (the others are seen at their middles).
         let limit = tied
             .iter()
             .map(|t| {
                 let p = &pieces[t.he / 2];
-                let c = &self.crvs[p.curve];
+                let crv = &self.crvs[p.curve];
                 let far = if t.he % 2 == 0 { p.t1 } else { p.t0 };
-                let mid = c.point(0.5 * (p.t0 + p.t1));
-                0.45 * (mid - v).length().max((c.point(far) - v).length())
+                let mid = crv.point(0.5 * (p.t0 + p.t1));
+                0.45 * (mid - c).length().max((crv.point(far) - c).length())
             })
+            .filter(|&l| l > r0)
             .fold(f64::INFINITY, f64::min);
-        let scale = v.abs().max_element();
+        let limit = if limit.is_finite() { limit } else { r0 };
+        let scale = self.magnitude(pieces, tied.iter().map(|t| t.he));
         let mut groups: Vec<Vec<usize>> = vec![(0..tied.len()).collect()];
-        let mut x = (32.0 * self.tol).min(limit / 8.0);
-        while x <= limit && groups.iter().any(|g| g.len() > 1) {
-            let noise = 64.0 * f64::EPSILON * (scale + x);
+        let mut r = r0;
+        while r <= limit && groups.iter().any(|g| g.len() > 1) {
+            let noise = Self::angle_noise(c, scale, r);
             let mut next = Vec::new();
             for g in groups {
                 if g.len() == 1 {
                     next.push(g);
                     continue;
                 }
-                let ys: Option<Vec<f64>> = g
+                let ys: Vec<f64> = g
                     .iter()
                     .map(|&k| {
                         let he = tied[k].he;
-                        self.probe(&pieces[he / 2], he % 2 == 0, v, dir, x)
+                        self.seen(&pieces[he / 2], he % 2 == 0, c, dir, r)
                     })
                     .collect();
-                let Some(ys) = ys else {
-                    next.push(g);
-                    continue;
-                };
                 let mut idx: Vec<usize> = (0..g.len()).collect();
                 idx.sort_by(|&a, &b| ys[a].total_cmp(&ys[b]).then(g[a].cmp(&g[b])));
                 let mut cur = vec![g[idx[0]]];
@@ -832,7 +919,7 @@ impl Builder<'_> {
                 next.push(cur);
             }
             groups = next;
-            x *= 2.0;
+            r *= 2.0;
         }
         let mut out = Vec::with_capacity(tied.len());
         for mut g in groups {
@@ -841,7 +928,7 @@ impl Builder<'_> {
                 for w in g.windows(2) {
                     let (ka, kb) = (tied[w[0]].kappa, tied[w[1]].kappa);
                     if kb - ka <= 1e-9 * (ka.abs() + kb.abs()) {
-                        return Err(near_degenerate(v, "coincident curves at a vertex"));
+                        return Err(near_degenerate(c, "coincident curves at a vertex"));
                     }
                 }
             }
@@ -850,45 +937,93 @@ impl Builder<'_> {
         Ok(out)
     }
 
-    /// Outgoing half-edges of vertex `v` in counter-clockwise order.
+    /// Outgoing half-edges of the vertex at `c` in counter-clockwise order
+    /// (design note 0006 §4.1): the order in which they cross a circle
+    /// about `c` just beyond the points merged into the vertex (three times
+    /// the farthest half-edge start, at least twice the tolerance), with
+    /// edges too short to reach it seen at their middles. Inside the circle
+    /// the vertex's members are a few tolerances apart and positions there
+    /// are noise; their tangents can disagree with where the edges run
+    /// (edges a few tolerances long from a vertex merged from points 0.11
+    /// µm apart leave at 45° and 0° by their tangents but cross in the
+    /// opposite order). Half-edges seen in nearly the same direction
+    /// (tangent curves) are ordered by where they run farther out
+    /// ([`Self::order_tied`]).
     fn rotation(
         &self,
         pieces: &[Piece],
-        v: DVec2,
+        c: DVec2,
         hes: &[usize],
     ) -> Result<Vec<usize>, KernelError> {
         if hes.len() <= 2 {
             return Ok(hes.to_vec());
         }
+        let start = |he: usize| {
+            let p = &pieces[he / 2];
+            let t = if he % 2 == 0 { p.t0 } else { p.t1 };
+            self.crvs[p.curve].point(t)
+        };
+        let off = hes
+            .iter()
+            .map(|&he| (start(he) - c).length())
+            .fold(0.0, f64::max);
+        let r0 = (2.0 * self.tol).max(3.0 * off);
+        let scale = self.magnitude(pieces, hes.iter().copied());
+        // A half-edge starting at the vertex (to rounding) leaves in its
+        // tangent's direction, which is exact where positions this close to
+        // the vertex are not (far from the origin).
+        let exact = 64.0 * f64::EPSILON * c.abs().max_element().max(scale);
         let mut info: Vec<(Tied, f64)> = hes
             .iter()
             .map(|&he| {
-                let (dir, kappa) = self.travel(&pieces[he / 2], he % 2 == 0);
-                (Tied { he, dir, kappa }, dir.y.atan2(dir.x))
+                let (p, fwd) = (&pieces[he / 2], he % 2 == 0);
+                let (dir, kappa) = self.travel(p, fwd);
+                let angle = if (start(he) - c).length() <= exact {
+                    dir.y.atan2(dir.x)
+                } else {
+                    self.seen(p, fwd, c, DVec2::X, r0)
+                };
+                (Tied { he, kappa }, angle)
             })
             .collect();
         info.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.he.cmp(&b.0.he)));
-        let mut groups: Vec<Vec<Tied>> = Vec::new();
-        for (k, (t, ang)) in info.iter().enumerate() {
-            if k == 0 || ang - info[k - 1].1 >= TIE_ANGLE {
-                groups.push(Vec::new());
-            }
-            if let Some(g) = groups.last_mut() {
-                g.push(*t);
-            }
-        }
-        if groups.len() > 1 && info[0].1 + TAU - info[info.len() - 1].1 < TIE_ANGLE {
-            if let Some(mut last) = groups.pop() {
-                last.append(&mut groups[0]);
-                groups[0] = last;
-            }
-        }
-        let mut out = Vec::with_capacity(hes.len());
-        for g in groups {
-            if g.len() == 1 {
-                out.push(g[0].he);
-            } else {
-                out.extend(self.order_tied(pieces, v, &g)?);
+        // Runs of neighbours closer than the tie angle (and the noise),
+        // round the circle.
+        let n = info.len();
+        let tie = TIE_ANGLE + 4.0 * Self::angle_noise(c, scale, r0);
+        let link: Vec<bool> = (0..n)
+            .map(|k| {
+                let gap = if k + 1 < n {
+                    info[k + 1].1 - info[k].1
+                } else {
+                    info[0].1 + TAU - info[n - 1].1
+                };
+                gap < tie
+            })
+            .collect();
+        // Start after a gap (the whole vertex is one run if there is none).
+        let first = link.iter().position(|&l| !l).map_or(0, |k| k + 1);
+        let mut out = Vec::with_capacity(n);
+        let mut run: Vec<usize> = Vec::new();
+        for m in 0..n {
+            let k = (first + m) % n;
+            run.push(k);
+            if !link[k] || m + 1 == n {
+                if run.len() == 1 {
+                    out.push(info[k].0.he);
+                } else {
+                    let (a0, a1) = (info[run[0]].1, info[k].1);
+                    let span = if run.len() == n {
+                        TAU
+                    } else {
+                        (a1 - a0).rem_euclid(TAU)
+                    };
+                    let mid = a0 + 0.5 * span;
+                    let dir = DVec2::new(mid.cos(), mid.sin());
+                    let g: Vec<Tied> = run.iter().map(|&r| info[r].0).collect();
+                    out.extend(self.order_tied(pieces, c, dir, r0, &g)?);
+                }
+                run.clear();
             }
         }
         Ok(out)
@@ -900,7 +1035,8 @@ impl Builder<'_> {
         verts: &[Vtx],
         used: &[bool],
         all: &[Piece],
-    ) -> Result<SketchArrangement, KernelError> {
+        merge: bool,
+    ) -> Result<Finished, KernelError> {
         let crvs = self.crvs;
         let tol = self.tol;
         // Live edges, ordered by curve and parameter.
@@ -1033,6 +1169,73 @@ impl Builder<'_> {
                 )));
             }
         }
+        // Faces thinner than the tolerance, absorbed (design note 0006
+        // §4.2) rather than refused:
+        // * a bounded face whose boundary stays within twice the tolerance
+        //   of the mean of its corners, and whose every side passes within
+        //   the tolerance of that point, is a point at the tolerance, as
+        //   snapping would have made it had the corners been a little
+        //   closer (three curves crossing nearly at one point, each pair a
+        //   little more than the tolerance from the others): its corners
+        //   merge into one vertex;
+        // * a face between two pieces joining the same two vertices, each
+        //   within twice the tolerance of the other (so no point of the
+        //   face is the tolerance from its boundary), is an overlap that
+        //   chained contacts split off (curves nearly tangent over a
+        //   stretch): the later piece is dropped as a duplicate.
+        // The caller then builds again.
+        if merge {
+            let mut groups: Vec<Vec<usize>> = Vec::new();
+            let mut drop: Vec<usize> = Vec::new();
+            for (c, &a) in cycles.iter().zip(&areas) {
+                if a.is_nan() || a <= 0.0 {
+                    continue;
+                }
+                if let [h, g] = c[..] {
+                    let (p, q) = (&edges[h / 2], &edges[g / 2]);
+                    if start(h) != end(h)
+                        && self.one_sided(p, q, 2.0 * tol)
+                        && self.one_sided(q, p, 2.0 * tol)
+                    {
+                        // Pieces are ordered by curve and parameter, as
+                        // `eliminate` keeps the first.
+                        drop.push(eidx[(h / 2).max(g / 2)]);
+                        continue;
+                    }
+                }
+                let mut corners: Vec<usize> = c.iter().map(|&h| start(h)).collect();
+                corners.sort_unstable();
+                corners.dedup();
+                if corners.len() < 2 {
+                    continue;
+                }
+                let mid =
+                    corners.iter().map(|&v| verts[v].pos).sum::<DVec2>() / corners.len() as f64;
+                let small = c.iter().all(|&h| {
+                    let e = &edges[h / 2];
+                    let crv = &crvs[e.curve];
+                    crv.closest(mid, e.t0, e.t1).1 <= tol
+                        && (0..=8).all(|k| {
+                            let t = e.t0 + (e.t1 - e.t0) * k as f64 / 8.0;
+                            (crv.point(t) - mid).length() <= 2.0 * tol
+                        })
+                });
+                if small {
+                    groups.push(
+                        corners
+                            .iter()
+                            .flat_map(|&v| verts[v].members.iter().copied())
+                            .collect(),
+                    );
+                }
+            }
+            if !groups.is_empty() || !drop.is_empty() {
+                return Ok(Finished::Absorb {
+                    merge: groups,
+                    drop,
+                });
+            }
+        }
         for (c, &a) in cycles.iter().zip(&areas) {
             if a.abs() <= tol * tol || !a.is_finite() {
                 return Err(near_degenerate(verts[start(c[0])].pos, "degenerate face"));
@@ -1148,11 +1351,11 @@ impl Builder<'_> {
                 right: face_of[cycle_of[2 * k + 1]],
             });
         }
-        Ok(SketchArrangement {
+        Ok(Finished::Done(SketchArrangement {
             vertices,
             edges: out_edges,
             regions,
-        })
+        }))
     }
 
     /// The region whose outer loop most tightly contains the outer boundary

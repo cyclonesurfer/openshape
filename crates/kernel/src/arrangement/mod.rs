@@ -113,6 +113,21 @@ pub struct CurveContact {
     pub tb: f64,
 }
 
+/// A point of a curve with its direction and curvature, see
+/// [`curvature_samples`].
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CurvatureSample {
+    /// Parameter (see the module docs).
+    pub t: f64,
+    /// The point.
+    pub point: DVec2,
+    /// Unit tangent, in the direction of increasing parameter.
+    pub tangent: DVec2,
+    /// Signed curvature (reciprocal metres): positive where the curve turns
+    /// to the left of `tangent` (counter-clockwise).
+    pub curvature: f64,
+}
+
 /// Where two curves meet (design note 0007, §6): transversal crossings,
 /// tangencies, end points of either curve lying on the other, and the two
 /// ends of an overlap, with the same intersection code and tolerance
@@ -162,6 +177,114 @@ pub fn curve_point(curve: &ProfileCurve, t: f64, tol: &Tolerance) -> Result<DVec
     Ok(c.point(c.clamp(t)))
 }
 
+/// Samples of `curve` for a curvature comb: `n + 1` points evenly spaced
+/// along its length, ends included, and at each spline knot
+/// where the curvature jumps, its value on both sides (left first), all in
+/// order of parameter. Curvature comes from the exact first and second
+/// derivatives, `κ = (C′ × C″) / |C′|³`; points where the curve has no
+/// direction (a vanishing first derivative) are left out. Degenerate curves
+/// are [`KernelError::InvalidInput`], as in [`arrange`].
+pub fn curvature_samples(
+    curve: &ProfileCurve,
+    n: usize,
+    tol: &Tolerance,
+) -> Result<Vec<CurvatureSample>, KernelError> {
+    let c = curve::Crv::new(0, curve, tol.linear)?;
+    let n = n.clamp(1, 100_000);
+    let sample = |t: f64, right: bool| {
+        let [point, d1, d2] = c.eval(t, right);
+        let speed = d1.length();
+        let curvature = d1.perp_dot(d2) / (speed * speed * speed);
+        (speed > 0.0 && curvature.is_finite()).then(|| CurvatureSample {
+            t,
+            point,
+            tangent: d1 / speed,
+            curvature,
+        })
+    };
+    // Length along the curve: Simpson's rule on the speed over a grid
+    // (lines and arcs move at constant speed; each spline span is cut into
+    // 64), then Newton's method for the parameter at each target length.
+    let speed = |t: f64, right: bool| c.eval(t, right)[1].length();
+    let length = |t0: f64, t1: f64| {
+        let m = 8;
+        let h = (t1 - t0) / m as f64;
+        let sum: f64 = (0..=m)
+            .map(|i| {
+                let w = if i == 0 || i == m {
+                    1.0
+                } else if i % 2 == 1 {
+                    4.0
+                } else {
+                    2.0
+                };
+                w * speed(t0 + h * i as f64, i < m)
+            })
+            .sum();
+        sum * h / 3.0
+    };
+    let mut grid = vec![c.lo];
+    let spans = c.spans();
+    if spans.is_empty() {
+        grid.push(c.hi);
+    } else {
+        for s in spans {
+            for k in 1..=64 {
+                grid.push(s.t0 + (s.t1 - s.t0) * k as f64 / 64.0);
+            }
+        }
+    }
+    let mut len = vec![0.0];
+    for w in grid.windows(2) {
+        let l = len[len.len() - 1] + length(w[0], w[1]);
+        len.push(l);
+    }
+    let total = len[len.len() - 1];
+    let mut out = Vec::with_capacity(n + 1);
+    let mut j = 0;
+    for k in 0..=n {
+        let t = if k == 0 {
+            c.lo
+        } else if k == n {
+            c.hi
+        } else {
+            let s = total * k as f64 / n as f64;
+            while j + 2 < len.len() && len[j + 1] < s {
+                j += 1;
+            }
+            let (a, b) = (grid[j], grid[j + 1]);
+            let f = if len[j + 1] > len[j] {
+                ((s - len[j]) / (len[j + 1] - len[j])).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let mut t = a + (b - a) * f;
+            for _ in 0..3 {
+                let v = speed(t, true);
+                if v <= 0.0 {
+                    break;
+                }
+                t = (t - (len[j] + length(a, t) - s) / v).clamp(a, b);
+            }
+            t
+        };
+        out.extend(sample(t, k < n));
+    }
+    // Both sides of the knots where the curvature jumps.
+    for w in spans.windows(2) {
+        let t = w[0].t1;
+        if let (Some(a), Some(b)) = (sample(t, false), sample(t, true)) {
+            let jump = (a.curvature - b.curvature).abs();
+            if jump > 1e-9 * a.curvature.abs().max(b.curvature.abs()) {
+                let at = out.partition_point(|s| s.t < t);
+                let past = out.partition_point(|s| s.t <= t);
+                out.splice(at..past, [a, b]);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Builds the arrangement of `curves` (design note 0006, §4).
 ///
 /// Degenerate curves (zero length or radius, non-finite values, coordinates
@@ -203,9 +326,11 @@ pub fn region_profile(
 /// within twenty tolerances of where it starts and ends within ten of it
 /// (the curves before and after it then meet within ten tolerances, and
 /// the boundary moves by at most twenty). Duplicate indices in `regions`
-/// are ignored. An empty or out-of-range selection, a boundary loop or a
-/// longer chain of boundary edges below that resolution, or an arrangement
-/// that does not match `curves`, is [`KernelError::InvalidInput`].
+/// are ignored. An empty or out-of-range selection, a boundary loop below
+/// that resolution (or within twice it of a point once its edges below it
+/// are left out), a longer chain of boundary edges below it, or an
+/// arrangement that does not match `curves`, is
+/// [`KernelError::InvalidInput`].
 pub fn region_profile_with_tolerance(
     arrangement: &SketchArrangement,
     curves: &[ProfileCurve],

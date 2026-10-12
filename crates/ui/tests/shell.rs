@@ -272,6 +272,27 @@ fn context_menus_suppress_and_delete() {
 }
 
 #[test]
+fn escape_closes_an_open_menu_and_nothing_else() {
+    let (mut d, _, _) = demo();
+    let cylinder = feature_ids(&d)[2];
+    let selected = Some(Selection::Feature(cylinder));
+    d.app.select(selected);
+    d.settle().unwrap();
+    let row = d.app.layout().feature_row(cylinder).unwrap();
+    d.right_click(row.center()).unwrap();
+    d.settle().unwrap();
+    assert!(d.menu_row("Suppress").is_some());
+    d.key(Key::Escape, Modifiers::NONE).unwrap();
+    d.settle().unwrap();
+    assert!(d.menu_row("Suppress").is_none(), "the menu closed");
+    assert_eq!(d.app.selection(), selected, "the selection stays");
+    // With no menu open, Escape clears the selection as before.
+    d.key(Key::Escape, Modifiers::NONE).unwrap();
+    d.settle().unwrap();
+    assert_eq!(d.app.selection(), None);
+}
+
+#[test]
 fn tabs_add_switch_rename_and_delete_part_studios() {
     let (mut d, _, _) = demo();
     let elements = |d: &AppDriver| d.app.model().elements().len();

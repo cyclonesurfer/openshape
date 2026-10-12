@@ -55,6 +55,10 @@ pub struct SketchColors {
     pub plane_active_edge: Color32,
     /// Plane labels.
     pub plane_label: Color32,
+    /// Teeth of curvature combs.
+    pub comb: Color32,
+    /// The line joining a curvature comb's tooth tips.
+    pub comb_envelope: Color32,
 }
 
 /// The app's visual tokens. [`Theme::light`] (also [`Default`]) is the only
@@ -175,6 +179,8 @@ impl Theme {
                 plane_active: Color32::from_rgba_unmultiplied(0x2B, 0x6C, 0xD4, 0x30),
                 plane_active_edge: hex(0x2B6CD4),
                 plane_label: hex(0x5B6470),
+                comb: Color32::from_rgba_unmultiplied(0xB0, 0x4A, 0x9A, 0x90),
+                comb_envelope: hex(0x9A3486),
             },
 
             rounding: 3.0,

@@ -321,8 +321,10 @@ fn split_point(crvs: &[Crv], sd: &Side) -> (f64, f64) {
 /// by at most `2·snap`). A piece whose own ends are within `snap` (a closed
 /// edge, or one that leaves and comes back) is cut in two (see
 /// [`split_point`]). Anything else below the resolution (a whole
-/// loop, or a longer chain of tiny pieces) is [`KernelError::InvalidInput`]:
-/// leaving it out could change the region by more than the resolution.
+/// loop, or one that stays within `2·snap` of a point once its tiny pieces
+/// are left out, or a longer chain of tiny pieces) is
+/// [`KernelError::InvalidInput`]: leaving it out could change the region
+/// by more than the resolution.
 fn resolve_loop(crvs: &[Crv], lp: Vec<Side>, snap: f64) -> Result<Vec<Side>, KernelError> {
     let n = lp.len();
     let tiny: Vec<bool> = lp
@@ -366,6 +368,21 @@ fn resolve_loop(crvs: &[Crv], lp: Vec<Side>, snap: f64) -> Result<Vec<Side>, Ker
             keep[(k + j) % n] = false;
         }
         i += len;
+    }
+    // What is left can still stay within twice the resolution of where it
+    // starts (two arcs a little longer than the resolution crossing at a
+    // narrow angle, once a short third side is left out): too small for the
+    // builder as a whole.
+    let p = lp[first].start(crvs);
+    if (0..n)
+        .filter(|&i| keep[i])
+        .all(|i| reach(crvs, &lp[i], p) <= 2.0 * snap)
+    {
+        return Err(bad(format!(
+            "a boundary loop of the selected regions near {} is smaller than the profile \
+             resolution ({snap:e})",
+            near(p)
+        )));
     }
     let mut out = Vec::with_capacity(n + 1);
     for (sd, kept) in lp.into_iter().zip(keep) {

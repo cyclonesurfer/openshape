@@ -19,7 +19,7 @@ use openshape_core_model::sketch::{
 use openshape_core_model::units::{LengthUnit, Quantity};
 use openshape_core_model::{DVec2, DVec3, FeatureId, OpId, SketchData, SketchEdit, SketchId};
 use openshape_features::{kernel_curve, EntityState, SketchResult, Solution};
-use openshape_kernel::{Frame, ProfileCurve};
+use openshape_kernel::{CurvatureSample, Frame, ProfileCurve};
 use openshape_render::{Camera, Projection};
 use openshape_sketch_solver::{
     conic, measure, resolve_curves, solve, ResolvedCurve, SolveError, SolveOptions, SolveStatus,
@@ -27,6 +27,7 @@ use openshape_sketch_solver::{
 };
 use openshape_text::Font;
 
+use crate::comb;
 use crate::sketch_ops::fillet::fillet;
 use crate::sketch_ops::shapes::{self, TangentStart};
 use crate::sketch_ops::transform::{self, Similarity};
@@ -276,6 +277,8 @@ pub struct SketchDisplay {
     /// Placed dimension labels: offsets from each dimension's anchor
     /// (`SketchDef::labels`, or the label being dragged).
     pub labels: BTreeMap<SketchId, DVec2>,
+    /// Curvature samples of the curves showing their comb.
+    pub combs: Vec<(SketchId, Vec<CurvatureSample>)>,
 }
 
 impl SketchDisplay {
@@ -336,6 +339,7 @@ impl SketchDisplay {
             status: solution.status.clone(),
             dof: solution.dof,
             labels: BTreeMap::new(),
+            combs: Vec::new(),
         }
     }
 
@@ -2487,6 +2491,9 @@ pub struct SketchEditor {
     /// The selected text's characters and font as being edited in the
     /// dialog (applied with [`SketchEditor::apply_text`]).
     pub text_edit: Option<TextEdit>,
+    /// Curves showing their curvature comb (a view setting of this
+    /// editing session, not part of the document).
+    pub combs: BTreeSet<SketchId>,
 }
 
 /// A selected text's characters and font, as typed in the dialog.
@@ -2549,6 +2556,7 @@ impl SketchEditor {
             text_content: text::DEFAULT_TEXT.to_string(),
             text_font: Font::DEFAULT,
             text_edit: None,
+            combs: BTreeSet::new(),
         }
     }
 
@@ -2569,6 +2577,12 @@ impl SketchEditor {
         {
             d.labels.insert(dimension, offset);
         }
+        d.combs = d
+            .curves
+            .iter()
+            .filter(|c| self.combs.contains(&c.id))
+            .map(|c| (c.id, comb::samples(model.kernel(), &c.curve)))
+            .collect();
         Some(d)
     }
 
@@ -2608,6 +2622,26 @@ impl SketchEditor {
         self.tangent_start = None;
         self.turn = 0.0;
         self.last_angle = None;
+    }
+
+    /// True when nothing is in progress (the Select tool, no drag, prompt
+    /// or clicks), so the secondary button opens the context menu rather
+    /// than cancelling.
+    pub fn menu_ready(&self) -> bool {
+        self.tool == Tool::Select
+            && self.prompt.is_none()
+            && self.drag.is_none()
+            && self.clicks.is_empty()
+    }
+
+    /// Makes what is under the pointer the selection, unless it is selected
+    /// already (for the context menu).
+    pub fn select_hovered(&mut self) {
+        if let Some(id) = self.hover.map(Pick::id) {
+            if !self.selection.contains(&id) {
+                self.selection = vec![id];
+            }
+        }
     }
 
     /// Escape: abandons the current clicks, else returns to Select, else
@@ -4576,6 +4610,45 @@ impl SketchEditor {
             })
             .collect();
         self.commit(model, edits);
+    }
+
+    /// The selected curves that have a curvature comb to show (circles,
+    /// arcs, ellipses, conics and splines).
+    pub fn comb_candidates(&self, model: &Model) -> Vec<SketchId> {
+        let Some(def) = model.sketch_def(self.feature) else {
+            return Vec::new();
+        };
+        self.selection
+            .iter()
+            .filter_map(|id| def.sketch.entity(*id))
+            .filter(|e| comb::has_curvature(&e.geometry))
+            .map(|e| e.id)
+            .collect()
+    }
+
+    /// True if every selected curve with a curvature shows its comb.
+    pub fn combs_shown(&self, model: &Model) -> bool {
+        let c = self.comb_candidates(model);
+        !c.is_empty() && c.iter().all(|id| self.combs.contains(id))
+    }
+
+    /// Shows the curvature combs of the selected curves, or hides them if
+    /// they all show theirs already.
+    pub fn toggle_combs(&mut self, model: &Model) {
+        let c = self.comb_candidates(model);
+        if c.is_empty() {
+            self.message = Some(
+                "Select an arc, circle, ellipse, conic or spline to show its curvature".into(),
+            );
+            return;
+        }
+        if c.iter().all(|id| self.combs.contains(id)) {
+            for id in &c {
+                self.combs.remove(id);
+            }
+        } else {
+            self.combs.extend(c);
+        }
     }
 
     /// Whether a constraint tool applies to the selection.

@@ -2,9 +2,9 @@
 
 Updated 2026-10-12, Phase 2 (sketcher): core sketcher, the application
 shell, the editing tools, ellipses, conics, transform, curvature
-continuity, text, smooth closed splines, and trimming of ellipses and
-conics done; a rare arrangement inconsistency and then the curvature
-comb next.
+continuity, text, smooth closed splines, trimming of ellipses and conics,
+and curvature combs done; region detection now absorbs faces thinner than
+the tolerance instead of refusing them. Phase 3 groundwork next.
 
 ## What works
 
@@ -240,6 +240,19 @@ comb next.
   elliptical joints. The tool replaces a tangency it implies, the joint
   shows "C", and trim and split hand the constraint on to the piece at
   the joint.
+  Curvature combs show how curves bend: select arcs, circles, ellipses,
+  conics or splines and choose Curvature comb (command search, or
+  right-click a curve in the sketch, which selects it and offers "Show
+  curvature comb" or "Hide curvature comb"). Each curve gets 96 teeth
+  evenly spaced by arc length, standing on the outside of the turn (away
+  from the centre of curvature) and as long as the curvature there, with
+  their tips joined; one scale serves all combs shown, the tightest bend
+  drawing 72 points long. A spline's comb shows both sides of a curvature
+  jump at a knot. Across a curvature-continuous joint the teeth carry on;
+  across a merely tangent one they jump. The samples come from the
+  kernel (`Kernel::curvature_samples`), from exact first and second
+  derivatives; combs are a view setting of the editing session, kept
+  through edits but not saved with the sketch.
   Text (ADR 0015) places one line of characters in a box: type it, pick
   one of six bundled faces (Liberation Sans, Serif and Mono, regular and
   bold), click a corner, then click its height; the box grows towards the
@@ -464,6 +477,22 @@ comb next.
   with a second line starting 0.11 µm from that end, made the
   arrangement inconsistent (Euler's formula fails) and it refused the
   sketch (see the known issues).
+- Curvature combs and region robustness, 2026-10-12, on Mesa lavapipe:
+  fmt, clippy with `-D warnings`, 819 tests and `cargo deny` pass. The
+  comb's samples are checked against closed forms (circle, ellipse,
+  parabola, equal arc lengths by an independent quadrature) and against
+  exact one-sided differences at spline knots; the editor tests check a
+  G2 joint's two sides against the solved curves' end derivatives, and
+  the right-click menu showing and hiding a comb in the rendered image.
+  The region arrangement was stressed with the lattice test at 40,000
+  cases instead of 48: it failed after about 2,500 cases at the start of
+  the day (an internal inconsistency), and each failure it found since
+  is fixed and kept as a regression test with the exact curves'
+  regions: half-edges are ordered beyond a vertex's merged points, faces
+  thinner than the tolerance that are artefacts of it are absorbed, and
+  the profile builder refuses micron-sized loops by name. Successive
+  runs passed 7,533, 13,908, 2,868, 8,360 and 14,673 cases before the
+  next defect.
 - Curvature continuity, 2026-10-12, on Mesa lavapipe: fmt, clippy with
   `-D warnings`, 717 tests and `cargo deny` pass. The solver tests
   check every joint against curvatures computed in the test from closed
@@ -527,7 +556,6 @@ comb next.
   (mostly a spline meeting an interpolated spline), reported, never
   wrong; where the spline alone cannot reach the joint's curvature the
   other curve gives too (a conic may flatten) unless it is dimensioned.
-  There is no curvature comb display yet.
   Transform has no on-screen manipulator (drag handles): the selection
   moves by clicked points or typed values.
   Conics cannot be made tangent to a curve away from their ends, so a
@@ -581,13 +609,13 @@ comb next.
   arc of 3 m radius cannot be integrated to 1e-10 and the kernel says
   so (it converges to 1e-6; the random region test computes such slivers
   there).
-- The region arrangement can refuse a sketch as internally inconsistent
-  where curves meet within a tolerance or two of a tangency: in the
-  random region test, about once in 2,500 lattices perturbed by up to
-  three tolerances (minimal case: lines from (3, 3) to (4, 3) and from
-  (3, 3 − 1.1e-7) to (2, 4), and a circle about (3, 1) of radius 2 +
-  3e-8, in metres). The kernel reports it (an error, never a wrong
-  region), but the random test can fail on it, about once in 50 runs.
+- Region detection refuses a sketch with a long sliver thinner than the
+  tolerance that has three or more sides (design note 0006 §4.2 absorbs
+  the other kinds), naming where; and the profile builder, which merges
+  end points within ten tolerances, refuses a region that small as a whole
+  (a loop within twenty tolerances of a point). Both are errors, never
+  wrong regions; in the random lattice test they occur only for curves
+  moved by about a tolerance or more.
 - Solver conflict detection is local: from a start far from any solution it
   can call a sketch conflicting although another branch would satisfy it.
 - No booleans: each feature makes its own part (Phase 3).
@@ -599,14 +627,10 @@ comb next.
 
 ## Next steps
 
-1. Fix the arrangement's inconsistency at a tangency within a tolerance
-   or two of another curve's end (known issues; the minimal case is
-   recorded there), so the random region test cannot fail on it.
-2. The rest of the Phase 2 sketcher that needs no faces: a curvature
-   comb display. Project/convert, intersection curves and pierce wait
-   for Phase 3 faces.
-3. Check the new title bar on GNOME (on Pat's desktop).
-4. Phase 3 groundwork: design notes for curve/surface intersection, booleans
+1. Check the new title bar on GNOME (on Pat's desktop).
+2. Phase 3 groundwork: design notes for curve/surface intersection, booleans
    and persistent naming; make the kernel's tessellation and profile checks
    adapt to local feature size, and scale the mass-property rounding floor
-   to the coordinates curves are evaluated in.
+   to the coordinates curves are evaluated in. The rest of the Phase 2
+   sketcher (project/convert, intersection curves, pierce) needs Phase 3
+   faces.
