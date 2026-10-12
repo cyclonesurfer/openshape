@@ -8,10 +8,10 @@ the tolerance instead of refusing them. Phase 3 groundwork started: the
 design notes for intersections (0011), booleans (0012) and persistent
 naming (0013) are written, and the kernel's profile check is now exact
 and its tessellation adapts to local feature size, so every region of the
-random sketch tests extrudes; implementing the notes is next. The
-product is now named OpenDatum (ADR 0017): packages `opendatum-*`, binary
-`opendatum`, documents `.odatum`; documents saved under the old name open
-unchanged.
+random sketch tests extrudes, slivers included, with mass properties
+exact to rounding; implementing the notes is next. The product is now
+named OpenDatum (ADR 0017): packages `opendatum-*`, binary `opendatum`,
+documents `.odatum`; documents saved under the old name open unchanged.
 
 ## What works
 
@@ -497,6 +497,26 @@ unchanged.
   with a second line starting 0.11 µm from that end, made the
   arrangement inconsistent (Euler's formula fails) and it refused the
   sketch (see the known issues).
+- Rename and mass rounding floor, 2026-10-12, on Mesa lavapipe: fmt,
+  clippy with `-D warnings`, 833 tests and `cargo deny` pass (832 for
+  the rename to OpenDatum, ADR 0017, with a new op-log test that
+  documents saved under the old name still open). The lattice test's
+  40,000-case rerun with the vertex-order fix passed; it refused, as
+  documented, 265 perturbed inputs unresolvable at the tolerance, 19
+  profile loops below the builder's resolution and 46 pinched profiles,
+  and 97 slivers fell back to 1e-6 for their mass. Mass properties now
+  scale their rounding floor with the coordinates a body's points are
+  computed from (design note 0003): the lens 0.3 µm wide between arcs of
+  3 m radius that was refused at 1e-10 converges, within 1e-9 of its
+  exact volume (regression test, fails without the change; it allows
+  1e-8, what rounding of the points can cost), and the
+  random region tests no longer let any sliver fall back to 1e-6. With
+  the change, all 12 random arrangement tests passed at raised counts
+  (2,000 polygons, 2,000 grids, 1,000 scales, 500 splines, 20,000
+  garbage inputs and the rest), and a fresh 40,000-case lattice run
+  passed with every region's mass to 1e-10, no fallback; it refused 313
+  unresolvable perturbed inputs, 18 loops below resolution and 44
+  pinched profiles (the cases are random per run).
 - Feature-size-adaptive tessellation and exact profile checks,
   2026-10-12, on Mesa lavapipe: fmt, clippy with `-D warnings`, 830 tests
   and `cargo deny` pass. The random sketch tests no longer exempt any
@@ -522,8 +542,8 @@ unchanged.
   first angle, as for a run with no gap at all, so it pointed away from
   the curves and their angles seen from it fell on both sides of ±π.
   Fixed (a run closed by a gap spans its own angles) and kept as a
-  regression test, checked to fail without the fix (a 40,000-case rerun
-  was going at commit time). Documented refusals in the failed run: lattice inputs
+  regression test, checked to fail without the fix (the rerun is in the
+  entry above). Documented refusals in the failed run: lattice inputs
   perturbed by about a tolerance or more refused as unresolvable (198),
   profile loops below the builder's resolution (14), slivers whose mass
   cannot show 1e-10 (57, computed to 1e-6) and pinched profiles (30);
@@ -653,11 +673,12 @@ unchanged.
   segments a tolerance long) or where a face's boundary would need more
   than eight times its initial samples plus 100,000. In the random sketch
   tests every region now extrudes, cusps and slivers included (design
-  note 0002 §5). Mass properties keep one blind spot: their rounding
-  floor scales with the body's size, not with the coordinates the curves
-  are evaluated in, so a sliver 0.3 µm wide on an arc of 3 m radius
-  cannot be integrated to 1e-10 and the kernel says so (it converges to
-  1e-6; the random region test computes such slivers there).
+  note 0002 §5). Mass properties are exact to the rounding of the
+  coordinates a body's points are computed from: a body far from the
+  origin, or a sliver on an arc of large radius, gets its integrals to
+  about 1e-13 of those coordinates times its size to one dimension less,
+  not 1e-13 of its own size (a lens 0.3 µm wide on arcs of 3 m radius:
+  its volume to 1e-9).
 - Region detection refuses a sketch with a long sliver thinner than the
   tolerance that has three or more sides (design note 0006 §4.2 absorbs
   the other kinds), naming where; and the profile builder, which merges
@@ -679,9 +700,7 @@ unchanged.
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Phase 3 groundwork: scale the mass-property rounding floor to the
-   coordinates curves are evaluated in (the sliver blind spot above).
-3. Phase 3, in the order the design notes give: origin tables and entity
+2. Phase 3, in the order the design notes give: origin tables and entity
    handles for box, extrude and revolve (design note 0013 §10); the
    boolean pipeline end to end on polyhedral solids with plane/plane
    intersections and the volume identities (0012 §8, 0011 §8). The rest

@@ -1110,3 +1110,75 @@ fn square_with_a_gap_at_a_corner() {
         },
     );
 }
+
+/// A lens 0.3 µm wide and 1.9 mm long between two circles of radius 3 m
+/// (the kind of sliver the random region tests make between perturbed
+/// arcs). Its points are computed from centres metres away, to about
+/// 1e-15 m, some 1e-8 of its width; the integrals' rounding floor scaled
+/// with the body's 2 mm size alone, so they could not converge to 1e-10
+/// and the kernel refused. The floor now scales with the coordinates the
+/// points are computed from (design note 0003): the integrals converge,
+/// and the result is exact to that rounding.
+#[test]
+fn a_sliver_between_large_arcs_has_its_mass() {
+    let r: f64 = 3.0;
+    let d = 2.0 * r - 3e-7;
+    // The lens's width, exactly (Sterbenz), and its half-angle θ from
+    // 1 − cos θ = w / 2r without cancellation.
+    let w = 2.0 * r - d;
+    let theta = 2.0 * (w / (4.0 * r)).sqrt().asin();
+    let p = Profile {
+        plane: Frame::WORLD,
+        curves: vec![
+            ProfileCurve::Arc {
+                center: DVec2::ZERO,
+                radius: r,
+                start_angle: -theta,
+                sweep_angle: 2.0 * theta,
+            },
+            ProfileCurve::Arc {
+                center: DVec2::new(d, 0.0),
+                radius: r,
+                start_angle: PI - theta,
+                sweep_angle: 2.0 * theta,
+            },
+        ],
+    };
+    // Two circular segments, r² (x − sin x) each half with x = 2θ, by its
+    // series (the next term is about 1e-24 of the first).
+    let x = 2.0 * theta;
+    let area = r * r * (x.powi(3) / 6.0 - x.powi(5) / 120.0 + x.powi(7) / 5040.0);
+    let perimeter = 2.0 * r * x;
+    let h = 2e-5;
+    let b = k()
+        .extrude(
+            &p,
+            &ExtrudeSpec {
+                distance: h,
+                symmetric: false,
+            },
+        )
+        .unwrap();
+    let m = k().mass_properties(&b, 1e-10).unwrap();
+    // Rounding of up to 1e-15 m in points along 3.8 mm of boundary can
+    // move the area by 4e-18 m², 1e-8 of it (1e-9 here).
+    assert_close(m.volume, area * h, 1e-8, "volume");
+    assert_close(m.area, 2.0 * area + perimeter * h, 1e-10, "area");
+    let c = DVec3::new(0.5 * d, 0.0, 0.5 * h);
+    assert!(
+        (m.centroid - c).abs().max_element() < 1e-14,
+        "{}",
+        m.centroid
+    );
+    check(
+        &b,
+        Expect {
+            volume: area * h,
+            area: 2.0 * area + perimeter * h,
+            counts: Some((4, 6, 4)),
+            genus: 0,
+            solids: 1,
+            rel: 1e-7,
+        },
+    );
+}

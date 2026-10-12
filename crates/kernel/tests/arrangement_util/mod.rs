@@ -498,11 +498,6 @@ pub fn profile_pinched_at(prof: &[ProfileCurve], snap: f64) -> bool {
 /// [`profile_pinched_at`]).
 pub static EXTRUDE_PINCHED: AtomicUsize = AtomicUsize::new(0);
 
-/// Number of slivers of perturbed curves whose volume was computed to 1e-6
-/// because the integrals could not show 1e-10 (see
-/// [`extrude_all_within`]).
-pub static SLIVER_MASS: AtomicUsize = AtomicUsize::new(0);
-
 /// Number of regions of perturbed curves whose profile was refused for a
 /// loop or edges below the profile builder's resolution (see
 /// [`extrude_all_within`]).
@@ -558,25 +553,10 @@ pub fn extrude_all_within(curves: &[ProfileCurve], a: &SketchArrangement, gap: f
                             .sum::<f64>()
                     })
                     .sum();
-                let got = match k().mass_properties(&body, 1e-10) {
-                    Ok(m) => m.volume,
-                    // A sliver between perturbed curves (a lens 0.3 µm wide
-                    // and 3 mm long on an arc of 3 m radius) is evaluated
-                    // with rounding of about 1e-16 of its coordinates, some
-                    // 1e-9 of its width, while the kernel's noise floor is
-                    // scaled to the body's size: its integrals cannot show
-                    // 1e-10 and say so. The volume check below allows more
-                    // than the sliver's whole volume for the gap anyway, so
-                    // it is computed to 1e-6.
-                    Err(KernelError::MassProperties(e))
-                        if gap > 0.0 && area < 10.0 * gap * perimeter =>
-                    {
-                        let n = SLIVER_MASS.fetch_add(1, Ordering::Relaxed) + 1;
-                        eprintln!("SLIVER_MASS #{n}: region {r}: {e}");
-                        k().mass_properties(&body, 1e-6).unwrap().volume
-                    }
-                    Err(e) => panic!("region {r}: {e}"),
-                };
+                let got = k()
+                    .mass_properties(&body, 1e-10)
+                    .unwrap_or_else(|e| panic!("region {r}: {e}"))
+                    .volume;
                 let want = area * h;
                 assert!(
                     (got - want).abs() <= 1e-9 * want + 2.0 * gap * perimeter * h,

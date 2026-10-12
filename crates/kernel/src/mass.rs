@@ -428,11 +428,32 @@ fn strip_integrals(
     acc
 }
 
+/// The size of the coordinates a body's points are computed from: its
+/// vertices, and the origins, centres plus radii and control points of its
+/// curves and surfaces.
+///
+/// A point is computed with a rounding error of about this times the
+/// machine epsilon, however small the body: a sliver 0.3 µm wide on an
+/// arc of 3 m radius has its boundary placed to about 1e-15 m, some 1e-9
+/// of its width. The integrands, products of one such point and factors
+/// of the body's size, carry the same relative error, so the rounding
+/// floor of the integrals scales with this size times the body's size to
+/// one dimension less; scaled with the body's size alone, a sliver's
+/// integrals could never meet it.
+fn evaluation_size(b: &Brep) -> f64 {
+    let vertices = b.vertices.iter().map(|v| v.point.abs().max_element());
+    let edges = b.edges.iter().map(|e| e.curve.magnitude());
+    let faces = b.faces.iter().map(|f| f.surface.magnitude());
+    vertices.chain(edges).chain(faces).fold(0.0, f64::max)
+}
+
 /// Mass properties of a body with unit density: each integral to within
 /// `relative_accuracy` (no finer than [`NOISE`]) of the boundary integral
 /// of its integrand's magnitude, as estimated by [`Adaptive`], plus a
-/// rounding floor of [`NOISE`] times the body's `size` to the integral's
-/// dimension (area L², volume L³, first moments L⁴, second moments L⁵).
+/// rounding floor of [`NOISE`] times the body's `size` to one less than
+/// the integral's dimension (area L², volume L³, first moments L⁴, second
+/// moments L⁵) times the size of the coordinates its points are computed
+/// from (the body's size if that is larger; see [`evaluation_size`]).
 /// Fails if some piece of the boundary cannot be integrated that
 /// accurately.
 pub(crate) fn mass_properties(
@@ -456,7 +477,8 @@ pub(crate) fn mass_properties(
         .sum();
     let share = NOISE / coedges.max(1) as f64;
     let dims = [2, 3, 4, 4, 4, 5, 5, 5, 5, 5, 5];
-    let floor: Acc = dims.map(|d| share * size.powi(d));
+    let eval = evaluation_size(b).max(size);
+    let floor: Acc = dims.map(|d| share * eval * size.powi(d - 1));
     let relative = relative_accuracy.max(NOISE);
     let mut acc = [0.0; 11];
     let refuse = || {

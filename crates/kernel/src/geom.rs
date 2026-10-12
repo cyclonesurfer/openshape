@@ -33,6 +33,22 @@ pub(crate) enum Curve3 {
 pub const KNOT_MERGE: f64 = 1e-12;
 
 impl Curve3 {
+    /// Size of the coordinates the curve's points are computed from (its
+    /// origin, its centre plus radius, or its control points' bounds):
+    /// together with the size of the points themselves, this sets their
+    /// rounding errors, about this times the machine epsilon.
+    pub fn magnitude(&self) -> f64 {
+        match self {
+            Curve3::Line { origin, .. } => origin.abs().max_element(),
+            Curve3::Circle { center, radius, .. } => center.abs().max_element() + radius,
+            Curve3::Nurbs(n) => n
+                .control_points()
+                .iter()
+                .map(|p| p.abs().max_element())
+                .fold(0.0, f64::max),
+        }
+    }
+
     /// Point at parameter `t`.
     pub fn point(&self, t: f64) -> DVec3 {
         match self {
@@ -248,6 +264,24 @@ pub(crate) enum Surface {
 }
 
 impl Surface {
+    /// Size of the coordinates the surface's points are computed from, as
+    /// [`Curve3::magnitude`].
+    pub fn magnitude(&self) -> f64 {
+        match self {
+            Surface::Plane(f) => f.origin.abs().max_element(),
+            Surface::Extrusion { curve, .. } => curve.magnitude(),
+            Surface::Revolution { frame, profile } => {
+                frame.origin.abs().max_element() + profile.magnitude()
+            }
+            Surface::Nurbs(n) => n
+                .control_points()
+                .iter()
+                .flatten()
+                .map(|p| p.abs().max_element())
+                .fold(0.0, f64::max),
+        }
+    }
+
     /// Point at `(u, v)`.
     pub fn point(&self, u: f64, v: f64) -> DVec3 {
         match self {

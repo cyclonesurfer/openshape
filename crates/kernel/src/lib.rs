@@ -201,8 +201,12 @@ pub trait Kernel: Send + Sync {
     /// Each integral is computed to within `relative_accuracy` of the
     /// boundary integral of its integrand's magnitude (for the volume of a
     /// solid that is star-shaped about its vertex centroid, the volume
-    /// itself), but no finer than rounding allows (about 1e-13). Fails
-    /// rather than return a less accurate value.
+    /// itself), but no finer than rounding allows: about 1e-13 of the
+    /// body's size to the integral's dimension, or, where the body's
+    /// points are computed from larger coordinates (far from the origin,
+    /// or on an arc of large radius), 1e-13 of those coordinates' size
+    /// times the body's size to one dimension less. Fails rather than
+    /// return a less accurate value.
     fn mass_properties(
         &self,
         body: &Self::Body,

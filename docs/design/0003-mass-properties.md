@@ -43,10 +43,17 @@ integrals, the difference is at most
   that accuracy times the boundary integral of the magnitude; for the
   volume of a solid star-shaped about the vertex centroid that is the
   volume itself), or
-* a rounding floor of 1e-13 times the body's size to the integral's
-  dimension, shared among the coedges by parameter length (for components
-  that vanish on a piece up to rounding, whose relative difference is
-  noise).
+* a rounding floor of 1e-13 times the body's size to one less than the
+  integral's dimension times the size of the coordinates its points are
+  computed from (vertices, curve origins, centres plus radii, control
+  points; at least the body's size), shared among the coedges by
+  parameter length (for components that vanish on a piece up to
+  rounding, whose relative difference is noise). A point is computed to
+  about the machine epsilon of those coordinates, whatever the body's
+  size: a lens 0.3 µm wide on two arcs of 3 m radius has its boundary
+  placed to about 1e-15 m, 1e-8 of its width, and with a floor scaled to
+  its 2 mm size alone its integrals could never converge to 1e-10 (found
+  by the random region test; `a_sliver_between_large_arcs_has_its_mass`).
 
 Accuracies finer than 1e-13 mean 1e-13. A piece that has not converged
 after 30 bisections makes the whole computation fail with an error; the
