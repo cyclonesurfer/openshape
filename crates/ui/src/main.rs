@@ -6,11 +6,16 @@
 //! openshape --headless-demo <dir>   # offscreen end-to-end demo, writes PNGs
 //! openshape --screenshots <dir>     # the application shell offscreen, writes PNGs
 //! openshape --bench <dir> [frames]  # offscreen frame-time benchmark
+//! openshape --version               # prints the version
 //! ```
+//!
+//! `OPENSHAPE_WGPU_BACKEND=vulkan|gl|any` restricts the window's graphics
+//! backend as it does the offscreen renderer's.
 
 use std::path::PathBuf;
 
 use openshape_app::{app::OpenShapeApp, demo, screenshots, Model};
+use openshape_render::BackendPreference;
 
 fn main() -> std::process::ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
@@ -109,12 +114,26 @@ fn main() -> std::process::ExitCode {
         },
         None => Model::new(),
     };
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("OpenShape")
             .with_inner_size([1280.0, 800.0]),
         ..Default::default()
     };
+    match BackendPreference::from_env() {
+        Ok(preference) => {
+            if let (Some(backends), egui_wgpu::WgpuSetup::CreateNew(setup)) = (
+                preference.forced_backends(),
+                &mut options.wgpu_options.wgpu_setup,
+            ) {
+                setup.instance_descriptor.backends = backends;
+            }
+        }
+        Err(e) => {
+            eprintln!("openshape: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    }
     match eframe::run_native(
         "OpenShape",
         options,

@@ -69,7 +69,10 @@ cargo run --release -p openshape -- part.osdoc   # open a saved document
 The first build compiles everything in release mode and takes a while; later
 runs start immediately. The app runs natively on Wayland or X11 and uses
 Vulkan by default. `OPENSHAPE_WGPU_BACKEND=gl` forces OpenGL if Vulkan
-misbehaves; `RUST_LOG=openshape_render=info` prints the adapter in use.
+misbehaves (`vulkan` and `any` are the other values; wgpu's own
+`WGPU_BACKEND` is honoured when it is unset). The status bar at the bottom
+right names the adapter and backend in use, and `RUST_LOG=openshape_app=info`
+prints them with the driver in the terminal.
 
 Controls: the toolbar adds sketches (S), extrudes (E), revolves (V), a box
 and templates (cylinder, plate with hole, ring, spline vase); Ctrl+K opens
@@ -146,8 +149,9 @@ It ends with `RESULT: all steps passed` or lists what failed, with the last
 software driver`, the run did not use the GPU; see the note in step 1.
 
 Everything lands in `gpu-check-out/`: `report.txt` (the summary to send
-back), the demo images in `demo/`, the benchmark in `bench/`, a log per step,
-and `gpu-check-out.tar.gz` with all of it. To copy the images from a server to
+back), the demo images in `demo/`, the benchmark in `bench/` and a log per
+step. `gpu-check-out.tar.gz`, next to that folder, holds all of it, the
+finished report included. To copy the images from a server to
 your own computer, run this on your computer (adjust user, host and path):
 
 ```sh

@@ -5,7 +5,8 @@
 #   scripts/gpu-check.sh [out-dir]        (default: gpu-check-out)
 #
 # Prints PASS/FAIL per step and writes <out-dir>/report.txt (paste that back),
-# the demo PNGs in <out-dir>/demo/, and <out-dir>.tar.gz with all of it.
+# the demo PNGs in <out-dir>/demo/, and <out-dir>.tar.gz (next to <out-dir>)
+# with all of it.
 # See docs/RUNNING.md for prerequisites.
 
 set -uo pipefail
@@ -79,12 +80,13 @@ if grep -qiE '^adapter:.*(llvmpipe|lavapipe|softpipe)' "$out/demo.log" 2>/dev/nu
     say "         Check that RADV is installed and that /dev/dri/renderD* is accessible."
 fi
 
-tar czf "$out.tar.gz" -C "$(dirname "$out")" "$(basename "$out")"
 say ""
 if [ "$failed" = 0 ]; then
     say "RESULT: all steps passed"
 else
     say "RESULT: some steps FAILED (see above)"
 fi
+# Last, so the report inside the archive has the RESULT line.
+tar czf "$out.tar.gz" -C "$(dirname "$out")" "$(basename "$out")"
 echo "Report: $report   Images: $out/demo/   Archive: $out.tar.gz"
 exit "$failed"

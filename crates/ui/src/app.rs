@@ -245,6 +245,14 @@ impl OpenShapeApp {
         let (viewport, adapter) = match render_state {
             Some(rs) => {
                 let info = rs.adapter.get_info();
+                log::info!(
+                    "openshape: window uses {} ({:?}, {:?}, driver {} {})",
+                    info.name,
+                    info.backend,
+                    info.device_type,
+                    info.driver,
+                    info.driver_info
+                );
                 (
                     Some(Viewport::new(rs, &theme)),
                     format!("{} ({:?})", info.name, info.backend),

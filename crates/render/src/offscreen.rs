@@ -7,9 +7,9 @@ use crate::scene::SceneRenderer;
 use crate::RenderError;
 use std::path::Path;
 
-/// Environment variable selecting the backend of [`OffscreenRenderer::new`]:
-/// `vulkan`, `gl` or `any` (case-insensitive). Unset means
-/// [`BackendPreference::PreferVulkan`].
+/// Environment variable selecting the backend of [`OffscreenRenderer::new`]
+/// and of the application window: `vulkan`, `gl` or `any`
+/// (case-insensitive). Unset means [`BackendPreference::PreferVulkan`].
 pub const BACKEND_ENV_VAR: &str = "OPENSHAPE_WGPU_BACKEND";
 
 /// Which wgpu backend an [`OffscreenRenderer`] may use.
@@ -45,6 +45,19 @@ impl BackendPreference {
             Ok(v) if v.trim().is_empty() => Ok(BackendPreference::default()),
             Ok(v) => BackendPreference::parse(&v).ok_or(RenderError::InvalidBackendEnv(v)),
             Err(_) => Ok(BackendPreference::default()),
+        }
+    }
+
+    /// The backends a window must restrict itself to under this
+    /// preference: `None` for [`BackendPreference::PreferVulkan`], which
+    /// leaves the windowing toolkit's own choice (Vulkan where present) in
+    /// place.
+    pub fn forced_backends(self) -> Option<wgpu::Backends> {
+        match self {
+            BackendPreference::PreferVulkan => None,
+            BackendPreference::Vulkan => Some(wgpu::Backends::VULKAN),
+            BackendPreference::Gl => Some(wgpu::Backends::GL),
+            BackendPreference::Any => Some(wgpu::Backends::all()),
         }
     }
 
@@ -595,5 +608,22 @@ mod tests {
             Some(BackendPreference::Any)
         );
         assert_eq!(BackendPreference::parse("metal"), None);
+    }
+
+    #[test]
+    fn a_window_is_restricted_only_when_a_backend_is_named() {
+        assert_eq!(BackendPreference::PreferVulkan.forced_backends(), None);
+        assert_eq!(
+            BackendPreference::Vulkan.forced_backends(),
+            Some(wgpu::Backends::VULKAN)
+        );
+        assert_eq!(
+            BackendPreference::Gl.forced_backends(),
+            Some(wgpu::Backends::GL)
+        );
+        assert_eq!(
+            BackendPreference::Any.forced_backends(),
+            Some(wgpu::Backends::all())
+        );
     }
 }
