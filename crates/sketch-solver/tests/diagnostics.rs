@@ -122,6 +122,58 @@ fn appended_implied_constraints_are_reported_alone() {
     }
 }
 
+/// A constraint that the eliminated ones imply exactly can be the only
+/// equation of its component; its Jacobian row is then rounding noise
+/// (here about 1e-32), which must count as zero rather than as full rank
+/// against itself. Found by the mirror fuzz (design note 0007 §9): the
+/// diagnosis of an exactly placed input disagreed with a nudged one.
+#[test]
+fn constraints_implied_by_eliminations_alone_are_redundant() {
+    let rectangle = |nudge: f64| {
+        let mut b = B::new();
+        let (l0, p0, p1) = b.line(0.0, 0.0, 3.0, 0.0);
+        let (l1, p2, p3) = b.line(3.0, 0.0, 3.0, 2.0);
+        let (l2, p4, p5) = b.line(3.0, 2.0, 0.0, 2.0);
+        let (l3, p6, p7) = b.line(0.0, 2.0, nudge, 0.0);
+        b.coincident(p1, p2);
+        b.coincident(p3, p4);
+        b.coincident(p5, p6);
+        b.coincident(p7, p0);
+        b.c(Constraint::Horizontal { line: l0 });
+        b.c(Constraint::Vertical { line: l1 });
+        b.c(Constraint::Horizontal { line: l2 });
+        b.c(Constraint::Vertical { line: l3 });
+        (b, [l0, l1, l2, l3])
+    };
+    for nudge in [0.0, 1e-3] {
+        let (base, lines) = rectangle(nudge);
+        let implied = [
+            Constraint::Angle {
+                a: lines[1],
+                b: lines[0],
+                value: -FRAC_PI_2,
+            },
+            Constraint::Perpendicular {
+                a: lines[0],
+                b: lines[1],
+            },
+            Constraint::Parallel {
+                a: lines[0],
+                b: lines[2],
+            },
+        ];
+        for c in implied {
+            let mut b = base.clone();
+            let id = b.c(c.clone());
+            let s = solve(&b.build(), &opts());
+            assert_eq!(s.status, SolveStatus::Redundant, "{c:?}, nudge {nudge}");
+            assert_eq!(s.redundant, vec![id], "{c:?}, nudge {nudge}");
+            // Four corners on two x and two y values.
+            assert_eq!(s.dof, 4, "{c:?}, nudge {nudge}");
+        }
+    }
+}
+
 #[test]
 fn redundancy_follows_constraint_order() {
     // A horizontal line, then the same condition on its end points: the

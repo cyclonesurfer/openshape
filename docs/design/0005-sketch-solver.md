@@ -244,6 +244,21 @@ test or the fuzzers showed the plan was not enough.
   bounds; the Jacobi SVD runs only when the bounds are inconclusive. Both
   give the same rank. This took the 300-entity chain from 352 ms to 11.6 ms
   (release).
+* **Rows that cancel are zero.** A Jacobian row whose entries sum (in
+  absolute value) to at most 1e-10 of its equation's own gradient terms is
+  set to zero before any rank decision. Such a row is rounding noise: the
+  members of an equality class pulling equally both ways, or a derivative
+  that is zero analytically (an angle's with respect to a vertical line's
+  length). Alone in its component, the relative rank test above would
+  count it as full rank against itself, so an angle implied by horizontal
+  and vertical constraints went unreported when the input was placed
+  exactly and was reported when it was nudged. The mirror fuzz (design
+  note 0007 §9) found this; `constraints_implied_by_eliminations_alone_are_redundant`
+  guards it. Rows of legitimate equations are not that small: a row is
+  smallest against its terms when a free point is measured against a short
+  fixed line (its terms grow as 1/length), and every line shorter than
+  8 × 1e-10 of the sketch has collapsed (above), which keeps the ratio
+  above 1e-10 for geometry within the sketch's extent.
 * **Spline parameters** use an active set at the domain ends; spline
   corners (repeated knots) are supported; the start point for a
   point-on-spline is found by sampling every knot span and refining each

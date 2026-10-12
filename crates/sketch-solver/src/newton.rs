@@ -317,11 +317,25 @@ impl<'a> CompSystem<'a> {
                 return None;
             }
             let mut noise = 0.0;
+            let mut gross = 0.0;
             for &(s, g) in &grad {
                 noise += g.abs() * self.v[s].abs();
+                gross += g.abs();
                 let c = self.col_of_slot[s];
                 if c != usize::MAX {
                     j[(i, c)] += g;
+                }
+            }
+            // A row that cancels to within RANK_TOL of its own terms (the
+            // members of an equality class pulling equally both ways, or a
+            // derivative that is zero up to rounding, such as an angle's
+            // with respect to a vertical line's length) is zero: alone in
+            // a component, its rounding noise would otherwise count as
+            // full rank against itself.
+            let row: f64 = (0..n).map(|c| j[(i, c)].abs()).sum();
+            if row <= RANK_TOL * gross {
+                for c in 0..n {
+                    j[(i, c)] = 0.0;
                 }
             }
             r.push(ri);
