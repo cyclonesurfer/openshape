@@ -96,7 +96,9 @@ application shell done; sketch editing tools next.
   app rendered offscreen.
 - **Sketch mode**: line (chained), corner, centre-point and aligned
   rectangles, circle, 3-point, centre and tangent arcs, slot, regular
-  polygon (3 to 64 sides), point, through-point spline, construction
+  polygon (3 to 64 sides), point, through-point and control-point splines
+  (the control polygon shown dashed; clicking the first point again closes
+  the curve, with a corner there), construction
   toggle (design note 0007 §4; each shape's degrees of freedom and the
   absence of redundant constraints are tested); 12
   constraint tools and dimensions (length, distance aligned/horizontal/
@@ -265,6 +267,9 @@ application shell done; sketch editing tools next.
 
 - Sketch editing tools are not done: ellipses, conics, text, use/project
   and transform.
+  A spline closed on its first point meets itself with a corner: a smooth
+  (periodic) closed spline is not expressible in the sketch yet (design
+  note 0007 §4).
   Splines cannot be offset (their offsets are not splines; an
   approximation with a guaranteed tolerance is future work).
   A fillet removes (and reports) equal-length and midpoint constraints on
@@ -305,8 +310,8 @@ application shell done; sketch editing tools next.
 ## Next steps
 
 1. The rest of the Phase 2 sketcher that needs no faces: ellipses and
-   elliptical arcs, control-point splines, conics, transform (move, rotate,
-   scale a selection), the curvature constraint, text. Project/convert,
+   elliptical arcs, conics, transform (move, rotate, scale a selection),
+   the curvature constraint, text, smooth closed splines. Project/convert,
    intersection curves and pierce wait for Phase 3 faces.
 2. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.

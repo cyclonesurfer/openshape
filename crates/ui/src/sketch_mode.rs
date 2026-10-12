@@ -1213,6 +1213,34 @@ pub fn snap(d: &SketchDisplay, map: &ScreenMap, pos: Pos2, exclude: &[SketchId])
 // Building edit batches
 // ---------------------------------------------------------------------------
 
+/// True when two clicks are different places (not the same point, nor
+/// snapped to the same point entity).
+fn distinct_clicks(a: &Snap, b: &Snap) -> bool {
+    (a.at - b.at).length() > SAME_POINT
+        && !(a.target == b.target && matches!(a.target, SnapTarget::Point(_)))
+}
+
+/// The degree of a control-point spline the tool makes with `count`
+/// control points: cubic, or lower when there are too few points.
+pub fn control_degree(count: usize) -> u32 {
+    (count.saturating_sub(1)).clamp(1, 3) as u32
+}
+
+/// The control-point spline (clamped, uniform knots) on `control`, from
+/// three points; `None` with fewer.
+pub fn control_spline(control: &[DVec2]) -> Option<ProfileCurve> {
+    if control.len() < 3 {
+        return None;
+    }
+    let degree = control_degree(control.len()) as usize;
+    Some(ProfileCurve::Spline {
+        degree,
+        knots: openshape_sketch_solver::clamped_uniform_knots(control.len(), degree),
+        points: control.to_vec(),
+        weights: None,
+    })
+}
+
 /// Where a tangent arc clicked at `s` starts: `s` must have snapped to the
 /// end point of a line, arc or spline.
 fn tangent_start(d: &SketchDisplay, s: &Snap) -> Option<TangentStart> {
@@ -1306,11 +1334,13 @@ pub enum Tool {
     LinearPattern,
     /// Copies of the selection about a centre.
     CircularPattern,
+    /// A B-spline shaped by clicked control points.
+    ControlSpline,
 }
 
 impl Tool {
     /// Every tool, in toolbar order.
-    pub const ALL: [Tool; 21] = [
+    pub const ALL: [Tool; 22] = [
         Tool::Select,
         Tool::Line,
         Tool::Rectangle,
@@ -1324,6 +1354,7 @@ impl Tool {
         Tool::Polygon,
         Tool::Point,
         Tool::Spline,
+        Tool::ControlSpline,
         Tool::Trim,
         Tool::Extend,
         Tool::Split,
@@ -1353,7 +1384,7 @@ impl Tool {
             Tool::Slot => &[Tool::Slot],
             Tool::Polygon => &[Tool::Polygon],
             Tool::Point => &[Tool::Point],
-            Tool::Spline => &[Tool::Spline],
+            Tool::Spline | Tool::ControlSpline => &[Tool::Spline, Tool::ControlSpline],
             Tool::SketchFillet => &[Tool::SketchFillet],
             Tool::Mirror => &[Tool::Mirror],
             Tool::Offset => &[Tool::Offset],
@@ -1379,6 +1410,7 @@ impl Tool {
             Tool::Polygon => "Polygon",
             Tool::Point => "Point",
             Tool::Spline => "Spline",
+            Tool::ControlSpline => "Control-point spline",
             Tool::Trim => "Trim",
             Tool::Extend => "Extend",
             Tool::Split => "Split",
@@ -1427,7 +1459,8 @@ impl Tool {
             | Tool::Mirror
             | Tool::Offset
             | Tool::LinearPattern
-            | Tool::CircularPattern => return None,
+            | Tool::CircularPattern
+            | Tool::ControlSpline => return None,
         })
     }
 
@@ -1464,6 +1497,11 @@ impl Tool {
             (Tool::Point, _) => "Click to place a point",
             (Tool::Spline, 0) => "Click the first point",
             (Tool::Spline, _) => "Click more points; Enter or double-click finishes",
+            (Tool::ControlSpline, 0) => "Click the first control point (the curve starts there)",
+            (Tool::ControlSpline, 1 | 2) => "Click more control points",
+            (Tool::ControlSpline, _) => {
+                "Click more control points; Enter or double-click finishes, the first point closes it"
+            }
             (Tool::Trim, _) => {
                 "Click the piece of a curve to remove (a curve nothing crosses is deleted)"
             }
@@ -2354,6 +2392,16 @@ impl SketchEditor {
         if self.tool.is_pattern() {
             self.curve_edit = self.plan_pattern(model, &d, s);
         }
+        // A control-point spline closes on its first point.
+        if self.tool == Tool::ControlSpline && self.clicks.len() >= 3 {
+            let first = self.clicks[0];
+            if map
+                .to_screen(first.at)
+                .is_some_and(|f| f.distance(pos) <= POINT_PICK)
+            {
+                s = first;
+            }
+        }
         self.cursor = Some(s);
     }
 
@@ -2889,6 +2937,18 @@ impl SketchEditor {
                     _ => vec![pts],
                 }
             }
+            (Tool::ControlSpline, n) if n >= 1 => {
+                // The control polygon and, from three points, the curve.
+                let mut pts: Vec<DVec2> = c.iter().map(|s| s.at).collect();
+                if distinct_clicks(&c[n - 1], &cur) {
+                    pts.push(cur.at);
+                }
+                let mut out = vec![pts.clone()];
+                if let Some(curve) = control_spline(&pts) {
+                    out.push(sample_curve(&curve));
+                }
+                out
+            }
             _ => Vec::new(),
         }
     }
@@ -2943,10 +3003,7 @@ impl SketchEditor {
     }
 
     fn tool_click(&mut self, model: &mut Model, s: Snap) {
-        let distinct = |a: &Snap, b: &Snap| {
-            (a.at - b.at).length() > SAME_POINT
-                && !(a.target == b.target && matches!(a.target, SnapTarget::Point(_)))
-        };
+        let distinct = distinct_clicks;
         let construction = self.construction;
         match self.tool {
             // Curve editing tools act on clicks directly (`edit_curve`).
@@ -3227,11 +3284,53 @@ impl SketchEditor {
                     self.clicks.push(s);
                 }
             }
+            Tool::ControlSpline => {
+                if self.clicks.last().is_none_or(|a| distinct(a, &s)) {
+                    let closes = self.clicks.len() >= 3 && !distinct(&self.clicks[0], &s);
+                    self.clicks.push(s);
+                    if closes {
+                        self.finish(model);
+                    }
+                }
+            }
         }
     }
 
     /// Enter: finishes a spline; ends a line chain.
     pub fn finish(&mut self, model: &mut Model) {
+        if self.tool == Tool::ControlSpline {
+            let clicks = std::mem::take(&mut self.clicks);
+            if clicks.len() < 3 {
+                if !clicks.is_empty() {
+                    self.message = Some("A control-point spline needs at least 3 points".into());
+                }
+                self.reset_tool();
+                return;
+            }
+            let mut b = Batch::default();
+            // Ending on the first point closes the curve: the same point.
+            let closed =
+                clicks.len() >= 4 && !distinct_clicks(&clicks[0], &clicks[clicks.len() - 1]);
+            let open = if closed {
+                &clicks[..clicks.len() - 1]
+            } else {
+                &clicks[..]
+            };
+            let mut control: Vec<SketchId> = open.iter().map(|s| b.snapped_point(s)).collect();
+            if closed {
+                control.push(control[0]);
+            }
+            b.entity(
+                Geometry::ControlSpline {
+                    degree: control_degree(control.len()),
+                    control,
+                },
+                self.construction,
+            );
+            self.commit(model, b.edits);
+            self.reset_tool();
+            return;
+        }
         if self.tool == Tool::Spline && self.clicks.len() >= 2 {
             let clicks = std::mem::take(&mut self.clicks);
             let mut lengths = vec![0.0];
@@ -3263,7 +3362,7 @@ impl SketchEditor {
     /// edits its value.
     pub fn double_click(&mut self, model: &mut Model, map: &ScreenMap, pos: Pos2) {
         match self.tool {
-            Tool::Spline | Tool::Line => self.finish(model),
+            Tool::Spline | Tool::ControlSpline | Tool::Line => self.finish(model),
             Tool::Select => {
                 let Some(d) = self.display(model) else {
                     return;

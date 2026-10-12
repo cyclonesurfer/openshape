@@ -15,7 +15,7 @@ const COLUMNS: usize = 10;
 #[test]
 fn the_set_is_complete_and_named() {
     // 19 app, 7 view, 11 tree and tab, 36 sketch icons.
-    assert_eq!(Icon::ALL.len(), 73);
+    assert_eq!(Icon::ALL.len(), 74);
     let unique: HashSet<Icon> = Icon::ALL.iter().copied().collect();
     assert_eq!(unique.len(), Icon::ALL.len(), "duplicates in Icon::ALL");
     let names: HashSet<&str> = Icon::ALL.iter().map(|i| i.name()).collect();

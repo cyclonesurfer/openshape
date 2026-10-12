@@ -259,8 +259,10 @@ fn kinks(knots: &[f64], p: usize) -> Vec<f64> {
 }
 
 /// Clamped knots on `[0, 1]` with uniform interior knots for `count`
-/// control points of degree `p`.
-pub(crate) fn clamped_uniform_knots(count: usize, p: usize) -> Vec<f64> {
+/// control points of degree `p` (the knots of a
+/// [`Geometry::ControlSpline`](crate::Geometry::ControlSpline)); needs
+/// `count > p`.
+pub fn clamped_uniform_knots(count: usize, p: usize) -> Vec<f64> {
     let n = count - 1;
     let segments = n - p + 1;
     let mut u = Vec::with_capacity(n + p + 2);

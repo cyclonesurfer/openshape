@@ -277,6 +277,7 @@ impl Command {
                 Tool::Polygon => Icon::Polygon,
                 Tool::Point => Icon::Point,
                 Tool::Spline => Icon::Spline,
+                Tool::ControlSpline => Icon::ControlSpline,
                 Tool::Trim => Icon::Trim,
                 Tool::Extend => Icon::Extend,
                 Tool::Split => Icon::Split,

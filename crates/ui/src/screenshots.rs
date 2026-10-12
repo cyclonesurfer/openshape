@@ -450,6 +450,22 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
         .set_view(openshape_ui_kit::view_cube::CubeTarget::HOME);
     save("16-extrude-preview.png", &d.settle()?)?;
     d.key(Key::Escape, Modifiers::NONE)?;
+    // A control-point spline left of the plate: being drawn (its control
+    // polygon and the curve to the pointer), then finished.
+    d.app.enter_sketch(sketch);
+    d.settle()?;
+    d.app
+        .run(crate::commands::Command::Tool(Tool::ControlSpline));
+    for (x, y) in [(-80.0, -38.0), (-76.0, 18.0), (-64.0, -30.0), (-56.0, 12.0)] {
+        d.click(on_plane(&d, x, y)?)?;
+    }
+    d.hover(on_plane(&d, -48.0, -26.0)?)?;
+    save("17-control-spline-drawing.png", &d.settle()?)?;
+    d.click(on_plane(&d, -48.0, -26.0)?)?;
+    d.key(Key::Enter, Modifiers::NONE)?;
+    d.hover(on_plane(&d, 120.0, -80.0)?)?;
+    save("18-control-spline.png", &d.settle()?)?;
+    d.app.run(crate::commands::Command::CancelSketch);
     Ok(written)
 }
 

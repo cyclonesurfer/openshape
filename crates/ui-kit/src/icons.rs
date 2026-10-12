@@ -135,6 +135,9 @@ pub enum Icon {
     Point,
     /// A smooth S-shaped curve through four dotted points.
     Spline,
+    /// A smooth curve pulled towards four dotted control points joined by a
+    /// dashed control polygon (a control-point spline).
+    ControlSpline,
     /// A rectangle with a dot at its centre and one corner, joined by a
     /// dashed half-diagonal.
     CenterRectangle,
@@ -252,6 +255,7 @@ impl Icon {
         Icon::CenterArc,
         Icon::Point,
         Icon::Spline,
+        Icon::ControlSpline,
         Icon::CenterRectangle,
         Icon::AlignedRectangle,
         Icon::TangentArc,
@@ -330,6 +334,7 @@ impl Icon {
             Icon::CenterArc => "Center arc",
             Icon::Point => "Point",
             Icon::Spline => "Spline",
+            Icon::ControlSpline => "Control-point spline",
             Icon::CenterRectangle => "Center rectangle",
             Icon::AlignedRectangle => "Aligned rectangle",
             Icon::TangentArc => "Tangent arc",
@@ -996,6 +1001,27 @@ fn draw(pen: &Pen<'_>, icon: Icon) {
             let knots = [(4.0, 16.0), (8.5, 7.5), (15.5, 16.5), (20.0, 8.0)];
             pen.poly(&catmull_rom(&knots));
             for q in knots {
+                pen.dot(q, 1.7);
+            }
+        }
+        Icon::ControlSpline => {
+            let ctrl = [(4.0, 18.0), (6.5, 5.0), (17.5, 19.0), (20.0, 6.0)];
+            for w in ctrl.windows(2) {
+                pen.dashed(w[0], w[1], 2.4, 1.8);
+            }
+            // The cubic Bézier the four points control.
+            let curve: Vec<P> = (0..=24)
+                .map(|i| {
+                    let t = i as f32 / 24.0;
+                    let s = 1.0 - t;
+                    let b = [s * s * s, 3.0 * s * s * t, 3.0 * s * t * t, t * t * t];
+                    let x = (0..4).map(|k| b[k] * ctrl[k].0).sum();
+                    let y = (0..4).map(|k| b[k] * ctrl[k].1).sum();
+                    (x, y)
+                })
+                .collect();
+            pen.poly(&curve);
+            for q in ctrl {
                 pen.dot(q, 1.7);
             }
         }

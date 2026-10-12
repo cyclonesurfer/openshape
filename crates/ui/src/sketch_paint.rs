@@ -5,6 +5,7 @@
 //! translucent halo.
 
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, Vec2};
+use openshape_core_model::sketch::Geometry;
 use openshape_core_model::{DVec2, SketchId};
 use openshape_features::{kernel_curve, EntityState};
 use openshape_sketch_solver::SolveStatus;
@@ -123,6 +124,19 @@ pub fn paint_editor(
             Stroke::new(width, col),
             c.construction,
         );
+    }
+    // Control-point splines show their control polygons.
+    for e in &d.sketch.entities {
+        if let Geometry::ControlSpline { control, .. } = &e.geometry {
+            let pts: Vec<DVec2> = control.iter().filter_map(|p| d.sketch.point(*p)).collect();
+            stroke_polyline(
+                painter,
+                map,
+                &pts,
+                Stroke::new(1.0, dimmed(color(e.id))),
+                true,
+            );
+        }
     }
     for (id, at) in d.points() {
         if let Some(s) = map.to_screen(at) {
