@@ -7,7 +7,10 @@
 //!   Nocedal & Wright, *Numerical Optimization*, 2nd ed., §10.3). Unit
 //!   weights make every step the smallest change that fixes the linearized
 //!   residuals, so the solver stays on the branch nearest the start; dragged
-//!   points carry weight 1e6 and move last.
+//!   points carry weight 1e6 and move last. Images of derived constraints
+//!   (mirror, offset) move first: when moving them alone solves the
+//!   linearized system, nothing else moves ([`images_first`]), so changing
+//!   an offset's distance moves the offset, not the curves it follows.
 //! * **Bounds and corners** (`bounded_step`): hidden curve parameters stay
 //!   in `[0, 1]` by an active set; a radius may at most halve per step;
 //!   at a corner of a degree-1 spline the step uses the one-sided
@@ -39,7 +42,7 @@
 //!   interpolated from their current values; other equations follow the
 //!   Newton homotopy `r(x) − (1 − s)·r(x₀)`.
 
-use openshape_linalg::{dot, lstsq_min_norm, weighted_min_norm, Matrix};
+use openshape_linalg::{dot, lstsq_min_norm, norm_inf, residual, weighted_min_norm, Matrix};
 
 use crate::build::Problem;
 use crate::eq::{norm, EqKind, PairMode, VecExpr};
@@ -111,6 +114,8 @@ pub(crate) struct CompSystem<'a> {
     col_of_slot: Vec<usize>,
     /// Metric weights of the local unknowns.
     pub weights: Vec<f64>,
+    /// Local unknowns that are images of a derived constraint.
+    pub image: Vec<bool>,
     is_param: Vec<bool>,
     is_radius: Vec<bool>,
     /// Admissible range of each local unknown.
@@ -142,14 +147,18 @@ pub(crate) struct Outcome {
 }
 
 impl<'a> CompSystem<'a> {
-    /// The system of `comp`, with slot values `v` (constants included) and
-    /// per-unknown weights `unknown_weight` (indexed by reduced unknown).
+    /// The system of `comp`, with slot values `v` (constants included),
+    /// per-unknown weights `unknown_weight` and the unknowns that are images
+    /// of derived constraints `unknown_image` (both indexed by reduced
+    /// unknown).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         prob: &'a Problem,
         red: &Reduced,
         comp: &Component,
         v: Vec<f64>,
         unknown_weight: &[f64],
+        unknown_image: &[bool],
         len_tol: LengthTol,
         region: Region,
     ) -> Self {
@@ -158,6 +167,7 @@ impl<'a> CompSystem<'a> {
         let mut is_param = Vec::with_capacity(comp.unknowns.len());
         let mut is_radius = Vec::with_capacity(comp.unknowns.len());
         let mut weights = Vec::with_capacity(comp.unknowns.len());
+        let mut image = Vec::with_capacity(comp.unknowns.len());
         let mut range = Vec::with_capacity(comp.unknowns.len());
         for (k, &u) in comp.unknowns.iter().enumerate() {
             let class = &red.classes[red.unknowns[u]];
@@ -178,6 +188,7 @@ impl<'a> CompSystem<'a> {
                 region.y
             });
             weights.push(unknown_weight[u]);
+            image.push(unknown_image[u]);
         }
         let mut param_spline = vec![None; comp.unknowns.len()];
         let mut param_point = vec![None; comp.unknowns.len()];
@@ -217,6 +228,7 @@ impl<'a> CompSystem<'a> {
             members,
             col_of_slot,
             weights,
+            image,
             is_param,
             is_radius,
             range,
@@ -498,6 +510,43 @@ fn converged(r: &[f64], tol: &[f64]) -> bool {
     r.iter().zip(tol).all(|(ri, ti)| ri.abs() <= *ti)
 }
 
+/// Relative residual below which moving the images alone solves a
+/// linearized system (rounding of the decomposition, with margin).
+const IMAGES_ALONE: f64 = 1e-9;
+/// Absolute (scaled) residual that moving the images alone may leave: a
+/// tenth of the tightest convergence tolerance, so equations the images
+/// cannot reach, already satisfied to rounding, do not make every other
+/// unknown move.
+const IMAGES_ALONE_ABS: f64 = 1e-13;
+
+/// The minimum-norm step for `J Δ = rhs` (columns weighted by `weights`)
+/// that moves only the unknowns marked `image` when that solves the
+/// system, and otherwise the ordinary weighted step.
+///
+/// Images of derived constraints are fixed by their sources, so a change
+/// that only their constraint's own value asks for (an offset's distance)
+/// can always be met by moving them; the ordinary step would spread it
+/// over the sources too. This is the limit of the weighted step as the
+/// images' weight goes to zero, taken exactly: among the solutions that
+/// leave every other unknown where it is, the smallest image move.
+fn images_first(jz: &Matrix, rhs: &[f64], weights: &[f64], image: &[bool]) -> Vec<f64> {
+    if image.iter().any(|&i| i) && image.iter().any(|&i| !i) {
+        let mut ji = jz.clone();
+        for (k, &i) in image.iter().enumerate() {
+            if !i {
+                ji.col_mut(k).fill(0.0);
+            }
+        }
+        let step = weighted_min_norm(&ji, rhs, weights, RANK_TOL).x;
+        let left = residual(jz, &step, rhs);
+        let alone = (IMAGES_ALONE * dot(rhs, rhs).sqrt()).max(IMAGES_ALONE_ABS);
+        if norm_inf(&left) <= alone {
+            return step;
+        }
+    }
+    weighted_min_norm(jz, rhs, weights, RANK_TOL).x
+}
+
 /// The Gauss–Newton step under the unknowns' bounds and at spline corners,
 /// by an active-set method in the manner of projected Newton methods
 /// (Bertsekas, "Projected Newton methods for optimization problems with
@@ -568,7 +617,7 @@ fn bounded_step(
                 col.fill(0.0);
             }
         }
-        let mut step = weighted_min_norm(&jz, &rhs, &sys.weights, RANK_TOL).x;
+        let mut step = images_first(&jz, &rhs, &sys.weights, &sys.image);
         for (x, f) in step.iter_mut().zip(&fixed) {
             if let Some(v) = f {
                 *x = *v;

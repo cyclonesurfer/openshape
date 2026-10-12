@@ -15,7 +15,7 @@ use openshape_core_model::{SketchData, SketchEdit, SketchId};
 use openshape_sketch_solver::ResolvedCurve;
 
 use super::trim::{Plan, Preview, CUT_GAP, TANGENT_SIN};
-use super::{coincidence_classes, perp, Batch};
+use super::{coincidence_classes, meet, perp, Batch, Carrier};
 
 /// One of the two curves at the corner.
 #[derive(Clone, Debug)]
@@ -34,13 +34,6 @@ struct Side {
     f: DVec2,
     /// An arc's sweep (counter-clockwise, radians); unused for lines.
     sweep: f64,
-}
-
-/// The line or circle a side lies on.
-#[derive(Clone, Copy, Debug)]
-enum Carrier {
-    Line { p: DVec2, d: DVec2 },
-    Circle { c: DVec2, r: f64 },
 }
 
 impl Side {
@@ -105,43 +98,6 @@ impl Side {
                 }
                 v
             }
-        }
-    }
-}
-
-/// Where two carriers meet (none for parallel lines, concentric circles).
-fn meet(a: Carrier, b: Carrier) -> Vec<DVec2> {
-    match (a, b) {
-        (Carrier::Line { p, d }, Carrier::Line { p: q, d: e }) => {
-            let den = d.perp_dot(e);
-            if den.abs() < 1e-12 {
-                return Vec::new();
-            }
-            vec![p + d * ((q - p).perp_dot(e) / den)]
-        }
-        (Carrier::Line { p, d }, Carrier::Circle { c, r })
-        | (Carrier::Circle { c, r }, Carrier::Line { p, d }) => {
-            // |p + d s − c|² = r².
-            let w = p - c;
-            let (b, k) = (w.dot(d), w.length_squared() - r * r);
-            let disc = b * b - k;
-            if disc < 0.0 {
-                return Vec::new();
-            }
-            let h = disc.sqrt();
-            vec![p + d * (-b - h), p + d * (-b + h)]
-        }
-        (Carrier::Circle { c, r }, Carrier::Circle { c: k, r: s }) => {
-            let v = k - c;
-            let dist = v.length();
-            if dist < 1e-12 || dist > r + s || dist < (r - s).abs() {
-                return Vec::new();
-            }
-            let a = (r * r - s * s + dist * dist) / (2.0 * dist);
-            let h = (r * r - a * a).max(0.0).sqrt();
-            let m = c + v * (a / dist);
-            let n = perp(v / dist);
-            vec![m + n * h, m - n * h]
         }
     }
 }

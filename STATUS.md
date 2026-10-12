@@ -128,7 +128,19 @@ application shell done; sketch editing tools next.
   a mirrored half profile closes) and replace the point-on-line
   constraints there, and deleting a source or an image drops just that
   pair; fuzzed over 3,000 random batches of rectangles, polygons, slots,
-  circles, arcs and points about random lines. Every edit is one undoable op; Cancel
+  circles, arcs and points about random lines. Offset (design note 0007
+  §10.6) moves a chain of lines and arcs joined end to end, or a circle,
+  to the side the pointer is on; the distance is then typed and stays an
+  editable dimension. One derived constraint holds every image (joined at
+  corners where the offsets meet, through smooth joints on the normal,
+  free ends square to the source) with no added freedom; changing the
+  distance moves only the offset; after every solve the solver checks the
+  offset is still valid (no piece turned back, no crossing, smooth joints
+  still smooth) and fails naming it rather than returning a broken one.
+  Fuzzed over 3,000 random rectangles, polygons, slots, circles and line
+  chains: 2,738 offsets committed exact (no source moved, no crossing by
+  the kernel's own intersections), the rest refused with the reason.
+  Every edit is one undoable op; Cancel
   undoes the whole sketch session. The editor is UI-toolkit independent and
   tested end to end by driving it with screen clicks.
 - **UI kit** (`openshape-ui-kit`): the application's look in one place
@@ -200,6 +212,12 @@ application shell done; sketch editing tools next.
   reported redundant when the input was nudged and not when it was placed
   exactly. Rows that cancel to within 1e-10 of their own terms are now
   zero (design note 0005 §9), with a regression test on both inputs.
+- The offset tests found a behaviour defect in the solver: changing an
+  offset's distance also moved the curves it follows (by a third of the
+  change in a rectangle test), because every step was the smallest change
+  of all points together. Images of derived constraints now move first:
+  when moving them alone solves a step, nothing else moves (design note
+  0005 §3), and the test asserts the sources stay exactly where they were.
 - App shell, 2026-10-12, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   455 tests and `cargo deny` pass. `crates/ui/tests/shell.rs` drives the
   real application offscreen with synthetic mouse and keyboard input (13
@@ -213,8 +231,10 @@ application shell done; sketch editing tools next.
 
 ## Not yet / known limits
 
-- Sketch editing tools are not done: offset and patterns (in progress,
-  design note 0007), and ellipses, conics, text, use/project.
+- Sketch editing tools are not done: linear and circular patterns (in
+  progress, design note 0007), and ellipses, conics, text, use/project.
+  Splines cannot be offset (their offsets are not splines; an
+  approximation with a guaranteed tolerance is future work).
   A fillet removes (and reports) equal-length and midpoint constraints on
   the filleted lines, so a filleted regular polygon is no longer held
   regular; equal distances between virtual sharps are not expressible yet. Trim cuts one piece per click (no drag across several
@@ -253,8 +273,8 @@ application shell done; sketch editing tools next.
 
 ## Next steps
 
-1. Sketch editing tools (design note 0007): offset, linear and circular
-   patterns; draggable dimension labels.
+1. Sketch editing tools (design note 0007): linear and circular patterns;
+   draggable dimension labels.
 2. Live preview in feature dialogs.
 3. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.

@@ -134,6 +134,18 @@ fn relabel<F: Fn(u32) -> u64>(s: &Sketch<u32>, f: F) -> Sketch<u64> {
             axis: f(axis),
             pairs: pairs.into_iter().map(|(s, i)| (f(s), f(i))).collect(),
         },
+        C::Offset {
+            distance,
+            pieces,
+            smooth,
+        } => C::Offset {
+            distance,
+            pieces: pieces
+                .into_iter()
+                .map(|(s, i, l)| (f(s), f(i), l))
+                .collect(),
+            smooth: smooth.into_iter().map(&f).collect(),
+        },
     };
     Sketch {
         entities: s

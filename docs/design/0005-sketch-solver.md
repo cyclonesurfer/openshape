@@ -115,7 +115,13 @@ zero-radius circle) is reported as `Degenerate` instead of producing NaN.
    * J Δ = −r is solved in the weighted minimum-norm least-squares sense:
      minimize ‖W^{1/2} Δ‖ among the least-squares solutions, using QR with
      column pivoting of J W^{−1/2} and a complete orthogonal decomposition.
-     Weights are 1, except for dragged points (§7).
+     Weights are 1, except for dragged points (§7). Images of derived
+     constraints (design note 0007 §9) move first: when moving them alone
+     solves the linearized system (to 1e-9 relative, or to a tenth of the
+     tightest convergence tolerance), that is the step, the limit of the
+     weighted step as their weight goes to zero. So a change only images
+     need absorb (an offset's distance) leaves every other point exactly
+     where it was. A dragged image moves last, like any dragged point.
    * Step acceptance by backtracking line search on ½‖r‖² (Armijo, c = 1e-4,
      halving down to 2⁻²⁰); if the line search fails, Levenberg–Marquardt
      damping (Madsen et al. §3.1 update rule) takes over for that iteration.

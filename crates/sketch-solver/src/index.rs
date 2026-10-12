@@ -106,6 +106,66 @@ pub(crate) enum Con {
     Radius(Circ, f64),
     Diameter(Circ, f64),
     Mirror(LineRef, Derived),
+    Offset(OffsetCon),
+}
+
+/// A curve of an offset, over internal indices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OCurve {
+    /// A line.
+    Line(LineRef),
+    /// An arc: centre, start and end point indices.
+    Arc {
+        /// Centre.
+        c: usize,
+        /// Start.
+        s: usize,
+        /// End.
+        e: usize,
+    },
+    /// A circle: centre point and radius indices.
+    Circle {
+        /// Centre.
+        c: usize,
+        /// Radius index.
+        r: usize,
+    },
+}
+
+impl OCurve {
+    /// Start and end point indices (none for a circle).
+    pub fn ends(&self) -> Option<(usize, usize)> {
+        match *self {
+            OCurve::Line(l) => Some((l.s, l.e)),
+            OCurve::Arc { s, e, .. } => Some((s, e)),
+            OCurve::Circle { .. } => None,
+        }
+    }
+}
+
+/// One equation placing an offset's image point (design note 0007 §10.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OEq {
+    /// On piece `k`'s offset curve.
+    OnOffset(usize),
+    /// On the normal to piece `k`'s source through its end point `v`.
+    Normal(usize, usize),
+}
+
+/// A validated offset constraint (design note 0007 §10).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct OffsetCon {
+    /// Distance (metres).
+    pub distance: f64,
+    /// `(source, image, left)` pieces.
+    pub pieces: Vec<(OCurve, OCurve, bool)>,
+    /// Each image end point with its two equations.
+    pub points: Vec<(usize, OEq, OEq)>,
+    /// `(source, image)` entity positions.
+    pub entities: Vec<(usize, usize)>,
+    /// Entity positions of the image arcs, whose implicit equation the
+    /// offset's equations replace.
+    pub arcs: Vec<usize>,
 }
 
 /// The point-level content of a derived constraint (design note 0007 §9):
@@ -575,6 +635,176 @@ impl<K: SketchKey> Index<K> {
                 });
                 Con::Mirror(l, d)
             }
+            Constraint::Offset {
+                distance,
+                pieces,
+                smooth,
+            } => Con::Offset(self.offset(
+                id,
+                length(*distance, "offset distance")?,
+                pieces,
+                smooth,
+                coincident,
+            )?),
+        })
+    }
+
+    /// Validates an offset's pieces and gives each image end point its two
+    /// equations (design note 0007 §10.4): on its piece's offset curve, and
+    /// on the next piece's (a corner), or on the normal at its source's end
+    /// (a free end, or a smooth joint).
+    fn offset(
+        &self,
+        id: &dyn Debug,
+        distance: f64,
+        pieces: &[(K, K, bool)],
+        smooth: &[K],
+        coincident: &[usize],
+    ) -> Result<OffsetCon, SolveError> {
+        if pieces.is_empty() {
+            return Err(invalid(format!(
+                "constraint {id:?}: there are no curves to offset"
+            )));
+        }
+        let mut curves = Vec::with_capacity(pieces.len());
+        let mut entities: Vec<(usize, usize)> = Vec::with_capacity(pieces.len());
+        let mut arcs = Vec::new();
+        let mut source_points = BTreeSet::new();
+        // Image end point → (piece, true for the piece's end).
+        let mut roles: BTreeMap<usize, Vec<(usize, bool)>> = BTreeMap::new();
+        for (k, (src, img, left)) in pieces.iter().enumerate() {
+            if src == img {
+                return Err(invalid(format!(
+                    "constraint {id:?}: entity {src:?} cannot be its own offset"
+                )));
+            }
+            let (ks, ki) = (self.kind_of(id, src)?, self.kind_of(id, img)?);
+            let (es, ei) = (self.ent[src], self.ent[img]);
+            if entities.iter().any(|&(_, i)| i == ei) {
+                return Err(invalid(format!(
+                    "constraint {id:?}: entity {img:?} is the offset of more than one curve"
+                )));
+            }
+            let same_centre = |c: usize, c2: usize| {
+                if c == c2 {
+                    Ok(())
+                } else {
+                    Err(invalid(format!(
+                        "constraint {id:?}: the offset {img:?} of {src:?} must share its centre point"
+                    )))
+                }
+            };
+            let (a, b) = match (ks, ki) {
+                (EntKind::Line(a), EntKind::Line(b)) => (OCurve::Line(a), OCurve::Line(b)),
+                (
+                    EntKind::Circular(Circ::Arc { c, s, e }),
+                    EntKind::Circular(Circ::Arc {
+                        c: c2,
+                        s: s2,
+                        e: e2,
+                    }),
+                ) => {
+                    same_centre(c, c2)?;
+                    arcs.push(ei);
+                    (
+                        OCurve::Arc { c, s, e },
+                        OCurve::Arc {
+                            c: c2,
+                            s: s2,
+                            e: e2,
+                        },
+                    )
+                }
+                (
+                    EntKind::Circular(Circ::Circle { c, r }),
+                    EntKind::Circular(Circ::Circle { c: c2, r: r2 }),
+                ) => {
+                    same_centre(c, c2)?;
+                    (OCurve::Circle { c, r }, OCurve::Circle { c: c2, r: r2 })
+                }
+                _ => {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: {src:?} and its offset {img:?} are not two lines, two arcs or two circles"
+                    )))
+                }
+            };
+            match a {
+                OCurve::Line(l) => source_points.extend([l.s, l.e]),
+                OCurve::Arc { c, s, e } => source_points.extend([c, s, e]),
+                OCurve::Circle { c, .. } => {
+                    source_points.insert(c);
+                }
+            }
+            if let Some((s, e)) = b.ends() {
+                roles.entry(s).or_default().push((k, false));
+                roles.entry(e).or_default().push((k, true));
+            }
+            entities.push((es, ei));
+            curves.push((a, b, *left));
+        }
+        let smooth: BTreeSet<usize> = smooth
+            .iter()
+            .map(|k| self.point(id, k))
+            .collect::<Result<_, _>>()?;
+        if let Some(&p) = smooth.iter().find(|p| !roles.contains_key(p)) {
+            return Err(invalid(format!(
+                "constraint {id:?}: point {:?} is not an end of an offset curve",
+                self.point_key(p)
+            )));
+        }
+        let class = |p: usize| coincident.get(p).copied().unwrap_or(p);
+        // The source point behind an image end.
+        let behind = |k: usize, at_end: bool| -> usize {
+            let (s, e) = curves[k]
+                .0
+                .ends()
+                .expect("an image with ends has a source with ends");
+            if at_end {
+                e
+            } else {
+                s
+            }
+        };
+        let mut points = Vec::with_capacity(roles.len());
+        for (&p, r) in &roles {
+            if source_points.contains(&p) {
+                return Err(invalid(format!(
+                    "constraint {id:?}: point {:?} is both an image and a source of the offset",
+                    self.point_key(p)
+                )));
+            }
+            let (k, at_end) = r[0];
+            let v = behind(k, at_end);
+            let (first, second) = match r.as_slice() {
+                [_] => (OEq::OnOffset(k), OEq::Normal(k, v)),
+                [_, (k2, at_end2)] => {
+                    if class(v) != class(behind(*k2, *at_end2)) {
+                        return Err(invalid(format!(
+                            "constraint {id:?}: the offsets {:?} and {:?} meet where their sources do not",
+                            pieces[k].1, pieces[*k2].1
+                        )));
+                    }
+                    if smooth.contains(&p) {
+                        (OEq::OnOffset(k), OEq::Normal(k, v))
+                    } else {
+                        (OEq::OnOffset(k), OEq::OnOffset(*k2))
+                    }
+                }
+                _ => {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: point {:?} ends more than two offset curves",
+                        self.point_key(p)
+                    )))
+                }
+            };
+            points.push((p, first, second));
+        }
+        Ok(OffsetCon {
+            distance,
+            pieces: curves,
+            points,
+            entities,
+            arcs,
         })
     }
 
@@ -800,8 +1030,12 @@ impl<K: SketchKey> Index<K> {
         // Image entity → (source entity, constraint position).
         let mut source_of: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
         for (j, con) in cons.iter().enumerate() {
-            let Con::Mirror(_, d) = con else { continue };
-            for &(s, i) in &d.entities {
+            let entities = match con {
+                Con::Mirror(_, d) => &d.entities,
+                Con::Offset(o) => &o.entities,
+                _ => continue,
+            };
+            for &(s, i) in entities {
                 if let Some((_, j0)) = source_of.insert(i, (s, j)) {
                     return Err(invalid(format!(
                         "constraint {:?}: entity {:?} is already an image of constraint {:?}",

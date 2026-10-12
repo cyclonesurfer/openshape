@@ -5,7 +5,7 @@
 use glam::DVec2;
 
 use crate::eq::{EqKind, PairMode, RTerm, Rhs, SplineDef, VecExpr};
-use crate::index::{Circ, Con, Index, LineRef, TanSide};
+use crate::index::{Circ, Con, Index, LineRef, OCurve, OEq, OffsetCon, TanSide};
 use crate::model::{DistanceKind, SketchKey};
 
 /// Lengths are divided by `l` after subtracting the centre `(cx, cy)` from
@@ -165,6 +165,7 @@ pub(crate) fn scale_of<K: SketchKey>(
             | Con::Length(_, v)
             | Con::Radius(_, v)
             | Con::Diameter(_, v) => max_dim = max_dim.max(*v),
+            Con::Offset(o) => max_dim = max_dim.max(o.distance),
             _ => {}
         }
     }
@@ -285,6 +286,57 @@ impl Builder<'_> {
             false,
             None,
         );
+    }
+
+    /// The equation of design note 0007 §10.4 placing image point `x` of
+    /// offset `o`.
+    fn offset_eq(&mut self, owner: usize, o: &OffsetCon, x: usize, eq: OEq) {
+        match eq {
+            OEq::OnOffset(k) => {
+                let (src, _, left) = o.pieces[k];
+                let side = if left { 1.0 } else { -1.0 };
+                let d = self.scale.len(o.distance);
+                let kind = match src {
+                    // Left of a line is positive signed distance.
+                    OCurve::Line(l) => EqKind::SignedDist {
+                        dir: Self::dir(l),
+                        v: VecExpr::diff(x, l.s),
+                        abs: false,
+                        rhs: Rhs::constant(side * d),
+                    },
+                    // Left of a counter-clockwise arc is towards its centre.
+                    OCurve::Arc { c, s, .. } => EqKind::Norm {
+                        k: 1.0,
+                        v: VecExpr::diff(x, c),
+                        rhs: Rhs {
+                            terms: vec![
+                                (1.0, RTerm::Norm(VecExpr::diff(s, c))),
+                                (-side, RTerm::Const(d)),
+                            ],
+                            abs: false,
+                        },
+                    },
+                    OCurve::Circle { .. } => unreachable!("a circle's offset has no end points"),
+                };
+                self.push(owner, kind, false, None);
+            }
+            OEq::Normal(k, v) => {
+                let kind = match o.pieces[k].0 {
+                    OCurve::Line(l) => EqKind::Proj {
+                        dir: Self::dir(l),
+                        v: VecExpr::diff(x, v),
+                    },
+                    OCurve::Arc { c, .. } => EqKind::SignedDist {
+                        dir: VecExpr::diff(v, c),
+                        v: VecExpr::diff(x, c),
+                        abs: false,
+                        rhs: Rhs::zero(),
+                    },
+                    OCurve::Circle { .. } => unreachable!("a circle's offset has no end points"),
+                };
+                self.push(owner, kind, false, None);
+            }
+        }
     }
 
     fn constraint(&mut self, owner: usize, con: &Con) {
@@ -597,6 +649,33 @@ impl Builder<'_> {
                     self.equal_slots(owner, self.radius_base + r, self.radius_base + r2);
                 }
             }
+            Con::Offset(ref o) => {
+                // Design note 0007 §10.4: two equations per image end
+                // point, regular in it (two offset curves crossing, or an
+                // offset curve and a normal to it); an image circle's
+                // radius is its source's less or more the distance.
+                for &(x, a, b) in &o.points {
+                    self.offset_eq(owner, o, x, a);
+                    self.offset_eq(owner, o, x, b);
+                }
+                for &(src, img, left) in &o.pieces {
+                    if let (OCurve::Circle { r, .. }, OCurve::Circle { r: r2, .. }) = (src, img) {
+                        let side = if left { 1.0 } else { -1.0 };
+                        self.push(
+                            owner,
+                            EqKind::Lin {
+                                terms: vec![
+                                    (self.radius_base + r2, 1.0),
+                                    (self.radius_base + r, -1.0),
+                                ],
+                                rhs: -side * sc.len(o.distance),
+                            },
+                            false,
+                            None,
+                        );
+                    }
+                }
+            }
             Con::Radius(c, v) | Con::Diameter(c, v) => {
                 let diameter = matches!(con, Con::Diameter(..));
                 let k = if diameter { 2.0 } else { 1.0 };
@@ -661,6 +740,7 @@ pub(crate) fn build<K: SketchKey>(index: &Index<K>, cons: &[Con], scale: Scale) 
         .iter()
         .flat_map(|c| match c {
             Con::Mirror(_, d) => d.arcs.clone(),
+            Con::Offset(o) => o.arcs.clone(),
             _ => Vec::new(),
         })
         .collect();

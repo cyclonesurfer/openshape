@@ -275,6 +275,7 @@ impl Command {
                 Tool::Split => Icon::Split,
                 Tool::SketchFillet => Icon::SketchFillet,
                 Tool::Mirror => Icon::Mirror,
+                Tool::Offset => Icon::Offset,
             },
             Command::Construction => Icon::Construction,
             Command::Constrain(c) => match c {

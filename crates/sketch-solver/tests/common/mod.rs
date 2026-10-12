@@ -452,6 +452,9 @@ pub fn violation(s: &Sketch<u32>, c: &Constraint<u32>) -> (f64, bool) {
             }
             (worst, false)
         }
+        Constraint::Offset {
+            distance, pieces, ..
+        } => (offset_violation(s, *distance, pieces), false),
     }
 }
 
@@ -526,4 +529,58 @@ pub fn bits(s: &Sketch<u32>) -> Vec<u64> {
         }
     }
     out
+}
+
+/// How far an offset's images are from where design note 0007 §10 puts
+/// them, measured from the geometry: every image end on its source's
+/// offset curve (a circle's radius by the distance), and an image end that
+/// no other image shares on the normal at its source's end.
+pub fn offset_violation(s: &Sketch<u32>, d: f64, pieces: &[(u32, u32, bool)]) -> f64 {
+    let ends = |k: u32| match s.entity(k).unwrap().geometry {
+        Geometry::Line { start, end } | Geometry::Arc { start, end, .. } => Some((start, end)),
+        _ => None,
+    };
+    let mut uses: std::collections::BTreeMap<u32, usize> = Default::default();
+    for (_, img, _) in pieces {
+        if let Some((a, b)) = ends(*img) {
+            *uses.entry(a).or_default() += 1;
+            *uses.entry(b).or_default() += 1;
+        }
+    }
+    let mut worst = 0.0f64;
+    for &(src, img, left) in pieces {
+        let side = if left { 1.0 } else { -1.0 };
+        match (&s.entity(src).unwrap().geometry, ends(img)) {
+            (Geometry::Line { .. }, Some((ia, ib))) => {
+                let (a, b) = line(s, src);
+                let u = (b - a).normalize();
+                for (x, v) in [(ia, a), (ib, b)] {
+                    let q = pos(s, x);
+                    worst = worst.max((u.perp_dot(q - a) - side * d).abs());
+                    if uses[&x] == 1 {
+                        worst = worst.max((q - v).dot(u).abs());
+                    }
+                }
+            }
+            (Geometry::Arc { start, end, .. }, Some((ia, ib))) => {
+                let (c, r) = circ(s, src);
+                for (x, v) in [(ia, *start), (ib, *end)] {
+                    let q = pos(s, x);
+                    worst = worst.max(((q - c).length() - (r - side * d)).abs());
+                    if uses[&x] == 1 {
+                        let n = (pos(s, v) - c).normalize();
+                        worst = worst.max(n.perp_dot(q - c).abs());
+                    }
+                }
+            }
+            (Geometry::Circle { .. }, None) => {
+                let ((c, r), (ic, ir)) = (circ(s, src), circ(s, img));
+                worst = worst
+                    .max((c - ic).length())
+                    .max((ir - (r - side * d)).abs());
+            }
+            _ => panic!("offset piece of different kinds"),
+        }
+    }
+    worst
 }

@@ -26,10 +26,10 @@ use openshape_sketch_solver::{
 };
 
 use crate::sketch_ops::fillet::fillet;
-use crate::sketch_ops::mirror;
 use crate::sketch_ops::shapes::{self, TangentStart};
 use crate::sketch_ops::trim::{self, Cuts, Plan};
 use crate::sketch_ops::{curve_ending_at, deletion, leaving_direction, Batch};
+use crate::sketch_ops::{mirror, offset};
 use crate::{geometry_edits, Model};
 
 /// Pick radius for points, in screen points.
@@ -366,7 +366,8 @@ pub fn glyph(c: &Constraint<SketchId>) -> &'static str {
         | Constraint::Length { .. }
         | Constraint::Angle { .. }
         | Constraint::Radius { .. }
-        | Constraint::Diameter { .. } => "",
+        | Constraint::Diameter { .. }
+        | Constraint::Offset { .. } => "",
     }
 }
 
@@ -428,6 +429,7 @@ pub fn dimension_text(c: &Constraint<SketchId>) -> String {
         Constraint::Radius { value, .. } => format!("R {}", format_length(*value)),
         Constraint::Diameter { value, .. } => format!("Ø {}", format_length(*value)),
         Constraint::Angle { value, .. } => format_angle(*value),
+        Constraint::Offset { distance, .. } => format_length(*distance),
         _ => String::new(),
     }
 }
@@ -683,6 +685,28 @@ fn dimension_annotation(
                 lines,
                 x + DVec2::from_angle(start + value * 0.5) * (r + off * 0.9),
             )
+        }
+        Constraint::Offset { pieces, .. } => {
+            // From the middle of the first source square across to its
+            // image, the label just beyond the image.
+            let &(src, img, _) = pieces.first()?;
+            let (from, to) = match (
+                line_ends(sketch, points, src),
+                line_ends(sketch, points, img),
+            ) {
+                (Some((a, b)), Some((p, q))) => {
+                    let m = (a + b) * 0.5;
+                    let u = (q - p).normalize_or_zero();
+                    (m, p + u * (m - p).dot(u))
+                }
+                _ => {
+                    let (c, r, dir) = circular(sketch, points, src)?;
+                    let (_, r2, _) = circular(sketch, points, img)?;
+                    (c + dir * r, c + dir * r2)
+                }
+            };
+            let n = (to - from).normalize_or_zero();
+            (vec![[from, to]], to + n * off * 0.8)
         }
         _ => return None,
     };
@@ -954,11 +978,13 @@ pub enum Tool {
     SketchFillet,
     /// Mirror images of curves and points about a line.
     Mirror,
+    /// Offsets a chain of lines and arcs, or a circle, to one side.
+    Offset,
 }
 
 impl Tool {
     /// Every tool, in toolbar order.
-    pub const ALL: [Tool; 18] = [
+    pub const ALL: [Tool; 19] = [
         Tool::Select,
         Tool::Line,
         Tool::Rectangle,
@@ -977,6 +1003,7 @@ impl Tool {
         Tool::Split,
         Tool::SketchFillet,
         Tool::Mirror,
+        Tool::Offset,
     ];
 
     /// The tools sharing one toolbar button with this one (shown in its
@@ -1001,6 +1028,7 @@ impl Tool {
             Tool::Spline => &[Tool::Spline],
             Tool::SketchFillet => &[Tool::SketchFillet],
             Tool::Mirror => &[Tool::Mirror],
+            Tool::Offset => &[Tool::Offset],
         }
     }
 
@@ -1025,6 +1053,7 @@ impl Tool {
             Tool::Split => "Split",
             Tool::SketchFillet => "Sketch fillet",
             Tool::Mirror => "Mirror",
+            Tool::Offset => "Offset",
         }
     }
 
@@ -1057,7 +1086,8 @@ impl Tool {
             | Tool::Extend
             | Tool::Split
             | Tool::SketchFillet
-            | Tool::Mirror => return None,
+            | Tool::Mirror
+            | Tool::Offset => return None,
         })
     }
 
@@ -1103,6 +1133,9 @@ impl Tool {
             (Tool::Split, _) => "Click a line or arc where it should be split",
             (Tool::SketchFillet, _) => "Click the corner point where two lines or arcs meet",
             (Tool::Mirror, _) => "Click the mirror line, then the curves to mirror",
+            (Tool::Offset, _) => {
+                "Click a line, arc or circle to offset it with the curves joined to it"
+            }
         }
     }
 }
@@ -1632,6 +1665,8 @@ pub struct SketchEditor {
     /// What the mirror tool mirrors about the first line clicked: the
     /// selection when the tool was chosen.
     pub mirror_sources: Vec<SketchId>,
+    /// The offset tool's chain, once chosen, with the curve clicked.
+    pub offset_chain: Option<(SketchId, offset::Chain)>,
 }
 
 /// What the trim, extend or split tool would do at the pointer.
@@ -1669,6 +1704,7 @@ impl SketchEditor {
             cuts: None,
             mirror_axis: None,
             mirror_sources: Vec::new(),
+            offset_chain: None,
         }
     }
 
@@ -1702,6 +1738,7 @@ impl SketchEditor {
         self.curve_edit = None;
         self.mirror_axis = None;
         self.mirror_sources.clear();
+        self.offset_chain = None;
         self.inferred = None;
         self.tangent_start = None;
         self.turn = 0.0;
@@ -1718,7 +1755,7 @@ impl SketchEditor {
             self.preview = None;
             return;
         }
-        if !self.clicks.is_empty() || self.mirror_axis.is_some() {
+        if !self.clicks.is_empty() || self.mirror_axis.is_some() || self.offset_chain.is_some() {
             self.reset_tool();
         } else if self.tool != Tool::Select {
             self.set_tool(Tool::Select);
@@ -1777,6 +1814,10 @@ impl SketchEditor {
                 (None, n) => format!("Click the line to mirror the {n} selected items about"),
             };
         }
+        if self.tool == Tool::Offset && self.offset_chain.is_some() {
+            return "Move to the side to offset to and click; type the distance after; Esc chooses another curve"
+                .into();
+        }
         self.tool.hint(self.clicks.len()).into()
     }
 
@@ -1826,6 +1867,10 @@ impl SketchEditor {
         }
         if self.tool == Tool::Mirror {
             self.curve_edit = self.plan_mirror(&d, map, pos);
+            return;
+        }
+        if self.tool == Tool::Offset {
+            self.curve_edit = self.plan_offset(model, &d, map, pos);
             return;
         }
         if self.tool == Tool::SketchFillet {
@@ -1994,6 +2039,121 @@ impl SketchEditor {
                 self.mirror_axis = Some(axis);
                 self.mirror_sources.clear();
                 self.selection.clear();
+            }
+            Err(e) => self.message = Some(format!("Not done: {e}")),
+        }
+        self.hover(model, map, Some(pos));
+    }
+
+    /// The offset of the chosen chain for the pointer at `pos`: the side
+    /// it is on and its distance from the clicked curve, rounded to a step
+    /// of about 1.5 screen points.
+    fn offset_at(
+        &self,
+        d: &SketchDisplay,
+        map: &ScreenMap,
+        pos: Pos2,
+    ) -> Option<Result<offset::Offsetted, String>> {
+        let (clicked, chain) = self.offset_chain.as_ref()?;
+        let curves: Vec<(SketchId, ResolvedCurve)> =
+            d.curves.iter().map(|c| (c.id, c.curve.clone())).collect();
+        let at = map.to_plane(pos)?;
+        let curve = &d.curve(*clicked)?.curve;
+        let (distance, left) = offset::side_and_distance(curve, at)?;
+        let distance = round_distance(distance, map.plane_per_point(pos));
+        Some(offset::offset(&d.sketch, &curves, chain, distance, left))
+    }
+
+    /// The offset tool's plan at `pos`: before a curve is chosen, the chain
+    /// of the curve under the pointer; after, the chain's offset towards
+    /// the pointer, checked by solving it.
+    fn plan_offset(
+        &self,
+        model: &Model,
+        d: &SketchDisplay,
+        map: &ScreenMap,
+        pos: Pos2,
+    ) -> Option<CurveEdit> {
+        match &self.offset_chain {
+            None => {
+                let (target, _) = nearest_curve(d, map, pos, CURVE_PICK)?;
+                let plan = offset::chain(&d.sketch, target).map(|chain| Plan {
+                    edits: Vec::new(),
+                    removed: 0,
+                    preview: trim::Preview::Shapes {
+                        curves: chain
+                            .pieces
+                            .iter()
+                            .filter_map(|(id, _)| d.curve(*id).map(|c| c.curve.clone()))
+                            .collect(),
+                        points: Vec::new(),
+                    },
+                });
+                Some(CurveEdit { target, plan })
+            }
+            Some((clicked, _)) => {
+                let plan = self.offset_at(d, map, pos)?.and_then(|o| {
+                    model
+                        .check_sketch_edit(self.feature, &o.plan.edits)
+                        .map(|_| o.plan)
+                });
+                Some(CurveEdit {
+                    target: *clicked,
+                    plan,
+                })
+            }
+        }
+    }
+
+    /// Commits the offset tool's click at `pos`: chooses the chain, or
+    /// offsets it towards the pointer and opens its distance for typing.
+    fn click_offset(&mut self, model: &mut Model, map: &ScreenMap, pos: Pos2) {
+        self.hover(model, map, Some(pos));
+        let Some(d) = self.display(model) else {
+            return;
+        };
+        let Some(edit) = self.curve_edit.take() else {
+            self.message = Some(match self.offset_chain {
+                None => "Click a line, arc or circle to offset".into(),
+                Some(_) => "Move the pointer to the side to offset to".into(),
+            });
+            return;
+        };
+        if self.offset_chain.is_none() {
+            match edit
+                .plan
+                .and_then(|_| offset::chain(&d.sketch, edit.target))
+            {
+                Ok(chain) => {
+                    self.message = Some(match chain.pieces.len() {
+                        1 => "Curve chosen".into(),
+                        n => format!("Chain of {n} curves chosen"),
+                    });
+                    self.offset_chain = Some((edit.target, chain));
+                    self.hover(model, map, Some(pos));
+                }
+                Err(e) => self.message = Some(e),
+            }
+            return;
+        }
+        let outcome = match self.offset_at(&d, map, pos) {
+            Some(planned) => planned.and_then(|o| {
+                model
+                    .edit_sketch_checked(self.feature, o.plan.edits.clone())
+                    .map(|op| (o, op))
+            }),
+            None => Err("Move the pointer to the side to offset to".into()),
+        };
+        match outcome {
+            Ok((o, op)) => {
+                self.message = self.solve_message(model).or(Some(o.message()));
+                self.offset_chain = None;
+                self.selection.clear();
+                let id = SketchId {
+                    op,
+                    index: o.constraint.index,
+                };
+                self.edit_dimension(model, id, pos);
             }
             Err(e) => self.message = Some(format!("Not done: {e}")),
         }
@@ -2227,6 +2387,10 @@ impl SketchEditor {
             self.click_mirror(model, map, pos);
             return;
         }
+        if self.tool == Tool::Offset {
+            self.click_offset(model, map, pos);
+            return;
+        }
         if self.tool.edits_curves() {
             self.edit_curve(model, map, pos);
             return;
@@ -2252,7 +2416,8 @@ impl SketchEditor {
             | Tool::Extend
             | Tool::Split
             | Tool::SketchFillet
-            | Tool::Mirror => {}
+            | Tool::Mirror
+            | Tool::Offset => {}
             Tool::Point => {
                 let mut b = Batch::default();
                 let p = b.snapped_point(&s);
@@ -2908,6 +3073,22 @@ impl SketchEditor {
             self.selection.clear();
         }
     }
+}
+
+/// `d` rounded to a step of about 1.5 screen points at `ppp` plane units
+/// per point: 1, 2 or 5 times a power of ten, and at least one step.
+fn round_distance(d: f64, ppp: f64) -> f64 {
+    let target = 1.5 * ppp;
+    if !(target.is_finite() && target > 0.0) {
+        return d;
+    }
+    let p = 10f64.powf(target.log10().floor());
+    let step = [1.0, 2.0, 5.0, 10.0]
+        .into_iter()
+        .map(|k| k * p)
+        .find(|s| *s >= target)
+        .unwrap_or(10.0 * p);
+    ((d / step).round() * step).max(step)
 }
 
 // ---------------------------------------------------------------------------

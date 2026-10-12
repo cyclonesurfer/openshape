@@ -339,6 +339,35 @@ pub enum Constraint<K> {
         /// `(source, image)` entity pairs.
         pairs: Vec<(K, K)>,
     },
+    /// Derived geometry and a dimension (design note 0007 §10): each image
+    /// curve is its source offset by `distance` (metres, > 0) to one side,
+    /// and moves with it.
+    ///
+    /// A piece `(source, image, left)` is two lines, two arcs or two
+    /// circles. The image lies `distance` to the source's left (`true`) or
+    /// right in the source's own direction, so towards an arc's or circle's
+    /// centre when `left`; image arcs and circles share their source's
+    /// centre point and keep its direction. Images that share an end point
+    /// meet there where their offset curves cross, or, at the points in
+    /// `smooth` (joints whose sources meet tangentially), on the joint's
+    /// normal; an image end shared with no other piece lies on the normal
+    /// at its source's end. Images add no degrees of freedom.
+    ///
+    /// After every solve the offset must still be valid: every image end on
+    /// its offset curve (at a smooth joint that holds only while the
+    /// sources stay tangent), no line image reversed and no arc image
+    /// turned back, and no two images crossing or touching except
+    /// consecutive ones at their joint. Otherwise the solve fails with an
+    /// error naming the offset. Deleting a source or an image removes its
+    /// piece ([`Constraint::without`]).
+    Offset {
+        /// Distance (metres, > 0).
+        distance: f64,
+        /// `(source, image, left)` pieces.
+        pieces: Vec<(K, K, bool)>,
+        /// Image points at smooth joints.
+        smooth: Vec<K>,
+    },
 }
 
 impl<K: SketchKey> Constraint<K> {
@@ -350,6 +379,7 @@ impl<K: SketchKey> Constraint<K> {
             | Constraint::Angle { value, .. }
             | Constraint::Radius { value, .. }
             | Constraint::Diameter { value, .. } => Some(*value),
+            Constraint::Offset { distance, .. } => Some(*distance),
             _ => None,
         }
     }
@@ -361,7 +391,10 @@ impl<K: SketchKey> Constraint<K> {
             | Constraint::Length { value, .. }
             | Constraint::Angle { value, .. }
             | Constraint::Radius { value, .. }
-            | Constraint::Diameter { value, .. } => {
+            | Constraint::Diameter { value, .. }
+            | Constraint::Offset {
+                distance: value, ..
+            } => {
                 *value = v;
                 true
             }
@@ -444,14 +477,24 @@ impl<K: SketchKey> Constraint<K> {
                 axis: f(*axis),
                 pairs: pairs.iter().map(|(s, i)| (f(*s), f(*i))).collect(),
             },
+            C::Offset {
+                distance,
+                pieces,
+                smooth,
+            } => C::Offset {
+                distance: *distance,
+                pieces: pieces.iter().map(|(s, i, l)| (f(*s), f(*i), *l)).collect(),
+                smooth: smooth.iter().map(|p| f(*p)).collect(),
+            },
         }
     }
 
     /// The constraint left after deleting the entities for which `gone` is
     /// true, or `None` when nothing of it remains. A derived constraint
-    /// ([`Constraint::Mirror`]) loses the pairs that reference a deleted
-    /// entity, and goes with its axis or its last pair; any other
-    /// constraint goes when an entity it references does.
+    /// ([`Constraint::Mirror`], [`Constraint::Offset`]) loses the pairs or
+    /// pieces that reference a deleted entity (an offset also its deleted
+    /// smooth points), and goes with a mirror's axis or its last pair or
+    /// piece; any other constraint goes when an entity it references does.
     pub fn without(&self, gone: impl Fn(K) -> bool) -> Option<Constraint<K>> {
         match self {
             Constraint::Mirror { axis, pairs } => {
@@ -466,6 +509,23 @@ impl<K: SketchKey> Constraint<K> {
                 (!kept.is_empty()).then_some(Constraint::Mirror {
                     axis: *axis,
                     pairs: kept,
+                })
+            }
+            Constraint::Offset {
+                distance,
+                pieces,
+                smooth,
+            } => {
+                let kept: Vec<(K, K, bool)> = pieces
+                    .iter()
+                    .copied()
+                    .filter(|(s, i, _)| !gone(*s) && !gone(*i))
+                    .collect();
+                let smooth: Vec<K> = smooth.iter().copied().filter(|p| !gone(*p)).collect();
+                (!kept.is_empty()).then_some(Constraint::Offset {
+                    distance: *distance,
+                    pieces: kept,
+                    smooth,
                 })
             }
             _ => (!self.referenced().into_iter().any(gone)).then(|| self.clone()),
@@ -499,6 +559,11 @@ impl<K: SketchKey> Constraint<K> {
             Constraint::Radius { curve, .. } | Constraint::Diameter { curve, .. } => vec![*curve],
             Constraint::Mirror { axis, pairs } => std::iter::once(*axis)
                 .chain(pairs.iter().flat_map(|(s, i)| [*s, *i]))
+                .collect(),
+            Constraint::Offset { pieces, smooth, .. } => pieces
+                .iter()
+                .flat_map(|(s, i, _)| [*s, *i])
+                .chain(smooth.iter().copied())
                 .collect(),
         }
     }
@@ -622,6 +687,11 @@ mod tests {
             Constraint::Mirror {
                 axis: 1,
                 pairs: vec![(2, 3), (4, 5)],
+            },
+            Constraint::Offset {
+                distance: 0.5,
+                pieces: vec![(2, 3, true), (4, 5, false)],
+                smooth: vec![6],
             },
         ];
         for c in &all {

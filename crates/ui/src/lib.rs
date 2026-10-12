@@ -430,6 +430,17 @@ impl Model {
         feature: FeatureId,
         edits: Vec<SketchEdit>,
     ) -> Result<OpId, String> {
+        self.check_sketch_edit(feature, &edits)?;
+        self.edit_sketch(feature, edits)
+    }
+
+    /// Whether [`Model::edit_sketch_checked`] would accept `edits`, without
+    /// making them: the error says why not.
+    pub fn check_sketch_edit(
+        &self,
+        feature: FeatureId,
+        edits: &[SketchEdit],
+    ) -> Result<(), String> {
         let def = self
             .sketch_def(feature)
             .ok_or("the sketch no longer exists")?;
@@ -439,7 +450,7 @@ impl Model {
             None => solve(&def.sketch, &options),
         };
         let mut trial = def.clone();
-        trial.apply_edits(OpId::NULL, &edits)?;
+        trial.apply_edits(OpId::NULL, edits)?;
         let after = solve(&trial.sketch, &options);
         if !matches!(before.status, SolveStatus::Failed(_)) {
             if let SolveStatus::Failed(e) = &after.status {
@@ -449,7 +460,7 @@ impl Model {
                 return Err("the sketch would have redundant constraints".into());
             }
         }
-        self.edit_sketch(feature, edits)
+        Ok(())
     }
 
     /// A fresh name like "Extrude 3" for a new feature of this type.

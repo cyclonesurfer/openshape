@@ -6,7 +6,8 @@
 //! check, the input is the answer. A result with a collapsed curve
 //! ([`collapsed`]) is no answer: the constraint to blame is searched for
 //! ([`Part::attribute`], design note 0005 §9) and reported as
-//! conflicting, or the curve is reported degenerate.
+//! conflicting, or the curve is reported degenerate. Nor is one that leaves
+//! an offset invalid ([`offset_problem`]): the offset is reported.
 
 use std::collections::BTreeMap;
 
@@ -15,11 +16,12 @@ use openshape_linalg::{dot, norm2, residual, select_columns_in_order, CompleteOr
 
 use crate::build::{build, scale_of, Problem, Scale, DEGENERATE};
 use crate::diagnose::{conflicts, diagnose, CompDiag};
-use crate::index::{Circ, EntKind, Index, MAX_MAGNITUDE};
+use crate::index::{Circ, Con, EntKind, Index, OCurve, OEq, MAX_MAGNITUDE};
 use crate::model::{Geometry, Sketch, SketchKey};
 use crate::newton::{
     equation_tol, solve_component, CompSystem, LengthTol, Region, RANK_TOL, REACH,
 };
+use crate::offset::{self, Invalid, OffsetPiece, Piece};
 use crate::reduce::{reduce, Reduced, Status};
 use crate::{EntityState, Solution, SolveError, SolveOptions, SolveStatus};
 
@@ -253,6 +255,42 @@ fn solve_inner<K: SketchKey>(
         .iter()
         .map(|&c| red.classes[c].members.iter().map(|&s| slot_w[s]).sum())
         .collect();
+    // Images of derived constraints move first (`newton::images_first`):
+    // an unknown is an image when every slot it stands for is, and none is
+    // dragged (a dragged image moves last, like any dragged point).
+    let mut image_slot = vec![false; n_slots];
+    for con in &cons {
+        match con {
+            Con::Mirror(_, d) => {
+                for &(_, q) in &d.points {
+                    image_slot[2 * q] = true;
+                    image_slot[2 * q + 1] = true;
+                }
+            }
+            Con::Offset(o) => {
+                for &(x, ..) in &o.points {
+                    image_slot[2 * x] = true;
+                    image_slot[2 * x + 1] = true;
+                }
+                for &(_, img, _) in &o.pieces {
+                    if let OCurve::Circle { r, .. } = img {
+                        image_slot[prob.radius_slot(r)] = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let unknown_image: Vec<bool> = red
+        .unknowns
+        .iter()
+        .map(|&c| {
+            red.classes[c]
+                .members
+                .iter()
+                .all(|&s| image_slot[s] && !dragged[s])
+        })
+        .collect();
 
     // Degenerate geometry at the start: arcs without a radius, and
     // directions that constraints need.
@@ -298,7 +336,16 @@ fn solve_inner<K: SketchKey>(
     let mut dof = 0usize;
     let mut comp_rank: Vec<usize> = Vec::with_capacity(red.components.len());
     for comp in &red.components {
-        let mut sys = CompSystem::new(&prob, &red, comp, v.clone(), &unknown_w, len_tol, region);
+        let mut sys = CompSystem::new(
+            &prob,
+            &red,
+            comp,
+            v.clone(),
+            &unknown_w,
+            &unknown_image,
+            len_tol,
+            region,
+        );
         let u0: Vec<f64> = comp.unknowns.iter().map(|&u| u_global[u]).collect();
         // Constant slots referenced, with their values in the start geometry.
         let mut const_seed: Vec<(usize, f64)> = Vec::new();
@@ -436,6 +483,8 @@ fn solve_inner<K: SketchKey>(
         &input_params,
         degen_in,
     );
+    let input_ok =
+        input_ok && offset_problem(sketch, &index, &cons, &index.positions, &index.radii).is_none();
 
     // Write back.
     let abs_value = |s: usize| -> f64 {
@@ -554,6 +603,12 @@ fn solve_inner<K: SketchKey>(
             degen_out,
         )
     };
+    let offset_error = if out_ok {
+        offset_problem(sketch, &index, &cons, &positions, &radii)
+    } else {
+        None
+    };
+    let out_ok = out_ok && offset_error.is_none();
     if !out_ok {
         // The input itself may already be a solution (to the model
         // tolerance) that iterating could not polish or that a converged
@@ -583,7 +638,9 @@ fn solve_inner<K: SketchKey>(
                 iterations,
             };
         }
-        let err = if conflicting.is_empty() {
+        let err = if let Some(why) = offset_error {
+            SolveError::Degenerate(why)
+        } else if conflicting.is_empty() {
             SolveError::NotConverged
         } else {
             SolveError::Conflicting
@@ -659,6 +716,82 @@ fn accept<K: SketchKey>(
             .iter()
             .all(|r| r.is_finite() && *r > degen && *r <= MAX_MAGNITUDE);
     (ok, max_abs_residual(&checks))
+}
+
+/// The first offset that the geometry leaves invalid (design note 0007
+/// §10.5), as a message naming it: an image end off its offset curve (a
+/// smooth joint whose sources no longer meet tangentially), a piece turned
+/// back by too large a distance, or pieces that cross.
+fn offset_problem<K: SketchKey>(
+    sketch: &Sketch<K>,
+    index: &Index<K>,
+    cons: &[Con],
+    positions: &[DVec2],
+    radii: &[f64],
+) -> Option<String> {
+    for (j, con) in cons.iter().enumerate() {
+        let Con::Offset(o) = con else { continue };
+        let piece = |c: OCurve| match c {
+            OCurve::Line(l) => Piece::Line {
+                a: positions[l.s],
+                b: positions[l.e],
+            },
+            OCurve::Arc { c, s, e } => Piece::Arc {
+                c: positions[c],
+                a: positions[s],
+                b: positions[e],
+            },
+            OCurve::Circle { c, r } => Piece::Circle {
+                c: positions[c],
+                r: radii[r],
+            },
+        };
+        // Image ends held on a normal: free ends and smooth joints.
+        let held: Vec<usize> = o
+            .points
+            .iter()
+            .filter(|(_, _, eq)| matches!(eq, OEq::Normal(..)))
+            .map(|(x, ..)| *x)
+            .collect();
+        let pieces: Vec<OffsetPiece> = o
+            .pieces
+            .iter()
+            .map(|&(src, img, left)| OffsetPiece {
+                src: piece(src),
+                img: piece(img),
+                left,
+                ends: img.ends(),
+                held: img.ends().map_or((false, false), |(s, e)| {
+                    (held.contains(&s), held.contains(&e))
+                }),
+            })
+            .collect();
+        let Err(why) = offset::check(&pieces, o.distance, LINEAR_TOL) else {
+            continue;
+        };
+        let id = sketch.constraints[j].id;
+        let image = |k: usize| index.keys[o.entities[k].1];
+        let source = |k: usize| index.keys[o.entities[k].0];
+        return Some(match why {
+            Invalid::OffCurve(k, end) => format!(
+                "the curves at a smooth joint of an offset no longer meet tangentially, so \
+                 their offsets do not meet (offset {id:?}, at the {} of {:?})",
+                if end { "end" } else { "start" },
+                image(k)
+            ),
+            Invalid::TurnedBack(k) => format!(
+                "the offset distance is too large: the offset of a curve would turn back \
+                 or vanish (offset {id:?}, curve {:?})",
+                source(k)
+            ),
+            Invalid::Cross(a, b) => format!(
+                "an offset would cross itself (offset {id:?}, curves {:?} and {:?})",
+                image(a),
+                image(b)
+            ),
+        });
+    }
+    None
 }
 
 /// The point indices of entity `ent`.

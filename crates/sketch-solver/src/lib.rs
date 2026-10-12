@@ -14,6 +14,7 @@ mod diagnose;
 mod eq;
 mod index;
 mod newton;
+mod offset;
 mod reduce;
 mod resolve;
 mod solve;

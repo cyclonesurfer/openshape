@@ -5,6 +5,7 @@
 
 pub mod fillet;
 pub mod mirror;
+pub mod offset;
 pub mod shapes;
 pub mod trim;
 
@@ -241,6 +242,63 @@ pub fn leaving_direction(curve: &ResolvedCurve, at_end: bool) -> Option<DVec2> {
     };
     let len = d.length();
     (len.is_finite() && len > 0.0).then(|| d / len)
+}
+
+/// The line or circle a curve lies on: a line through `p` in the unit
+/// direction `d`, or a circle.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Carrier {
+    /// A line through `p` in the unit direction `d`.
+    Line {
+        /// A point of the line.
+        p: DVec2,
+        /// Its unit direction.
+        d: DVec2,
+    },
+    /// A circle.
+    Circle {
+        /// Centre.
+        c: DVec2,
+        /// Radius.
+        r: f64,
+    },
+}
+
+/// Where two carriers meet (none for parallel lines, concentric circles).
+pub(crate) fn meet(a: Carrier, b: Carrier) -> Vec<DVec2> {
+    match (a, b) {
+        (Carrier::Line { p, d }, Carrier::Line { p: q, d: e }) => {
+            let den = d.perp_dot(e);
+            if den.abs() < 1e-12 {
+                return Vec::new();
+            }
+            vec![p + d * ((q - p).perp_dot(e) / den)]
+        }
+        (Carrier::Line { p, d }, Carrier::Circle { c, r })
+        | (Carrier::Circle { c, r }, Carrier::Line { p, d }) => {
+            // |p + d s − c|² = r².
+            let w = p - c;
+            let (b, k) = (w.dot(d), w.length_squared() - r * r);
+            let disc = b * b - k;
+            if disc < 0.0 {
+                return Vec::new();
+            }
+            let h = disc.sqrt();
+            vec![p + d * (-b - h), p + d * (-b + h)]
+        }
+        (Carrier::Circle { c, r }, Carrier::Circle { c: k, r: s }) => {
+            let v = k - c;
+            let dist = v.length();
+            if dist < 1e-12 || dist > r + s || dist < (r - s).abs() {
+                return Vec::new();
+            }
+            let a = (r * r - s * s + dist * dist) / (2.0 * dist);
+            let h = (r * r - a * a).max(0.0).sqrt();
+            let m = c + v * (a / dist);
+            let n = perp(v / dist);
+            vec![m + n * h, m - n * h]
+        }
+    }
 }
 
 /// A small union-find over sketch ids.

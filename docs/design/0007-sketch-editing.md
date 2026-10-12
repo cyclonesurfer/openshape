@@ -434,6 +434,80 @@ not splines (Farouki & Neff), and an approximating fit with a guaranteed
 tolerance (Elber, Lee & Kim) would need a constraint that holds only
 approximately; that is future work.
 
+### 10.6 As built (offset)
+
+* **Constraint.** `Offset { distance, pieces, smooth }`: pieces are
+  `(source, image, left)`, two lines, two arcs or two circles, with the
+  side in the source's own direction (§10.2); `smooth` lists the image
+  points at joints whose sources meet tangentially. The distance is the
+  constraint's value, so it is edited like any dimension and labelled from
+  the middle of the first source across to its image.
+* **Equations** (a change from §10.4). Image arcs and circles share their
+  source's centre point. Each image end point gets exactly two equations
+  from the joint it sits at: at a corner, on both pieces' offset curves;
+  at a free end, on its piece's offset curve and on the normal at its
+  source's end; at a smooth joint, on the first piece's offset curve and
+  on the normal at the joint (the second piece's offset passes through
+  that point as long as the sources stay tangent). An image arc's own
+  equation is dropped instead of being used at one end: with both ends
+  placed on the same offset circle it is implied. An image circle's radius
+  is the source's less or more the distance. Images therefore add no
+  freedom. A joint the planner wrongly took for a corner while it is
+  tangent would put two on-curve equations at a double root, which the
+  rank test reports as redundant; a test that first drew such a joint by
+  mistake (a line leaving a quarter arc vertically) showed exactly that.
+* **Validity, in the solver** (`crates/sketch-solver/src/offset.rs`),
+  after every solve, as part of accepting it: every image end on its
+  offset curve (fails at a smooth joint whose sources are no longer
+  tangent), no line image reversed, no arc image turned back (its sweep
+  measured from the source's, each end moved by less than half a turn),
+  no arc end held on a normal lying across the centre (the normal line
+  meets the offset circle twice), no image circle shrunk to nothing, and
+  no two images crossing, touching or overlapping except consecutive
+  ones at their shared joint. A failure is `SolveError::Degenerate` with
+  a message naming the offset and the curve. The solver computes these
+  contacts itself (it does not depend on the kernel); the editor fuzz
+  checks every committed offset against the kernel's `curve_contacts`.
+* **Images move first** (design note 0005 §3). Without this, changing the
+  distance spread the change over the sources as well (a rectangle's
+  corner moved by a third of the change in the first test run): the
+  ordinary step is the smallest change of all points together. Now the
+  sources stay exactly where they were and only the offset moves; a
+  dragged image still drags its sources.
+* **Planner** (`crates/ui/src/sketch_ops/offset.rs`). The chain runs
+  through coincidence classes where exactly two curves of the same kind
+  (construction or not) end; a spline ends a chain and cannot be offset;
+  a circle is a chain of its own. The side and distance come from the
+  pointer's distance to the clicked curve, rounded to a 1, 2 or 5 step of
+  about 1.5 screen points. Joins follow §10.3: smooth when the tangents
+  agree to a sine of 1e-7, otherwise the meeting of the offset carriers
+  nearest the joint; the planner refuses when they do not meet or the
+  distance exceeds an arc's or circle's radius. The edit is committed
+  through the checked edit (refused if the sketch would stop solving or
+  gain a redundant constraint, which the solver's validity check turns
+  into a refusal for a crossing or turned-back offset), then the distance
+  opens for typing. Hovering shows the chain, then the offset, already
+  checked by a trial solve.
+* **Deleting** a source or an image removes its piece; joints it shared
+  become free ends, whose images move to the normals at their sources'
+  ends. Deleting every piece removes the constraint.
+
+Tests: `crates/sketch-solver/tests/offset.rs` (rectangles in and out,
+the distance as a dimension, redundancy of a dimension on an image,
+chains with smooth joints, corners and free ends, circles, refusals,
+deletion, and a property test over random convex polygons) and
+`crates/ui/tests/sketch_offset.rs` (the tool end to end, regions and an
+extruded volume exact, and a fuzz: random rectangles, polygons, slots,
+circles and line chains offset by random distances to random sides; every
+offset either commits with the sketch solved, nothing redundant, no
+freedom added, no source moved, every image at the distance and no two
+crossing by the kernel's intersections, or is refused naming the
+offset). At 3,000 cases each: the property test solved every polygon
+exactly; the fuzz committed 2,738 offsets, and the solver's check
+refused 204 (a piece turned back or images crossing) and the planner 58
+(the distance larger than an arc's or circle's radius), with no
+failure.
+
 ## 11. Patterns
 
 * **Linear pattern**: select curves, then a direction line (made by the
@@ -445,6 +519,49 @@ approximately; that is future work.
 
 Copies keep the construction flag of their source and can be selected and
 constrained like any curve; deleting a copy removes it from the pattern.
+
+### 11.1 Constraints and equations
+
+Two derived constraints (§9), with copies `(source, image, k)`, k ≥ 1:
+
+* `LinearPattern { direction, copies }`: for each source point p and its
+  image q in copy k, q − p − k·(e − s) = 0, s and e the direction line's
+  start and end: two equations linear in the unknowns, the identity in q.
+* `CircularPattern { centre, angle, copies }`: q − c − R(k·θ)(p − c) = 0,
+  c the centre point and θ the angle, a dimension (its value): linear in
+  the unknowns for the given angle, a rotation in q.
+
+Both maps keep orientation, so an image arc's start and end are the
+images of its source's start and end; image arcs' implicit equations are
+dropped and image circles' radii are their sources' (substituted). A
+source point that is the centre (or coincident with it) is its own image
+in every copy of a circular pattern: the copies share it and it gets no
+equation, so spokes drawn from a hub stay joined at it. Each use of a
+pattern tool makes one constraint; several may share a centre point.
+
+Validity, refused naming the constraint: the direction line and the
+centre cannot be sources or images; a pair must be the same kind; an
+entity cannot be its own image or the image of two entities; k·θ must
+not be a whole number of turns (a copy would lie on its source), nor may
+two copies of one source have the same k. As with mirrors, images move
+first (design note 0005 §3): changing the angle moves only the copies.
+
+### 11.2 Tools
+
+The count (instances, the source included) is a field of the sketch
+dialog while a pattern tool is active, like the fillet radius. With
+curves selected:
+
+* **Linear**: two clicks, snapping like a line, give the first step: the
+  tool adds a construction line between them (the direction line) and
+  count − 1 copies, then opens the line's length for typing, which adds
+  a length dimension.
+* **Circular**: one click, snapping to points, gives the centre (a new
+  point if it snaps to nothing); copies are spread at 360°/count and the
+  angle opens for typing.
+
+Hovering previews the copies; edits go through the checked edit, so a
+pattern that would make the sketch unsolvable or redundant is refused.
 
 ## 12. Dimension labels
 
