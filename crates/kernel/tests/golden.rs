@@ -37,6 +37,33 @@ fn assert_watertight(mesh: &BodyMesh) {
     }
 }
 
+/// Total polyline length of the seam edges and of the crease edges.
+fn seam_and_crease_length(body: &openshape_kernel::Body) -> (f64, f64) {
+    let opts = TessellationOptions {
+        chord_tolerance: 1e-5,
+        max_angle: 2f64.to_radians(),
+    };
+    let mesh = k().tessellate(body, &opts).unwrap();
+    assert_eq!(mesh.seams.len(), mesh.edges.len());
+    let mut out = (0.0, 0.0);
+    for (e, seam) in mesh.edges.iter().zip(&mesh.seams) {
+        let l: f64 = e.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+        if *seam {
+            out.0 += l;
+        } else {
+            out.1 += l;
+        }
+    }
+    out
+}
+
+fn assert_close(a: f64, b: f64, rel: f64, what: &str) {
+    assert!(
+        (a - b).abs() <= rel * b.abs().max(1e-12),
+        "{what}: {a} vs {b}"
+    );
+}
+
 struct Expect {
     volume: f64,
     area: f64,
@@ -119,6 +146,8 @@ fn unit_box() {
         }
     }
     assert!(k().face_kinds(&b).iter().all(|k| *k == SurfaceKind::Plane));
+    let mesh = k().tessellate(&b, &TessellationOptions::default()).unwrap();
+    assert!(mesh.seams.iter().all(|s| !s), "a box has no seams");
 }
 
 #[test]
@@ -176,6 +205,11 @@ fn cylinder_extrude() {
             rel: 1e-9,
         },
     );
+    // The two lines where the side is split are seams; the circles are
+    // creases.
+    let (seam, crease) = seam_and_crease_length(&b);
+    assert_close(seam, 2.0 * h, 1e-12, "seam length");
+    assert_close(crease, 2.0 * TAU * r, 1e-4, "crease length");
     let kinds = k().face_kinds(&b);
     assert_eq!(
         kinds
@@ -239,6 +273,14 @@ fn plate_with_hole_has_genus_one() {
             solids: 1,
             rel: 1e-9,
         },
+    );
+    let (seam, crease) = seam_and_crease_length(&b);
+    assert_close(seam, 2.0 * 0.5, 1e-12, "the hole's seams");
+    assert_close(
+        crease,
+        2.0 * 14.0 + 4.0 * 0.5 + 2.0 * TAU * 0.5,
+        1e-4,
+        "creases",
     );
     let mesh = k().tessellate(&b, &TessellationOptions::default()).unwrap();
     let (lo, hi) = mesh.bounds().unwrap();
@@ -449,6 +491,11 @@ fn revolve_rectangle_on_axis_is_a_cylinder() {
             rel: 1e-9,
         },
     );
+    // Seams: the side's split lines and the caps' diameters; creases: the
+    // two rims.
+    let (seam, crease) = seam_and_crease_length(&b);
+    assert_close(seam, 2.0 * h + 4.0 * r, 1e-12, "seams");
+    assert_close(crease, 2.0 * TAU * r, 1e-4, "rims");
     let kinds = k().face_kinds(&b);
     assert_eq!(
         kinds
@@ -482,6 +529,8 @@ fn revolve_circle_is_a_torus() {
         },
     );
     assert!(k().face_kinds(&b).iter().all(|k| *k == SurfaceKind::Torus));
+    let mesh = k().tessellate(&b, &TessellationOptions::default()).unwrap();
+    assert!(mesh.seams.iter().all(|s| *s), "a torus has no creases");
 }
 
 #[test]
@@ -515,6 +564,8 @@ fn revolve_half_disc_is_a_sphere() {
         },
     );
     assert!(k().face_kinds(&b).iter().all(|k| *k == SurfaceKind::Sphere));
+    let mesh = k().tessellate(&b, &TessellationOptions::default()).unwrap();
+    assert!(mesh.seams.iter().all(|s| *s), "a sphere has no creases");
 }
 
 #[test]
@@ -715,7 +766,10 @@ proptest! {
         prop_assert_eq!((t.vertices, t.edges, t.faces), (2 * n, 3 * n, n + 2));
         let m = k().mass_properties(&b, 1e-3).unwrap();
         prop_assert!((m.volume - area * h.abs()).abs() < 1e-9 * (1.0 + area * h.abs()));
-        assert_watertight(&k().tessellate(&b, &TessellationOptions::default()).unwrap());
+        let mesh = k().tessellate(&b, &TessellationOptions::default()).unwrap();
+        assert_watertight(&mesh);
+        // Every edge of a convex prism is a crease.
+        prop_assert!(mesh.seams.iter().all(|s| !s));
     }
 
     /// Random off-axis rectangles revolved by random angles match the
@@ -729,6 +783,13 @@ proptest! {
         let expect = theta / 2.0 * (r2 * r2 - r1 * r1) * h;
         prop_assert!(((m.volume - expect) / expect).abs() < 1e-9, "{} vs {}", m.volume, expect);
         assert_watertight(&k().tessellate(&b, &TessellationOptions::default()).unwrap());
+        // The creases are the four rims and the two end rectangles (whose
+        // edges on the axis is shared when r1 = 0); everything else is a
+        // seam where a surface is split.
+        let (_, crease) = seam_and_crease_length(&b);
+        let ends = if r1 > 0.0 { 4.0 * (w + h) } else { 4.0 * w + 3.0 * h };
+        let expect = theta * 2.0 * (r1 + r2) + ends;
+        prop_assert!(((crease - expect) / expect).abs() < 1e-4, "creases {} vs {}", crease, expect);
     }
 }
 

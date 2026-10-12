@@ -31,6 +31,9 @@ application shell done; sketch editing tools next.
     revolution, NURBS.
   - Watertight tessellation with chord and angle tolerances (shared edge
     discretisation, constrained Delaunay per face, singular points handled).
+    It marks seam edges, where two pieces of one surface meet (the splits of
+    ADR 0008), so the display draws only creases; the comparison is
+    geometric and errs towards showing an edge.
   - Exact mass properties (volume, area, centroid, inertia) by boundary
     integration, accurate to 1e-9 relative on the golden corpus.
 - **Features** (`openshape-features`): regenerates a Part Studio through the
@@ -182,11 +185,8 @@ application shell done; sketch editing tools next.
   selected but not on hover; there is no box selection of parts; shortcuts
   are not remappable; only the light theme exists; File > Open and Save use
   a text path prompt, not a native file picker.
-- Edges where the kernel splits a periodic face (ADR 0008) are drawn like
-  real edges, so cylinders and revolved parts show seam lines (a line down
-  a cylinder's side, a diameter across a revolved disc). The display should
-  hide edges between two pieces of the same surface; the kernel has to
-  report which edges those are.
+- Silhouettes of curved faces are not drawn as lines (only real edges), so
+  a cylinder's sides show by shading alone.
 - Sketches can only be placed on the three standard planes until Phase 3
   brings faces and construction planes.
 - Extrude rejects some valid but extreme sketch regions with an error (never
@@ -214,8 +214,7 @@ application shell done; sketch editing tools next.
 1. Sketch editing tools: trim, extend, offset, sketch fillet, mirror,
    patterns, slots, polygons, centre/aligned rectangles, tangent arcs;
    parallel/perpendicular/tangent inference; draggable dimension labels.
-2. Hide seam edges of split periodic faces in the display (kernel reports
-   them); live preview in feature dialogs.
+2. Live preview in feature dialogs.
 3. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.
 4. Phase 3 groundwork: design notes for curve/surface intersection, booleans

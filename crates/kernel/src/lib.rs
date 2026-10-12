@@ -99,6 +99,10 @@ pub struct BodyMesh {
     pub faces: Vec<FaceMesh>,
     /// Per-edge polylines.
     pub edges: Vec<Vec<DVec3>>,
+    /// Per edge: true for a seam, where two pieces of one surface meet (the
+    /// split of a periodic face, ADR 0008). A seam bounds faces but is no
+    /// crease in the shape; displays hide it.
+    pub seams: Vec<bool>,
 }
 
 impl BodyMesh {
@@ -294,6 +298,7 @@ impl Kernel for OsKernel {
                 })
                 .collect(),
             edges: t.edges,
+            seams: t.seams,
         })
     }
 

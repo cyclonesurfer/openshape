@@ -48,7 +48,7 @@ const PART_COLORS: [[f32; 4]; 6] = [
     [0.58, 0.76, 0.78, 1.0],
 ];
 
-/// Converts a kernel mesh into renderer mesh data.
+/// Converts a kernel mesh into renderer mesh data (seam edges left out).
 pub fn to_mesh_data(mesh: &BodyMesh, color: [f32; 4]) -> MeshData {
     let mut out = MeshData {
         color,
@@ -64,7 +64,11 @@ pub fn to_mesh_data(mesh: &BodyMesh, color: [f32; 4]) -> MeshData {
             out.indices.extend(t.iter().map(|i| base + i));
         }
     }
-    for e in &mesh.edges {
+    // Seams of split periodic faces are no creases: not drawn.
+    for (i, e) in mesh.edges.iter().enumerate() {
+        if mesh.seams.get(i).copied().unwrap_or(false) {
+            continue;
+        }
         for w in e.windows(2) {
             out.edge_lines.push(w[0].as_vec3().to_array());
             out.edge_lines.push(w[1].as_vec3().to_array());

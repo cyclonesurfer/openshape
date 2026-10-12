@@ -29,10 +29,11 @@ fn model_undo_redo_and_display_meshes() {
         FeatureDialog::new(Template::Ring).build().unwrap(),
     );
     assert_eq!(m.meshes().len(), 2);
-    assert!(m
-        .meshes()
-        .iter()
-        .all(|d| !d.indices.is_empty() && !d.edge_lines.is_empty()));
+    assert!(m.meshes().iter().all(|d| !d.indices.is_empty()));
+    // The box shows its 12 edges; a full torus has no creases, only the
+    // seams where its faces are split, which are not drawn.
+    assert_eq!(m.meshes()[0].edge_segment_count(), 12);
+    assert!(m.meshes()[1].edge_lines.is_empty());
     assert!(m.undo());
     assert_eq!(m.meshes().len(), 1);
     assert!(m.redo());

@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use glam::{DVec2, DVec3};
 use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
 
-use crate::geom::Surface;
+use crate::geom::{Curve3, Surface};
 use crate::topo::{Brep, Face};
 use crate::KernelError;
 
@@ -55,6 +55,171 @@ pub(crate) struct FaceTess {
 pub(crate) struct BrepTess {
     pub faces: Vec<FaceTess>,
     pub edges: Vec<Vec<DVec3>>,
+    /// Per edge: true for a seam (see [`seams`]).
+    pub seams: Vec<bool>,
+}
+
+/// Per edge of `brep`: true where two pieces of one surface meet with the
+/// same orientation, as where a periodic face is split (ADR 0008), or where
+/// one face uses the edge twice. Such an edge bounds faces but is no crease
+/// in the shape, so displays hide it.
+///
+/// The test ([`same_surface`]) errs towards showing an edge: surfaces it
+/// cannot prove identical count as different, so a real crease is never
+/// hidden.
+pub(crate) fn seams(brep: &Brep) -> Vec<bool> {
+    let mut uses: Vec<Vec<usize>> = vec![Vec::new(); brep.edges.len()];
+    for (fi, f) in brep.faces.iter().enumerate() {
+        for lp in &f.loops {
+            for c in &lp.coedges {
+                uses[c.edge.idx()].push(fi);
+            }
+        }
+    }
+    uses.iter()
+        .map(|u| match u.as_slice() {
+            [a, b] => a == b || same_surface(&brep.faces[*a], &brep.faces[*b]),
+            _ => false,
+        })
+        .collect()
+}
+
+/// Relative tolerance for comparing surface data built from the same
+/// definition by rigid motions (rounding only).
+const SAME: f64 = 1e-10;
+
+fn near(a: DVec3, b: DVec3, scale: f64) -> bool {
+    (a - b).length() <= SAME * scale
+}
+
+fn parallel(a: DVec3, b: DVec3) -> bool {
+    let (a, b) = (a.normalize_or_zero(), b.normalize_or_zero());
+    a.dot(b) >= 1.0 - SAME
+}
+
+/// True if two faces are pieces of one surface with one outward side:
+///
+/// * planes with the same outward normal and offset;
+/// * extrusions of circles (cylinders) along the same direction with equal
+///   radii, parallel circle planes and centres on one axis line;
+/// * surfaces of revolution about the same axis whose profiles have the same
+///   meridian (distance from and height along the axis): lines and splines
+///   point for point, as the copies a revolve rotates about its axis, and
+///   circles in planes through the axis by centre and radius;
+/// * otherwise, identical surface data.
+///
+/// Except for planes, the faces must also have the same orientation flag;
+/// the pieces a sweep makes are rigid copies, so theirs agree.
+pub(crate) fn same_surface(a: &Face, b: &Face) -> bool {
+    match (&a.surface, &b.surface) {
+        (Surface::Plane(fa), Surface::Plane(fb)) => {
+            let sign = |f: &Face| if f.forward { 1.0 } else { -1.0 };
+            let (na, nb) = (fa.z * sign(a), fb.z * sign(b));
+            let scale = 1.0 + fa.origin.length().max(fb.origin.length());
+            parallel(na, nb) && na.dot(fb.origin - fa.origin).abs() <= SAME * scale
+        }
+        _ if a.forward != b.forward => false,
+        (
+            Surface::Extrusion {
+                curve:
+                    Curve3::Circle {
+                        center: ca,
+                        x: xa,
+                        y: ya,
+                        radius: ra,
+                    },
+                dir: da,
+                ..
+            },
+            Surface::Extrusion {
+                curve:
+                    Curve3::Circle {
+                        center: cb,
+                        x: xb,
+                        y: yb,
+                        radius: rb,
+                    },
+                dir: db,
+                ..
+            },
+        ) => {
+            let scale = 1.0 + ca.length().max(cb.length()) + ra.max(*rb);
+            let axis = da.normalize_or_zero();
+            let off = *cb - *ca;
+            (ra - rb).abs() <= SAME * scale
+                && parallel(*da, *db)
+                && xa.cross(*ya).dot(xb.cross(*yb)).abs() >= 1.0 - SAME
+                && (off - axis * off.dot(axis)).length() <= SAME * scale
+        }
+        (
+            Surface::Revolution {
+                frame: fa,
+                profile: pa,
+            },
+            Surface::Revolution {
+                frame: fb,
+                profile: pb,
+            },
+        ) => {
+            let scale = 1.0 + fa.origin.length().max(fb.origin.length());
+            let off = fb.origin - fa.origin;
+            if !parallel(fa.z, fb.z) || (off - fa.z * off.dot(fa.z)).length() > SAME * scale {
+                return false;
+            }
+            // Distance from the axis and height along it.
+            let meridian = |p: DVec3| {
+                let r = p - fa.origin;
+                let h = r.dot(fa.z);
+                DVec3::new((r - fa.z * h).length(), h, 0.0)
+            };
+            let same_at = |ts: &[f64]| {
+                ts.iter()
+                    .all(|&t| near(meridian(pa.point(t)), meridian(pb.point(t)), scale))
+            };
+            match (pa, pb) {
+                (Curve3::Line { .. }, Curve3::Line { .. }) => same_at(&[0.0, 1.0]),
+                // Circles in planes through the axis sweep the same torus
+                // (or sphere) when their centres have the same meridian and
+                // their radii agree, whatever their parameterization.
+                (
+                    Curve3::Circle {
+                        center: ca,
+                        x: xa,
+                        y: ya,
+                        radius: ra,
+                    },
+                    Curve3::Circle {
+                        center: cb,
+                        x: xb,
+                        y: yb,
+                        radius: rb,
+                    },
+                ) => {
+                    let in_meridian_plane = |c: DVec3, n: DVec3| {
+                        let r = c - fa.origin;
+                        let radial = r - fa.z * r.dot(fa.z);
+                        n.dot(fa.z).abs() <= SAME && n.dot(radial).abs() <= SAME * scale
+                    };
+                    (ra - rb).abs() <= SAME * scale
+                        && near(meridian(*ca), meridian(*cb), scale)
+                        && in_meridian_plane(*ca, xa.cross(*ya))
+                        && in_meridian_plane(*cb, xb.cross(*yb))
+                }
+                (Curve3::Nurbs(na), Curve3::Nurbs(nb)) => {
+                    na.degree() == nb.degree()
+                        && na.knots() == nb.knots()
+                        && na.weights() == nb.weights()
+                        && na
+                            .control_points()
+                            .iter()
+                            .zip(nb.control_points())
+                            .all(|(p, q)| near(meridian(*p), meridian(q), scale))
+                }
+                _ => false,
+            }
+        }
+        (sa, sb) => sa == sb,
+    }
 }
 
 /// Tessellates every face and edge of `brep`.
@@ -86,7 +251,11 @@ pub(crate) fn tessellate(brep: &Brep, opts: &TessellationOptions) -> Result<Brep
                 .map_err(|e| KernelError::Tessellation(format!("face {i}: {e}")))?,
         );
     }
-    Ok(BrepTess { faces, edges })
+    Ok(BrepTess {
+        faces,
+        edges,
+        seams: seams(brep),
+    })
 }
 
 #[derive(Clone, Copy)]
