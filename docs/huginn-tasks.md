@@ -86,7 +86,7 @@ check out <branch name, or PR number via `gh pr checkout <n>`>. With
 OPENSHAPE_WGPU_BACKEND=vulkan, run:
   cargo build --release --workspace --all-targets
   cargo test --release -p openshape-render -- --nocapture
-  cargo test --release --workspace
+  cargo test --release --workspace --no-fail-fast
   cargo run --release -p openshape -- --headless-demo /tmp/os-demo
 For every test that fails on the branch, run the same test on main and say
 whether the failure is new. Change no code.

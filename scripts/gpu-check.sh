@@ -54,7 +54,8 @@ step() {
 }
 
 step build cargo build --release --workspace --all-targets
-step tests cargo test --release --workspace
+# --no-fail-fast: run every test binary, so the report lists every failure.
+step tests cargo test --release --workspace --no-fail-fast
 step demo cargo run --release -p openshape -- --headless-demo "$out/demo"
 step bench cargo run --release -p openshape -- --bench "$out/bench" 600
 step render-timing cargo test --release -p openshape-render --test offscreen \
@@ -73,6 +74,10 @@ say ""
 say "== Test totals"
 grep -E '^test result:' "$out/tests.log" 2>/dev/null \
     | awk '{p+=$4; f+=$6} END {printf "passed %d, failed %d\n", p, f}' | tee -a "$report"
+if grep -qE '^test .* \.\.\. FAILED$' "$out/tests.log" 2>/dev/null; then
+    say "failing tests (each one's panic message is in $out/tests.log):"
+    grep -E '^test .* \.\.\. FAILED$' "$out/tests.log" | sed 's/^/  /' | tee -a "$report"
+fi
 
 if grep -qiE '^adapter:.*(llvmpipe|lavapipe|softpipe)' "$out/demo.log" 2>/dev/null; then
     say ""

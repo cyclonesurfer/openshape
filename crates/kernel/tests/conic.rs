@@ -31,6 +31,17 @@ fn implicit(p: [DVec2; 3], w: f64, x: DVec2) -> (f64, f64) {
     (t1 * t1 - 4.0 * w * w * t0 * t2, t0.min(t1).min(t2))
 }
 
+/// arcosh w for w ≥ 1 as ln(1 + t + √(t(t + 2))), t = w − 1 (exact for
+/// w ≤ 2), accurate to a few units in the last place near 1 whichever
+/// toolchain builds the tests. `f64::acosh` is not: Rust 1.95's computes
+/// ln(w + √(w − 1)√(w + 1)) and is 25 units in the last place off at
+/// w = 1 + 1e-5 (1.97's is correctly rounded there), which the cancelling
+/// segment formula below turns into a 4e-10 relative error.
+fn acosh(w: f64) -> f64 {
+    let t = w - 1.0;
+    (t + (t * (t + 2.0)).sqrt()).ln_1p()
+}
+
 /// The area between a conic arc and its chord as a fraction of its control
 /// triangle's (design note 0009 §9), from the circular segment of
 /// half-angle α with w = cos α, continued analytically to w ≥ 1. `1 − w²`
@@ -45,7 +56,7 @@ fn ratio(w: f64) -> f64 {
         2.0 / 3.0
     } else {
         let s = ((w - 1.0) * (w + 1.0)).sqrt();
-        w * (w * s - w.acosh()) / (s * s * s)
+        w * (w * s - acosh(w)) / (s * s * s)
     }
 }
 
@@ -163,7 +174,7 @@ fn the_segment_area_formula_matches_a_quadrature() {
     // beyond it.
     for (w, a2) in [
         (1.0 - 1e-5, (1.0 - 1e-5f64).acos().powi(2)),
-        (1.0 + 1e-5, -(1.0 + 1e-5f64).acosh().powi(2)),
+        (1.0 + 1e-5, -acosh(1.0 + 1e-5).powi(2)),
     ] {
         assert_rel(ratio(w), 2.0 / 3.0 - 2.0 * a2 / 15.0, 1e-10);
     }

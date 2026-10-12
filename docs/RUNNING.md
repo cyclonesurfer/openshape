@@ -39,6 +39,11 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 . "$HOME/.cargo/env"
 ```
 
+A distribution's packaged Rust (Fedora's `rust` and `cargo`, say) also
+builds OpenShape, but it ignores `rust-toolchain.toml` and may be older
+than CI's stable; `scripts/gpu-check.sh` prints the `rustc` it used. The
+suite passes on Rust 1.95 (Fedora 44's) as well as on current stable.
+
 Confirm Vulkan sees the GPU. The output should name your AMD card with driver
 `radv`, not `llvmpipe`:
 

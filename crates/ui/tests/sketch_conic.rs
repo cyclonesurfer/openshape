@@ -83,6 +83,17 @@ fn implicit(c: &Solved, x: DVec2) -> (f64, f64) {
     )
 }
 
+/// arcosh w for w ≥ 1 as ln(1 + t + √(t(t + 2))), t = w − 1 (exact for
+/// w ≤ 2), accurate to a few units in the last place near 1 whichever
+/// toolchain builds the tests. `f64::acosh` is not: Rust 1.95's computes
+/// ln(w + √(w − 1)√(w + 1)) and is 25 units in the last place off at
+/// w = 1 + 1e-5 (1.97's is correctly rounded there), which the cancelling
+/// segment formula below turns into a 4e-10 relative error.
+fn acosh(w: f64) -> f64 {
+    let t = w - 1.0;
+    (t + (t * (t + 2.0)).sqrt()).ln_1p()
+}
+
 /// The area between a conic of weight `w` and its chord over its control
 /// triangle's (design note 0009 §9).
 fn ratio(w: f64) -> f64 {
@@ -93,7 +104,7 @@ fn ratio(w: f64) -> f64 {
         2.0 / 3.0
     } else {
         let s = ((w - 1.0) * (w + 1.0)).sqrt();
-        w * (w * s - w.acosh()) / (s * s * s)
+        w * (w * s - acosh(w)) / (s * s * s)
     }
 }
 
