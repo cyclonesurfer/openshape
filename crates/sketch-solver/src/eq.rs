@@ -1454,30 +1454,42 @@ mod tests {
         for (i, d) in g {
             dense[i] += d;
         }
-        for (i, &analytic) in dense.iter().enumerate() {
-            let h = 1e-6;
-            let mut vp = v.to_vec();
-            let mut vm = v.to_vec();
-            vp[i] += h;
-            vm[i] -= h;
-            let (Some(rp), Some(rm)) = (
-                eq.eval(&vp, &sp, DEGEN, None),
-                eq.eval(&vm, &sp, DEGEN, None),
-            ) else {
-                continue;
-            };
-            let fd = (rp.r - rm.r) / (2.0 * h);
-            let scale = 1.0 + analytic.abs().max(fd.abs());
-            // An absolute value whose argument changes sign within ±h makes
-            // the one-sided differences disagree: not a smooth point.
-            let fwd = (rp.r - e.r) / h;
-            let bwd = (e.r - rm.r) / h;
-            if (fwd - bwd).abs() > 0.1 * scale {
-                continue;
+        'slots: for (i, &analytic) in dense.iter().enumerate() {
+            // Central differences with a step and, if that disagrees, a
+            // tenth of it: near a nearly degenerate configuration (an
+            // ellipse axis just above DEGEN) the residual bends so sharply
+            // that the larger step's O(h²) truncation error exceeds the
+            // bound, while the smaller step's does not.
+            let mut fds = Vec::new();
+            for h in [1e-6, 1e-7] {
+                let mut vp = v.to_vec();
+                let mut vm = v.to_vec();
+                vp[i] += h;
+                vm[i] -= h;
+                let (Some(rp), Some(rm)) = (
+                    eq.eval(&vp, &sp, DEGEN, None),
+                    eq.eval(&vm, &sp, DEGEN, None),
+                ) else {
+                    continue 'slots;
+                };
+                let fd = (rp.r - rm.r) / (2.0 * h);
+                let scale = 1.0 + analytic.abs().max(fd.abs());
+                // An absolute value whose argument changes sign within ±h
+                // makes the one-sided differences disagree: not a smooth
+                // point.
+                let fwd = (rp.r - e.r) / h;
+                let bwd = (e.r - rm.r) / h;
+                if (fwd - bwd).abs() > 0.1 * scale {
+                    continue 'slots;
+                }
+                if (fd - analytic).abs() <= 2e-5 * scale {
+                    continue 'slots;
+                }
+                fds.push(fd);
             }
             prop_assert!(
-                (fd - analytic).abs() <= 2e-5 * scale,
-                "{name}: slot {i}: analytic {analytic}, central difference {fd}"
+                false,
+                "{name}: slot {i}: analytic {analytic}, central differences {fds:?}"
             );
         }
         // Slots reported as referenced cover every nonzero derivative.

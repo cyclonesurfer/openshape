@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 920add21bb6ee3e9a686dff0444ff19e1ec903a462ffdb6413d68bfe5cf49aff # an ellipse axis just above DEGEN: the 1e-6 central difference is off by 5e-5, the 1e-7 one agrees

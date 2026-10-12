@@ -1023,6 +1023,30 @@ proptest! {
     }
 }
 
+/// A curve's extent for the sliver check: a line's or conic's chord, an
+/// arc's length, a circle's radius, an ellipse's smaller semi-axis (times
+/// the sweep for an arc of one).
+fn curve_size(c: &ResolvedCurve) -> f64 {
+    match c {
+        ResolvedCurve::Line { start, end } => (*end - *start).length(),
+        ResolvedCurve::Arc {
+            radius,
+            sweep_angle,
+            ..
+        } => radius * sweep_angle,
+        ResolvedCurve::Circle { radius, .. } => *radius,
+        ResolvedCurve::Spline { .. } => 1.0,
+        ResolvedCurve::Ellipse { major, minor, .. } => major.length().min(minor.length()),
+        ResolvedCurve::EllipticalArc {
+            major,
+            minor,
+            sweep_param,
+            ..
+        } => major.length().min(minor.length()) * sweep_param.abs(),
+        ResolvedCurve::Conic { start, end, .. } => (*end - *start).length(),
+    }
+}
+
 /// Applies random trims, extends and splits (`(op, curve, fraction along
 /// it)`) and checks each one (see `random_edits_keep_the_sketch_solved`).
 fn edit_randomly(
@@ -1030,6 +1054,13 @@ fn edit_randomly(
     f: FeatureId,
     steps: &[(usize, usize, f64)],
 ) -> Result<(), TestCaseError> {
+    // A curve drawn thinner than the cut gap (a rectangle 0.5 µm tall) is
+    // the user's; what is checked is that the edits never make one.
+    let drawn = m.sketch_result(f).unwrap();
+    prop_assume!(drawn
+        .curves
+        .iter()
+        .all(|(_, _, c)| curve_size(c) > trim::CUT_GAP));
     for &(op, which, t) in steps {
         let r = m.sketch_result(f).unwrap();
         let curves: Vec<(SketchId, ResolvedCurve)> =
@@ -1074,25 +1105,7 @@ fn edit_randomly(
             prop_assert!(e.contains("within the model tolerance"), "{}", e);
         }
         for (_, _, c) in &after.curves {
-            let size = match c {
-                ResolvedCurve::Line { start, end } => (*end - *start).length(),
-                ResolvedCurve::Arc {
-                    radius,
-                    sweep_angle,
-                    ..
-                } => radius * sweep_angle,
-                ResolvedCurve::Circle { radius, .. } => *radius,
-                ResolvedCurve::Spline { .. } => 1.0,
-                ResolvedCurve::Ellipse { major, minor, .. } => major.length().min(minor.length()),
-                ResolvedCurve::EllipticalArc {
-                    major,
-                    minor,
-                    sweep_param,
-                    ..
-                } => major.length().min(minor.length()) * sweep_param.abs(),
-                ResolvedCurve::Conic { start, end, .. } => (*end - *start).length(),
-            };
-            prop_assert!(size > trim::CUT_GAP, "{:?}", c);
+            prop_assert!(curve_size(c) > trim::CUT_GAP, "{:?}", c);
         }
         for e in &sketch.entities {
             let Geometry::Point { at } = e.geometry else {
