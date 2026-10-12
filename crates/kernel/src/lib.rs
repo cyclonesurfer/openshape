@@ -15,6 +15,7 @@ mod check;
 mod geom;
 mod mass;
 mod math;
+mod origin;
 mod profile;
 mod sweep;
 mod tess;
@@ -29,6 +30,10 @@ pub use arrangement::{
 pub use geom::SurfaceKind;
 pub use glam::{DMat4, DVec2, DVec3};
 pub use math::{Frame, Tolerance};
+pub use origin::{
+    Adjacency, EdgeIx, EdgeOrigin, FaceIx, FaceOrigin, Origins, PieceEnd, ProfilePiece,
+    ProfileVertex, VertexIx, VertexOrigin,
+};
 pub use profile::{Profile, ProfileCurve};
 pub use sweep::{ExtrudeSpec, RevolveSpec};
 pub use tess::TessellationOptions;
@@ -106,9 +111,13 @@ pub struct BodyMesh {
     /// Per-edge polylines.
     pub edges: Vec<Vec<DVec3>>,
     /// Per edge: true for a seam, where two pieces of one surface meet (the
-    /// split of a periodic face, ADR 0008). A seam bounds faces but is no
-    /// crease in the shape; displays hide it.
+    /// split of a periodic face, ADR 0008, or the faces a sweep makes of
+    /// two pieces of one curve). A seam bounds faces but is no crease in
+    /// the shape; displays hide it.
     pub seams: Vec<bool>,
+    /// Per vertex, its position (in the vertex order of
+    /// [`Kernel::origins`]), for picking vertices.
+    pub vertices: Vec<DVec3>,
 }
 
 impl BodyMesh {
@@ -151,15 +160,18 @@ impl BodyMesh {
     }
 }
 
-/// An opaque solid body produced by a kernel.
+/// An opaque solid body produced by a kernel, with the origins of its
+/// entities (ADR 0018).
 #[derive(Clone, Debug)]
 pub struct Body {
     brep: Arc<topo::Brep>,
+    origins: Arc<Origins>,
 }
 
 impl PartialEq for Body {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.brep, &other.brep) || self.brep == other.brep
+        (Arc::ptr_eq(&self.brep, &other.brep) || self.brep == other.brep)
+            && (Arc::ptr_eq(&self.origins, &other.origins) || self.origins == other.origins)
     }
 }
 
@@ -215,6 +227,15 @@ pub trait Kernel: Send + Sync {
 
     /// Analytic kinds of the body's faces, in face order.
     fn face_kinds(&self, body: &Self::Body) -> Vec<SurfaceKind>;
+
+    /// How each face, edge and vertex of the body arose from the inputs of
+    /// the operation that made it, in handle order (ADR 0018): the raw
+    /// material of persistent names (design note 0013).
+    fn origins<'a>(&self, body: &'a Self::Body) -> &'a Origins;
+
+    /// Which faces each edge bounds, which edges end at each vertex, and
+    /// which edges are seams.
+    fn adjacency(&self, body: &Self::Body) -> Adjacency;
 
     /// The planar arrangement of sketch curves: vertices, edges and bounded
     /// regions (design note 0006).
@@ -275,11 +296,23 @@ impl BrepKernel {
         Self { tol }
     }
 
-    fn finish(&self, brep: topo::Brep) -> Result<Body, KernelError> {
-        let issues = check::validate(&brep, &self.tol);
+    fn finish(&self, (brep, origins): (topo::Brep, Origins)) -> Result<Body, KernelError> {
+        let mut issues = check::validate(&brep, &self.tol);
+        let counts = (brep.faces.len(), brep.edges.len(), brep.vertices.len());
+        let table = (
+            origins.faces.len(),
+            origins.edges.len(),
+            origins.vertices.len(),
+        );
+        if counts != table {
+            issues.push(format!(
+                "origin table covers {table:?} faces, edges and vertices of {counts:?}"
+            ));
+        }
         if issues.is_empty() {
             Ok(Body {
                 brep: Arc::new(brep),
+                origins: Arc::new(origins),
             })
         } else {
             Err(KernelError::InvalidResult(issues.join("; ")))
@@ -336,6 +369,7 @@ impl Kernel for BrepKernel {
                 .collect(),
             edges: t.edges,
             seams: t.seams,
+            vertices: body.brep.vertices.iter().map(|v| v.point).collect(),
         })
     }
 
@@ -363,6 +397,32 @@ impl Kernel for BrepKernel {
 
     fn face_kinds(&self, body: &Body) -> Vec<SurfaceKind> {
         body.brep.faces.iter().map(|f| f.surface.kind()).collect()
+    }
+
+    fn origins<'a>(&self, body: &'a Body) -> &'a Origins {
+        &body.origins
+    }
+
+    fn adjacency(&self, body: &Body) -> Adjacency {
+        let b = &body.brep;
+        let mut edge_faces = vec![Vec::new(); b.edges.len()];
+        for (fi, f) in b.faces.iter().enumerate() {
+            for c in f.loops.iter().flat_map(|l| &l.coedges) {
+                edge_faces[c.edge.idx()].push(FaceIx(fi as u32));
+            }
+        }
+        let mut vertex_edges = vec![Vec::new(); b.vertices.len()];
+        for (ei, e) in b.edges.iter().enumerate() {
+            vertex_edges[e.v0.idx()].push(EdgeIx(ei as u32));
+            if e.v1 != e.v0 {
+                vertex_edges[e.v1.idx()].push(EdgeIx(ei as u32));
+            }
+        }
+        Adjacency {
+            edge_faces,
+            vertex_edges,
+            seams: tess::seams(b),
+        }
     }
 
     fn sketch_regions(&self, curves: &[ProfileCurve]) -> Result<SketchArrangement, KernelError> {

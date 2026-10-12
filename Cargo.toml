@@ -5,6 +5,7 @@ members = [
     "crates/core-model",
     "crates/nurbs",
     "crates/kernel",
+    "crates/naming",
     "crates/features",
     "crates/render",
     "crates/io",
@@ -28,6 +29,7 @@ opendatum-oplog = { path = "crates/oplog", version = "0.1.0" }
 opendatum-core-model = { path = "crates/core-model", version = "0.1.0" }
 opendatum-nurbs = { path = "crates/nurbs", version = "0.1.0" }
 opendatum-kernel = { path = "crates/kernel", version = "0.1.0" }
+opendatum-naming = { path = "crates/naming", version = "0.1.0" }
 opendatum-features = { path = "crates/features", version = "0.1.0" }
 opendatum-render = { path = "crates/render", version = "0.1.0" }
 opendatum-io = { path = "crates/io", version = "0.1.0" }

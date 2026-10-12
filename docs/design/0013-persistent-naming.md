@@ -257,3 +257,40 @@ its face"), never a failure, since moving with the model is the point.
    face (carrier references), with the picking UI.
 4. Origins through booleans (design note 0012) and the split/merge
    qualifiers, then the bracket suite and the property tests.
+
+## 11. As built (steps 1 and 2, 2026-10-12)
+
+Steps 1 and 2 are done: ADR 0018 settles the origin tables and handles,
+and the `naming` crate names box, extrude and revolve bodies and
+resolves references against them. Where building it refined this note:
+
+* **Where the types live.** `Name`, `Reference` and their parts are data
+  stored in feature definitions, so they live in `core-model`
+  (`opendatum_core_model::naming`) beside the sketch keys they are built
+  from; the `naming` crate holds the algorithms and depends on the
+  kernel only for the origin and handle types.
+* **Caps** always carry the selected regions they cover, by the outer
+  loop of the region key the feature stores (design note 0006 §5), not
+  only in multi-region sweeps: a cap then keeps its name while the stored
+  key keeps finding its region, whatever else the sketch edit changed,
+  and adding a region to the feature leaves the other caps' names alone.
+  Regions that share an edge become one cap carrying both; resolution
+  treats caps (and side faces) that share a source as descendants, which
+  is §5's merge rule and its inverse. A region selected anew whose
+  boundary has other sketch curves has no recorded link to the old one,
+  so references to its caps fail rather than guess.
+* **Logical entities** are what the user sees: kernel faces joined across
+  seams (the kernel's own judgement of where pieces of one surface meet
+  with no crease, which the display already uses), so the `Pi(k)`
+  qualifier is never stored and a sketch line split by a vertex where
+  nothing else meets it still gives one face, named by both sketch edges
+  (§5's merged name). Edges are the kernel edges between the same two
+  logical faces joined end to end where nothing else meets them;
+  vertices are where logical edges end. A body whose table would give
+  one name to two entities is refused.
+* **Tie-breaks** (§4) are the kernel origin in sketch terms: the sketch
+  edge and end of a profile edge, and for a profile vertex the lesser of
+  the two piece ends meeting there by sketch key, so they do not depend
+  on the order of the profile's curves. Only where those also collide is
+  the weak ordinal used.
+* `Split` qualifiers and `Kept` wrappers come with booleans (step 4).

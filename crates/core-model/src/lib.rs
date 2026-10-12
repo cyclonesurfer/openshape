@@ -9,6 +9,7 @@
 //! with plain data (planes, profile curves, dimensions in SI units) and are
 //! evaluated by the `features` crate.
 
+pub mod naming;
 pub mod sketch;
 pub mod units;
 

@@ -1,0 +1,20 @@
+[package]
+name = "opendatum-naming"
+description = "Persistent names of faces, edges and vertices from kernel origin tables, and their resolution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+opendatum-core-model.workspace = true
+opendatum-kernel.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+opendatum-oplog.workspace = true
+
+[lints]
+workspace = true

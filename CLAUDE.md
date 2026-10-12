@@ -42,6 +42,7 @@ container without a GPU, install Mesa's software Vulkan (lavapipe):
 | `crates/kernel` | `opendatum-kernel` | B-rep kernel behind the `Kernel` trait |
 | `crates/linalg` | `opendatum-linalg` | deterministic dense linear algebra (pivoted QR, COD, SVD) for the solvers (ADR 0010) |
 | `crates/sketch-solver` | `opendatum-sketch-solver` | 2D sketch constraint solver with DOF/redundancy/conflict diagnostics (design note 0005) |
+| `crates/naming` | `opendatum-naming` | persistent names of faces, edges and vertices from the kernel's origin tables, and resolution of stored references (design note 0013, ADR 0018) |
 | `crates/features` | `opendatum-features` | evaluates a part studio's feature list through `Kernel` |
 | `crates/render` | `opendatum-render` | wgpu viewport renderer + offscreen renderer; no kernel/egui deps |
 | `crates/text` | `opendatum-text` | font layout for sketch text: bundled Liberation fonts (OFL), shaping, exact outlines (ADR 0015) |
@@ -49,7 +50,7 @@ container without a GPU, install Mesa's software Vulkan (lavapipe):
 | `crates/ui-kit` | `opendatum-ui-kit` | the look: theme tokens, original icon set, view cube, offscreen egui rendering (ADR 0012) |
 | `crates/ui` | `opendatum` (bin) | egui/eframe application shell (ADR 0012), offscreen screenshots and end-to-end UI tests |
 
-Planned crates (not yet created; see docs/ARCHITECTURE.md): `naming`, `regen`,
+Planned crates (not yet created; see docs/ARCHITECTURE.md): `regen`,
 `mate-solver`, `script`, `drawing`, `sim`, `cam`,
 `render-studio`, `server`, `client-sync`, `api`, `plugins`.
 

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::geom::Curve3;
 use crate::math::Frame;
+use crate::origin::{PieceEnd, ProfilePiece};
 use crate::{KernelError, Tolerance};
 
 /// One curve of a planar profile, in the profile plane's 2D coordinates.
@@ -267,6 +268,10 @@ pub(crate) struct Seg {
     pub curve: Curve3,
     pub t0: f64,
     pub t1: f64,
+    /// The profile piece it is (ADR 0018).
+    pub piece: ProfilePiece,
+    /// Whether it runs against the piece's own direction.
+    pub reversed: bool,
 }
 
 impl Seg {
@@ -281,6 +286,20 @@ impl Seg {
             .point(self.t0 + (self.t1 - self.t0) * f)
             .truncate()
     }
+    /// The piece end it starts at.
+    pub fn start_end(&self) -> PieceEnd {
+        PieceEnd {
+            piece: self.piece,
+            end: self.reversed,
+        }
+    }
+    /// The piece end it ends at.
+    pub fn end_end(&self) -> PieceEnd {
+        PieceEnd {
+            piece: self.piece,
+            end: !self.reversed,
+        }
+    }
     pub fn reversed(&self) -> Seg {
         match &self.curve {
             Curve3::Line { origin, dir } => {
@@ -293,6 +312,8 @@ impl Seg {
                     },
                     t0: 0.0,
                     t1: 1.0,
+                    piece: self.piece,
+                    reversed: !self.reversed,
                 }
             }
             Curve3::Circle {
@@ -314,6 +335,8 @@ impl Seg {
                     },
                     t0: 0.0,
                     t1: self.t1 - self.t0,
+                    piece: self.piece,
+                    reversed: !self.reversed,
                 }
             }
             Curve3::Nurbs(n) => {
@@ -324,6 +347,8 @@ impl Seg {
                     curve: Curve3::Nurbs(r),
                     t0: a + b - self.t1,
                     t1: a + b - self.t0,
+                    piece: self.piece,
+                    reversed: !self.reversed,
                 }
             }
         }
@@ -362,6 +387,8 @@ fn arc_segs(center: DVec2, radius: f64, start: f64, sweep: f64) -> Vec<Seg> {
                 },
                 t0: 0.0,
                 t1: step.abs(),
+                piece: ProfilePiece::default(),
+                reversed: false,
             }
         })
         .collect()
@@ -384,6 +411,8 @@ fn to_segs(c: &ProfileCurve, tol: &Tolerance) -> Result<Vec<Seg>, KernelError> {
                 },
                 t0: 0.0,
                 t1: 1.0,
+                piece: ProfilePiece::default(),
+                reversed: false,
             }])
         }
         ProfileCurve::Arc {
@@ -433,11 +462,15 @@ fn to_segs(c: &ProfileCurve, tol: &Tolerance) -> Result<Vec<Seg>, KernelError> {
                         curve: curve.clone(),
                         t0: a,
                         t1: m,
+                        piece: ProfilePiece::default(),
+                        reversed: false,
                     },
                     Seg {
                         curve,
                         t0: m,
                         t1: b,
+                        piece: ProfilePiece::default(),
+                        reversed: false,
                     },
                 ])
             } else {
@@ -445,6 +478,8 @@ fn to_segs(c: &ProfileCurve, tol: &Tolerance) -> Result<Vec<Seg>, KernelError> {
                     curve,
                     t0: a,
                     t1: b,
+                    piece: ProfilePiece::default(),
+                    reversed: false,
                 }])
             }
         }
@@ -464,7 +499,13 @@ pub(crate) fn regions(profile: &Profile, tol: &Tolerance) -> Result<Vec<Region>,
     for (ci, c) in profile.curves.iter().enumerate() {
         let s = to_segs(c, tol)?;
         seg_curve.extend(std::iter::repeat_n(ci, s.len()));
-        segs.extend(s);
+        segs.extend(s.into_iter().enumerate().map(|(j, mut s)| {
+            s.piece = ProfilePiece {
+                curve: ci as u32,
+                piece: j as u32,
+            };
+            s
+        }));
     }
     if segs.is_empty() {
         return Err(KernelError::InvalidInput("profile is empty".into()));

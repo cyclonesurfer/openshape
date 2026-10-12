@@ -11,8 +11,9 @@ use glam::{DMat4, DVec3};
 
 use crate::geom::{Curve3, Surface};
 use crate::math::{rotate_vec, rotation_about, Frame};
-use crate::profile::{regions, Profile, Region, Seg};
-use crate::topo::{Brep, Coedge, EdgeId, Loop, VertexId};
+use crate::origin::{EdgeOrigin, FaceOrigin, Origins, ProfileVertex, VertexOrigin};
+use crate::profile::{regions, Profile, Region, Seg, SegLoop};
+use crate::topo::{Brep, Coedge, EdgeId, FaceId, Loop, VertexId};
 use crate::{KernelError, Tolerance};
 
 /// Extrude parameters.
@@ -34,6 +35,73 @@ pub struct RevolveSpec {
     /// Signed sweep angle in radians, `0 < |angle| ≤ 2π` (right-hand rule
     /// about `axis_dir`).
     pub angle: f64,
+}
+
+/// A B-rep under construction with its origin table (ADR 0018), the two
+/// kept in step: every entity is added together with its origin.
+struct Build {
+    brep: Brep,
+    org: Origins,
+}
+
+impl Build {
+    fn new(positions: usize) -> Self {
+        Build {
+            brep: Brep::default(),
+            org: Origins {
+                positions: positions as u32,
+                ..Origins::default()
+            },
+        }
+    }
+
+    fn vertex(&mut self, point: DVec3, origin: VertexOrigin) -> VertexId {
+        self.org.vertices.push(origin);
+        self.brep.add_vertex(point)
+    }
+
+    fn edge(
+        &mut self,
+        curve: Curve3,
+        (t0, t1): (f64, f64),
+        (v0, v1): (VertexId, VertexId),
+        origin: EdgeOrigin,
+    ) -> EdgeId {
+        self.org.edges.push(origin);
+        self.brep.add_edge(curve, t0, t1, v0, v1)
+    }
+
+    fn face(
+        &mut self,
+        surface: Surface,
+        forward: bool,
+        loops: Vec<Loop>,
+        origin: FaceOrigin,
+    ) -> FaceId {
+        self.org.faces.push(origin);
+        self.brep.add_face(surface, forward, loops)
+    }
+
+    /// Records a region's pieces, returning its index.
+    fn region(&mut self, region: &Region) -> u32 {
+        self.org.regions.push(
+            region
+                .loops
+                .iter()
+                .map(|l| l.iter().map(|s| s.piece).collect())
+                .collect(),
+        );
+        self.org.regions.len() as u32 - 1
+    }
+}
+
+/// The profile vertex where segment `i` of a loop starts.
+fn start_vertex(lp: &SegLoop, i: usize) -> ProfileVertex {
+    let prev = &lp[(i + lp.len() - 1) % lp.len()];
+    let (a, b) = (lp[i].start_end(), prev.end_end());
+    ProfileVertex {
+        ends: [a.min(b), a.max(b)],
+    }
 }
 
 fn loop_from(coedges: Vec<Coedge>, reverse: bool) -> Loop {
@@ -67,12 +135,12 @@ fn bw(edge: EdgeId) -> Coedge {
     }
 }
 
-/// Builds a solid by extruding a profile.
+/// Builds a solid by extruding a profile, with its origin table.
 pub(crate) fn extrude(
     profile: &Profile,
     spec: &ExtrudeSpec,
     tol: &Tolerance,
-) -> Result<Brep, KernelError> {
+) -> Result<(Brep, Origins), KernelError> {
     if !spec.distance.is_finite() || spec.distance.abs() <= tol.linear {
         return Err(KernelError::InvalidInput(
             "extrude distance must be non-zero".into(),
@@ -88,15 +156,15 @@ pub(crate) fn extrude(
     };
     let m0 = DMat4::from_translation(base) * plane.matrix();
     let m1 = DMat4::from_translation(base + d) * plane.matrix();
-    let mut brep = Brep::default();
+    let mut b = Build::new(2);
     for r in &regs {
-        extrude_region(&mut brep, r, &plane, d, base, &m0, &m1);
+        extrude_region(&mut b, r, &plane, d, base, &m0, &m1);
     }
-    Ok(brep)
+    Ok((b.brep, b.org))
 }
 
 fn extrude_region(
-    brep: &mut Brep,
+    b: &mut Build,
     region: &Region,
     plane: &Frame,
     d: DVec3,
@@ -108,47 +176,53 @@ fn extrude_region(
     let mut bottom_loops = Vec::new();
     let mut top_loops = Vec::new();
     let up = d.dot(plane.z) > 0.0;
+    let region_ix = b.region(region);
     for lp in &region.loops {
         let n = lp.len();
-        let vb: Vec<VertexId> = lp
-            .iter()
-            .map(|s| brep.add_vertex(m0.transform_point3(s.start().extend(0.0))))
-            .collect();
-        let vt: Vec<VertexId> = lp
-            .iter()
-            .map(|s| brep.add_vertex(m1.transform_point3(s.start().extend(0.0))))
-            .collect();
-        let eb: Vec<EdgeId> = (0..n)
-            .map(|i| {
-                brep.add_edge(
-                    lp[i].curve.transformed(m0),
-                    lp[i].t0,
-                    lp[i].t1,
-                    vb[i],
-                    vb[(i + 1) % n],
-                )
-            })
-            .collect();
-        let et: Vec<EdgeId> = (0..n)
-            .map(|i| {
-                brep.add_edge(
-                    lp[i].curve.transformed(m1),
-                    lp[i].t0,
-                    lp[i].t1,
-                    vt[i],
-                    vt[(i + 1) % n],
-                )
-            })
-            .collect();
+        let pv: Vec<ProfileVertex> = (0..n).map(|i| start_vertex(lp, i)).collect();
+        let mut copy_vertices = |m: &DMat4, at: u32| -> Vec<VertexId> {
+            (0..n)
+                .map(|i| {
+                    let p = m.transform_point3(lp[i].start().extend(0.0));
+                    b.vertex(p, VertexOrigin::Profile { vertex: pv[i], at })
+                })
+                .collect()
+        };
+        let vb = copy_vertices(m0, 0);
+        let vt = copy_vertices(m1, 1);
+        let mut copy_edges = |m: &DMat4, v: &[VertexId], at: u32| -> Vec<EdgeId> {
+            (0..n)
+                .map(|i| {
+                    let piece = lp[i].piece;
+                    b.edge(
+                        lp[i].curve.transformed(m),
+                        (lp[i].t0, lp[i].t1),
+                        (v[i], v[(i + 1) % n]),
+                        EdgeOrigin::Profile { piece, at },
+                    )
+                })
+                .collect()
+        };
+        let eb = copy_edges(m0, &vb, 0);
+        let et = copy_edges(m1, &vt, 1);
         let ev: Vec<EdgeId> = (0..n)
             .map(|i| {
-                let a = brep.vertex(vb[i]).point;
-                brep.add_edge(Curve3::Line { origin: a, dir: d }, 0.0, 1.0, vb[i], vt[i])
+                let a = b.brep.vertex(vb[i]).point;
+                let origin = EdgeOrigin::Swept {
+                    vertex: pv[i],
+                    span: 0,
+                };
+                b.edge(
+                    Curve3::Line { origin: a, dir: d },
+                    (0.0, 1.0),
+                    (vb[i], vt[i]),
+                    origin,
+                )
             })
             .collect();
         for i in 0..n {
             let s = &lp[i];
-            let bottom_curve = brep.edge(eb[i]).curve.clone();
+            let bottom_curve = b.brep.edge(eb[i]).curve.clone();
             let surface = match &bottom_curve {
                 Curve3::Line { origin, dir } => {
                     let o = *origin + *dir * s.t0;
@@ -179,7 +253,11 @@ fn extrude_region(
             let normal = surface.normal(u, v).unwrap_or(DVec3::ZERO);
             let forward = normal.dot(outward) > 0.0;
             let lp_side = vec![fw(eb[i]), fw(ev[(i + 1) % n]), bw(et[i]), bw(ev[i])];
-            faces.push(brep.add_face(surface, forward, vec![loop_from(lp_side, !forward)]));
+            let origin = FaceOrigin::Side {
+                piece: s.piece,
+                span: 0,
+            };
+            faces.push(b.face(surface, forward, vec![loop_from(lp_side, !forward)], origin));
         }
         bottom_loops.push(eb.iter().map(|&e| fw(e)).collect::<Vec<_>>());
         top_loops.push(et.iter().map(|&e| fw(e)).collect::<Vec<_>>());
@@ -191,35 +269,44 @@ fn extrude_region(
     let bottom_out_is_z = !up;
     let top_out_is_z = up;
     faces.push(
-        brep.add_face(
+        b.face(
             Surface::Plane(bottom_frame),
             bottom_out_is_z,
             bottom_loops
                 .into_iter()
                 .map(|l| loop_from(l, !bottom_out_is_z))
                 .collect(),
+            FaceOrigin::Cap {
+                at: 0,
+                region: region_ix,
+            },
         ),
     );
     faces.push(
-        brep.add_face(
+        b.face(
             Surface::Plane(top_frame),
             top_out_is_z,
             top_loops
                 .into_iter()
                 .map(|l| loop_from(l, !top_out_is_z))
                 .collect(),
+            FaceOrigin::Cap {
+                at: 1,
+                region: region_ix,
+            },
         ),
     );
-    let shell = brep.add_shell(faces);
-    brep.add_solid(vec![shell]);
+    let shell = b.brep.add_shell(faces);
+    b.brep.add_solid(vec![shell]);
 }
 
-/// Builds a solid by revolving a profile about an axis in its plane.
+/// Builds a solid by revolving a profile about an axis in its plane, with
+/// its origin table.
 pub(crate) fn revolve(
     profile: &Profile,
     spec: &RevolveSpec,
     tol: &Tolerance,
-) -> Result<Brep, KernelError> {
+) -> Result<(Brep, Origins), KernelError> {
     let theta = spec.angle.abs();
     if !theta.is_finite() || theta <= tol.angular || theta > TAU + 1e-9 {
         return Err(KernelError::InvalidInput(
@@ -280,11 +367,11 @@ pub(crate) fn revolve(
         ((theta / PI) - 1e-9).ceil().max(1.0) as usize
     };
     let angles: Vec<f64> = (0..=k).map(|j| theta * j as f64 / k as f64).collect();
-    let mut brep = Brep::default();
+    let mut b = Build::new(angles.len());
     for r in &regs {
-        revolve_region(&mut brep, r, &plane, &frame0, &angles, full, on_tol)?;
+        revolve_region(&mut b, r, &plane, &frame0, &angles, full, on_tol)?;
     }
-    Ok(brep)
+    Ok((b.brep, b.org))
 }
 
 fn rho(frame: &Frame, p: DVec3) -> f64 {
@@ -294,7 +381,7 @@ fn rho(frame: &Frame, p: DVec3) -> f64 {
 
 #[allow(clippy::too_many_arguments)]
 fn revolve_region(
-    brep: &mut Brep,
+    b: &mut Build,
     region: &Region,
     plane: &Frame,
     f0: &Frame,
@@ -311,8 +398,10 @@ fn revolve_region(
     let mut faces = Vec::new();
     let mut start_cap: Vec<Vec<Coedge>> = Vec::new();
     let mut end_cap: Vec<Vec<Coedge>> = Vec::new();
+    let region_ix = b.region(region);
     for lp in &region.loops {
         let n = lp.len();
+        let pv: Vec<ProfileVertex> = (0..n).map(|i| start_vertex(lp, i)).collect();
         let starts: Vec<DVec3> = lp.iter().map(|s| plane.point2(s.start())).collect();
         let on_axis: Vec<bool> = starts.iter().map(|p| rho(f0, *p) <= on_tol).collect();
         // Segments lying on the axis (straight lines with both ends on it).
@@ -340,12 +429,16 @@ fn revolve_region(
         // Vertices: per copy for off-axis points, shared for on-axis points.
         let verts: Vec<Vec<VertexId>> = (0..n)
             .map(|i| {
+                let origin = |j: usize| VertexOrigin::Profile {
+                    vertex: pv[i],
+                    at: j as u32,
+                };
                 if on_axis[i] {
-                    let v = brep.add_vertex(starts[i]);
+                    let v = b.vertex(starts[i], origin(0));
                     vec![v; nj]
                 } else {
                     (0..nj)
-                        .map(|j| brep.add_vertex(rot(j).transform_point3(starts[i])))
+                        .map(|j| b.vertex(rot(j).transform_point3(starts[i]), origin(j)))
                         .collect()
                 }
             })
@@ -355,16 +448,21 @@ fn revolve_region(
         let mut copies: Vec<Vec<Option<EdgeId>>> = vec![vec![None; nj]; n];
         for i in 0..n {
             let base = lp[i].curve.transformed(&pm);
+            let ts = (lp[i].t0, lp[i].t1);
+            let origin = |j: usize| EdgeOrigin::Profile {
+                piece: lp[i].piece,
+                at: j as u32,
+            };
             if axis_seg[i] {
                 if !full {
-                    let e = brep.add_edge(base, lp[i].t0, lp[i].t1, vtx(i, 0), vtx(i + 1, 0));
+                    let e = b.edge(base, ts, (vtx(i, 0), vtx(i + 1, 0)), origin(0));
                     copies[i] = vec![Some(e); nj];
                 }
                 continue;
             }
             for (j, slot) in copies[i].iter_mut().enumerate() {
                 let c = base.transformed(&rot(j));
-                *slot = Some(brep.add_edge(c, lp[i].t0, lp[i].t1, vtx(i, j), vtx(i + 1, j)));
+                *slot = Some(b.edge(c, ts, (vtx(i, j), vtx(i + 1, j)), origin(j)));
             }
         }
         // Circular edges swept by off-axis vertices, one per piece.
@@ -384,12 +482,15 @@ fn revolve_region(
                     y: f0.z.cross(cx),
                     radius: r,
                 };
-                arcs[i][j] = Some(brep.add_edge(
+                let origin = EdgeOrigin::Swept {
+                    vertex: pv[i],
+                    span: j as u32,
+                };
+                arcs[i][j] = Some(b.edge(
                     curve,
-                    0.0,
-                    angles[j + 1] - angles[j],
-                    vtx(i, j),
-                    vtx(i, j + 1),
+                    (0.0, angles[j + 1] - angles[j]),
+                    (vtx(i, j), vtx(i, j + 1)),
+                    origin,
                 ));
             }
         }
@@ -411,7 +512,8 @@ fn revolve_region(
                     y: rj.transform_vector3(f0.y),
                     z: f0.z,
                 };
-                let profile_curve = brep
+                let profile_curve = b
+                    .brep
                     .edge(copies[i][copy(j)].expect("copy exists"))
                     .curve
                     .clone();
@@ -432,7 +534,11 @@ fn revolve_region(
                     ce.push(bw(a));
                 }
                 ce.push(bw(copies[i][copy(j)].expect("copy exists")));
-                faces.push(brep.add_face(surface, forward, vec![loop_from(ce, !forward)]));
+                let origin = FaceOrigin::Side {
+                    piece: s.piece,
+                    span: j as u32,
+                };
+                faces.push(b.face(surface, forward, vec![loop_from(ce, !forward)], origin));
             }
         }
         if !full {
@@ -452,13 +558,17 @@ fn revolve_region(
         // Start cap: the profile plane; outward is against the rotation (-y0).
         let start_out_is_z = (-f0.y).dot(plane.z) > 0.0;
         faces.push(
-            brep.add_face(
+            b.face(
                 Surface::Plane(*plane),
                 start_out_is_z,
                 start_cap
                     .into_iter()
                     .map(|l| loop_from(l, !start_out_is_z))
                     .collect(),
+                FaceOrigin::Cap {
+                    at: 0,
+                    region: region_ix,
+                },
             ),
         );
         let rk = rot(k);
@@ -471,17 +581,21 @@ fn revolve_region(
         let yk = rk.transform_vector3(f0.y);
         let end_out_is_z = yk.dot(end_plane.z) > 0.0;
         faces.push(
-            brep.add_face(
+            b.face(
                 Surface::Plane(end_plane),
                 end_out_is_z,
                 end_cap
                     .into_iter()
                     .map(|l| loop_from(l, !end_out_is_z))
                     .collect(),
+                FaceOrigin::Cap {
+                    at: k as u32,
+                    region: region_ix,
+                },
             ),
         );
     }
-    let shell = brep.add_shell(faces);
-    brep.add_solid(vec![shell]);
+    let shell = b.brep.add_shell(faces);
+    b.brep.add_solid(vec![shell]);
     Ok(())
 }

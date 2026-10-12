@@ -1,17 +1,18 @@
 # OpenDatum status
 
-Updated 2026-10-12, Phase 2 (sketcher): core sketcher, the application
-shell, the editing tools, ellipses, conics, transform, curvature
-continuity, text, smooth closed splines, trimming of ellipses and conics,
-and curvature combs done; region detection now absorbs faces thinner than
-the tolerance instead of refusing them. Phase 3 groundwork started: the
-design notes for intersections (0011), booleans (0012) and persistent
-naming (0013) are written, and the kernel's profile check is now exact
-and its tessellation adapts to local feature size, so every region of the
-random sketch tests extrudes, slivers included, with mass properties
-exact to rounding; implementing the notes is next. The product is now
-named OpenDatum (ADR 0017): packages `opendatum-*`, binary `opendatum`,
-documents `.odatum`; documents saved under the old name open unchanged.
+Updated 2026-10-12. Phase 2 (sketcher) is done but for the tools that
+need model faces (project/convert, intersection curves, pierce). Phase 3
+has begun: the design notes for intersections (0011), booleans (0012)
+and persistent naming (0013) are written; every region of the random
+sketch tests extrudes, slivers included, with mass properties exact to
+rounding; and the first two steps of persistent naming are built: the
+kernel's origin tables (ADR 0018) and the `opendatum-naming` crate,
+which names the faces, edges and vertices of boxes, extrudes and
+revolves as the user sees them and resolves stored references. Next:
+sketch on a face and extrude up to a face with picking, then booleans.
+The product is now named OpenDatum (ADR 0017): packages `opendatum-*`,
+binary `opendatum`, documents `.odatum`; documents saved under the old
+name open unchanged.
 
 ## What works
 
@@ -69,12 +70,40 @@ documents `.odatum`; documents saved under the old name open unchanged.
     1e-9 relative and better. Edges that lie on their two faces only
     within the tolerance (merged end points) get the flux of the strip
     between the faces added, so such bodies are exact to rounding too.
+  - Origin tables (ADR 0018): every face, edge and vertex of a box,
+    extrude or revolve records how it arose (the profile piece and the
+    sweep positions it spans, or the region a cap covers), addressed by
+    per-body handles in mesh order; `Kernel::adjacency` gives each edge's
+    faces, each vertex's edges and the seams, and the mesh each vertex's
+    position. Tests check the tables complete, unique, consistent with
+    the topology and right by an independent geometric check, on tilted
+    planes, symmetric extrudes, and partial and full revolves either way
+    round, and that they follow the curves, not their order.
 - **Features** (`opendatum-features`): regenerates a Part Studio through the
   kernel with per-feature status (ok, warning, suppressed, failed with
   message). A failing feature never blocks the others. Sketch features are
   solved and their regions computed during regeneration; extrude and revolve
   take their profile from picked sketch regions, which are named
   topologically and re-found after sketch edits (design note 0006 §5).
+- **Persistent names** (`opendatum-naming`, design note 0013 §11): names
+  for the faces, edges and vertices of box, extrude and revolve bodies as
+  the user sees them, made from the origin tables and the sketch keys of
+  the profile: a side face by its sketch edge, a cap by the selected
+  regions it covers (by the keys the feature stores), an edge by its two
+  faces, a vertex by the faces around it, with a sketch-level tie-break
+  only where those collide (a lens's two lateral edges, the two points of
+  a half disc on its revolve axis). Kernel faces joined across seams are
+  one face (π-split pieces, a circle's halves, a sketch line split by a
+  vertex), named by all their sources. Resolution (§6): the exact name;
+  else the entities descending from it (a sketch edge split, extended or
+  re-keyed; regions merged into one cap or parted), all of them for a
+  carrier or set reference and the one the hint lies on for a single
+  one; else "no longer exists", never another entity of the same feature
+  and role. Tests check every name against an independent geometric
+  oracle (which faces an edge or vertex touches, which curve a side lies
+  on, which end a cap is at and which region it covers), names unchanged
+  by dimensions, curve order and revolve angles across π, and each
+  resolution rule. Nothing references model geometry through them yet.
 - **Sketch solver** (`opendatum-sketch-solver`, on the deterministic
   `opendatum-linalg`): points, lines, circles, arcs, through-point and
   control-point splines, open or smooth closed (ADR 0016: the periodic
@@ -517,6 +546,15 @@ documents `.odatum`; documents saved under the old name open unchanged.
   passed with every region's mass to 1e-10, no fallback; it refused 313
   unresolvable perturbed inputs, 18 loops below resolution and 44
   pinched profiles (the cases are random per run).
+- Origin tables and persistent names, 2026-10-12, on Mesa lavapipe:
+  fmt, clippy with `-D warnings`, 851 tests and `cargo deny` pass. The
+  origin tables pass
+  their completeness, topology and geometry checks on every box, extrude
+  and revolve test body; the naming tests (14) check names against
+  geometry and every resolution rule. Writing them found that one sketch
+  line split by a vertex gave two faces of one plane, which the display
+  showed as one face (the edge between them is a seam): logical faces now
+  follow the seams, so selection matches what is seen.
 - Feature-size-adaptive tessellation and exact profile checks,
   2026-10-12, on Mesa lavapipe: fmt, clippy with `-D warnings`, 830 tests
   and `cargo deny` pass. The random sketch tests no longer exempt any
@@ -690,19 +728,27 @@ documents `.odatum`; documents saved under the old name open unchanged.
   can call a sketch conflicting although another branch would satisfy it.
 - No booleans: each feature makes its own part (Phase 3; design notes
   0011 and 0012 are the plan).
-- No persistent naming or incremental regeneration: every edit regenerates
-  the whole studio (Phase 3; design note 0013 is the naming plan). Features
-  don't reference model geometry yet, so nothing can break on upstream
-  edits today.
+- No feature references model geometry yet: names and resolution exist
+  for box, extrude and revolve bodies (design note 0013 §11), but sketch
+  on a face and extrude up to a face, the first references, come next,
+  so nothing can break on upstream edits today. A cap reference survives
+  sketch edits while the feature's stored region key finds its region;
+  once a region is selected anew with other boundary curves (a region
+  cut in two, say), references to its caps fail rather than guess.
+  Splits and merges by later operations come with booleans. No
+  incremental regeneration: every edit regenerates the whole studio.
 - Non-manifold topology deferred to Phase 3.
 - No STEP or other exchange formats beyond STL (Phase 4; see docs/FORMATS.md).
 
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Phase 3, in the order the design notes give: origin tables and entity
-   handles for box, extrude and revolve (design note 0013 §10); the
-   boolean pipeline end to end on polyhedral solids with plane/plane
-   intersections and the volume identities (0012 §8, 0011 §8). The rest
-   of the Phase 2 sketcher (project/convert, intersection curves, pierce)
-   needs Phase 3 faces.
+2. Phase 3, in the order the design notes give: sketch on a face and
+   extrude up to a face, with picking of faces, edges and vertices in the
+   viewport (design note 0013 §10 step 3): the features crate maps each
+   profile curve to its sketch edge (the region profile reporting each
+   curve's arrangement edge) and keeps every body's names for the UI.
+   Then the boolean pipeline end to end on polyhedral solids with
+   plane/plane intersections and the volume identities (0012 §8, 0011
+   §8). The rest of the Phase 2 sketcher (project/convert, intersection
+   curves, pierce) needs Phase 3 faces.

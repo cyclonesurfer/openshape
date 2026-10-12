@@ -40,7 +40,7 @@ item is delivered in the phase noted.
 - [ ] Curve/curve, curve/surface, surface/surface intersection (design note 0011 written)
 - [ ] Robust booleans; fuzzing; `|A∪B| = |A|+|B|−|A∩B|` property test; failure-rate metric in CI (design note 0012 written)
 - [ ] Incremental regeneration engine (`regen`): dependency graph, caching, cancellation, error propagation
-- [ ] Persistent naming (`naming`) with reorder/suppress/pattern-count tests (design note 0013 written)
+- [ ] Persistent naming (`naming`) with reorder/suppress/pattern-count tests (design note 0013; kernel origin tables (ADR 0018) and the `naming` crate for box, extrude and revolve done; references from features, split/merge through booleans and the reorder/suppress/pattern tests to come)
 - [ ] Hole, patterns, mirror, construction planes
 - [ ] Milestone: a real bracket survives upstream edits with no broken references
 

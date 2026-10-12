@@ -2416,6 +2416,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "opendatum-naming"
+version = "0.1.0"
+dependencies = [
+ "opendatum-core-model",
+ "opendatum-kernel",
+ "opendatum-oplog",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "opendatum-nurbs"
 version = "0.1.0"
 dependencies = [
