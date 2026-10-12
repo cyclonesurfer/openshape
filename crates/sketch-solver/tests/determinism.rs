@@ -146,6 +146,25 @@ fn relabel<F: Fn(u32) -> u64>(s: &Sketch<u32>, f: F) -> Sketch<u64> {
                 .collect(),
             smooth: smooth.into_iter().map(&f).collect(),
         },
+        C::LinearPattern { direction, copies } => C::LinearPattern {
+            direction: f(direction),
+            copies: copies
+                .into_iter()
+                .map(|(s, i, k)| (f(s), f(i), k))
+                .collect(),
+        },
+        C::CircularPattern {
+            centre,
+            angle,
+            copies,
+        } => C::CircularPattern {
+            centre: f(centre),
+            angle,
+            copies: copies
+                .into_iter()
+                .map(|(s, i, k)| (f(s), f(i), k))
+                .collect(),
+        },
     };
     Sketch {
         entities: s

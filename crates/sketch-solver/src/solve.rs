@@ -15,14 +15,15 @@ use glam::DVec2;
 use openshape_linalg::{dot, norm2, residual, select_columns_in_order, CompleteOrthogonal, Matrix};
 
 use crate::build::{build, scale_of, Problem, Scale, DEGENERATE};
-use crate::diagnose::{conflicts, diagnose, CompDiag};
+use crate::diagnose::{conflicts, diagnose, CompDiag, FREE_TOL};
+use crate::eq::EqKind;
 use crate::index::{Circ, Con, EntKind, Index, OCurve, OEq, MAX_MAGNITUDE};
 use crate::model::{Geometry, Sketch, SketchKey};
 use crate::newton::{
     equation_tol, solve_component, CompSystem, LengthTol, Region, RANK_TOL, REACH,
 };
 use crate::offset::{self, Invalid, OffsetPiece, Piece};
-use crate::reduce::{reduce, Reduced, Status};
+use crate::reduce::{peel, reduce, Reduced, Status};
 use crate::{EntityState, Solution, SolveError, SolveOptions, SolveStatus};
 
 /// Model linear tolerance (metres), ADR 0006.
@@ -141,6 +142,14 @@ fn max_abs_residual(checks: &[Option<(f64, f64, bool)>]) -> f64 {
         .fold(0.0, f64::max)
 }
 
+/// A block of columns of the whole system's null space: a component's
+/// orthonormal basis, or a free unknown's own direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum NullBlock {
+    Component(usize),
+    Free(usize),
+}
+
 pub(crate) fn solve<K: SketchKey>(sketch: &Sketch<K>, options: &SolveOptions<K>) -> Solution<K> {
     solve_inner(sketch, options, true)
 }
@@ -171,7 +180,7 @@ fn solve_inner<K: SketchKey>(
         base: lt,
         cap: (0.5 * LINEAR_TOL / scale.l).min(1e-10),
     };
-    let red = reduce(&prob, len_tol.base);
+    let mut red = reduce(&prob, len_tol.base);
     let n_slots = prob.n_slots();
     let np = prob.n_points;
 
@@ -267,6 +276,12 @@ fn solve_inner<K: SketchKey>(
                     image_slot[2 * q + 1] = true;
                 }
             }
+            Con::LinearPattern(_, pt) | Con::CircularPattern(_, _, pt) => {
+                for &(_, q, _) in &pt.points {
+                    image_slot[2 * q] = true;
+                    image_slot[2 * q + 1] = true;
+                }
+            }
             Con::Offset(o) => {
                 for &(x, ..) in &o.points {
                     image_slot[2 * x] = true;
@@ -291,6 +306,9 @@ fn solve_inner<K: SketchKey>(
                 .all(|&s| image_slot[s] && !dragged[s])
         })
         .collect();
+    // Images that only their defining linear equation references are
+    // computed from it after the solve instead (`reduce::peel`).
+    peel(&prob, &mut red, &unknown_image);
 
     // Degenerate geometry at the start: arcs without a radius, and
     // directions that constraints need.
@@ -335,7 +353,10 @@ fn solve_inner<K: SketchKey>(
     let mut slot_free = vec![false; n_slots];
     let mut dof = 0usize;
     let mut comp_rank: Vec<usize> = Vec::with_capacity(red.components.len());
-    for comp in &red.components {
+    // Each unknown's row of the null space of the whole system, as blocks:
+    // (component, its row there) or a free unknown's own column.
+    let mut null_rows: Vec<Vec<(NullBlock, Vec<f64>)>> = vec![Vec::new(); red.unknowns.len()];
+    for (ci, comp) in red.components.iter().enumerate() {
         let mut sys = CompSystem::new(
             &prob,
             &red,
@@ -378,6 +399,11 @@ fn solve_inner<K: SketchKey>(
         }
         dof += d.dof;
         comp_rank.push(d.rank);
+        if !red.peeled.is_empty() {
+            for (k, &u) in comp.unknowns.iter().enumerate() {
+                null_rows[u] = vec![(NullBlock::Component(ci), d.null.row(k))];
+            }
+        }
         for (k, &u) in comp.unknowns.iter().enumerate() {
             if d.free[k] {
                 for &s in &red.classes[red.unknowns[u]].members {
@@ -394,6 +420,45 @@ fn solve_inner<K: SketchKey>(
         for &s in &red.classes[red.unknowns[u]].members {
             slot_free[s] = true;
         }
+        null_rows[u] = vec![(NullBlock::Free(u), vec![1.0])];
+    }
+    // Peeled images, from the unknowns they depend on: their values, and
+    // their null-space rows (the same combination of the others' rows).
+    for pe in &red.peeled {
+        let EqKind::Lin { terms, rhs } = &prob.eqs[pe.eq].kind else {
+            unreachable!("only linear equations are peeled")
+        };
+        let mut value = *rhs;
+        let mut row: BTreeMap<NullBlock, Vec<f64>> = BTreeMap::new();
+        for &(s, c) in terms {
+            let class = red.class_of[s];
+            match red.unknown_of_class[class] {
+                Some(w) if w == pe.unknown => {}
+                Some(w) => {
+                    value -= c * u_global[w];
+                    for (block, r) in &null_rows[w] {
+                        let acc = row.entry(*block).or_insert_with(|| vec![0.0; r.len()]);
+                        for (a, x) in acc.iter_mut().zip(r) {
+                            *a -= c / pe.coef * x;
+                        }
+                    }
+                }
+                None => value -= c * red.classes[class].constant.map_or(0.0, |k| k.0),
+            }
+        }
+        u_global[pe.unknown] = value / pe.coef;
+        let norm: f64 = row
+            .values()
+            .flat_map(|r| r.iter())
+            .map(|x| x * x)
+            .sum::<f64>()
+            .sqrt();
+        if norm > FREE_TOL {
+            for &s in &red.classes[red.unknowns[pe.unknown]].members {
+                slot_free[s] = true;
+            }
+        }
+        null_rows[pe.unknown] = row.into_iter().collect();
     }
     // Equations whose unknowns were all eliminated: satisfied (hence implied
     // by the eliminations) or in conflict with them.
@@ -1292,6 +1357,7 @@ fn priority_redundancy(
                     first_red.entry(root).or_insert(i);
                 }
             }
+            Status::Explicit => {}
         }
     }
     let redo: Vec<usize> = first_red
@@ -1316,11 +1382,11 @@ fn priority_redundancy(
         for (k, &s) in set_slots.iter().enumerate() {
             col[s] = k;
         }
-        // Rank of the full set: independent eliminations plus the ranks of
-        // the reduced components inside it.
+        // Rank of the full set: independent eliminations and peeled
+        // equations plus the ranks of the reduced components inside it.
         let mut rank = eqs
             .iter()
-            .filter(|&&i| red.status[i] == Status::Accepted)
+            .filter(|&&i| matches!(red.status[i], Status::Accepted | Status::Explicit))
             .count();
         for (ci, comp) in red.components.iter().enumerate() {
             if comp

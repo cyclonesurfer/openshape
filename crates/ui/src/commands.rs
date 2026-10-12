@@ -276,6 +276,8 @@ impl Command {
                 Tool::SketchFillet => Icon::SketchFillet,
                 Tool::Mirror => Icon::Mirror,
                 Tool::Offset => Icon::Offset,
+                Tool::LinearPattern => Icon::LinearPattern,
+                Tool::CircularPattern => Icon::CircularPattern,
             },
             Command::Construction => Icon::Construction,
             Command::Constrain(c) => match c {

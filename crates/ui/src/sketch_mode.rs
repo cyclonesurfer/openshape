@@ -29,7 +29,7 @@ use crate::sketch_ops::fillet::fillet;
 use crate::sketch_ops::shapes::{self, TangentStart};
 use crate::sketch_ops::trim::{self, Cuts, Plan};
 use crate::sketch_ops::{curve_ending_at, deletion, leaving_direction, Batch};
-use crate::sketch_ops::{mirror, offset};
+use crate::sketch_ops::{mirror, offset, pattern};
 use crate::{geometry_edits, Model};
 
 /// Pick radius for points, in screen points.
@@ -362,12 +362,14 @@ pub fn glyph(c: &Constraint<SketchId>) -> &'static str {
         Constraint::Normal { .. } => "N",
         Constraint::Fix { .. } => "F",
         Constraint::Mirror { .. } => "↔",
+        Constraint::LinearPattern { .. } => "⇉",
         Constraint::Distance { .. }
         | Constraint::Length { .. }
         | Constraint::Angle { .. }
         | Constraint::Radius { .. }
         | Constraint::Diameter { .. }
-        | Constraint::Offset { .. } => "",
+        | Constraint::Offset { .. }
+        | Constraint::CircularPattern { .. } => "",
     }
 }
 
@@ -384,6 +386,7 @@ fn glyph_anchors(c: &Constraint<SketchId>) -> Vec<SketchId> {
         Constraint::Horizontal { line } | Constraint::Vertical { line } => vec![*line],
         Constraint::Normal { line, .. } => vec![*line],
         Constraint::Mirror { axis, .. } => vec![*axis],
+        Constraint::LinearPattern { direction, .. } => vec![*direction],
         Constraint::Parallel { a, b }
         | Constraint::Perpendicular { a, b }
         | Constraint::Equal { a, b }
@@ -428,7 +431,9 @@ pub fn dimension_text(c: &Constraint<SketchId>) -> String {
         }
         Constraint::Radius { value, .. } => format!("R {}", format_length(*value)),
         Constraint::Diameter { value, .. } => format!("Ø {}", format_length(*value)),
-        Constraint::Angle { value, .. } => format_angle(*value),
+        Constraint::Angle { value, .. } | Constraint::CircularPattern { angle: value, .. } => {
+            format_angle(*value)
+        }
         Constraint::Offset { distance, .. } => format_length(*distance),
         _ => String::new(),
     }
@@ -708,6 +713,50 @@ fn dimension_annotation(
             let n = (to - from).normalize_or_zero();
             (vec![[from, to]], to + n * off * 0.8)
         }
+        Constraint::CircularPattern {
+            centre,
+            angle,
+            copies,
+        } => {
+            // An arc about the centre from a point of the first source to
+            // its first copy, with the two radii.
+            let c = *points.get(centre)?;
+            let &(src, _, _) = copies.first()?;
+            let p = match sketch.entity(src)?.geometry {
+                Geometry::Point { .. } => *points.get(&src)?,
+                Geometry::Line { .. } => {
+                    let (a, b) = line_ends(sketch, points, src)?;
+                    (a + b) * 0.5
+                }
+                Geometry::Circle { center, .. } => *points.get(&center)?,
+                Geometry::Arc { .. } => {
+                    let (cc, r, dir) = circular(sketch, points, src)?;
+                    cc + dir * r
+                }
+                ref g => {
+                    let pts = g.referenced_points();
+                    let sum: DVec2 = pts.iter().filter_map(|q| points.get(q)).sum();
+                    sum / pts.len().max(1) as f64
+                }
+            };
+            let v = p - c;
+            let (r, start) = if v.length() > off {
+                (v.length(), v.to_angle())
+            } else {
+                (off * 1.6, 0.0)
+            };
+            let n = 32;
+            let arc: Vec<DVec2> = (0..=n)
+                .map(|i| c + DVec2::from_angle(start + angle * i as f64 / n as f64) * r)
+                .collect();
+            let mut lines: Vec<[DVec2; 2]> = arc.windows(2).map(|w| [w[0], w[1]]).collect();
+            lines.push([c, arc[0]]);
+            lines.push([c, arc[n]]);
+            (
+                lines,
+                c + DVec2::from_angle(start + angle * 0.5) * (r + off * 0.9),
+            )
+        }
         _ => return None,
     };
     let text = dimension_text(&c.constraint);
@@ -980,11 +1029,15 @@ pub enum Tool {
     Mirror,
     /// Offsets a chain of lines and arcs, or a circle, to one side.
     Offset,
+    /// Copies of the selection along a line.
+    LinearPattern,
+    /// Copies of the selection about a centre.
+    CircularPattern,
 }
 
 impl Tool {
     /// Every tool, in toolbar order.
-    pub const ALL: [Tool; 19] = [
+    pub const ALL: [Tool; 21] = [
         Tool::Select,
         Tool::Line,
         Tool::Rectangle,
@@ -1004,6 +1057,8 @@ impl Tool {
         Tool::SketchFillet,
         Tool::Mirror,
         Tool::Offset,
+        Tool::LinearPattern,
+        Tool::CircularPattern,
     ];
 
     /// The tools sharing one toolbar button with this one (shown in its
@@ -1029,6 +1084,9 @@ impl Tool {
             Tool::SketchFillet => &[Tool::SketchFillet],
             Tool::Mirror => &[Tool::Mirror],
             Tool::Offset => &[Tool::Offset],
+            Tool::LinearPattern | Tool::CircularPattern => {
+                &[Tool::LinearPattern, Tool::CircularPattern]
+            }
         }
     }
 
@@ -1054,6 +1112,8 @@ impl Tool {
             Tool::SketchFillet => "Sketch fillet",
             Tool::Mirror => "Mirror",
             Tool::Offset => "Offset",
+            Tool::LinearPattern => "Linear pattern",
+            Tool::CircularPattern => "Circular pattern",
         }
     }
 
@@ -1064,6 +1124,11 @@ impl Tool {
             self,
             Tool::Trim | Tool::Extend | Tool::Split | Tool::SketchFillet
         )
+    }
+
+    /// True for the pattern tools.
+    pub fn is_pattern(self) -> bool {
+        matches!(self, Tool::LinearPattern | Tool::CircularPattern)
     }
 
     /// Keyboard shortcut.
@@ -1087,7 +1152,9 @@ impl Tool {
             | Tool::Split
             | Tool::SketchFillet
             | Tool::Mirror
-            | Tool::Offset => return None,
+            | Tool::Offset
+            | Tool::LinearPattern
+            | Tool::CircularPattern => return None,
         })
     }
 
@@ -1136,6 +1203,11 @@ impl Tool {
             (Tool::Offset, _) => {
                 "Click a line, arc or circle to offset it with the curves joined to it"
             }
+            (Tool::LinearPattern, 0) => {
+                "Select curves or points, then click where the step between copies starts"
+            }
+            (Tool::LinearPattern, _) => "Click where the step to the first copy ends",
+            (Tool::CircularPattern, _) => "Select curves or points, then click the centre",
         }
     }
 }
@@ -1557,7 +1629,10 @@ pub struct DimensionPrompt {
 impl DimensionPrompt {
     /// True for angles.
     pub fn is_angle(&self) -> bool {
-        matches!(self.constraint, Constraint::Angle { .. })
+        matches!(
+            self.constraint,
+            Constraint::Angle { .. } | Constraint::CircularPattern { .. }
+        )
     }
 
     /// How a point-to-point distance is measured, if it is one.
@@ -1574,6 +1649,9 @@ impl DimensionPrompt {
         if self.is_angle() {
             let v = Quantity::parse_angle(&self.text).map_err(|e| e.to_string())?;
             let v = v.abs() * if current < 0.0 { -1.0 } else { 1.0 };
+            if let Constraint::CircularPattern { copies, .. } = &self.constraint {
+                return pattern_angle(v, copies);
+            }
             if v.abs() > PI {
                 return Err("an angle between lines is at most 180°".into());
             }
@@ -1589,11 +1667,33 @@ impl DimensionPrompt {
     }
 }
 
+/// Checks a circular pattern's typed angle: more than nothing and less
+/// than a turn, and no copy turned onto its source by a whole number of
+/// turns (the solver's own test, design note 0007 §11.1).
+fn pattern_angle(v: f64, copies: &[(SketchId, SketchId, u32)]) -> Result<f64, String> {
+    if !(v.is_finite() && v != 0.0 && v.abs() < TAU) {
+        return Err("a pattern angle is more than 0° and less than 360°".into());
+    }
+    let last = copies.iter().map(|&(_, _, k)| k).max().unwrap_or(1);
+    for k in 1..=last {
+        let turns = v * f64::from(k) / TAU;
+        if (turns - turns.round()).abs() * TAU <= 1e-9 {
+            return Err(format!(
+                "copy {k} would be turned onto its source ({}°)",
+                trim_number((v * f64::from(k)).abs().to_degrees())
+            ));
+        }
+    }
+    Ok(v)
+}
+
 /// Text a prompt starts with for a value (millimetres or degrees, no unit).
 fn prompt_text(c: &Constraint<SketchId>) -> String {
     let v = c.value().unwrap_or(0.0);
     match c {
-        Constraint::Angle { .. } => trim_number(v.abs().to_degrees()),
+        Constraint::Angle { .. } | Constraint::CircularPattern { .. } => {
+            trim_number(v.abs().to_degrees())
+        }
         _ => trim_number(v / LengthUnit::Millimetre.metres()),
     }
 }
@@ -1667,6 +1767,11 @@ pub struct SketchEditor {
     pub mirror_sources: Vec<SketchId>,
     /// The offset tool's chain, once chosen, with the curve clicked.
     pub offset_chain: Option<(SketchId, offset::Chain)>,
+    /// What the pattern tools copy: the selection when the tool was
+    /// chosen.
+    pub pattern_sources: Vec<SketchId>,
+    /// Instances a pattern tool makes, the sources included.
+    pub pattern_count: u32,
 }
 
 /// What the trim, extend or split tool would do at the pointer.
@@ -1705,6 +1810,8 @@ impl SketchEditor {
             mirror_axis: None,
             mirror_sources: Vec::new(),
             offset_chain: None,
+            pattern_sources: Vec::new(),
+            pattern_count: 3,
         }
     }
 
@@ -1731,6 +1838,11 @@ impl SketchEditor {
         if tool == Tool::Mirror {
             self.mirror_sources = self.selection.clone();
         }
+        self.pattern_sources = if tool.is_pattern() {
+            self.selection.clone()
+        } else {
+            Vec::new()
+        };
     }
 
     fn reset_tool(&mut self) {
@@ -1817,6 +1929,22 @@ impl SketchEditor {
         if self.tool == Tool::Offset && self.offset_chain.is_some() {
             return "Move to the side to offset to and click; type the distance after; Esc chooses another curve"
                 .into();
+        }
+        if self.tool.is_pattern() {
+            let items = match self.pattern_sources.len() {
+                0 => return "Select the curves and points to pattern, then choose the tool".into(),
+                1 => "the selected item".to_string(),
+                n => format!("the {n} selected items"),
+            };
+            return match (self.tool, self.clicks.len()) {
+                (Tool::LinearPattern, 0) => {
+                    format!("Click where the step between copies of {items} starts")
+                }
+                (Tool::LinearPattern, _) => {
+                    "Click where the step to the first copy ends; Esc starts it again".into()
+                }
+                _ => format!("Click the centre to turn {items} about"),
+            };
         }
         self.tool.hint(self.clicks.len()).into()
     }
@@ -1930,6 +2058,9 @@ impl SketchEditor {
                 self.turn = step;
             }
             self.last_angle = Some(a);
+        }
+        if self.tool.is_pattern() {
+            self.curve_edit = self.plan_pattern(model, &d, s);
         }
         self.cursor = Some(s);
     }
@@ -2160,6 +2291,118 @@ impl SketchEditor {
         self.hover(model, map, Some(pos));
     }
 
+    /// The pattern for the pointer snapped at `s`, once the anchor is
+    /// known: a linear pattern's start clicked (and the pointer elsewhere),
+    /// or a circular pattern's centre under the pointer.
+    fn pattern_at(&self, d: &SketchDisplay, s: Snap) -> Option<Result<pattern::Patterned, String>> {
+        let anchor = match (self.tool, self.clicks.first()) {
+            (Tool::LinearPattern, Some(from)) if (s.at - from.at).length() > SAME_POINT => {
+                pattern::Anchor::Linear { from: *from, to: s }
+            }
+            (Tool::CircularPattern, _) => pattern::Anchor::Circular { centre: s },
+            _ => return None,
+        };
+        let curves: Vec<(SketchId, ResolvedCurve)> =
+            d.curves.iter().map(|c| (c.id, c.curve.clone())).collect();
+        let sources = mirror::sources(&d.sketch, &self.pattern_sources);
+        Some(pattern::pattern(
+            &d.sketch,
+            &curves,
+            &sources,
+            anchor,
+            self.pattern_count,
+        ))
+    }
+
+    /// The pattern tools' plan for the pointer snapped at `s`: the copies,
+    /// checked by solving them, with the first source as the target.
+    fn plan_pattern(&self, model: &Model, d: &SketchDisplay, s: Snap) -> Option<CurveEdit> {
+        let target = *self.pattern_sources.first()?;
+        let plan = self.pattern_at(d, s)?.and_then(|p| {
+            model
+                .check_sketch_edit(self.feature, &p.plan.edits)
+                .map(|_| p.plan)
+        });
+        Some(CurveEdit { target, plan })
+    }
+
+    /// Commits a pattern tool's click at `pos`: a linear pattern's first
+    /// click starts the step; the next (or a circular pattern's centre)
+    /// makes the copies, returns to the Select tool and opens the step's
+    /// length or the angle for typing.
+    fn click_pattern(&mut self, model: &mut Model, map: &ScreenMap, pos: Pos2) {
+        self.hover(model, map, Some(pos));
+        let Some(s) = self.cursor else {
+            return;
+        };
+        if self.pattern_sources.is_empty() {
+            self.message = Some("Select the curves and points to pattern first".into());
+            return;
+        }
+        if self.tool == Tool::LinearPattern && self.clicks.is_empty() {
+            self.clicks.push(s);
+            self.hover(model, map, Some(pos));
+            return;
+        }
+        let Some(d) = self.display(model) else {
+            return;
+        };
+        let Some(planned) = self.pattern_at(&d, s) else {
+            return;
+        };
+        let outcome = planned.and_then(|p| {
+            model
+                .edit_sketch_checked(self.feature, p.plan.edits.clone())
+                .map(|op| (p, op))
+        });
+        match outcome {
+            Ok((p, op)) => {
+                self.message = self.solve_message(model).or(Some(p.message()));
+                self.selection.clear();
+                self.set_tool(Tool::Select);
+                match p.line {
+                    Some(line) => self.prompt_length(
+                        model,
+                        SketchId {
+                            op,
+                            index: line.index,
+                        },
+                        pos,
+                    ),
+                    None => self.edit_dimension(
+                        model,
+                        SketchId {
+                            op,
+                            index: p.constraint.index,
+                        },
+                        pos,
+                    ),
+                }
+            }
+            Err(e) => self.message = Some(format!("Not done: {e}")),
+        }
+        self.hover(model, map, Some(pos));
+    }
+
+    /// Opens the prompt for a new length dimension on `line`, at its
+    /// measured length.
+    fn prompt_length(&mut self, model: &Model, line: SketchId, at: Pos2) {
+        let Some(d) = self.display(model) else {
+            return;
+        };
+        let mut constraint = Constraint::Length { line, value: 0.0 };
+        if let Ok(v) = measure(&d.sketch, &constraint) {
+            constraint.set_value(v);
+            self.prompt = Some(DimensionPrompt {
+                text: prompt_text(&constraint),
+                constraint,
+                existing: None,
+                at,
+                error: None,
+            });
+        }
+    }
+
     /// Plans the trim, extend or split of `target` at plane point `at`.
     fn plan_curve_edit(
         &mut self,
@@ -2310,7 +2553,7 @@ impl SketchEditor {
                 }
                 None => vec![vec![c[0].at, c[1].at]],
             },
-            (Tool::CenterArc, 1) => vec![vec![c[0].at, cur.at]],
+            (Tool::CenterArc, 1) | (Tool::LinearPattern, 1) => vec![vec![c[0].at, cur.at]],
             (Tool::CenterArc, 2) => {
                 let r = (c[1].at - c[0].at).length();
                 let a0 = (c[1].at - c[0].at).to_angle();
@@ -2391,6 +2634,10 @@ impl SketchEditor {
             self.click_offset(model, map, pos);
             return;
         }
+        if self.tool.is_pattern() {
+            self.click_pattern(model, map, pos);
+            return;
+        }
         if self.tool.edits_curves() {
             self.edit_curve(model, map, pos);
             return;
@@ -2417,7 +2664,9 @@ impl SketchEditor {
             | Tool::Split
             | Tool::SketchFillet
             | Tool::Mirror
-            | Tool::Offset => {}
+            | Tool::Offset
+            | Tool::LinearPattern
+            | Tool::CircularPattern => {}
             Tool::Point => {
                 let mut b = Batch::default();
                 let p = b.snapped_point(&s);

@@ -24,6 +24,9 @@ pub(crate) struct CompDiag {
     pub free: Vec<bool>,
     /// Local indices of redundant equations.
     pub redundant: Vec<usize>,
+    /// An orthonormal null-space basis, one row per local unknown (the
+    /// identity when nothing could be said: everything free).
+    pub null: Matrix,
 }
 
 /// The numerical rank and an orthonormal null-space basis of `j`: rank from
@@ -101,6 +104,7 @@ pub(crate) fn diagnose(sys: &mut CompSystem<'_>, u: &[f64], hidden: &[bool]) -> 
             dof: hidden.iter().filter(|h| !**h).count(),
             free: vec![true; n],
             redundant: Vec::new(),
+            null: Matrix::identity(n),
         };
     };
     let m = j.rows();
@@ -128,6 +132,7 @@ pub(crate) fn diagnose(sys: &mut CompSystem<'_>, u: &[f64], hidden: &[bool]) -> 
         dof,
         free,
         redundant,
+        null: nsp,
     }
 }
 

@@ -86,9 +86,9 @@ pub enum SketchEdit {
     },
     /// Deletes entities and constraints, together with everything that
     /// references them (curves using a deleted point, constraints on a
-    /// deleted entity; a mirror loses only the pairs of deleted entities,
-    /// `Constraint::without`). Items that no longer exist are ignored, so
-    /// concurrent deletes merge.
+    /// deleted entity; a mirror, offset or pattern loses only the pairs,
+    /// pieces or copies of deleted entities, `Constraint::without`). Items
+    /// that no longer exist are ignored, so concurrent deletes merge.
     Delete {
         /// Items to delete.
         items: Vec<SketchId>,

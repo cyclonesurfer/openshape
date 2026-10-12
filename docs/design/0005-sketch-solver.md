@@ -110,18 +110,37 @@ zero-radius circle) is reported as `Degenerate` instead of producing NaN.
 2. **Decompose** the equation–unknown incidence graph into connected
    components; each is solved independently (Hoffmann et al. decompose
    further into rigid clusters; that refinement is future work and does not
-   change results, only speed).
+   change results, only speed). Before that, images of derived constraints
+   that only their own linear equation references (a pattern's copies;
+   design note 0007 §11) are *peeled*: the equation is the identity in the
+   image, so it leaves the system with the image, which is computed from
+   the solved unknowns afterwards (repeatedly, so copies of copies peel
+   too). This is exact; each peeled equation adds one to the rank, and an
+   image's row of the null space is the same combination of the other
+   unknowns' rows, from which its free state follows. Images that anything
+   else holds, and dragged images, stay in the system. Without peeling a
+   pattern of 100 hexagons was one dense component of about 2,400 unknowns
+   (2 s a solve, release build); with it, 7 ms.
 3. **Solve each component** by damped Gauss–Newton with minimum-norm steps:
    * J Δ = −r is solved in the weighted minimum-norm least-squares sense:
      minimize ‖W^{1/2} Δ‖ among the least-squares solutions, using QR with
      column pivoting of J W^{−1/2} and a complete orthogonal decomposition.
      Weights are 1, except for dragged points (§7). Images of derived
-     constraints (design note 0007 §9) move first: when moving them alone
-     solves the linearized system (to 1e-9 relative, or to a tenth of the
-     tightest convergence tolerance), that is the step, the limit of the
-     weighted step as their weight goes to zero. So a change only images
-     need absorb (an offset's distance) leaves every other point exactly
-     where it was. A dragged image moves last, like any dragged point.
+     constraints (design note 0007 §9) weigh nothing: the step is the limit
+     of the weighted step as their weight goes to zero, computed exactly.
+     With N an orthonormal basis of the left null space of the image
+     columns J_i (the equations images cannot reach), the other unknowns
+     take the weighted minimum-norm least-squares solution of
+     Nᵀ J_n Δn = Nᵀ r', and the images the minimum-norm solution of
+     J_i Δi = r' − J_n Δn (r' = −r). So a change only images need absorb
+     (an offset's distance, a pattern's angle) moves only them, and a
+     change of what images depend on (a pattern's direction line) moves
+     that and the images, not the sources. (The first version took the
+     image-only step only when it solved the system to a threshold and
+     otherwise the ordinary step; the pattern editor tests showed the
+     second case moving sources: typing a linear pattern's step resized
+     the square being copied.) A dragged image moves last, like any
+     dragged point.
    * Step acceptance by backtracking line search on ½‖r‖² (Armijo, c = 1e-4,
      halving down to 2⁻²⁰); if the line search fails, Levenberg–Marquardt
      damping (Madsen et al. §3.1 update rule) takes over for that iteration.

@@ -358,6 +358,7 @@ impl OpenShapeApp {
         let tool = ed.tool;
         let mut sides = ed.polygon_sides;
         let mut radius_mm = ed.fillet_radius * 1e3;
+        let mut count = ed.pattern_count;
         let (action, rect) = floating_dialog(
             ctx,
             &theme,
@@ -391,6 +392,14 @@ impl OpenShapeApp {
                             );
                             ui.end_row();
                         }
+                        if tool.is_pattern() {
+                            ui.label(RichText::new("Instances").color(theme.text_muted));
+                            ui.add(egui::DragValue::new(&mut count).range(
+                                crate::sketch_ops::pattern::MIN_COUNT
+                                    ..=crate::sketch_ops::pattern::MAX_COUNT,
+                            ));
+                            ui.end_row();
+                        }
                     });
                 ui.add_space(4.0);
                 ui.label(
@@ -407,6 +416,7 @@ impl OpenShapeApp {
         self.layout.dialog = Some(rect);
         if let Some(ed) = self.sketch.as_mut() {
             ed.polygon_sides = sides;
+            ed.pattern_count = count;
             if radius_mm != ed.fillet_radius * 1e3 {
                 ed.fillet_radius = radius_mm * 1e-3;
             }

@@ -140,6 +140,21 @@ application shell done; sketch editing tools next.
   Fuzzed over 3,000 random rectangles, polygons, slots, circles and line
   chains: 2,738 offsets committed exact (no source moved, no crossing by
   the kernel's own intersections), the rest refused with the reason.
+  Linear and circular patterns (design note 0007 §11.3) copy a selection
+  2 to 100 times along a step between two clicks (a construction line
+  whose length is then typed) or about a centre (copies spread at
+  360°/count, the angle then typed and kept as a dimension); one derived
+  constraint per use holds every copy exactly with no added freedom,
+  spokes share their hub, a new step or angle moves only the copies, and
+  deleting a copy drops just that copy.
+  Copies that nothing else holds are computed from their sources after
+  the solve rather than solved for, so 100 copies of a hexagon solve in
+  7 ms (release). Fuzzed over 3,000 random sets of rectangles, polygons,
+  slots, circles, arcs and points: 5,577 patterns committed (2,850 linear,
+  2,727 circular), every one exact with no source moved and only the
+  anchor's freedom added, and exact again after a new step or angle; 428
+  were refused with the reason (nothing to pattern, or all of it on the
+  centre).
   Every edit is one undoable op; Cancel
   undoes the whole sketch session. The editor is UI-toolkit independent and
   tested end to end by driving it with screen clicks.
@@ -218,6 +233,16 @@ application shell done; sketch editing tools next.
   of all points together. Images of derived constraints now move first:
   when moving them alone solves a step, nothing else moves (design note
   0005 §3), and the test asserts the sources stay exactly where they were.
+- The pattern tests found two more. Typing a linear pattern's step resized
+  the square being copied: moving the images alone cannot absorb a change
+  of the direction line, so the old rule fell back to the ordinary step.
+  Images now weigh nothing in every step, computed exactly as the limit
+  of the weighted step (design note 0005 §5), with a regression test that
+  fails on the old rule. And the first editor fuzz took 28 minutes: a
+  pattern was one dense component of every copy's unknowns (100 hexagons,
+  2 s a solve). Copies held only by their pattern are now peeled from the
+  system and computed afterwards, exactly, with their free state from the
+  same combination of null-space rows: 7 ms, and the fuzz takes seconds.
 - App shell, 2026-10-12, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   455 tests and `cargo deny` pass. `crates/ui/tests/shell.rs` drives the
   real application offscreen with synthetic mouse and keyboard input (13
@@ -231,8 +256,8 @@ application shell done; sketch editing tools next.
 
 ## Not yet / known limits
 
-- Sketch editing tools are not done: linear and circular patterns (in
-  progress, design note 0007), and ellipses, conics, text, use/project.
+- Sketch editing tools are not done: ellipses, conics, text, use/project
+  and transform.
   Splines cannot be offset (their offsets are not splines; an
   approximation with a guaranteed tolerance is future work).
   A fillet removes (and reports) equal-length and midpoint constraints on
@@ -273,8 +298,7 @@ application shell done; sketch editing tools next.
 
 ## Next steps
 
-1. Sketch editing tools (design note 0007): linear and circular patterns;
-   draggable dimension labels.
+1. Draggable dimension labels (design note 0007 §12).
 2. Live preview in feature dialogs.
 3. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.

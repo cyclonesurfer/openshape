@@ -8,9 +8,10 @@
 //!   weights make every step the smallest change that fixes the linearized
 //!   residuals, so the solver stays on the branch nearest the start; dragged
 //!   points carry weight 1e6 and move last. Images of derived constraints
-//!   (mirror, offset) move first: when moving them alone solves the
-//!   linearized system, nothing else moves ([`images_first`]), so changing
-//!   an offset's distance moves the offset, not the curves it follows.
+//!   (mirror, offset, patterns) weigh nothing: the step is the smallest
+//!   change of everything else, the images completing it
+//!   ([`images_first`]), so changing an offset's distance moves the
+//!   offset, not the curves it follows.
 //! * **Bounds and corners** (`bounded_step`): hidden curve parameters stay
 //!   in `[0, 1]` by an active set; a radius may at most halve per step;
 //!   at a corner of a degree-1 spline the step uses the one-sided
@@ -42,7 +43,7 @@
 //!   interpolated from their current values; other equations follow the
 //!   Newton homotopy `r(x) − (1 − s)·r(x₀)`.
 
-use openshape_linalg::{dot, lstsq_min_norm, norm_inf, residual, weighted_min_norm, Matrix};
+use openshape_linalg::{dot, lstsq_min_norm, null_space, residual, weighted_min_norm, Matrix};
 
 use crate::build::Problem;
 use crate::eq::{norm, EqKind, PairMode, VecExpr};
@@ -510,41 +511,55 @@ fn converged(r: &[f64], tol: &[f64]) -> bool {
     r.iter().zip(tol).all(|(ri, ti)| ri.abs() <= *ti)
 }
 
-/// Relative residual below which moving the images alone solves a
-/// linearized system (rounding of the decomposition, with margin).
-const IMAGES_ALONE: f64 = 1e-9;
-/// Absolute (scaled) residual that moving the images alone may leave: a
-/// tenth of the tightest convergence tolerance, so equations the images
-/// cannot reach, already satisfied to rounding, do not make every other
-/// unknown move.
-const IMAGES_ALONE_ABS: f64 = 1e-13;
-
-/// The minimum-norm step for `J Δ = rhs` (columns weighted by `weights`)
-/// that moves only the unknowns marked `image` when that solves the
-/// system, and otherwise the ordinary weighted step.
+/// The weighted minimum-norm step for `J Δ = rhs` in the limit where the
+/// unknowns marked `image` weigh nothing: the smallest change of the other
+/// unknowns, then the smallest image move that completes it.
 ///
-/// Images of derived constraints are fixed by their sources, so a change
-/// that only their constraint's own value asks for (an offset's distance)
-/// can always be met by moving them; the ordinary step would spread it
-/// over the sources too. This is the limit of the weighted step as the
-/// images' weight goes to zero, taken exactly: among the solutions that
-/// leave every other unknown where it is, the smallest image move.
+/// Images of derived constraints are fixed by their sources, so their own
+/// movement should cost nothing: a change that only a derived constraint's
+/// own value asks for (an offset's distance, a pattern's angle) is met by
+/// moving the images alone, and a change of something an image depends on
+/// (a pattern's direction line) moves that and the images, not the
+/// sources. The ordinary step would spread either over the sources too.
+///
+/// Exactly: with `N` an orthonormal basis of the equations the images
+/// cannot reach (the left null space of the image columns `J_i`), the other
+/// unknowns take the weighted minimum-norm least-squares solution of
+/// `Nᵀ J_n Δn = Nᵀ rhs`, and the images the minimum-norm solution of
+/// `J_i Δi = rhs − J_n Δn`. The result is a least-squares solution of the
+/// whole system (the part of the residual in the images' range is met by
+/// `Δi`, the rest is minimized by `Δn`), and the limit of the weighted step
+/// as the images' weight goes to zero.
 fn images_first(jz: &Matrix, rhs: &[f64], weights: &[f64], image: &[bool]) -> Vec<f64> {
-    if image.iter().any(|&i| i) && image.iter().any(|&i| !i) {
-        let mut ji = jz.clone();
-        for (k, &i) in image.iter().enumerate() {
-            if !i {
-                ji.col_mut(k).fill(0.0);
-            }
-        }
-        let step = weighted_min_norm(&ji, rhs, weights, RANK_TOL).x;
-        let left = residual(jz, &step, rhs);
-        let alone = (IMAGES_ALONE * dot(rhs, rhs).sqrt()).max(IMAGES_ALONE_ABS);
-        if norm_inf(&left) <= alone {
-            return step;
-        }
+    let (im, other): (Vec<usize>, Vec<usize>) = (0..image.len()).partition(|&k| image[k]);
+    if im.is_empty() || other.is_empty() {
+        return weighted_min_norm(jz, rhs, weights, RANK_TOL).x;
     }
-    weighted_min_norm(jz, rhs, weights, RANK_TOL).x
+    let ji = jz.select_cols(&im);
+    let jn = jz.select_cols(&other);
+    let pick = |ks: &[usize]| -> Vec<f64> { ks.iter().map(|&k| weights[k]).collect() };
+    let unreached = null_space(&ji.transpose(), RANK_TOL);
+    let dn = if unreached.cols() == 0 {
+        vec![0.0; other.len()]
+    } else {
+        weighted_min_norm(
+            &unreached.tr_matmul(&jn),
+            &unreached.tr_mul_vec(rhs),
+            &pick(&other),
+            RANK_TOL,
+        )
+        .x
+    };
+    let left = residual(&jn, &dn, rhs);
+    let di = weighted_min_norm(&ji, &left, &pick(&im), RANK_TOL).x;
+    let mut step = vec![0.0; image.len()];
+    for (k, d) in other.iter().zip(dn) {
+        step[*k] = d;
+    }
+    for (k, d) in im.iter().zip(di) {
+        step[*k] = d;
+    }
+    step
 }
 
 /// The Gauss–Newton step under the unknowns' bounds and at spline corners,

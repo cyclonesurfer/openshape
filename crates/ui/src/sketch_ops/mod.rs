@@ -6,6 +6,7 @@
 pub mod fillet;
 pub mod mirror;
 pub mod offset;
+pub mod pattern;
 pub mod shapes;
 pub mod trim;
 

@@ -563,6 +563,70 @@ curves selected:
 Hovering previews the copies; edits go through the checked edit, so a
 pattern that would make the sketch unsolvable or redundant is refused.
 
+### 11.3 As built (patterns)
+
+* **Constraints.** `LinearPattern { direction, copies }` and
+  `CircularPattern { centre, angle, copies }`, copies `(source, image, k)`.
+  Each copy point gets two equations linear in the unknowns with
+  coefficients summing to zero (so they hold under any shift of the
+  sketch): q − p − k(e − s) = 0, and q − c − R(kθ)(p − c) = 0 with the
+  rotation's cosine and sine computed once from the angle. Image arcs'
+  implicit equations are dropped and image circles' radii are their
+  sources' (substituted), as for mirrors (§9). The angle is the circular
+  pattern's value, so it is edited and labelled like any dimension (an arc
+  about the centre from a point of the first source to its first copy).
+* **Validity** is checked when the solver indexes the sketch and refused
+  naming the constraint: the line or centre as a source or image, a line
+  end as an image, mismatched kinds, an entity its own image (only a
+  point in the centre's coincidence class may be), an image in two copies,
+  a point both a copy and a source, k = 0, and an angle that is not
+  finite, zero, a turn or more, or turns some copy k onto its source
+  (k·θ within 1e-9 rad of a whole number of turns). Copies of one k are
+  checked like a mirror's pairs; across k, every image point must be new.
+* **Images weigh nothing** in a solver step (design note 0005 §5): copy
+  points are image slots, so a new angle moves only the copies and a new
+  step moves the direction line's end and the copies, not the sources.
+  Copies that nothing else holds are *peeled*: computed from the solved
+  sources after the solve rather than solved for (design note 0005 §5
+  step 2), so large patterns cost little.
+* **Found by the tests.** The first editor test typed a linear pattern's
+  step and the square being copied changed width: the old images-first
+  rule only applied when moving the images alone solved the step, which a
+  direction line's length change does not. The rule is now the exact
+  limit (above), with a solver regression test whose source runs along
+  the step. The first UI fuzz took 28 minutes: a pattern of n copies was
+  one dense component of n times the source's unknowns, hence peeling.
+* **Planner** (`crates/ui/src/sketch_ops/pattern.rs`). Sources are the
+  selection as for mirrors (curves, and points not on a selected curve).
+  Copy k of each source point is a new point, shared by every source of
+  that copy that uses the point; a circular pattern's source points in
+  the centre's coincidence class are shared by all copies instead. A
+  linear pattern's line is a construction line between the two snapped
+  clicks; a circular pattern's centre is the snapped point itself, or a
+  new point constrained to what it snapped to. Sources a circular pattern
+  would turn onto themselves (a point on the centre, a circle about it)
+  are skipped, and a pattern with nothing left is refused. The count is
+  2 to 100 instances (the Instances field of the sketch dialog, default
+  3); a circular pattern's angle starts at 360°/count.
+* **Tools.** Both are chosen with the selection made, and keep it as the
+  sources. Hovering previews the copies after a trial solve; the click
+  commits through the checked edit, returns to the Select tool and opens
+  the line's length (a new dimension) or the angle (the pattern's own
+  value) for typing. A typed angle is refused with the reason when it is
+  zero, a turn or more, or turns a copy onto its source.
+* **Deleting** a source or a copy removes that copy; deleting the line or
+  the centre removes the constraint and leaves the copies as free curves.
+
+Tests: `crates/sketch-solver/tests/pattern.rs` (copies of every kind
+exact for both patterns, the angle as a dimension moving only the copies,
+the line driving them, spokes sharing the hub, a dimension on a copy
+redundant, every malformed pattern refused, deletion, and a property test
+that random patterns add no freedom and no redundancy) and
+`crates/ui/tests/sketch_pattern.rs` (the tools end to end: a square
+copied along a typed step and extruded, spokes about their hub and a new
+angle typed, circles about the origin following their source's radius,
+deletion, refusals, and a fuzz of random patterns over random shapes).
+
 ## 12. Dimension labels
 
 A dimension's label position is stored per dimension as an offset in plane

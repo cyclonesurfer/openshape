@@ -625,6 +625,54 @@ impl Builder<'_> {
                 true,
                 None,
             ),
+            Con::LinearPattern(l, ref pt) => {
+                // Design note 0007 §11.1: q − p − k·(e − s) = 0 per axis,
+                // the identity in the image point q.
+                for &(p, q, k) in &pt.points {
+                    let k = f64::from(k);
+                    for (q, p, e, s) in [
+                        (self.x(q), self.x(p), self.x(l.e), self.x(l.s)),
+                        (self.y(q), self.y(p), self.y(l.e), self.y(l.s)),
+                    ] {
+                        self.push(
+                            owner,
+                            EqKind::Lin {
+                                terms: vec![(q, 1.0), (p, -1.0), (e, -k), (s, k)],
+                                rhs: 0.0,
+                            },
+                            false,
+                            None,
+                        );
+                    }
+                }
+                for &(r, r2) in &pt.radii {
+                    self.equal_slots(owner, self.radius_base + r, self.radius_base + r2);
+                }
+            }
+            Con::CircularPattern(c, angle, ref pt) => {
+                // Design note 0007 §11.1: q − c − R(k·θ)(p − c) = 0, linear
+                // for the given angle and a rotation in q.
+                for &(p, q, k) in &pt.points {
+                    let (sn, cs) = (f64::from(k) * angle).sin_cos();
+                    let (xp, yp, xq, yq, xc, yc) = (
+                        self.x(p),
+                        self.y(p),
+                        self.x(q),
+                        self.y(q),
+                        self.x(c),
+                        self.y(c),
+                    );
+                    for terms in [
+                        vec![(xq, 1.0), (xc, cs - 1.0), (xp, -cs), (yp, sn), (yc, -sn)],
+                        vec![(yq, 1.0), (yc, cs - 1.0), (xp, -sn), (xc, sn), (yp, -cs)],
+                    ] {
+                        self.push(owner, EqKind::Lin { terms, rhs: 0.0 }, false, None);
+                    }
+                }
+                for &(r, r2) in &pt.radii {
+                    self.equal_slots(owner, self.radius_base + r, self.radius_base + r2);
+                }
+            }
             Con::Mirror(l, ref d) => {
                 // Design note 0007 §9: two equations per image point, whose
                 // Jacobian block in that point (half the axis normal, the
@@ -741,6 +789,7 @@ pub(crate) fn build<K: SketchKey>(index: &Index<K>, cons: &[Con], scale: Scale) 
         .flat_map(|c| match c {
             Con::Mirror(_, d) => d.arcs.clone(),
             Con::Offset(o) => o.arcs.clone(),
+            Con::LinearPattern(_, pt) | Con::CircularPattern(_, _, pt) => pt.arcs.clone(),
             _ => Vec::new(),
         })
         .collect();

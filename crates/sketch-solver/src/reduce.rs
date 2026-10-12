@@ -19,8 +19,20 @@
 //!
 //! The remaining equations are split into connected components of the
 //! equation–unknown incidence graph; each is solved on its own.
+//!
+//! Then images of derived constraints that only their defining linear
+//! equation references (a pattern's copy points) are *peeled* ([`peel`]):
+//! such an equation is the identity in the image, so it fixes the image
+//! explicitly from the other unknowns and leaves the numerical system,
+//! and the image is computed after the solve by back-substitution.
+//! Peeling repeats, so copies of copies peel too. It is exact, and rank
+//! and null space transfer exactly: each peeled equation adds one to the
+//! rank and one unknown, and the image's null-space row is the same linear
+//! combination of the other unknowns' rows. Without it, a pattern of a
+//! hundred hexagons is one dense component of about 2,400 unknowns.
 
 use crate::build::{Problem, Sub};
+use crate::eq::EqKind;
 
 /// What happened to an equation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +45,20 @@ pub(crate) enum Status {
     Redundant,
     /// An elimination that contradicts earlier ones; solved numerically.
     Demoted,
+    /// Peeled: the only equation referencing an image unknown, which it
+    /// fixes explicitly ([`peel`]).
+    Explicit,
+}
+
+/// A peeled equation and the unknown it fixes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Peeled {
+    /// The equation (linear).
+    pub eq: usize,
+    /// The reduced unknown it fixes.
+    pub unknown: usize,
+    /// The sum of the equation's coefficients on that unknown's slots.
+    pub coef: f64,
 }
 
 /// An equality class of slots.
@@ -72,6 +98,10 @@ pub(crate) struct Reduced {
     pub constant_eqs: Vec<usize>,
     /// Unknowns that no numerical equation references.
     pub free_unknowns: Vec<usize>,
+    /// Peeled equations in back-substitution order: each one's unknown
+    /// depends only on unknowns solved numerically, free, or peeled before
+    /// it.
+    pub peeled: Vec<Peeled>,
 }
 
 fn find(uf: &mut [usize], mut x: usize) -> usize {
@@ -159,37 +189,89 @@ pub(crate) fn reduce(prob: &Problem, const_tol: f64) -> Reduced {
             unknowns.push(c);
         }
     }
-    // Components over the numerical equations.
-    let nu = unknowns.len();
+    let (components, constant_eqs, free_unknowns) = decompose(
+        prob,
+        &status,
+        &class_of,
+        &unknown_of_class,
+        unknowns.len(),
+        &[],
+    );
+    Reduced {
+        status,
+        class_of,
+        classes,
+        unknowns,
+        unknown_of_class,
+        components,
+        constant_eqs,
+        free_unknowns,
+        peeled: Vec::new(),
+    }
+}
+
+/// The reduced unknowns of each equation that is solved numerically.
+fn equation_unknowns(
+    prob: &Problem,
+    status: &[Status],
+    class_of: &[usize],
+    unknown_of_class: &[Option<usize>],
+) -> Vec<Vec<usize>> {
+    prob.eqs
+        .iter()
+        .enumerate()
+        .map(|(i, eq)| {
+            let mut us: Vec<usize> = Vec::new();
+            if matches!(status[i], Status::General | Status::Demoted) {
+                for s in eq.kind.slots(&prob.splines) {
+                    if let Some(u) = unknown_of_class[class_of[s]] {
+                        us.push(u);
+                    }
+                }
+                us.sort_unstable();
+                us.dedup();
+            }
+            us
+        })
+        .collect()
+}
+
+/// Connected components of the numerical equations, the equations left
+/// with no unknowns, and the unknowns no numerical equation references
+/// (`peeled` unknowns are neither: they are computed afterwards).
+fn decompose(
+    prob: &Problem,
+    status: &[Status],
+    class_of: &[usize],
+    unknown_of_class: &[Option<usize>],
+    nu: usize,
+    peeled: &[usize],
+) -> (Vec<Component>, Vec<usize>, Vec<usize>) {
     let mut cuf: Vec<usize> = (0..nu).collect();
-    let mut eq_unknowns: Vec<Vec<usize>> = Vec::with_capacity(prob.eqs.len());
+    let eq_unknowns = equation_unknowns(prob, status, class_of, unknown_of_class);
     let mut referenced = vec![false; nu];
+    for &u in peeled {
+        referenced[u] = true;
+    }
     let mut constant_eqs = Vec::new();
-    for (i, eq) in prob.eqs.iter().enumerate() {
-        let mut us: Vec<usize> = Vec::new();
-        if matches!(status[i], Status::General | Status::Demoted) {
-            for s in eq.kind.slots(&prob.splines) {
-                if let Some(u) = unknown_of_class[class_of[s]] {
-                    us.push(u);
-                }
-            }
-            us.sort_unstable();
-            us.dedup();
-            if us.is_empty() {
-                constant_eqs.push(i);
-            }
-            for &u in &us {
-                referenced[u] = true;
-            }
-            for w in us.windows(2) {
-                let (a, b) = (find(&mut cuf, w[0]), find(&mut cuf, w[1]));
-                if a != b {
-                    let (lo, hi) = (a.min(b), a.max(b));
-                    cuf[hi] = lo;
-                }
+    for (i, us) in eq_unknowns.iter().enumerate() {
+        if matches!(status[i], Status::General | Status::Demoted) && us.is_empty() {
+            constant_eqs.push(i);
+        }
+        for &u in us {
+            referenced[u] = true;
+        }
+        for w in us.windows(2) {
+            let (a, b) = (find(&mut cuf, w[0]), find(&mut cuf, w[1]));
+            if a != b {
+                let (lo, hi) = (a.min(b), a.max(b));
+                cuf[hi] = lo;
             }
         }
-        eq_unknowns.push(us);
+    }
+    let mut is_peeled = vec![false; nu];
+    for &u in peeled {
+        is_peeled[u] = true;
     }
     let mut comp_of_root = vec![usize::MAX; nu];
     let mut components: Vec<Component> = Vec::new();
@@ -197,6 +279,9 @@ pub(crate) fn reduce(prob: &Problem, const_tol: f64) -> Reduced {
     for (u, &is_referenced) in referenced.iter().enumerate().take(nu) {
         if !is_referenced {
             free_unknowns.push(u);
+            continue;
+        }
+        if is_peeled[u] {
             continue;
         }
         let r = find(&mut cuf, u);
@@ -215,14 +300,83 @@ pub(crate) fn reduce(prob: &Problem, const_tol: f64) -> Reduced {
             components[comp_of_root[r]].eqs.push(i);
         }
     }
-    Reduced {
-        status,
-        class_of,
-        classes,
-        unknowns,
-        unknown_of_class,
-        components,
-        constant_eqs,
-        free_unknowns,
+    (components, constant_eqs, free_unknowns)
+}
+
+/// Peels the linear equations that alone reference an unknown marked
+/// `peelable` (an image of a derived constraint, not dragged): the
+/// equation fixes it explicitly, so both leave the numerical system
+/// (module documentation). Repeats until nothing more peels; the order is
+/// recorded reversed, for back-substitution.
+pub(crate) fn peel(prob: &Problem, red: &mut Reduced, peelable: &[bool]) {
+    let nu = red.unknowns.len();
+    let eq_unknowns = equation_unknowns(prob, &red.status, &red.class_of, &red.unknown_of_class);
+    let mut uses = vec![0usize; nu];
+    let mut eqs_of: Vec<Vec<usize>> = vec![Vec::new(); nu];
+    for (i, us) in eq_unknowns.iter().enumerate() {
+        for &u in us {
+            uses[u] += 1;
+            eqs_of[u].push(i);
+        }
     }
+    let mut order: Vec<Peeled> = Vec::new();
+    let mut gone = vec![false; prob.eqs.len()];
+    let mut queue: Vec<usize> = (0..nu).filter(|&u| peelable[u] && uses[u] == 1).collect();
+    while let Some(u) = queue.pop() {
+        if uses[u] != 1 {
+            continue;
+        }
+        let Some(&i) = eqs_of[u].iter().find(|&&i| !gone[i]) else {
+            continue;
+        };
+        if red.status[i] != Status::General {
+            continue;
+        }
+        let EqKind::Lin { terms, .. } = &prob.eqs[i].kind else {
+            continue;
+        };
+        let coef: f64 = terms
+            .iter()
+            .filter(|&&(s, _)| red.unknown_of_class[red.class_of[s]] == Some(u))
+            .map(|&(_, c)| c)
+            .sum();
+        let largest = terms.iter().map(|&(_, c)| c.abs()).fold(0.0, f64::max);
+        // The images' own coefficient is 1 (patterns) or ±1 (offset
+        // radii); anything much smaller is a merged class and not peeled.
+        if !coef.is_finite() || coef.abs() < 1e-3 * largest {
+            continue;
+        }
+        gone[i] = true;
+        order.push(Peeled {
+            eq: i,
+            unknown: u,
+            coef,
+        });
+        for &w in &eq_unknowns[i] {
+            uses[w] -= 1;
+            if w != u && peelable[w] && uses[w] == 1 {
+                queue.push(w);
+            }
+        }
+    }
+    if order.is_empty() {
+        return;
+    }
+    for p in &order {
+        red.status[p.eq] = Status::Explicit;
+    }
+    order.reverse();
+    let peeled: Vec<usize> = order.iter().map(|p| p.unknown).collect();
+    let (components, constant_eqs, free_unknowns) = decompose(
+        prob,
+        &red.status,
+        &red.class_of,
+        &red.unknown_of_class,
+        nu,
+        &peeled,
+    );
+    red.components = components;
+    red.constant_eqs = constant_eqs;
+    red.free_unknowns = free_unknowns;
+    red.peeled = order;
 }

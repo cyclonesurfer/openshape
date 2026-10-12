@@ -4,6 +4,7 @@
 //! nothing here panics on bad input.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::f64::consts::TAU;
 use std::fmt::Debug;
 
 use glam::DVec2;
@@ -106,6 +107,10 @@ pub(crate) enum Con {
     Radius(Circ, f64),
     Diameter(Circ, f64),
     Mirror(LineRef, Derived),
+    /// A linear pattern: the direction line and the copies.
+    LinearPattern(LineRef, Pattern),
+    /// A circular pattern: the centre point, the angle and the copies.
+    CircularPattern(usize, f64, Pattern),
     Offset(OffsetCon),
 }
 
@@ -183,6 +188,25 @@ pub(crate) struct Derived {
     pub entities: Vec<(usize, usize)>,
     /// Entity positions of the image arcs, whose implicit equation the
     /// derived equations imply.
+    pub arcs: Vec<usize>,
+}
+
+/// A copy turned by less than this from a whole number of turns (radians,
+/// the model's angular tolerance) would lie on its source.
+const WHOLE_TURN: f64 = 1e-9;
+
+/// A validated pattern's copies (design note 0007 §11.1), over internal
+/// indices.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Pattern {
+    /// `(source, image, k)` point triples, each image once.
+    pub points: Vec<(usize, usize, u32)>,
+    /// `(source, image)` circle radius indices.
+    pub radii: Vec<(usize, usize)>,
+    /// `(source, image)` entity positions.
+    pub entities: Vec<(usize, usize)>,
+    /// Entity positions of the image arcs, whose implicit equation the
+    /// pattern's equations imply.
     pub arcs: Vec<usize>,
 }
 
@@ -646,7 +670,132 @@ impl<K: SketchKey> Index<K> {
                 smooth,
                 coincident,
             )?),
+            Constraint::LinearPattern { direction, copies } => {
+                let l = self.line(id, direction)?;
+                if copies
+                    .iter()
+                    .any(|(s, i, _)| s == direction || i == direction)
+                {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: the pattern's line {direction:?} cannot be copied or be a copy"
+                    )));
+                }
+                let pt = self.pattern(id, copies, None, coincident)?;
+                if let Some(&(_, q, _)) = pt.points.iter().find(|&&(_, q, _)| q == l.s || q == l.e)
+                {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: point {:?} is an end of the pattern's line and cannot be a copy",
+                        self.point_key(q)
+                    )));
+                }
+                Con::LinearPattern(l, pt)
+            }
+            Constraint::CircularPattern {
+                centre,
+                angle,
+                copies,
+            } => {
+                let c = self.point(id, centre)?;
+                if !(angle.is_finite() && *angle != 0.0 && angle.abs() < TAU) {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: a pattern angle must be finite, non-zero and less than a turn (got {angle})"
+                    )));
+                }
+                if let Some(&(_, _, k)) = copies.iter().find(|&&(_, _, k)| {
+                    let t = (f64::from(k) * angle).rem_euclid(TAU);
+                    t < WHOLE_TURN || TAU - t < WHOLE_TURN
+                }) {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: copy {k} would be turned a whole number of turns, onto its source"
+                    )));
+                }
+                if copies.iter().any(|(_, i, _)| i == centre) {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: the pattern's centre {centre:?} cannot be a copy"
+                    )));
+                }
+                let pt = self.pattern(id, copies, Some(c), coincident)?;
+                if pt.points.iter().any(|&(_, q, _)| q == c) {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: the pattern's centre {centre:?} cannot be a copy"
+                    )));
+                }
+                Con::CircularPattern(c, *angle, pt)
+            }
         })
+    }
+
+    /// Validates a pattern's copies (design note 0007 §11.1) and maps them
+    /// to point triples. Each copy number is a map of its own (a
+    /// translation or a rotation, both keeping orientation); a source point
+    /// may be its own image only at the `centre` of a circular pattern (or
+    /// coincident with it), where it gets no equation.
+    fn pattern(
+        &self,
+        id: &dyn Debug,
+        copies: &[(K, K, u32)],
+        centre: Option<usize>,
+        coincident: &[usize],
+    ) -> Result<Pattern, SolveError> {
+        if copies.is_empty() {
+            return Err(invalid(format!("constraint {id:?}: there are no copies")));
+        }
+        let mut by_k: BTreeMap<u32, Vec<(K, K)>> = BTreeMap::new();
+        for (src, img, k) in copies {
+            if *k == 0 {
+                return Err(invalid(format!(
+                    "constraint {id:?}: the copy {img:?} of {src:?} must be copy 1 or later"
+                )));
+            }
+            by_k.entry(*k).or_default().push((*src, *img));
+        }
+        let class = |p: usize| coincident.get(p).copied().unwrap_or(p);
+        let mut out = Pattern::default();
+        // Image point → source point, over every copy.
+        let mut source_of: BTreeMap<usize, usize> = BTreeMap::new();
+        for (k, pairs) in by_k {
+            let d = self.derived(id, &pairs, false)?;
+            if let Some(&p) = d
+                .fixed
+                .iter()
+                .find(|&&p| centre.is_none_or(|c| class(p) != class(c)))
+            {
+                return Err(invalid(format!(
+                    "constraint {id:?}: point {:?} cannot be its own copy (only the centre of a circular pattern can)",
+                    self.point_key(p)
+                )));
+            }
+            for (p, q) in d.points {
+                if source_of.insert(q, p).is_some() {
+                    return Err(invalid(format!(
+                        "constraint {id:?}: point {:?} is in more than one copy",
+                        self.point_key(q)
+                    )));
+                }
+                out.points.push((p, q, k));
+            }
+            out.radii.extend(d.radii);
+            out.entities.extend(d.entities);
+            out.arcs.extend(d.arcs);
+        }
+        let mut images = BTreeSet::new();
+        if let Some(&(_, i)) = out.entities.iter().find(|&&(_, i)| !images.insert(i)) {
+            return Err(invalid(format!(
+                "constraint {id:?}: entity {:?} is in more than one copy",
+                self.keys[i]
+            )));
+        }
+        if let Some(&(_, q, _)) = out
+            .points
+            .iter()
+            .find(|&&(_, q, _)| source_of.values().any(|&p| p == q))
+        {
+            return Err(invalid(format!(
+                "constraint {id:?}: point {:?} is both a copy and a source",
+                self.point_key(q)
+            )));
+        }
+        Ok(out)
     }
 
     /// Validates an offset's pieces and gives each image end point its two
@@ -1033,6 +1182,7 @@ impl<K: SketchKey> Index<K> {
             let entities = match con {
                 Con::Mirror(_, d) => &d.entities,
                 Con::Offset(o) => &o.entities,
+                Con::LinearPattern(_, pt) | Con::CircularPattern(_, _, pt) => &pt.entities,
                 _ => continue,
             };
             for &(s, i) in entities {

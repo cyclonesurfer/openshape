@@ -455,7 +455,53 @@ pub fn violation(s: &Sketch<u32>, c: &Constraint<u32>) -> (f64, bool) {
         Constraint::Offset {
             distance, pieces, ..
         } => (offset_violation(s, *distance, pieces), false),
+        Constraint::LinearPattern { direction, copies } => {
+            let (s0, s1) = line(s, *direction);
+            (
+                pattern_violation(s, copies, |q, k| q + (s1 - s0) * f64::from(k)),
+                false,
+            )
+        }
+        Constraint::CircularPattern {
+            centre,
+            angle,
+            copies,
+        } => {
+            let c = p(*centre);
+            (
+                pattern_violation(s, copies, |q, k| {
+                    c + DVec2::from_angle(f64::from(k) * angle).rotate(q - c)
+                }),
+                false,
+            )
+        }
     }
+}
+
+/// How far a pattern's copies are from their sources moved by `map` (a
+/// point and the copy number): every image point against its source
+/// point's, circles also by radius.
+pub fn pattern_violation(
+    s: &Sketch<u32>,
+    copies: &[(u32, u32, u32)],
+    map: impl Fn(DVec2, u32) -> DVec2,
+) -> f64 {
+    let mut worst = 0.0f64;
+    for &(src, img, k) in copies {
+        let (gs, gi) = (
+            &s.entity(src).unwrap().geometry,
+            &s.entity(img).unwrap().geometry,
+        );
+        let (ps, pi) = (gs.referenced_points(), gi.referenced_points());
+        assert_eq!(ps.len(), pi.len(), "pattern copy of a different kind");
+        for (a, b) in ps.iter().zip(&pi) {
+            worst = worst.max((map(pos(s, *a), k) - pos(s, *b)).length());
+        }
+        if let (Geometry::Circle { .. }, Geometry::Circle { .. }) = (gs, gi) {
+            worst = worst.max((circ(s, src).1 - circ(s, img).1).abs());
+        }
+    }
+    worst
 }
 
 /// Bounding-box diagonal of the sketch's points and circles.

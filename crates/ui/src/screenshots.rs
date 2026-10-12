@@ -368,6 +368,68 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     }
     d.hover(on_plane(&d, 40.0, 25.0)?)?;
     save("09-fillet-preview.png", &d.settle()?)?;
+    // An offset of the plate's outline, chosen by its bottom side and
+    // previewed outwards.
+    d.app.run(crate::commands::Command::Tool(Tool::Offset));
+    d.click(on_plane(&d, 0.0, -25.0)?)?;
+    d.hover(on_plane(&d, 10.0, -31.0)?)?;
+    save("10-offset-preview.png", &d.settle()?)?;
+    d.key(Key::Escape, Modifiers::NONE)?;
+    // A triangle mirrored about the line across the plate, previewed.
+    d.app.run(crate::commands::Command::Tool(Tool::Line));
+    for (x, y) in [(-34.0, 6.0), (-14.0, 6.0), (-24.0, 18.0), (-34.0, 6.0)] {
+        d.click(on_plane(&d, x, y)?)?;
+    }
+    d.key(Key::Escape, Modifiers::NONE)?;
+    let triangle: Vec<_> = lines(d.app.model(), sketch)
+        .into_iter()
+        .rev()
+        .take(3)
+        .collect();
+    if let Some(ed) = d.app.sketch_editor_mut() {
+        ed.selection = triangle.clone();
+    }
+    d.app.run(crate::commands::Command::Tool(Tool::Mirror));
+    d.hover(on_plane(&d, -55.0, 0.0)?)?;
+    save("11-mirror-preview.png", &d.settle()?)?;
+    d.key(Key::Escape, Modifiers::NONE)?;
+    // The triangle patterned downwards, previewed with the step's end
+    // under the pointer.
+    if let Some(ed) = d.app.sketch_editor_mut() {
+        ed.selection = triangle;
+    }
+    d.app
+        .run(crate::commands::Command::Tool(Tool::LinearPattern));
+    d.click(on_plane(&d, -34.0, 6.0)?)?;
+    d.hover(on_plane(&d, -34.0, -12.0)?)?;
+    save("12-linear-pattern-preview.png", &d.settle()?)?;
+    d.key(Key::Escape, Modifiers::NONE)?;
+    d.key(Key::Escape, Modifiers::NONE)?;
+    // A small circle turned about the plate's centre: previewed, then
+    // made, with the angle open for typing.
+    d.app.run(crate::commands::Command::Tool(Tool::Circle));
+    d.click(on_plane(&d, 0.0, 18.0)?)?;
+    d.click(on_plane(&d, 3.0, 18.0)?)?;
+    d.key(Key::Escape, Modifiers::NONE)?;
+    let small = d.app.model().sketch_def(sketch).and_then(|def| {
+        def.sketch
+            .entities
+            .iter()
+            .rev()
+            .find(|e| matches!(e.geometry, Geometry::Circle { .. }))
+            .map(|e| e.id)
+    });
+    if let (Some(ed), Some(c)) = (d.app.sketch_editor_mut(), small) {
+        ed.selection = vec![c];
+        ed.pattern_count = 4;
+    }
+    d.app
+        .run(crate::commands::Command::Tool(Tool::CircularPattern));
+    d.hover(on_plane(&d, 0.0, 0.0)?)?;
+    save("13-circular-pattern-preview.png", &d.settle()?)?;
+    d.click(on_plane(&d, 0.0, 0.0)?)?;
+    save("14-circular-pattern.png", &d.settle()?)?;
+    d.key(Key::Escape, Modifiers::NONE)?;
     d.app.run(crate::commands::Command::CancelSketch);
     Ok(written)
 }

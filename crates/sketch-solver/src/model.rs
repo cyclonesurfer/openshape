@@ -368,6 +368,39 @@ pub enum Constraint<K> {
         /// Image points at smooth joints.
         smooth: Vec<K>,
     },
+    /// Derived geometry (design note 0007 §11): each image entity is its
+    /// source moved by `k` times the vector of the line `direction` (from
+    /// its start to its end), and moves with it.
+    ///
+    /// A copy `(source, image, k)`, k ≥ 1, is two points, lines, circles
+    /// or arcs, or two splines of the same form with as many points; each
+    /// image point is its source point moved, an image arc keeps its
+    /// source's start and end, an image circle its radius. Images add no
+    /// degrees of freedom. Deleting a source or an image removes its copy;
+    /// deleting the line removes the constraint.
+    LinearPattern {
+        /// The line whose vector is one step.
+        direction: K,
+        /// `(source, image, k)` copies.
+        copies: Vec<(K, K, u32)>,
+    },
+    /// Derived geometry and a dimension (design note 0007 §11): each image
+    /// entity is its source turned about the point `centre` by `k` times
+    /// `angle` (radians, counter-clockwise, 0 < |angle| < 2π), and moves
+    /// with it.
+    ///
+    /// Copies are as for [`Constraint::LinearPattern`]; a source point that
+    /// is the centre (or coincident with it) may be its own image. No copy
+    /// may be turned by a whole number of turns (it would lie on its
+    /// source). Deleting the centre removes the constraint.
+    CircularPattern {
+        /// The centre point.
+        centre: K,
+        /// The angle between consecutive copies (radians).
+        angle: f64,
+        /// `(source, image, k)` copies.
+        copies: Vec<(K, K, u32)>,
+    },
 }
 
 impl<K: SketchKey> Constraint<K> {
@@ -380,6 +413,7 @@ impl<K: SketchKey> Constraint<K> {
             | Constraint::Radius { value, .. }
             | Constraint::Diameter { value, .. } => Some(*value),
             Constraint::Offset { distance, .. } => Some(*distance),
+            Constraint::CircularPattern { angle, .. } => Some(*angle),
             _ => None,
         }
     }
@@ -394,7 +428,8 @@ impl<K: SketchKey> Constraint<K> {
             | Constraint::Diameter { value, .. }
             | Constraint::Offset {
                 distance: value, ..
-            } => {
+            }
+            | Constraint::CircularPattern { angle: value, .. } => {
                 *value = v;
                 true
             }
@@ -486,15 +521,29 @@ impl<K: SketchKey> Constraint<K> {
                 pieces: pieces.iter().map(|(s, i, l)| (f(*s), f(*i), *l)).collect(),
                 smooth: smooth.iter().map(|p| f(*p)).collect(),
             },
+            C::LinearPattern { direction, copies } => C::LinearPattern {
+                direction: f(*direction),
+                copies: copies.iter().map(|(s, i, k)| (f(*s), f(*i), *k)).collect(),
+            },
+            C::CircularPattern {
+                centre,
+                angle,
+                copies,
+            } => C::CircularPattern {
+                centre: f(*centre),
+                angle: *angle,
+                copies: copies.iter().map(|(s, i, k)| (f(*s), f(*i), *k)).collect(),
+            },
         }
     }
 
     /// The constraint left after deleting the entities for which `gone` is
     /// true, or `None` when nothing of it remains. A derived constraint
-    /// ([`Constraint::Mirror`], [`Constraint::Offset`]) loses the pairs or
-    /// pieces that reference a deleted entity (an offset also its deleted
-    /// smooth points), and goes with a mirror's axis or its last pair or
-    /// piece; any other constraint goes when an entity it references does.
+    /// ([`Constraint::Mirror`], [`Constraint::Offset`] and the patterns)
+    /// loses the pairs, pieces or copies that reference a deleted entity
+    /// (an offset also its deleted smooth points), and goes with a mirror's
+    /// axis, a pattern's line or centre, or its last pair, piece or copy;
+    /// any other constraint goes when an entity it references does.
     pub fn without(&self, gone: impl Fn(K) -> bool) -> Option<Constraint<K>> {
         match self {
             Constraint::Mirror { axis, pairs } => {
@@ -526,6 +575,31 @@ impl<K: SketchKey> Constraint<K> {
                     distance: *distance,
                     pieces: kept,
                     smooth,
+                })
+            }
+            Constraint::LinearPattern { direction, copies } => {
+                if gone(*direction) {
+                    return None;
+                }
+                let kept = kept_copies(copies, &gone);
+                (!kept.is_empty()).then_some(Constraint::LinearPattern {
+                    direction: *direction,
+                    copies: kept,
+                })
+            }
+            Constraint::CircularPattern {
+                centre,
+                angle,
+                copies,
+            } => {
+                if gone(*centre) {
+                    return None;
+                }
+                let kept = kept_copies(copies, &gone);
+                (!kept.is_empty()).then_some(Constraint::CircularPattern {
+                    centre: *centre,
+                    angle: *angle,
+                    copies: kept,
                 })
             }
             _ => (!self.referenced().into_iter().any(gone)).then(|| self.clone()),
@@ -565,8 +639,31 @@ impl<K: SketchKey> Constraint<K> {
                 .flat_map(|(s, i, _)| [*s, *i])
                 .chain(smooth.iter().copied())
                 .collect(),
+            Constraint::LinearPattern {
+                direction: first,
+                copies,
+            }
+            | Constraint::CircularPattern {
+                centre: first,
+                copies,
+                ..
+            } => std::iter::once(*first)
+                .chain(copies.iter().flat_map(|(s, i, _)| [*s, *i]))
+                .collect(),
         }
     }
+}
+
+/// The copies of a pattern that reference no deleted entity.
+fn kept_copies<K: SketchKey>(
+    copies: &[(K, K, u32)],
+    gone: &impl Fn(K) -> bool,
+) -> Vec<(K, K, u32)> {
+    copies
+        .iter()
+        .copied()
+        .filter(|(s, i, _)| !gone(*s) && !gone(*i))
+        .collect()
 }
 
 /// A constraint with its key.
@@ -692,6 +789,15 @@ mod tests {
                 distance: 0.5,
                 pieces: vec![(2, 3, true), (4, 5, false)],
                 smooth: vec![6],
+            },
+            Constraint::LinearPattern {
+                direction: 1,
+                copies: vec![(2, 3, 1), (2, 4, 2)],
+            },
+            Constraint::CircularPattern {
+                centre: 1,
+                angle: 0.5,
+                copies: vec![(2, 3, 1), (4, 5, 1)],
             },
         ];
         for c in &all {
