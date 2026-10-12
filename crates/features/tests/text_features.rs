@@ -4,15 +4,15 @@
 
 use std::collections::BTreeSet;
 
-use openshape_core_model::sketch::{Constraint, ConstraintEntry, Entity, Geometry, TextPiece};
-use openshape_core_model::{
+use opendatum_core_model::sketch::{Constraint, ConstraintEntry, Entity, Geometry, TextPiece};
+use opendatum_core_model::{
     DVec2, Feature, FeatureId, InsertAt, ModelOp, PlaneRef, ProfileSource, RegionKey, ReplicaId,
     Session, SketchData, SketchDef, SketchEdit, SketchId,
 };
-use openshape_features::{regenerate, FeatureStatus, StudioResult};
-use openshape_kernel::{Body, Kernel, OsKernel, SketchArrangement};
-use openshape_sketch_solver::SolveStatus;
-use openshape_text::{lay_out, Font, Layout};
+use opendatum_features::{regenerate, FeatureStatus, StudioResult};
+use opendatum_kernel::{Body, BrepKernel, Kernel, SketchArrangement};
+use opendatum_sketch_solver::SolveStatus;
+use opendatum_text::{lay_out, Font, Layout};
 
 const MM: f64 = 1e-3;
 
@@ -42,7 +42,7 @@ fn edit(s: &mut Session, sketch: FeatureId, edits: Vec<SketchEdit>) {
 
 fn regen(s: &Session) -> StudioResult<Body> {
     let el = s.document().element(s.first_studio().unwrap()).unwrap();
-    regenerate(&OsKernel::default(), &el.studio)
+    regenerate(&BrepKernel::default(), &el.studio)
 }
 
 fn outline(layout: &Layout) -> Vec<Vec<TextPiece>> {
@@ -204,7 +204,7 @@ fn place(s: &mut Session, sketch: FeatureId, content: &str, font: Font, h: f64) 
 /// The regions holding ink: every region but the counters (a counter's
 /// outer boundary is another region's hole).
 fn ink(a: &SketchArrangement) -> Vec<usize> {
-    let set = |l: &openshape_kernel::RegionLoop| -> BTreeSet<usize> {
+    let set = |l: &opendatum_kernel::RegionLoop| -> BTreeSet<usize> {
         l.edges.iter().map(|(e, _)| *e).collect()
     };
     let holes: Vec<BTreeSet<usize>> = a
@@ -272,7 +272,7 @@ fn volume(r: &StudioResult<Body>, f: FeatureId) -> f64 {
         .iter()
         .find(|b| b.feature == f)
         .unwrap_or_else(|| panic!("no body; status {:?}", r.status(f)));
-    OsKernel::default()
+    BrepKernel::default()
         .mass_properties(&b.body, 1e-9)
         .unwrap()
         .volume
@@ -319,7 +319,7 @@ fn assert_close(actual: f64, expected: f64, rel: f64) {
 #[test]
 fn a_word_extrudes_to_its_letters() {
     for font in [Font::Sans, Font::SerifBold, Font::Mono] {
-        let (s, sk, _, e, area) = setup("OpenShape", font, 10.0);
+        let (s, sk, _, e, area) = setup("OpenDatum", font, 10.0);
         let r = regen(&s);
         assert_eq!(
             r.status(e),
@@ -327,15 +327,15 @@ fn a_word_extrudes_to_its_letters() {
             "{font:?}: {:?}",
             r.status(e)
         );
-        // 9 letters of ink and 6 counters (O, p, e, a, p, e).
+        // 9 letters of ink and 5 counters (O, p, e, D, a).
         let (all, ink) = keys(&r, sk);
-        assert_eq!((all.len(), ink.len()), (15, 9), "{font:?}");
+        assert_eq!((all.len(), ink.len()), (14, 9), "{font:?}");
         assert_close(volume(&r, e), area * 2.0 * MM, 1e-6);
         // One side face per outline piece, two caps per letter.
-        let layout = lay_out("OpenShape", font).unwrap();
+        let layout = lay_out("OpenDatum", font).unwrap();
         let pieces: usize = layout.contours.iter().map(Vec::len).sum();
         let body = &r.bodies.iter().find(|b| b.feature == e).unwrap().body;
-        let t = OsKernel::default().topology(body);
+        let t = BrepKernel::default().topology(body);
         assert_eq!(
             (t.faces, t.edges, t.vertices),
             (pieces + 18, 3 * pieces, 2 * pieces),

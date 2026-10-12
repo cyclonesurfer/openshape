@@ -9,15 +9,15 @@
 mod common;
 
 use common::*;
-use openshape_app::sketch_mode::{
+use opendatum_app::sketch_mode::{
     constraints_for, dimension_for, ConstraintTool, CurveEdit, SnapTarget, Tool,
 };
-use openshape_app::sketch_ops::text::{self, CONSTRAIN_THE_BOX, NOT_EDITABLE};
-use openshape_app::Model;
-use openshape_core_model::sketch::{Constraint, Geometry};
-use openshape_core_model::{DVec2, FeatureId, SketchId};
-use openshape_sketch_solver::{ResolvedCurve, SolveStatus};
-use openshape_text::{lay_out, Font};
+use opendatum_app::sketch_ops::text::{self, CONSTRAIN_THE_BOX, NOT_EDITABLE};
+use opendatum_app::Model;
+use opendatum_core_model::sketch::{Constraint, Geometry};
+use opendatum_core_model::{DVec2, FeatureId, SketchId};
+use opendatum_sketch_solver::{ResolvedCurve, SolveStatus};
+use opendatum_text::{lay_out, Font};
 
 /// The texts of a sketch: (id, corners, content, font, aspect, mirrored).
 #[allow(clippy::type_complexity)]
@@ -66,8 +66,8 @@ fn pos(m: &Model, f: FeatureId, id: SketchId) -> DVec2 {
 /// height from the pointer at `b` (millimetres). Returns the text.
 fn place(
     m: &mut Model,
-    ed: &mut openshape_app::sketch_mode::SketchEditor,
-    map: &openshape_app::sketch_mode::ScreenMap,
+    ed: &mut opendatum_app::sketch_mode::SketchEditor,
+    map: &opendatum_app::sketch_mode::ScreenMap,
     content: &str,
     font: Font,
     a: (f64, f64),

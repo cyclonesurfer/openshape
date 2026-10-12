@@ -6,10 +6,10 @@
 mod common;
 
 use common::*;
-use openshape_app::sketch_mode::{ConstraintTool, Tool};
-use openshape_core_model::sketch::Geometry;
-use openshape_core_model::{DVec2, FeatureId, SketchId};
-use openshape_sketch_solver::SolveStatus;
+use opendatum_app::sketch_mode::{ConstraintTool, Tool};
+use opendatum_core_model::sketch::Geometry;
+use opendatum_core_model::{DVec2, FeatureId, SketchId};
+use opendatum_sketch_solver::SolveStatus;
 
 /// Clamped knots with uniform interior knots, written out here rather than
 /// taken from the solver so the check is independent.
@@ -81,7 +81,7 @@ fn segment_area(a: DVec2, b: DVec2) -> f64 {
 }
 
 /// The sketch's control-point splines: (control ids, degree).
-fn splines(m: &openshape_app::Model, f: FeatureId) -> Vec<(Vec<SketchId>, u32)> {
+fn splines(m: &opendatum_app::Model, f: FeatureId) -> Vec<(Vec<SketchId>, u32)> {
     m.sketch_def(f)
         .unwrap()
         .sketch
@@ -97,7 +97,7 @@ fn splines(m: &openshape_app::Model, f: FeatureId) -> Vec<(Vec<SketchId>, u32)> 
 }
 
 /// The solved positions of `ids`.
-fn solved(m: &openshape_app::Model, f: FeatureId, ids: &[SketchId]) -> Vec<DVec2> {
+fn solved(m: &opendatum_app::Model, f: FeatureId, ids: &[SketchId]) -> Vec<DVec2> {
     let sketch = &m.sketch_result(f).unwrap().solution.sketch;
     ids.iter().map(|id| sketch.point(*id).unwrap()).collect()
 }

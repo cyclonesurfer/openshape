@@ -5,10 +5,10 @@
 mod common;
 
 use common::*;
-use openshape_app::dialogs::{FeatureDialog, Template};
-use openshape_app::{FeaturePreview, Model, PREVIEW_FEATURE};
-use openshape_core_model::{DVec3, Feature, InsertAt};
-use openshape_features::FeatureStatus;
+use opendatum_app::dialogs::{FeatureDialog, Template};
+use opendatum_app::{FeaturePreview, Model, PREVIEW_FEATURE};
+use opendatum_core_model::{DVec3, Feature, InsertAt};
+use opendatum_features::FeatureStatus;
 
 fn cube(side: f64) -> Feature {
     Feature::Box {
@@ -96,7 +96,7 @@ fn a_preview_that_does_not_regenerate_reports_why() {
 
 #[test]
 fn export_writes_the_document_not_the_preview() {
-    let dir = std::env::temp_dir().join(format!("openshape-preview-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("opendatum-preview-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut m = Model::new();
     let f = m.add_feature("Box 1", cube(0.01));

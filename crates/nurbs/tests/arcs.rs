@@ -3,7 +3,7 @@
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use glam::{DMat4, DVec3};
-use openshape_nurbs::{NurbsCurve, NurbsError};
+use opendatum_nurbs::{NurbsCurve, NurbsError};
 use proptest::prelude::*;
 
 const SWEEPS: [f64; 12] = [

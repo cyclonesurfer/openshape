@@ -1,6 +1,6 @@
-# Running OpenShape
+# Running OpenDatum
 
-How to build and run OpenShape on Linux: the desktop app on an AMD/RADV
+How to build and run OpenDatum on Linux: the desktop app on an AMD/RADV
 machine, the developer checks, the offscreen demo and benchmark, and a
 one-command check for a GPU machine with no display.
 
@@ -40,7 +40,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ```
 
 A distribution's packaged Rust (Fedora's `rust` and `cargo`, say) also
-builds OpenShape, but it ignores `rust-toolchain.toml` and may be older
+builds OpenDatum, but it ignores `rust-toolchain.toml` and may be older
 than CI's stable; `scripts/gpu-check.sh` prints the `rustc` it used. The
 suite passes on Rust 1.95 (Fedora 44's) as well as on current stable.
 
@@ -67,16 +67,16 @@ Later: `git pull` inside the clone.
 ## 3. Desktop app (AMD/RADV workstation)
 
 ```sh
-cargo run --release -p openshape                 # empty document
-cargo run --release -p openshape -- part.osdoc   # open a saved document
+cargo run --release -p opendatum                 # empty document
+cargo run --release -p opendatum -- part.odatum   # open a saved document
 ```
 
 The first build compiles everything in release mode and takes a while; later
 runs start immediately. The app runs natively on Wayland or X11 and uses
-Vulkan by default. `OPENSHAPE_WGPU_BACKEND=gl` forces OpenGL if Vulkan
+Vulkan by default. `OPENDATUM_WGPU_BACKEND=gl` forces OpenGL if Vulkan
 misbehaves (`vulkan` and `any` are the other values; wgpu's own
 `WGPU_BACKEND` is honoured when it is unset). The status bar at the bottom
-right names the adapter and backend in use, and `RUST_LOG=openshape_app=info`
+right names the adapter and backend in use, and `RUST_LOG=opendatum_app=info`
 prints them with the driver in the terminal.
 
 Controls: the toolbar adds sketches (S), extrudes (E), revolves (V), a box
@@ -86,8 +86,8 @@ middle-drag or Ctrl+right-drag pans, the scroll wheel zooms, F fits the
 view, and the view cube turns it. Ctrl+Z undoes, Ctrl+Shift+Z or Ctrl+Y
 redoes. Right-click a feature in the list to edit, rename, suppress, move or
 delete it; drag the rollback bar to roll the history back. The menu at the
-top left saves and opens `.osdoc` documents and exports STL.
-`cargo run -p openshape -- --screenshots out/` writes screenshots of the
+top left saves and opens `.odatum` documents and exports STL.
+`cargo run -p opendatum -- --screenshots out/` writes screenshots of the
 whole app rendered offscreen.
 
 The windowed app has so far been tested only offscreen in CI; please report
@@ -109,8 +109,8 @@ cargo deny check        # first: cargo install cargo-deny --locked
 Both render offscreen and need no display.
 
 ```sh
-cargo run --release -p openshape -- --headless-demo out/demo
-cargo run --release -p openshape -- --bench out/bench 600
+cargo run --release -p opendatum -- --headless-demo out/demo
+cargo run --release -p opendatum -- --bench out/bench 600
 ```
 
 The demo prints the adapter, then one `[PASS]` or `[FAIL]` line per check, and
@@ -119,7 +119,7 @@ adds a cylinder, a 270° ring and a spline vase, undoes and redoes (each image
 must match the earlier state pixel for pixel), saves and reopens the
 document, and exports STL. Output in `out/demo/`: `01-box.png`,
 `02-orbit.png`, `03-four-parts.png`, `04-undo-to-box.png`, `05-redo.png`,
-`06-overview.png`, `demo.osdoc`, `parts.stl`.
+`06-overview.png`, `demo.odatum`, `parts.stl`.
 
 The benchmark renders the demo scene (four parts, 36,656 triangles) at
 1920x1080 with 4x MSAA for the given number of frames while orbiting, timing
@@ -160,7 +160,7 @@ finished report included. To copy the images from a server to
 your own computer, run this on your computer (adjust user, host and path):
 
 ```sh
-scp -r root@10.0.20.10:openshape/gpu-check-out/demo ./openshape-gpu-demo
+scp -r root@10.0.20.10:opendatum/gpu-check-out/demo ./opendatum-gpu-demo
 ```
 
 ## 7. With Claude Code on the machine

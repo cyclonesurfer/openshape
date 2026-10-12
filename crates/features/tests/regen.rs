@@ -1,12 +1,12 @@
 //! Regeneration through the op log: failures are isolated, suppression and
 //! undo change the produced bodies.
 
-use openshape_core_model::{
+use opendatum_core_model::{
     CurveDef, DVec2, DVec3, Feature, FeatureId, InsertAt, ModelOp, PlaneRef, ProfileDef,
     ProfileSource, ReplicaId, RevolveAxis, Session,
 };
-use openshape_features::{regenerate, FeatureStatus};
-use openshape_kernel::{Kernel, OsKernel};
+use opendatum_features::{regenerate, FeatureStatus};
+use opendatum_kernel::{BrepKernel, Kernel};
 
 fn insert(s: &mut Session, name: &str, f: Feature) -> FeatureId {
     let el = s.first_studio().unwrap();
@@ -20,7 +20,7 @@ fn insert(s: &mut Session, name: &str, f: Feature) -> FeatureId {
 
 #[test]
 fn failed_feature_does_not_stop_later_features() {
-    let k = OsKernel::default();
+    let k = BrepKernel::default();
     let mut s = Session::new_document(ReplicaId(1));
     let a = insert(
         &mut s,
@@ -89,8 +89,8 @@ fn failed_feature_does_not_stop_later_features() {
 
 #[test]
 fn features_after_the_rollback_bar_are_not_regenerated() {
-    use openshape_core_model::{SketchData, SketchDef};
-    let k = OsKernel::default();
+    use opendatum_core_model::{SketchData, SketchDef};
+    let k = BrepKernel::default();
     let mut s = Session::new_document(ReplicaId(1));
     let el = s.first_studio().unwrap();
     let boxed = |x: f64| Feature::Box {

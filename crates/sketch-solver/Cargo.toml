@@ -1,6 +1,6 @@
 [package]
-name = "openshape-sketch-solver"
-description = "2D geometric constraint solver and sketch data types for OpenShape"
+name = "opendatum-sketch-solver"
+description = "2D geometric constraint solver and sketch data types for OpenDatum"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,13 +9,13 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-openshape-linalg.workspace = true
+opendatum-linalg.workspace = true
 glam.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-openshape-text.workspace = true
+opendatum-text.workspace = true
 proptest.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 

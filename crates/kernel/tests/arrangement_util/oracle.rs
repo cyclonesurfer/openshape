@@ -15,7 +15,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::f64::consts::TAU;
 
-use openshape_kernel::{DVec2, ProfileCurve};
+use opendatum_kernel::{DVec2, ProfileCurve};
 
 use super::{circle, line};
 

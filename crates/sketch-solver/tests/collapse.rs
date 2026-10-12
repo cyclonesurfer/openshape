@@ -10,7 +10,7 @@
 mod common;
 
 use common::{bits, circ, line, pos, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     solve, Constraint, DVec2, EntityState, Geometry, Sketch, Solution, SolveError, SolveOptions,
     SolveStatus, TangentKind,
 };

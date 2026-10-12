@@ -1,6 +1,6 @@
-//! OpenShape's icon set.
+//! OpenDatum's icon set.
 //!
-//! Every icon is an original drawing made for OpenShape in code: line art
+//! Every icon is an original drawing made for OpenDatum in code: line art
 //! designed on a 24-unit grid from generic metaphors (a page for "new", a
 //! pencil over a plane for "sketch", a profile with an arrow for
 //! "extrude", and so on), drawn with egui shapes only. There are no image
@@ -20,7 +20,7 @@ use egui::{
     WidgetInfo, WidgetType,
 };
 
-/// One icon of OpenShape's set. Draw it with [`paint_icon`] or show it in a
+/// One icon of OpenDatum's set. Draw it with [`paint_icon`] or show it in a
 /// toolbar with [`icon_button`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {

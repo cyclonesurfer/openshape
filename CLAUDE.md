@@ -1,9 +1,9 @@
-# CLAUDE.md — working on OpenShape
+# CLAUDE.md — working on OpenDatum
 
-OpenShape is a native Linux, pure-Rust, history-based parametric 3D CAD system
-(clean-room; Onshape is a functional reference only — never copy its code,
-assets, icons, branding or formats, and never use its name in the product).
-License: GPL-3.0-or-later.
+OpenDatum (named OpenShape until 2026-10-12; ADR 0017) is a native Linux,
+pure-Rust, history-based parametric 3D CAD system (clean-room; Onshape is a
+functional reference only — never copy its code, assets, icons, branding or
+formats, and never use its name in the product). License: GPL-3.0-or-later.
 
 ## Start of every session (and after any context compaction)
 
@@ -18,10 +18,10 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo deny check            # licenses, advisories, bans, sources
-cargo run -p openshape      # desktop app (needs a GPU or Mesa)
-cargo run -p openshape -- --headless-demo out/   # offscreen proof, writes PNGs
-cargo run -p openshape -- --screenshots out/     # screenshots of the whole app
-cargo run --release -p openshape -- --bench out/ 600   # offscreen frame times
+cargo run -p opendatum      # desktop app (needs a GPU or Mesa)
+cargo run -p opendatum -- --headless-demo out/   # offscreen proof, writes PNGs
+cargo run -p opendatum -- --screenshots out/     # screenshots of the whole app
+cargo run --release -p opendatum -- --bench out/ 600   # offscreen frame times
 scripts/gpu-check.sh        # build, tests, demo, bench on a real GPU (docs/RUNNING.md)
 ```
 
@@ -30,24 +30,24 @@ All four checks must pass before every commit. `main` is never broken.
 The render tests and the headless demo need a Vulkan or GL driver. In a
 container without a GPU, install Mesa's software Vulkan (lavapipe):
 `apt-get install mesa-vulkan-drivers` — wgpu then reports `llvmpipe`.
-`OPENSHAPE_WGPU_BACKEND=vulkan|gl|any` forces a backend.
+`OPENDATUM_WGPU_BACKEND=vulkan|gl|any` forces a backend.
 
 ## Crate map
 
 | crate | package | role |
 |---|---|---|
-| `crates/oplog` | `openshape-oplog` | append-only op log: IDs, causal order, replay, undo/redo, sync primitives, CBOR container |
-| `crates/core-model` | `openshape-core-model` | documents, elements (tabs), feature tree as data, units, `ModelOp` reducer |
-| `crates/nurbs` | `openshape-nurbs` | NURBS curves/surfaces (Piegl & Tiller); **kernel-private** — only `kernel` may depend on it |
-| `crates/kernel` | `openshape-kernel` | B-rep kernel behind the `Kernel` trait |
-| `crates/linalg` | `openshape-linalg` | deterministic dense linear algebra (pivoted QR, COD, SVD) for the solvers (ADR 0010) |
-| `crates/sketch-solver` | `openshape-sketch-solver` | 2D sketch constraint solver with DOF/redundancy/conflict diagnostics (design note 0005) |
-| `crates/features` | `openshape-features` | evaluates a part studio's feature list through `Kernel` |
-| `crates/render` | `openshape-render` | wgpu viewport renderer + offscreen renderer; no kernel/egui deps |
-| `crates/text` | `openshape-text` | font layout for sketch text: bundled Liberation fonts (OFL), shaping, exact outlines (ADR 0015) |
-| `crates/io` | `openshape-io` | import/export formats (STL today) |
-| `crates/ui-kit` | `openshape-ui-kit` | the look: theme tokens, original icon set, view cube, offscreen egui rendering (ADR 0012) |
-| `crates/ui` | `openshape` (bin) | egui/eframe application shell (ADR 0012), offscreen screenshots and end-to-end UI tests |
+| `crates/oplog` | `opendatum-oplog` | append-only op log: IDs, causal order, replay, undo/redo, sync primitives, CBOR container |
+| `crates/core-model` | `opendatum-core-model` | documents, elements (tabs), feature tree as data, units, `ModelOp` reducer |
+| `crates/nurbs` | `opendatum-nurbs` | NURBS curves/surfaces (Piegl & Tiller); **kernel-private** — only `kernel` may depend on it |
+| `crates/kernel` | `opendatum-kernel` | B-rep kernel behind the `Kernel` trait |
+| `crates/linalg` | `opendatum-linalg` | deterministic dense linear algebra (pivoted QR, COD, SVD) for the solvers (ADR 0010) |
+| `crates/sketch-solver` | `opendatum-sketch-solver` | 2D sketch constraint solver with DOF/redundancy/conflict diagnostics (design note 0005) |
+| `crates/features` | `opendatum-features` | evaluates a part studio's feature list through `Kernel` |
+| `crates/render` | `opendatum-render` | wgpu viewport renderer + offscreen renderer; no kernel/egui deps |
+| `crates/text` | `opendatum-text` | font layout for sketch text: bundled Liberation fonts (OFL), shaping, exact outlines (ADR 0015) |
+| `crates/io` | `opendatum-io` | import/export formats (STL today) |
+| `crates/ui-kit` | `opendatum-ui-kit` | the look: theme tokens, original icon set, view cube, offscreen egui rendering (ADR 0012) |
+| `crates/ui` | `opendatum` (bin) | egui/eframe application shell (ADR 0012), offscreen screenshots and end-to-end UI tests |
 
 Planned crates (not yet created; see docs/ARCHITECTURE.md): `naming`, `regen`,
 `mate-solver`, `script`, `drawing`, `sim`, `cam`,

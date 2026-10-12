@@ -1,6 +1,6 @@
 [package]
-name = "openshape-ui-kit"
-description = "OpenShape's visual language: theme tokens, original icons, view cube and offscreen egui snapshots."
+name = "opendatum-ui-kit"
+description = "OpenDatum's visual language: theme tokens, original icons, view cube and offscreen egui snapshots."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-openshape-render = { workspace = true }
+opendatum-render = { workspace = true }
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
 wgpu = { workspace = true }

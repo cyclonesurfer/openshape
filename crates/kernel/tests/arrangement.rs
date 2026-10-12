@@ -5,8 +5,8 @@ mod arrangement_util;
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
 use arrangement_util::*;
-use openshape_kernel::arrangement::{arrange, region_containing, region_profile_with_tolerance};
-use openshape_kernel::{DVec2, Kernel, KernelError, ProfileCurve, SketchArrangement, Tolerance};
+use opendatum_kernel::arrangement::{arrange, region_containing, region_profile_with_tolerance};
+use opendatum_kernel::{DVec2, Kernel, KernelError, ProfileCurve, SketchArrangement, Tolerance};
 
 #[test]
 fn empty_input_has_no_regions() {
@@ -967,7 +967,7 @@ fn duplicate_curves_do_not_move_vertices() {
 
 #[test]
 fn spline_overlapping_part_of_another_spline() {
-    use openshape_nurbs::NurbsCurve;
+    use opendatum_nurbs::NurbsCurve;
     let pts: Vec<DVec2> = (0..=12)
         .map(|i| {
             let x = -1.0 + i as f64 / 6.0;

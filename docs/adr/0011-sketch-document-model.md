@@ -30,7 +30,7 @@ Option 2.
 
 * `Feature::Sketch(SketchDef)` holds the plane, entities and constraints. The
   entity, constraint and geometry types are defined in
-  `openshape-sketch-solver` (pure data, serde) and instantiated with
+  `opendatum-sketch-solver` (pure data, serde) and instantiated with
   `SketchId` keys; `core-model` depends on that crate for the types only.
 * `SketchId { op: OpId, index: u32 }`: the op that created the item and its
   index within that op's batch. In an edit, `op: OpId::NULL` means "the op

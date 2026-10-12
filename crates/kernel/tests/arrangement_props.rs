@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use arrangement_util::oracle::{in_polygon, polyline_distance, CellGrid, Shape, Shapes};
 use arrangement_util::raster::Raster;
 use arrangement_util::*;
-use openshape_kernel::arrangement::region_containing;
-use openshape_kernel::{
+use opendatum_kernel::arrangement::region_containing;
+use opendatum_kernel::{
     DVec2, Kernel, KernelError, ProfileCurve, SketchArrangement, TessellationOptions, Tolerance,
 };
 use proptest::prelude::*;
@@ -669,7 +669,7 @@ fn spline_shape() -> impl Strategy<Value = SplineShape> {
 /// An overlapping copy of a spline: itself (`kind` 1), reversed (2), or
 /// its piece from 40% to 75% of its domain, split off by knot insertion (3).
 fn spline_copy(sp: &ProfileCurve, kind: u8) -> ProfileCurve {
-    use openshape_nurbs::NurbsCurve;
+    use opendatum_nurbs::NurbsCurve;
     let ProfileCurve::Spline {
         degree,
         knots,

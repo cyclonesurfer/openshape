@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use common::gen::{generate, perturb};
 use common::{assert_satisfied, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     solve, Constraint, DVec2, Sketch, Solution, SolveOptions, SolveStatus,
 };
 

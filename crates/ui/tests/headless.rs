@@ -4,8 +4,8 @@
 
 #[test]
 fn headless_demo_passes_all_checks() {
-    let dir = std::env::temp_dir().join(format!("openshape-demo-{}", std::process::id()));
-    let report = openshape_app::demo::run(&dir).expect("demo runs (needs a Vulkan or GL adapter)");
+    let dir = std::env::temp_dir().join(format!("opendatum-demo-{}", std::process::id()));
+    let report = opendatum_app::demo::run(&dir).expect("demo runs (needs a Vulkan or GL adapter)");
     for (name, ok) in &report.checks {
         println!("[{}] {name}", if *ok { "PASS" } else { "FAIL" });
     }
@@ -20,8 +20,8 @@ fn headless_demo_passes_all_checks() {
 
 #[test]
 fn model_undo_redo_and_display_meshes() {
-    use openshape_app::dialogs::{FeatureDialog, Template};
-    let mut m = openshape_app::Model::new();
+    use opendatum_app::dialogs::{FeatureDialog, Template};
+    let mut m = opendatum_app::Model::new();
     assert!(m.meshes().is_empty());
     m.add_feature("Box 1", FeatureDialog::new(Template::Box).build().unwrap());
     m.add_feature(
@@ -44,7 +44,7 @@ fn model_undo_redo_and_display_meshes() {
 
 #[test]
 fn bench_times_every_frame() {
-    let r = openshape_app::demo::bench(5, 320, 240).expect("bench runs (needs an adapter)");
+    let r = opendatum_app::demo::bench(5, 320, 240).expect("bench runs (needs an adapter)");
     assert_eq!(r.frame_ms.len(), 5);
     assert!(r.frame_ms.iter().all(|t| t.is_finite() && *t > 0.0));
     assert!(r.triangles > 1000 && r.edge_segments > 0);

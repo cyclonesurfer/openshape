@@ -21,20 +21,20 @@ edition = "2021"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/cyclonesurfer/openshape"
-authors = ["OpenShape contributors"]
+authors = ["OpenDatum contributors"]
 
 [workspace.dependencies]
-openshape-oplog = { path = "crates/oplog", version = "0.1.0" }
-openshape-core-model = { path = "crates/core-model", version = "0.1.0" }
-openshape-nurbs = { path = "crates/nurbs", version = "0.1.0" }
-openshape-kernel = { path = "crates/kernel", version = "0.1.0" }
-openshape-features = { path = "crates/features", version = "0.1.0" }
-openshape-render = { path = "crates/render", version = "0.1.0" }
-openshape-io = { path = "crates/io", version = "0.1.0" }
-openshape-linalg = { path = "crates/linalg", version = "0.1.0" }
-openshape-sketch-solver = { path = "crates/sketch-solver", version = "0.1.0" }
-openshape-ui-kit = { path = "crates/ui-kit", version = "0.1.0" }
-openshape-text = { path = "crates/text", version = "0.1.0" }
+opendatum-oplog = { path = "crates/oplog", version = "0.1.0" }
+opendatum-core-model = { path = "crates/core-model", version = "0.1.0" }
+opendatum-nurbs = { path = "crates/nurbs", version = "0.1.0" }
+opendatum-kernel = { path = "crates/kernel", version = "0.1.0" }
+opendatum-features = { path = "crates/features", version = "0.1.0" }
+opendatum-render = { path = "crates/render", version = "0.1.0" }
+opendatum-io = { path = "crates/io", version = "0.1.0" }
+opendatum-linalg = { path = "crates/linalg", version = "0.1.0" }
+opendatum-sketch-solver = { path = "crates/sketch-solver", version = "0.1.0" }
+opendatum-ui-kit = { path = "crates/ui-kit", version = "0.1.0" }
+opendatum-text = { path = "crates/text", version = "0.1.0" }
 
 glam = { version = "0.34", features = ["serde", "bytemuck"] }
 serde = { version = "1", features = ["derive"] }

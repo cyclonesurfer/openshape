@@ -1,11 +1,11 @@
 //! STL export (ASCII and binary).
 //!
-//! STL has no units; callers choose a scale (OpenShape stores metres, most
+//! STL has no units; callers choose a scale (OpenDatum stores metres, most
 //! slicers expect millimetres, so `MILLIMETRES` is the usual choice).
 
 use std::io::{self, Write};
 
-use openshape_kernel::{BodyMesh, DVec3};
+use opendatum_kernel::{BodyMesh, DVec3};
 
 /// Scale factor from metres to millimetres.
 pub const MILLIMETRES: f64 = 1000.0;
@@ -53,7 +53,7 @@ pub fn write_binary<W: Write>(out: &mut W, meshes: &[BodyMesh], scale: f64) -> i
     let count = u32::try_from(count)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "too many triangles for STL"))?;
     let mut header = [0u8; 80];
-    let tag = b"OpenShape binary STL";
+    let tag = b"OpenDatum binary STL";
     header[..tag.len()].copy_from_slice(tag);
     out.write_all(&header)?;
     out.write_all(&count.to_le_bytes())?;
@@ -72,10 +72,10 @@ pub fn write_binary<W: Write>(out: &mut W, meshes: &[BodyMesh], scale: f64) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openshape_kernel::{Frame, Kernel, OsKernel, TessellationOptions};
+    use opendatum_kernel::{BrepKernel, Frame, Kernel, TessellationOptions};
 
     fn cube_mesh() -> BodyMesh {
-        let k = OsKernel::default();
+        let k = BrepKernel::default();
         let b = k.make_box(&Frame::WORLD, DVec3::splat(0.01)).unwrap();
         k.tessellate(&b, &TessellationOptions::default()).unwrap()
     }

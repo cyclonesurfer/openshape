@@ -4,10 +4,10 @@
 
 use std::f64::consts::{PI, TAU};
 
-use openshape_kernel::{CurvatureSample, DVec2, Kernel, KernelError, OsKernel, ProfileCurve};
+use opendatum_kernel::{BrepKernel, CurvatureSample, DVec2, Kernel, KernelError, ProfileCurve};
 
-fn k() -> OsKernel {
-    OsKernel::default()
+fn k() -> BrepKernel {
+    BrepKernel::default()
 }
 
 fn v(x: f64, y: f64) -> DVec2 {

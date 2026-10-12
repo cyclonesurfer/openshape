@@ -4,7 +4,7 @@
 mod common;
 
 use common::{assert_satisfied, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     solve, Constraint, DVec2, DistanceKind, EntityState, Geometry, SolveOptions, SolveStatus,
 };
 

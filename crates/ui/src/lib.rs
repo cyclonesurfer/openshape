@@ -1,4 +1,4 @@
-//! The OpenShape application shell.
+//! The OpenDatum application shell.
 //!
 //! [`Model`] is the UI-independent controller: an editing [`Session`] (the op
 //! log and its derived document), the geometry kernel, and the regenerated
@@ -30,15 +30,15 @@ use std::path::Path;
 
 use std::collections::BTreeMap;
 
-use openshape_core_model::sketch::Geometry;
-use openshape_core_model::{
+use opendatum_core_model::sketch::Geometry;
+use opendatum_core_model::{
     Element, ElementId, ElementKind, Feature, FeatureEntry, FeatureId, InsertAt, ModelOp, OpId,
     PartStudio, PlaneRef, ReplicaId, Session, SketchData, SketchDef, SketchEdit, SketchId,
 };
-use openshape_features::{regenerate, FeatureStatus, SketchResult, StudioResult};
-use openshape_kernel::{Body, BodyMesh, Kernel, OsKernel, TessellationOptions};
-use openshape_render::MeshData;
-use openshape_sketch_solver::{solve, SolveOptions, SolveStatus};
+use opendatum_features::{regenerate, FeatureStatus, SketchResult, StudioResult};
+use opendatum_kernel::{Body, BodyMesh, BrepKernel, Kernel, TessellationOptions};
+use opendatum_render::MeshData;
+use opendatum_sketch_solver::{solve, SolveOptions, SolveStatus};
 
 /// Colours cycled through for successive parts (sRGB).
 const PART_COLORS: [[f32; 4]; 6] = [
@@ -113,7 +113,7 @@ pub struct Model {
     session: Session,
     /// The element being edited; the first one when unset or deleted.
     active: Option<ElementId>,
-    kernel: OsKernel,
+    kernel: BrepKernel,
     result: StudioResult<Body>,
     meshes: Vec<MeshData>,
     mesh_owners: Vec<FeatureId>,
@@ -143,7 +143,7 @@ impl Model {
         let mut m = Model {
             session,
             active: None,
-            kernel: OsKernel::default(),
+            kernel: BrepKernel::default(),
             result: StudioResult::default(),
             meshes: Vec::new(),
             mesh_owners: Vec::new(),
@@ -192,7 +192,7 @@ impl Model {
         }
         let mut f =
             std::io::BufWriter::new(std::fs::File::create(path).map_err(|e| e.to_string())?);
-        openshape_io::stl::write_binary(&mut f, &meshes, openshape_io::stl::MILLIMETRES)
+        opendatum_io::stl::write_binary(&mut f, &meshes, opendatum_io::stl::MILLIMETRES)
             .map_err(|e| e.to_string())
     }
 
@@ -303,7 +303,7 @@ impl Model {
     }
 
     /// The kernel.
-    pub fn kernel(&self) -> &OsKernel {
+    pub fn kernel(&self) -> &BrepKernel {
         &self.kernel
     }
 

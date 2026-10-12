@@ -6,7 +6,7 @@
 
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     measure, resolve_curves, Constraint, DVec2, DistanceKind, Geometry, ResolvedCurve, Sketch,
     TangentKind,
 };

@@ -110,7 +110,7 @@ pub const NO_MATCHES: &str = "No matching commands";
 const MIN_WIDTH_BUTTONS: f32 = 8.0;
 
 /// The palette's area id (one palette is open at a time).
-const AREA_ID: &str = "openshape_command_palette";
+const AREA_ID: &str = "opendatum_command_palette";
 
 // Scoring weights; the table in the module documentation explains them.
 const SCORE_MATCH: i32 = 16;

@@ -1,6 +1,6 @@
 //! The rollback bar and element deletion in the op log (ADR 0013).
 
-use openshape_core_model::{
+use opendatum_core_model::{
     DVec3, ElementId, ElementKind, Feature, FeatureId, InsertAt, ModelOp, OpId, PartStudio,
     ReplicaId, Session,
 };
@@ -453,7 +453,7 @@ proptest! {
             let ids: Vec<FeatureId> = st.features.iter().map(|f| f.id).collect();
             prop_assert_eq!(&ids, &reference.ids);
             prop_assert_eq!(st.rollback_index(), reference.bar);
-            let replayed = openshape_core_model::Document::replay(s.log());
+            let replayed = opendatum_core_model::Document::replay(s.log());
             prop_assert_eq!(&replayed, s.document());
         }
     }

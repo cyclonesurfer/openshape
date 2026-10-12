@@ -4,7 +4,7 @@ mod common;
 
 use common::arb_curve;
 use glam::{DMat4, DVec3};
-use openshape_nurbs::{NurbsCurve, NurbsError};
+use opendatum_nurbs::{NurbsCurve, NurbsError};
 use proptest::prelude::*;
 
 fn samples(curve: &NurbsCurve, count: usize) -> Vec<f64> {

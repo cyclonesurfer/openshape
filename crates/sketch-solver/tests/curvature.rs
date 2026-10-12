@@ -7,7 +7,7 @@
 mod common;
 
 use common::{assert_satisfied, away_curvature, pos, size, violation, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     solve, Constraint, DVec2, Geometry, Sketch, SolveError, SolveOptions, SolveStatus, TangentKind,
 };
 use proptest::prelude::*;

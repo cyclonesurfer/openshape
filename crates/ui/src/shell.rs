@@ -7,10 +7,10 @@ use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, Response, RichText, Sense,
     Stroke, StrokeKind, Ui, UiBuilder, Vec2,
 };
-use openshape_render::DisplayMode;
-use openshape_ui_kit::{icon_button, paint_icon, palette::search_field, Icon, Theme};
+use opendatum_render::DisplayMode;
+use opendatum_ui_kit::{icon_button, paint_icon, palette::search_field, Icon, Theme};
 
-use crate::app::{Action, OpenShapeApp, Renaming, Selection};
+use crate::app::{Action, OpenDatumApp, Renaming, Selection};
 use crate::commands::Command;
 use crate::dialogs::Template;
 use crate::planes::StdPlane;
@@ -38,7 +38,7 @@ pub(crate) fn divider(ui: &mut Ui, theme: &Theme) {
 
 /// Where [`menu_rows`] are kept in egui's memory.
 fn menu_rows_id() -> egui::Id {
-    egui::Id::new("openshape menu rows")
+    egui::Id::new("opendatum menu rows")
 }
 
 /// The menu rows drawn in the last frame, by label: for tests and
@@ -181,7 +181,7 @@ pub(crate) fn accent_button(ui: &mut Ui, theme: &Theme, icon: Icon, label: &str)
     r
 }
 
-/// The OpenShape mark: an accent tile with a white cube.
+/// The OpenDatum mark: an accent tile with a white cube.
 fn logo(ui: &mut Ui, theme: &Theme) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
     ui.painter().rect_filled(rect, 5.0, theme.accent);
@@ -207,7 +207,7 @@ fn edge(ui: &Ui, rect: Rect, top: bool, color: Color32) {
     );
 }
 
-impl OpenShapeApp {
+impl OpenDatumApp {
     /// An icon button for a command; records its rectangle and queues the
     /// command when clicked.
     pub(crate) fn command_button(&mut self, ui: &mut Ui, c: Command) -> Response {
@@ -268,7 +268,7 @@ impl OpenShapeApp {
                     ui.add_space(4.0);
                     logo(ui, &theme);
                     ui.label(
-                        RichText::new("OpenShape")
+                        RichText::new("OpenDatum")
                             .size(theme.heading_size)
                             .color(theme.text)
                             .strong(),
@@ -382,7 +382,7 @@ impl OpenShapeApp {
                 }
             }
         });
-        if self.model.studio().rollback != openshape_core_model::InsertAt::End {
+        if self.model.studio().rollback != opendatum_core_model::InsertAt::End {
             divider(ui, &theme);
             self.command_button(ui, Command::RollToEnd);
         }
@@ -470,7 +470,7 @@ impl OpenShapeApp {
                     });
                     ui.add_space(4.0);
                     let active = self.model.studio_id();
-                    let elements: Vec<(openshape_core_model::ElementId, String)> = self
+                    let elements: Vec<(opendatum_core_model::ElementId, String)> = self
                         .model
                         .elements()
                         .iter()
@@ -500,7 +500,7 @@ impl OpenShapeApp {
         &mut self,
         ui: &mut Ui,
         theme: &Theme,
-        id: openshape_core_model::ElementId,
+        id: opendatum_core_model::ElementId,
         name: &str,
         active: bool,
         can_delete: bool,
@@ -564,7 +564,7 @@ impl OpenShapeApp {
                 Pos2::new(rect.left() + 15.0, rect.center().y),
                 Vec2::splat(16.0),
             ),
-            openshape_ui_kit::Icon::PartStudio,
+            opendatum_ui_kit::Icon::PartStudio,
             ink,
         );
         p.text(

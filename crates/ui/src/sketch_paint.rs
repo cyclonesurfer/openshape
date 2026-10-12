@@ -5,11 +5,11 @@
 //! translucent halo.
 
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, Vec2};
-use openshape_core_model::sketch::Geometry;
-use openshape_core_model::{DVec2, SketchId};
-use openshape_features::EntityState;
-use openshape_sketch_solver::SolveStatus;
-use openshape_ui_kit::Theme;
+use opendatum_core_model::sketch::Geometry;
+use opendatum_core_model::{DVec2, SketchId};
+use opendatum_features::EntityState;
+use opendatum_sketch_solver::SolveStatus;
+use opendatum_ui_kit::Theme;
 
 use crate::comb;
 use crate::sketch_mode::{

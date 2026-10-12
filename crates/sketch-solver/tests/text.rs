@@ -6,7 +6,7 @@
 mod common;
 
 use common::{pos, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     resolve_curves, solve, Constraint, DVec2, DistanceKind, Geometry, ResolvedCurve, SolveError,
     SolveOptions, SolveStatus, TextPiece,
 };
@@ -72,7 +72,7 @@ fn text(
 
 /// How far the box is from its equations (metres).
 fn box_error(
-    s: &openshape_sketch_solver::Sketch<u32>,
+    s: &opendatum_sketch_solver::Sketch<u32>,
     c: [u32; 4],
     aspect: f64,
     mirrored: bool,
@@ -241,7 +241,7 @@ fn the_outline_is_mapped_into_the_box_exactly_closed() {
 fn real_letters_map_into_a_turned_box() {
     // A word laid out by the text crate keeps its contours closed and its
     // proportions in any box.
-    let layout = openshape_text::lay_out("Gear 42", openshape_text::Font::Sans).unwrap();
+    let layout = opendatum_text::lay_out("Gear 42", opendatum_text::Font::Sans).unwrap();
     let outline: Vec<Vec<TextPiece>> = layout
         .contours
         .iter()

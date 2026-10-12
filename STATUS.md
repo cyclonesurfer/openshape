@@ -1,4 +1,4 @@
-# OpenShape status
+# OpenDatum status
 
 Updated 2026-10-12, Phase 2 (sketcher): core sketcher, the application
 shell, the editing tools, ellipses, conics, transform, curvature
@@ -8,26 +8,29 @@ the tolerance instead of refusing them. Phase 3 groundwork started: the
 design notes for intersections (0011), booleans (0012) and persistent
 naming (0013) are written, and the kernel's profile check is now exact
 and its tessellation adapts to local feature size, so every region of the
-random sketch tests extrudes; implementing the notes is next.
+random sketch tests extrudes; implementing the notes is next. The
+product is now named OpenDatum (ADR 0017): packages `opendatum-*`, binary
+`opendatum`, documents `.odatum`; documents saved under the old name open
+unchanged.
 
 ## What works
 
-- **Op log** (`openshape-oplog`): Lamport/replica op IDs with causal deps,
+- **Op log** (`opendatum-oplog`): Lamport/replica op IDs with causal deps,
   deterministic replay, undo/redo stored as ops (redo = undo of undo),
   history at any set of heads, sync primitives (`missing_for`, `integrate`
   with a pending buffer for out-of-order ops), CBOR container. Property tests
   check undo/redo against a reference model and replica convergence.
-- **Document model** (`openshape-core-model`): documents with element tabs, a
+- **Document model** (`opendatum-core-model`): documents with element tabs, a
   Part Studio feature list as data (insert, edit, rename, suppress, move,
   delete), a rollback bar stored in the op log (ADR 0013; its rules are
   property-tested against an independent model), element tabs that can be
   added, renamed and deleted, a reducer over the op log, units parsing of single quantities
   (`"25.4 mm"`, `"1 in"`, `"90 deg"`; bare numbers use the default unit).
   Expressions and variables come with Variable Studios.
-- **NURBS** (`openshape-nurbs`, kernel-private): rational curves and surfaces
+- **NURBS** (`opendatum-nurbs`, kernel-private): rational curves and surfaces
   after Piegl & Tiller — evaluation, derivatives, knot insertion, split,
   closest point, exact arcs, interpolation, extrusion/revolution surfaces.
-- **Kernel** (`openshape-kernel`, behind the `Kernel` trait):
+- **Kernel** (`opendatum-kernel`, behind the `Kernel` trait):
   - B-rep arena (solid/shell/face/loop/coedge/edge/vertex) with validation:
     closed loops, manifold edge use, edges on their surfaces, Euler–Poincaré,
     outward orientation. Every operation validates its output.
@@ -66,14 +69,14 @@ random sketch tests extrudes; implementing the notes is next.
     1e-9 relative and better. Edges that lie on their two faces only
     within the tolerance (merged end points) get the flux of the strip
     between the faces added, so such bodies are exact to rounding too.
-- **Features** (`openshape-features`): regenerates a Part Studio through the
+- **Features** (`opendatum-features`): regenerates a Part Studio through the
   kernel with per-feature status (ok, warning, suppressed, failed with
   message). A failing feature never blocks the others. Sketch features are
   solved and their regions computed during regeneration; extrude and revolve
   take their profile from picked sketch regions, which are named
   topologically and re-found after sketch edits (design note 0006 §5).
-- **Sketch solver** (`openshape-sketch-solver`, on the deterministic
-  `openshape-linalg`): points, lines, circles, arcs, through-point and
+- **Sketch solver** (`opendatum-sketch-solver`, on the deterministic
+  `opendatum-linalg`): points, lines, circles, arcs, through-point and
   control-point splines, open or smooth closed (ADR 0016: the periodic
   spline held as its exact clamped equivalent, a fixed linear map of the
   sketch's points), ellipses and elliptical arcs (design note 0008),
@@ -86,18 +89,18 @@ random sketch tests extrudes; implementing the notes is next.
   constraints, and never reports success on a result that fails an
   independent final check. 50-entity sketches solve in under 1 ms and a
   300-entity chain in 11.6 ms (release).
-- **Sketch regions** (`openshape-kernel`, `arrangement`): the planar
+- **Sketch regions** (`opendatum-kernel`, `arrangement`): the planar
   arrangement of arbitrary sketch curves (lines, arcs, circles, rational
   splines; crossings, tangencies, overlaps, duplicates, self-intersections)
   with exact areas, holes, and region profiles ready for extrude and
   revolve.
-- **Rendering** (`openshape-render`): wgpu renderer for the window and an
+- **Rendering** (`opendatum-render`): wgpu renderer for the window and an
   offscreen renderer; shaded parts with edges, perspective/orthographic
   camera, orbit/pan/zoom, view presets, fit, translucent meshes, and an
   edge colour per mesh (used for selection, sketches and plane outlines).
   Vulkan first, GL fallback.
-- **App shell** (`openshape` binary, egui/eframe; ADR 0012), in the familiar
-  parametric-CAD layout with OpenShape's own icons, palette and name:
+- **App shell** (`opendatum` binary, egui/eframe; ADR 0012), in the familiar
+  parametric-CAD layout with OpenDatum's own icons, palette and name:
   - top bar: application menu (new, open, save, export STL, quit),
     document name, undo/redo, command search (Ctrl+K, fuzzy matching over
     every command with its shortcut), display modes, perspective/ortho,
@@ -126,7 +129,7 @@ random sketch tests extrudes; implementing the notes is next.
   - element tabs: add, switch, rename (double-click), delete;
   - right-drag orbits, middle-drag or Ctrl+right-drag pans, the wheel
     zooms, in both Part Studio and sketch mode.
-  `openshape --screenshots <dir>` writes review screenshots of the whole
+  `opendatum --screenshots <dir>` writes review screenshots of the whole
   app rendered offscreen.
 - **Sketch mode**: line (chained), corner, centre-point and aligned
   rectangles, circle, 3-point, centre and tangent arcs, slot, regular
@@ -291,16 +294,16 @@ random sketch tests extrudes; implementing the notes is next.
   Every edit is one undoable op; Cancel
   undoes the whole sketch session. The editor is UI-toolkit independent and
   tested end to end by driving it with screen clicks.
-- **UI kit** (`openshape-ui-kit`): the application's look in one place
+- **UI kit** (`opendatum-ui-kit`): the application's look in one place
   (ADR 0012): theme tokens with pinned contrast ratios, 82 original icons
   drawn in code, a view cube, the command palette and search field, and an
   offscreen egui renderer used for screenshots and UI tests.
-- **I/O** (`openshape-io`): STL export, ASCII and binary.
-- **Headless demo**: `cargo run -p openshape -- --headless-demo out/` builds
+- **I/O** (`opendatum-io`): STL export, ASCII and binary.
+- **Headless demo**: `cargo run -p opendatum -- --headless-demo out/` builds
   a box through the op log, orbits, adds three more parts, undoes and redoes,
   saves and reopens, exports STL, and checks each step pixel-exactly. All 12
   checks pass on Mesa lavapipe.
-- **Benchmark**: `openshape --bench <dir> [frames]` times offscreen frames of
+- **Benchmark**: `opendatum --bench <dir> [frames]` times offscreen frames of
   the demo scene (36,656 triangles, 1920x1080, 4x MSAA) to GPU completion.
   Lavapipe in the cloud container: about 67 ms mean (15 fps).
   `scripts/gpu-check.sh` runs build, tests, demo and benchmark on a real GPU

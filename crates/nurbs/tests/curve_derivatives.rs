@@ -4,7 +4,7 @@ mod common;
 
 use common::{arb_curve, close, span_width};
 use glam::DVec3;
-use openshape_nurbs::NurbsCurve;
+use opendatum_nurbs::NurbsCurve;
 use proptest::prelude::*;
 
 /// Picks a parameter strictly inside a knot span (relative position 0.1..0.9),

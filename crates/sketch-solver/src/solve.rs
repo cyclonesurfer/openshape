@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 
 use glam::DVec2;
-use openshape_linalg::{dot, norm2, residual, select_columns_in_order, CompleteOrthogonal, Matrix};
+use opendatum_linalg::{dot, norm2, residual, select_columns_in_order, CompleteOrthogonal, Matrix};
 
 use crate::build::{build, scale_of, ParamCurve, Problem, Scale, DEGENERATE};
 use crate::conic;

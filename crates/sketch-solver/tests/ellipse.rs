@@ -9,7 +9,7 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use common::gen::{generate_with, perturb};
 use common::{assert_satisfied, bits, ell, pos, resolved, size, worst, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     solve, Constraint, DVec2, EntityState, Geometry, ResolvedCurve, SolveError, SolveOptions,
     SolveStatus, TangentKind,
 };
@@ -164,7 +164,7 @@ fn points_on_ellipses_and_arcs() {
 /// The line's signed distance (left positive) from the ellipse's centre
 /// and the ellipse's extent towards the line, measured by dense sampling
 /// (independently of both closed forms).
-fn line_gap(s: &openshape_sketch_solver::Sketch<u32>, l: u32, k: u32) -> (f64, f64) {
+fn line_gap(s: &opendatum_sketch_solver::Sketch<u32>, l: u32, k: u32) -> (f64, f64) {
     let (s0, s1) = common::line(s, l);
     let n = (s1 - s0).perp().normalize();
     let (c, a, bb) = ell(s, k);
@@ -343,7 +343,7 @@ fn what_ellipses_do_not_take_is_refused() {
         Constraint::Distance {
             a: kc,
             b: k,
-            kind: openshape_sketch_solver::DistanceKind::Aligned,
+            kind: opendatum_sketch_solver::DistanceKind::Aligned,
             value: 0.2,
         },
     ];
@@ -550,7 +550,7 @@ fn resolved_arcs_run_counter_clockwise_either_handedness() {
             e.geometry = Geometry::Point { at };
         }
     }
-    assert!(openshape_sketch_solver::resolve_curves(&b.build()).is_err());
+    assert!(opendatum_sketch_solver::resolve_curves(&b.build()).is_err());
     let _ = k;
 }
 
@@ -564,7 +564,7 @@ fn degenerate_ellipses_do_not_resolve() {
                 e.geometry = Geometry::Point { at: c + bend };
             }
         }
-        match openshape_sketch_solver::resolve_curves(&b.build()) {
+        match opendatum_sketch_solver::resolve_curves(&b.build()) {
             Err(SolveError::Degenerate(m)) => m,
             other => panic!("{other:?}"),
         }

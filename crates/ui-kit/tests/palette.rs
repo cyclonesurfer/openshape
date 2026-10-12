@@ -6,8 +6,8 @@ mod common;
 
 use common::{max_channel_diff, maybe_dump, rgba, snapshot};
 use egui::{pos2, vec2, Event, Key, LayerId, Modifiers, PointerButton, Pos2, Rect, Vec2};
-use openshape_ui_kit::palette::{match_positions, match_score, VISIBLE_ROWS};
-use openshape_ui_kit::{search_field, CommandPalette, Icon, PaletteEntry, PaletteOutcome, Theme};
+use opendatum_ui_kit::palette::{match_positions, match_score, VISIBLE_ROWS};
+use opendatum_ui_kit::{search_field, CommandPalette, Icon, PaletteEntry, PaletteOutcome, Theme};
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------

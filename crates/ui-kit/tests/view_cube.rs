@@ -3,8 +3,8 @@
 
 use egui::{Pos2, Rect, Vec2};
 use glam::DVec3;
-use openshape_render::{Camera, ViewPreset};
-use openshape_ui_kit::view_cube::{self, CubeCorner, CubeEdge, CubeFace, CubeTarget, CENTER_HALF};
+use opendatum_render::{Camera, ViewPreset};
+use opendatum_ui_kit::view_cube::{self, CubeCorner, CubeEdge, CubeFace, CubeTarget, CENTER_HALF};
 use proptest::prelude::*;
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 

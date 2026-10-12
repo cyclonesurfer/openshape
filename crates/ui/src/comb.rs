@@ -11,11 +11,11 @@
 //! ([`Kernel::curvature_samples`]); this module only scales them into
 //! teeth for drawing.
 
-use openshape_core_model::sketch::Geometry;
-use openshape_core_model::{DVec2, SketchId};
-use openshape_features::kernel_curve;
-use openshape_kernel::{CurvatureSample, Kernel};
-use openshape_sketch_solver::ResolvedCurve;
+use opendatum_core_model::sketch::Geometry;
+use opendatum_core_model::{DVec2, SketchId};
+use opendatum_features::kernel_curve;
+use opendatum_kernel::{CurvatureSample, Kernel};
+use opendatum_sketch_solver::ResolvedCurve;
 
 /// Teeth along each combed curve (one more sample than intervals).
 pub const TEETH: usize = 96;
@@ -82,10 +82,10 @@ pub fn comb(samples: &[CurvatureSample], scale: f64) -> Comb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openshape_kernel::{OsKernel, ProfileCurve};
+    use opendatum_kernel::{BrepKernel, ProfileCurve};
 
     fn kernel_samples(c: &ProfileCurve) -> Vec<CurvatureSample> {
-        OsKernel::default().curvature_samples(c, 8).unwrap()
+        BrepKernel::default().curvature_samples(c, 8).unwrap()
     }
 
     #[test]

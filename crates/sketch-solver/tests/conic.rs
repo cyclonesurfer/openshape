@@ -10,7 +10,7 @@ use common::gen::{generate_with_conics, perturb};
 use common::{
     assert_satisfied, bits, cnc, dist_to_conic, pos, resolved, size, violation, worst, B,
 };
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     measure, resolve_curves, solve, Constraint, DVec2, EntityState, Geometry, ResolvedCurve,
     SolveError, SolveOptions, SolveStatus, TangentKind,
 };

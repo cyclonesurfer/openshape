@@ -1,8 +1,8 @@
-//! OpenShape's visual language in one place.
+//! OpenDatum's visual language in one place.
 //!
 //! - [`theme`]: the colour, spacing and type tokens ([`Theme`]) and how they
 //!   map onto egui's style ([`Theme::apply`], [`font_definitions`]).
-//! - [`icons`]: OpenShape's own line-art icon set ([`Icon`], [`paint_icon`])
+//! - [`icons`]: OpenDatum's own line-art icon set ([`Icon`], [`paint_icon`])
 //!   and the square toolbar button that shows them ([`icon_button`]).
 //! - [`view_cube`]: the view-orientation cube for the graphics area, with
 //!   pure picking ([`view_cube::pick`]) and target angles

@@ -16,9 +16,9 @@ use std::collections::BTreeMap;
 use std::f64::consts::TAU;
 
 use glam::DVec2;
-use openshape_core_model::sketch::{Constraint, Geometry};
-use openshape_core_model::{SketchData, SketchId};
-use openshape_sketch_solver::ResolvedCurve;
+use opendatum_core_model::sketch::{Constraint, Geometry};
+use opendatum_core_model::{SketchData, SketchId};
+use opendatum_sketch_solver::ResolvedCurve;
 
 use super::trim::{Plan, Preview};
 use super::{coincidence_classes, Batch, SAME_POINT};

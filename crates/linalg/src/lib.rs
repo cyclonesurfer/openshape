@@ -1,4 +1,4 @@
-//! Deterministic dense linear algebra for OpenShape's solvers (ADR 0010):
+//! Deterministic dense linear algebra for OpenDatum's solvers (ADR 0010):
 //! Householder QR with column pivoting, complete orthogonal decomposition for
 //! least-squares and minimum-norm solves, and one-sided Jacobi SVD, in plain
 //! scalar Rust with a fixed operation order.

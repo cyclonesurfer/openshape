@@ -6,8 +6,8 @@ mod arrangement_util;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use arrangement_util::*;
-use openshape_kernel::arrangement::{arrange, curve_contacts};
-use openshape_kernel::{CurveContact, DVec2, Kernel, KernelError, ProfileCurve, Tolerance};
+use opendatum_kernel::arrangement::{arrange, curve_contacts};
+use opendatum_kernel::{CurveContact, DVec2, Kernel, KernelError, ProfileCurve, Tolerance};
 use proptest::prelude::*;
 
 fn contacts(a: &ProfileCurve, b: &ProfileCurve) -> Vec<CurveContact> {

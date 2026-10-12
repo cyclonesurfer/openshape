@@ -4,7 +4,7 @@
 //! are generated from the custom-feature language's parameter definitions;
 //! for now the built-in feature templates are listed here.
 
-use openshape_core_model::{
+use opendatum_core_model::{
     units::{LengthUnit, Quantity},
     CurveDef, DVec2, DVec3, Feature, FeatureEntry, FeatureId, PlaneRef, ProfileDef, ProfileSource,
     RevolveAxis,
@@ -315,7 +315,7 @@ impl FeatureDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openshape_core_model::{OpId, ReplicaId};
+    use opendatum_core_model::{OpId, ReplicaId};
 
     #[test]
     fn every_template_builds_and_round_trips_through_edit() {

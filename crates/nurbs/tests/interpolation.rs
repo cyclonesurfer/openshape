@@ -1,7 +1,7 @@
 //! Global curve interpolation (acceptance test 5).
 
 use glam::DVec3;
-use openshape_nurbs::{NurbsCurve, NurbsError};
+use opendatum_nurbs::{NurbsCurve, NurbsError};
 use proptest::prelude::*;
 
 /// Chord-length parameters, as used by `interpolate`.

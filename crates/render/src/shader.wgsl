@@ -1,4 +1,4 @@
-// OpenShape viewport shader: gradient background, shaded meshes, edge lines.
+// OpenDatum viewport shader: gradient background, shaded meshes, edge lines.
 //
 // Lighting is computed in linear space. All colours in the uniform block are
 // already linear; mesh vertex colours arrive sRGB-encoded (Unorm8x4) and are

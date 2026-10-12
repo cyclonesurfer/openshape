@@ -1,4 +1,4 @@
-# ADR 0012 — Application look: familiar CAD layout, OpenShape's own visual language
+# ADR 0012 — Application look: familiar CAD layout, OpenDatum's own visual language
 
 Status: accepted (Phase 2)
 
@@ -6,7 +6,7 @@ Status: accepted (Phase 2)
 
 The project owner asked for the application to look and feel as close as
 possible to the browser-based parametric CAD systems its users already know,
-so they can move to OpenShape without relearning the workflow. The project is
+so they can move to OpenDatum without relearning the workflow. The project is
 clean-room ([CLEANROOM.md](../CLEANROOM.md)): no other product's code, icons,
 logos, colours, artwork or name may be used, and the record of how the look
 was made must show that.
@@ -25,13 +25,13 @@ Options:
 | | familiar to users | clean-room | effort |
 |---|---|---|---|
 | A. egui's default look and our own ad-hoc layout | no | yes | none |
-| B. the field's common layout and workflow, drawn in OpenShape's own visual language | yes | yes | moderate |
+| B. the field's common layout and workflow, drawn in OpenDatum's own visual language | yes | yes | moderate |
 | C. a close visual imitation of one product | yes | no | moderate |
 
 ## Decision
 
 Option B. The application shell follows the common parametric-CAD layout
-and workflow, with icons, colours and name that are OpenShape's own.
+and workflow, with icons, colours and name that are OpenDatum's own.
 
 Layout:
 
@@ -64,7 +64,7 @@ Layout:
 
 Visual language:
 
-* **Icons** are original drawings made for OpenShape, in code
+* **Icons** are original drawings made for OpenDatum, in code
   (`crates/ui-kit/src/icons.rs`), designed on a 24-unit grid as thin line
   art. Each icon's documentation says what it depicts. No icon is copied,
   traced or imitated from any product or icon set, and no image files are
@@ -72,12 +72,12 @@ Visual language:
 * **Colours, spacing and text sizes** are tokens in one place
   (`crates/ui-kit/src/theme.rs`, `Theme::light()`); every part of the UI,
   including sketch and selection colours, takes its colours from the theme,
-  so OpenShape can be re-themed (a dark theme later) by adding a `Theme`.
+  so OpenDatum can be re-themed (a dark theme later) by adding a `Theme`.
 * **Palette: the feel, not the values.** The project owner asked for the
   colours to feel like the browser-based CAD tools users know (2026-10-11).
   That feel is a functional convention of the field: light neutral
   surfaces, dark text, thin grey borders, one blue accent for selection and
-  primary actions, a lighter blue for preselection. OpenShape follows it
+  primary actions, a lighter blue for preselection. OpenDatum follows it
   with values chosen here, from that description and these criteria, never
   by sampling, eyedropping or copying another product's colours, screenshots
   or style sheets:
@@ -93,10 +93,10 @@ Visual language:
     a halo so it stays distinct from free geometry.
   `crates/ui-kit/tests/theme.rs` pins these contrast ratios, so a later
   change to the palette has to keep them.
-* **Name and logo** are OpenShape's. No other product's name appears in the
+* **Name and logo** are OpenDatum's. No other product's name appears in the
   product; `crates/ui/tests/cleanroom.rs` enforces it.
 
-The look lives in a separate crate, `openshape-ui-kit` (theme, icons, view
+The look lives in a separate crate, `opendatum-ui-kit` (theme, icons, view
 cube, offscreen egui rendering for screenshots and tests), so the
 application crate only composes it.
 

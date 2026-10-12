@@ -3,9 +3,9 @@
 //! name, icon, shortcut and enabled rule wherever it appears.
 
 use egui::{Key, KeyboardShortcut, Modifiers};
-use openshape_render::DisplayMode;
-use openshape_ui_kit::view_cube::{CubeFace, CubeTarget};
-use openshape_ui_kit::Icon;
+use opendatum_render::DisplayMode;
+use opendatum_ui_kit::view_cube::{CubeFace, CubeTarget};
+use opendatum_ui_kit::Icon;
 
 use crate::dialogs::Template;
 use crate::planes::StdPlane;

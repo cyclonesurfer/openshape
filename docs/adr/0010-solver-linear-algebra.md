@@ -21,7 +21,7 @@ flaky.
    factorizations. Runtime SIMD dispatch and optional multithreading make
    results depend on the CPU and thread count; the API changes often; it
    pulls in a large dependency tree.
-3. **In-house dense kernels** in a small `openshape-linalg` crate:
+3. **In-house dense kernels** in a small `opendatum-linalg` crate:
    Householder QR with column pivoting, complete orthogonal decomposition
    (least-squares and minimum-norm solves), one-sided Jacobi SVD, written in
    plain scalar Rust with a fixed operation order.
@@ -43,7 +43,7 @@ where reproducibility matters.
 
 ## Consequences
 
-* `crates/linalg` (`openshape-linalg`) with property tests against
+* `crates/linalg` (`opendatum-linalg`) with property tests against
   reconstruction identities (A·P = Q·R, A = U·Σ·Vᵀ, orthogonality,
   minimum-norm optimality) on random and rank-deficient matrices.
 * Transcendental functions (`sin`, `atan2`, …) still come from the platform's

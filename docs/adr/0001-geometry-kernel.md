@@ -4,7 +4,7 @@ Status: accepted (Phase 0)
 
 ## Context
 
-The kernel is the largest and riskiest part of OpenShape. It must be pure
+The kernel is the largest and riskiest part of OpenDatum. It must be pure
 Rust, GPL-3.0-compatible, f64, robust, and eventually support booleans,
 fillets, offsets, shelling, healing and STEP-quality geometry. Candidates:
 

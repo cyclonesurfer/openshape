@@ -3,7 +3,7 @@
 use std::f64::consts::TAU;
 
 use glam::{DVec2, DVec3};
-use openshape_nurbs::NurbsCurve;
+use opendatum_nurbs::NurbsCurve;
 
 use super::curve::Crv;
 use super::measure::{RegionShape, Side};

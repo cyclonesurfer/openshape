@@ -47,7 +47,7 @@
 //!   interpolated from their current values; other equations follow the
 //!   Newton homotopy `r(x) − (1 − s)·r(x₀)`.
 
-use openshape_linalg::{dot, lstsq_min_norm, null_space, residual, weighted_min_norm, Matrix};
+use opendatum_linalg::{dot, lstsq_min_norm, null_space, residual, weighted_min_norm, Matrix};
 
 use crate::build::Problem;
 use crate::conic::{self, SHAPE_MAX};

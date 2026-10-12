@@ -108,7 +108,7 @@ its letters when the text moves.
    Licence 1.1, which allows bundling and embedding with any software if
    the copyright notice and licence travel with it; the files are
    unmodified, their licence is shipped next to them, NOTICE names them,
-   and the `openshape-text` crate's licence is
+   and the `opendatum-text` crate's licence is
    `GPL-3.0-or-later AND OFL-1.1` so cargo-deny checks it. Our code stays
    GPL; the fonts stay OFL. (The UI toolkit's own fonts are already OFL
    and UFL, ADR 0009.)

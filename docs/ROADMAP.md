@@ -1,4 +1,4 @@
-# OpenShape roadmap
+# OpenDatum roadmap
 
 Items are ticked only when implemented **and tested**. Each phase ends
 building, tested and runnable, with this file and `STATUS.md` updated.

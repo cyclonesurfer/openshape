@@ -14,7 +14,7 @@
 //! equations are linear and nonsingular, and are eliminated exactly.
 
 use glam::DVec2;
-use openshape_linalg::{CompleteOrthogonal, Matrix};
+use opendatum_linalg::{CompleteOrthogonal, Matrix};
 
 /// A spline as a linear map from its referenced points to its curve.
 #[derive(Clone, Debug)]

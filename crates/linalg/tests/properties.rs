@@ -3,7 +3,7 @@
 //! and bit-for-bit determinism, on random, tall, wide, scaled and
 //! rank-deficient matrices.
 
-use openshape_linalg::{
+use opendatum_linalg::{
     lstsq_min_norm, null_space, select_columns_in_order, svd, weighted_min_norm, Matrix, QrPivoted,
 };
 use proptest::prelude::*;
@@ -178,7 +178,7 @@ proptest! {
         prop_assert!(orthonormality_error(&d.v) <= 1e-13 * (a.cols().max(1) as f64));
         // Largest singular value equals the 2-norm: it bounds every column norm.
         for j in 0..a.cols() {
-            let c = openshape_linalg::norm2(a.col(j));
+            let c = opendatum_linalg::norm2(a.col(j));
             prop_assert!(c <= d.s[0] * (1.0 + 1e-12));
         }
     }
@@ -195,13 +195,13 @@ proptest! {
         let ax = a.mul_vec(&x);
         let res: Vec<f64> = ax.iter().zip(&b).map(|(p, q)| p - q).collect();
         let g = a.tr_mul_vec(&res);
-        let xn = openshape_linalg::norm2(&x);
-        let bn = openshape_linalg::norm2(&b);
-        let gn = openshape_linalg::norm2(&g);
+        let xn = opendatum_linalg::norm2(&x);
+        let bn = opendatum_linalg::norm2(&b);
+        let gn = opendatum_linalg::norm2(&g);
         prop_assert!(gn <= 1e-10 * (an * an * xn + an * bn) + 1e-300, "‖Aᵀr‖ = {gn:e}");
         // Minimum norm: x is orthogonal to the null space.
         let nsp = null_space(&a, RANK_TOL);
-        let proj = openshape_linalg::projection_norm(&nsp, &x);
+        let proj = opendatum_linalg::projection_norm(&nsp, &x);
         prop_assert!(proj <= 1e-10 * xn + 1e-300, "null-space component {proj:e}");
         // Agrees with the SVD pseudo-inverse.
         let d = svd(&a);
@@ -209,11 +209,11 @@ proptest! {
         let mut xs = vec![0.0; n];
         for i in 0..k {
             let ui = d.u.col(i);
-            let c = openshape_linalg::dot(ui, &b) / d.s[i];
-            openshape_linalg::axpy(c, d.v.col(i), &mut xs);
+            let c = opendatum_linalg::dot(ui, &b) / d.s[i];
+            opendatum_linalg::axpy(c, d.v.col(i), &mut xs);
         }
         let diff: Vec<f64> = x.iter().zip(&xs).map(|(p, q)| p - q).collect();
-        prop_assert!(openshape_linalg::norm2(&diff) <= 1e-8 * xn.max(1e-300) + 1e-300,
+        prop_assert!(opendatum_linalg::norm2(&diff) <= 1e-8 * xn.max(1e-300) + 1e-300,
             "x differs from the SVD pseudo-inverse solution");
     }
 
@@ -250,9 +250,9 @@ proptest! {
         let wmax = w.iter().cloned().fold(0.0, f64::max);
         let wmin = w.iter().cloned().fold(f64::INFINITY, f64::min);
         let cond_w = (wmax / wmin).sqrt();
-        let xn = openshape_linalg::norm2(x);
-        let bn = openshape_linalg::norm2(&b);
-        prop_assert!(openshape_linalg::norm2(&g) <= 1e-9 * cond_w * (an * an * xn + an * bn) + 1e-300);
+        let xn = opendatum_linalg::norm2(x);
+        let bn = opendatum_linalg::norm2(&b);
+        prop_assert!(opendatum_linalg::norm2(&g) <= 1e-9 * cond_w * (an * an * xn + an * bn) + 1e-300);
         // Optimality of ‖W^{1/2}x‖ over x + null(A): W x ⟂ null(A W^{-1/2})
         // mapped back, i.e. W x ⟂ null(A) when null(A) is computed for the
         // weighted matrix's rank decision. Use the weighted null space.
@@ -262,8 +262,8 @@ proptest! {
         let nw = null_space(&aw, RANK_TOL);
         // y = W^{1/2} x must be orthogonal to null(A W^{-1/2}).
         let y: Vec<f64> = x.iter().zip(&w).map(|(xi, wi)| xi * wi.sqrt()).collect();
-        let yn = openshape_linalg::norm2(&y);
-        prop_assert!(openshape_linalg::projection_norm(&nw, &y) <= 1e-10 * yn + 1e-300);
+        let yn = opendatum_linalg::norm2(&y);
+        prop_assert!(opendatum_linalg::projection_norm(&nw, &y) <= 1e-10 * yn + 1e-300);
     }
 
     #[test]
@@ -285,7 +285,7 @@ proptest! {
             let coef = lstsq_min_norm(&sub, a.col(j), RANK_TOL);
             let fit = sub.mul_vec(&coef);
             let d: Vec<f64> = fit.iter().zip(a.col(j)).map(|(p, q)| p - q).collect();
-            prop_assert!(openshape_linalg::norm2(&d) <= 1e-9 * an + 1e-300);
+            prop_assert!(opendatum_linalg::norm2(&d) <= 1e-9 * an + 1e-300);
         }
     }
 

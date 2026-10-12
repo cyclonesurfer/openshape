@@ -21,7 +21,7 @@ editor, command palette, docking, multi-window, HiDPI, themes).
 ## Decision
 
 egui with eframe's wgpu backend (wayland + x11 features). The viewport is
-rendered by `openshape-render` into an offscreen texture registered with
+rendered by `opendatum-render` into an offscreen texture registered with
 egui-wgpu, so the renderer is shared verbatim with headless tests (ADR 0007).
 
 ## Consequences
@@ -29,5 +29,5 @@ egui-wgpu, so the renderer is shared verbatim with headless tests (ADR 0007).
 * Auto-generated feature dialogs (needed for the custom-feature language)
   fall out naturally from immediate mode.
 * Very large trees/tables must be virtualized (`ScrollArea::show_rows`).
-* egui pins a wgpu major version; `openshape-render` must track it
+* egui pins a wgpu major version; `opendatum-render` must track it
   (currently wgpu 30 with egui 0.36).

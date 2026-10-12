@@ -2,9 +2,9 @@
 //! renderer's own output (crates/ui/src/viewport.rs): egui samples native
 //! textures as gamma-encoded bytes, so it must not read the sRGB view.
 
-use openshape_app::viewport::{scene_format, ViewportTexture};
-use openshape_render::{read_texture_rgba8, wgpu, Camera, MeshData, SceneRenderer};
-use openshape_ui_kit::snapshot::UiSnapshot;
+use opendatum_app::viewport::{scene_format, ViewportTexture};
+use opendatum_render::{read_texture_rgba8, wgpu, Camera, MeshData, SceneRenderer};
+use opendatum_ui_kit::snapshot::UiSnapshot;
 
 const W: u32 = 160;
 const H: u32 = 120;

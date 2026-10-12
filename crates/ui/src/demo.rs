@@ -1,15 +1,15 @@
 //! Headless end-to-end demo: builds parts through the op log, renders them
 //! offscreen with the shipping renderer, orbits the camera, and checks that
 //! undo/redo, save/open and STL export behave. Used by CI (on Mesa's software
-//! Vulkan) and runnable with `openshape --headless-demo <dir>`.
+//! Vulkan) and runnable with `opendatum --headless-demo <dir>`.
 
 use std::path::{Path, PathBuf};
 
-use openshape_core_model::{
+use opendatum_core_model::{
     CurveDef, DVec2, DVec3, Feature, PlaneRef, ProfileDef, ProfileSource, RevolveAxis,
 };
-use openshape_kernel::Kernel;
-use openshape_render::{write_png, Camera, OffscreenRenderer, RgbaImage};
+use opendatum_kernel::Kernel;
+use opendatum_render::{write_png, Camera, OffscreenRenderer, RgbaImage};
 
 use crate::dialogs::{FeatureDialog, Template};
 use crate::Model;
@@ -183,7 +183,7 @@ pub fn run(out: &Path) -> Result<DemoReport, String> {
                 .bodies()
                 .statuses
                 .iter()
-                .all(|(_, s)| *s == openshape_features::FeatureStatus::Ok),
+                .all(|(_, s)| *s == opendatum_features::FeatureStatus::Ok),
     );
 
     // 4. Undo/redo through the op log; images must match the earlier states
@@ -213,7 +213,7 @@ pub fn run(out: &Path) -> Result<DemoReport, String> {
     );
 
     // 5. Save the op log, reopen it, render the same image.
-    let doc = out.join("demo.osdoc");
+    let doc = out.join("demo.odatum");
     model.save(&doc)?;
     let reopened = Model::open(&doc)?;
     let ro = render(&reopened, &camera)?;

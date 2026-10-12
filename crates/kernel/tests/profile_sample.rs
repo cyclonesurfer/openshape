@@ -2,7 +2,7 @@
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
-use openshape_kernel::{DVec2, Kernel, OsKernel, ProfileCurve};
+use opendatum_kernel::{BrepKernel, DVec2, Kernel, ProfileCurve};
 
 fn close(a: DVec2, b: DVec2) -> bool {
     (a - b).length() < 1e-12
@@ -68,7 +68,7 @@ fn an_invalid_spline_is_an_error() {
 
 #[test]
 fn region_containing_through_the_kernel_trait() {
-    let k = OsKernel::default();
+    let k = BrepKernel::default();
     let curves = vec![
         ProfileCurve::Circle {
             center: DVec2::ZERO,

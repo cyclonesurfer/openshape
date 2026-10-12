@@ -14,11 +14,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::TAU;
 
 use glam::DVec2;
-use openshape_core_model::sketch::{Constraint, Geometry, TangentKind};
-use openshape_core_model::{SketchData, SketchEdit, SketchId};
-use openshape_features::kernel_curve;
-use openshape_kernel::{Kernel, ProfileCurve, Tolerance};
-use openshape_sketch_solver::{conic, ResolvedCurve, RHO_MIN};
+use opendatum_core_model::sketch::{Constraint, Geometry, TangentKind};
+use opendatum_core_model::{SketchData, SketchEdit, SketchId};
+use opendatum_features::kernel_curve;
+use opendatum_kernel::{Kernel, ProfileCurve, Tolerance};
+use opendatum_sketch_solver::{conic, ResolvedCurve, RHO_MIN};
 
 use super::shapes::{closest_anomaly, eccentric_anomaly, ellipse_point};
 use super::{coincidence_classes, deletion, own_axes, text, Batch, UnionFind};
@@ -897,7 +897,7 @@ impl<'a> Rewrite<'a> {
 
     fn live(
         &self,
-    ) -> impl Iterator<Item = &'a openshape_core_model::sketch::ConstraintEntry<SketchId>> + '_
+    ) -> impl Iterator<Item = &'a opendatum_core_model::sketch::ConstraintEntry<SketchId>> + '_
     {
         self.sketch
             .constraints

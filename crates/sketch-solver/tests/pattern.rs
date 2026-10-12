@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use common::gen::{generate, perturb, Rng};
 use common::{assert_satisfied, pattern_violation, pos, size, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     solve, Constraint, ConstraintEntry, DVec2, Entity, EntityState, Geometry, Sketch, SolveError,
     SolveOptions, SolveStatus,
 };

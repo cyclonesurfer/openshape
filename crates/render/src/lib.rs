@@ -1,4 +1,4 @@
-//! OpenShape 3D viewport renderer (wgpu).
+//! OpenDatum 3D viewport renderer (wgpu).
 //!
 //! This crate turns neutral mesh data into shaded, edge-outlined images. It
 //! depends neither on the CAD kernel nor on the UI toolkit:
@@ -15,14 +15,14 @@
 //!   [`write_png`] saves them.
 //!
 //! ```no_run
-//! use openshape_render::{Camera, MeshData, OffscreenRenderer, write_png};
+//! use opendatum_render::{Camera, MeshData, OffscreenRenderer, write_png};
 //!
 //! let cube = MeshData::cuboid([-0.5; 3], [0.5; 3], MeshData::DEFAULT_COLOR);
 //! let camera = Camera::isometric().fitted([-0.5; 3], [0.5; 3]);
 //! let mut renderer = OffscreenRenderer::new()?;
 //! let image = renderer.render_meshes_rgba(&[cube], &camera, 640, 480)?;
 //! write_png("cube.png", &image)?;
-//! # Ok::<(), openshape_render::RenderError>(())
+//! # Ok::<(), opendatum_render::RenderError>(())
 //! ```
 
 pub mod camera;

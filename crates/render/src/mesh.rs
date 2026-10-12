@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// A displayable body: a triangle mesh plus its B-rep edges as line segments.
 ///
 /// Conventions:
-/// - Coordinates are in model space (OpenShape uses metres, Z up), but the
+/// - Coordinates are in model space (OpenDatum uses metres, Z up), but the
 ///   renderer is unit-agnostic: the camera derives its clip planes from the
 ///   scene bounds, so 1 mm parts and 10 m assemblies both render correctly.
 /// - Triangles are counter-clockwise when seen from outside. Back faces are

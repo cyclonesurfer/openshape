@@ -1,5 +1,5 @@
 [package]
-name = "openshape-core-model"
+name = "opendatum-core-model"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,8 +8,8 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-openshape-oplog.workspace = true
-openshape-sketch-solver.workspace = true
+opendatum-oplog.workspace = true
+opendatum-sketch-solver.workspace = true
 glam.workspace = true
 serde.workspace = true
 thiserror.workspace = true

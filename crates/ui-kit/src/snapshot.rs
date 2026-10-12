@@ -1,10 +1,10 @@
 //! Offscreen egui rendering for screenshots and pixel tests.
 //!
 //! [`UiSnapshot`] owns an egui [`egui::Context`], a headless wgpu device
-//! chosen like the 3D renderer's ([`openshape_render::BACKEND_ENV_VAR`],
+//! chosen like the 3D renderer's ([`opendatum_render::BACKEND_ENV_VAR`],
 //! Vulkan preferred, Mesa lavapipe in CI) and an [`egui_wgpu::Renderer`].
 //! Each [`UiSnapshot::frame`] runs one egui pass, renders it into an RGBA8
-//! texture and reads it back as an [`openshape_render::RgbaImage`], so a
+//! texture and reads it back as an [`opendatum_render::RgbaImage`], so a
 //! [`Color32`](egui::Color32) painted as a solid fill reads back as the same
 //! sRGB bytes.
 //!
@@ -26,8 +26,8 @@
 //! on every GPU as far as the hardware allows.
 
 use egui::mutex::RwLock;
-use openshape_render::offscreen::HeadlessGpu;
-use openshape_render::{read_texture_rgba8, RenderError, RgbaImage};
+use opendatum_render::offscreen::HeadlessGpu;
+use opendatum_render::{read_texture_rgba8, RenderError, RgbaImage};
 use std::sync::Arc;
 
 /// Renders egui frames offscreen and reads them back.
@@ -78,7 +78,7 @@ impl UiSnapshot {
             pixels_per_point.is_finite() && pixels_per_point > 0.0,
             "pixels_per_point must be positive and finite, got {pixels_per_point}"
         );
-        let gpu = HeadlessGpu::new("openshape-ui-kit snapshot")?;
+        let gpu = HeadlessGpu::new("opendatum-ui-kit snapshot")?;
         let max = gpu.device.limits().max_texture_dimension_2d;
         let [width, height] = size;
         if width == 0 || height == 0 || width > max || height > max {
@@ -87,7 +87,7 @@ impl UiSnapshot {
         let renderer =
             egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::PREDICTABLE);
         let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("openshape-ui-kit snapshot target"),
+            label: Some("opendatum-ui-kit snapshot target"),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -103,7 +103,7 @@ impl UiSnapshot {
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
         let info = gpu.adapter.get_info();
         log::info!(
-            "openshape-ui-kit: snapshot on {} ({:?})",
+            "opendatum-ui-kit: snapshot on {} ({:?})",
             info.name,
             info.backend
         );
@@ -230,7 +230,7 @@ impl UiSnapshot {
         );
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("openshape-ui-kit snapshot frame"),
+            label: Some("opendatum-ui-kit snapshot frame"),
         });
         let user_buffers = {
             let mut renderer = self.renderer.write();
@@ -245,7 +245,7 @@ impl UiSnapshot {
             let renderer = self.renderer.read();
             let mut pass = encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("openshape-ui-kit snapshot pass"),
+                    label: Some("opendatum-ui-kit snapshot pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &self.view,
                         depth_slice: None,

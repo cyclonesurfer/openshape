@@ -1,6 +1,6 @@
 [package]
-name = "openshape-linalg"
-description = "Deterministic dense linear algebra for OpenShape's solvers"
+name = "opendatum-linalg"
+description = "Deterministic dense linear algebra for OpenDatum's solvers"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

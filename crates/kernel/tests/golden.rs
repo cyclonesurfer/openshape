@@ -5,14 +5,14 @@
 use std::collections::HashMap;
 use std::f64::consts::{PI, TAU};
 
-use openshape_kernel::{
-    BodyMesh, DVec2, DVec3, ExtrudeSpec, Frame, Kernel, OsKernel, Profile, ProfileCurve,
+use opendatum_kernel::{
+    BodyMesh, BrepKernel, DVec2, DVec3, ExtrudeSpec, Frame, Kernel, Profile, ProfileCurve,
     RevolveSpec, SurfaceKind, TessellationOptions,
 };
 use proptest::prelude::*;
 
-fn k() -> OsKernel {
-    OsKernel::default()
+fn k() -> BrepKernel {
+    BrepKernel::default()
 }
 
 /// Asserts the welded mesh is closed and consistently oriented: every
@@ -38,7 +38,7 @@ fn assert_watertight(mesh: &BodyMesh) {
 }
 
 /// Total polyline length of the seam edges and of the crease edges.
-fn seam_and_crease_length(body: &openshape_kernel::Body) -> (f64, f64) {
+fn seam_and_crease_length(body: &opendatum_kernel::Body) -> (f64, f64) {
     let opts = TessellationOptions {
         chord_tolerance: 1e-5,
         max_angle: 2f64.to_radians(),
@@ -73,7 +73,7 @@ struct Expect {
     rel: f64,
 }
 
-fn check(body: &openshape_kernel::Body, e: Expect) {
+fn check(body: &opendatum_kernel::Body, e: Expect) {
     let kern = k();
     let issues = kern.validate(body);
     assert!(issues.is_empty(), "invalid body: {issues:?}");
@@ -389,7 +389,7 @@ fn spline_samples(c: &ProfileCurve, n: usize) -> Vec<DVec2> {
     else {
         panic!("not a spline")
     };
-    let curve = openshape_nurbs::NurbsCurve::new(
+    let curve = opendatum_nurbs::NurbsCurve::new(
         *degree,
         knots.clone(),
         points.iter().map(|p| p.extend(0.0)).collect(),
@@ -461,7 +461,7 @@ fn spline_profile_extrude() {
     assert!(k().face_kinds(&b).contains(&SurfaceKind::Extrusion));
 }
 
-fn revolve_z(p: Profile, angle: f64) -> openshape_kernel::Body {
+fn revolve_z(p: Profile, angle: f64) -> opendatum_kernel::Body {
     k().revolve(
         &p,
         &RevolveSpec {

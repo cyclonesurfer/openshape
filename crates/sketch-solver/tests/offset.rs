@@ -10,7 +10,7 @@ mod common;
 
 use common::gen::Rng;
 use common::{assert_satisfied, offset_violation, pos, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     solve, Constraint, ConstraintEntry, DVec2, Geometry, Sketch, SolveError, SolveOptions,
     SolveStatus, TangentKind,
 };

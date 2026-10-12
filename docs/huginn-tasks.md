@@ -26,7 +26,7 @@ Every prompt below sends the agent here first. Follow these on every task.
      pass. Say what you did not run.
    - Stop and escalate on a correctness problem you can't fix properly. Tell
      Pat the specifics and the options instead of working around it.
-   - Clean room: OpenShape is an independent implementation. Don't consult
+   - Clean room: OpenDatum is an independent implementation. Don't consult
      or copy code, shaders, assets or file formats from any commercial CAD
      product.
    - Before any commit, all four checks must pass: `cargo fmt --all`,
@@ -43,12 +43,12 @@ Every prompt below sends the agent here first. Follow these on every task.
    - When a task allows fixes, work on a branch named `gpu/<topic>` and push
      only that branch. The cloud project reviews and merges it.
 4. **Use the real GPU.**
-   - Export `OPENSHAPE_WGPU_BACKEND=vulkan` for cargo commands
+   - Export `OPENDATUM_WGPU_BACKEND=vulkan` for cargo commands
      (`scripts/gpu-check.sh` sets it itself).
    - The `adapter:` lines must name the AMD card (RADV). If one says
      llvmpipe or lavapipe, the run used the CPU renderer: stop and report
      that first.
-5. **Report back.** Pat pastes your report into the OpenShape project, so
+5. **Report back.** Pat pastes your report into the project chat, so
    finish with one fenced block of at most 60 lines. It contains:
    - the commit (`git rev-parse --short HEAD`) and the adapter line;
    - PASS/FAIL per step, with test totals;
@@ -83,11 +83,11 @@ Use this before merging rendering or GPU-facing changes.
 In ~/openshape, run `git switch main && git pull --ff-only`, read CLAUDE.md
 and the "Ground rules" section of docs/huginn-tasks.md, and follow them. Then
 check out <branch name, or PR number via `gh pr checkout <n>`>. With
-OPENSHAPE_WGPU_BACKEND=vulkan, run:
+OPENDATUM_WGPU_BACKEND=vulkan, run:
   cargo build --release --workspace --all-targets
-  cargo test --release -p openshape-render -- --nocapture
+  cargo test --release -p opendatum-render -- --nocapture
   cargo test --release --workspace --no-fail-fast
-  cargo run --release -p openshape -- --headless-demo /tmp/os-demo
+  cargo run --release -p opendatum -- --headless-demo /tmp/os-demo
 For every test that fails on the branch, run the same test on main and say
 whether the failure is new. Change no code.
 Report per command: exit status, totals, failures with assertion text and
@@ -102,10 +102,10 @@ Use this to track frame times against the roadmap goal of 60 fps (16.7 ms) at
 ```text
 In ~/openshape, run `git switch main && git pull --ff-only`, read CLAUDE.md
 and the "Ground rules" section of docs/huginn-tasks.md, and follow them. Close
-other GPU-heavy programs. With OPENSHAPE_WGPU_BACKEND=vulkan, run each of
+other GPU-heavy programs. With OPENDATUM_WGPU_BACKEND=vulkan, run each of
 these three times:
-  cargo run --release -p openshape -- --bench /tmp/os-bench 600
-  cargo test --release -p openshape-render --test offscreen thousand_instances_timing -- --nocapture
+  cargo run --release -p opendatum -- --bench /tmp/os-bench 600
+  cargo test --release -p opendatum-render --test offscreen thousand_instances_timing -- --nocapture
 Change no code.
 Report for each run: the adapter, the scene (triangles, edge segments,
 resolution), the frame time mean/median/p95/p99/max and fps from bench.txt,
@@ -126,10 +126,10 @@ allows code changes, on a `gpu/<topic>` branch.
 In ~/openshape, run `git switch main && git pull --ff-only`, read CLAUDE.md
 and the "Ground rules" section of docs/huginn-tasks.md, and follow them.
 <test name> fails on this GPU but passes on CI's software renderer
-(lavapipe). Reproduce it with OPENSHAPE_WGPU_BACKEND=vulkan. Set
-OPENSHAPE_RENDER_TEST_OUT=/tmp/os-render to save the test images, then find
+(lavapipe). Reproduce it with OPENDATUM_WGPU_BACKEND=vulkan. Set
+OPENDATUM_RENDER_TEST_OUT=/tmp/os-render to save the test images, then find
 the root cause. Decide which case it is:
-(a) a bug in OpenShape: fix the code;
+(a) a bug in OpenDatum: fix the code;
 (b) a driver bug: write a minimal reproduction and report it, without
     working around it silently;
 (c) a test that assumes something the graphics APIs don't guarantee: stop

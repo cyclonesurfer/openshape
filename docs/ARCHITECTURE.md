@@ -1,6 +1,6 @@
-# OpenShape architecture
+# OpenDatum architecture
 
-OpenShape is a history-based parametric CAD system. Its single source of
+OpenDatum is a history-based parametric CAD system. Its single source of
 truth is a document's **operation log**; everything the user sees is derived
 from it by deterministic replay and regeneration.
 
@@ -33,7 +33,7 @@ from it by deterministic replay and regeneration.
 | Assemblies | `mate-solver` | Phase 6 |
 | Custom features | `script` | Phase 9 |
 | Viewport | `render` | Phase 0 ✔ (shaded + edges, orbit camera, offscreen) |
-| Application shell | `ui` (binary `openshape`) | Phase 0 ✔ (egui, feature tree, undo/redo) |
+| Application shell | `ui` (binary `opendatum`) | Phase 0 ✔ (egui, feature tree, undo/redo) |
 | Formats | `io` | STL export ✔; rest per ROADMAP |
 | Drawings | `drawing` | Phase 7 |
 | Simulation | `sim` | Phase 11 |
@@ -66,9 +66,9 @@ from it by deterministic replay and regeneration.
 
 ## Deployment modes
 
-1. **Solo desktop** (`openshape` binary): local, offline; documents are op-log
+1. **Solo desktop** (`opendatum` binary): local, offline; documents are op-log
    files on disk (ADR 0005, `docs/NATIVE_FORMAT.md`). Never links the server.
-2. **Client/server** (Phase 10): `openshape-server` hosts the same op logs;
+2. **Client/server** (Phase 10): `opendatum-server` hosts the same op logs;
    clients exchange ops using `OpLog::missing_for` / `integrate`, which already
    handle out-of-order delivery and concurrent edits.
 

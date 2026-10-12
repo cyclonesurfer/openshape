@@ -1,4 +1,4 @@
-//! Lays out a line of text in one of OpenShape's bundled fonts as closed
+//! Lays out a line of text in one of OpenDatum's bundled fonts as closed
 //! outline contours, for sketch text (ADR 0015).
 //!
 //! The layout is in **box units**: the text's box is 1 high (the font's line

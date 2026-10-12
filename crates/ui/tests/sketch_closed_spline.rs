@@ -14,12 +14,12 @@
 mod common;
 
 use common::*;
-use openshape_app::sketch_mode::{sample_resolved, ConstraintTool, SketchEditor, Tool};
-use openshape_app::Model;
-use openshape_core_model::sketch::{Constraint, Geometry};
-use openshape_core_model::{DVec2, FeatureId, SketchId};
-use openshape_kernel::Kernel;
-use openshape_sketch_solver::{ResolvedCurve, SolveStatus};
+use opendatum_app::sketch_mode::{sample_resolved, ConstraintTool, SketchEditor, Tool};
+use opendatum_app::Model;
+use opendatum_core_model::sketch::{Constraint, Geometry};
+use opendatum_core_model::{DVec2, FeatureId, SketchId};
+use opendatum_kernel::Kernel;
+use opendatum_sketch_solver::{ResolvedCurve, SolveStatus};
 use std::collections::BTreeSet;
 
 /// Five-point Gauss–Legendre nodes and weights on [−1, 1].
@@ -295,7 +295,7 @@ fn seams_and_creases(m: &Model, feature: FeatureId) -> (f64, f64) {
         .iter()
         .find(|b| b.feature == feature)
         .expect("a body");
-    let opts = openshape_kernel::TessellationOptions {
+    let opts = opendatum_kernel::TessellationOptions {
         chord_tolerance: 1e-7,
         max_angle: 1f64.to_radians(),
     };

@@ -6,14 +6,14 @@ use eframe::egui;
 use egui::{
     Align, Area, Id, Key, Layout, Order, Pos2, Rect, Response, RichText, Sense, Stroke, Ui, Vec2,
 };
-use openshape_core_model::sketch::DistanceKind;
-use openshape_core_model::ModelOp;
-use openshape_features::FeatureStatus;
-use openshape_text::Font;
-use openshape_ui_kit::palette::{PaletteEntry, PaletteOutcome};
-use openshape_ui_kit::{icon_button, paint_icon, Icon, Theme};
+use opendatum_core_model::sketch::DistanceKind;
+use opendatum_core_model::ModelOp;
+use opendatum_features::FeatureStatus;
+use opendatum_text::Font;
+use opendatum_ui_kit::palette::{PaletteEntry, PaletteOutcome};
+use opendatum_ui_kit::{icon_button, paint_icon, Icon, Theme};
 
-use crate::app::{Action, FileAction, OpenShapeApp, Selection};
+use crate::app::{Action, FileAction, OpenDatumApp, Selection};
 use crate::commands::Command;
 use crate::dialogs::FieldKind;
 use crate::profile_pick::SweepKind;
@@ -135,7 +135,7 @@ fn field(ui: &mut Ui, theme: &Theme, label: &str, text: &mut String, unit: &str)
     ui.end_row();
 }
 
-impl OpenShapeApp {
+impl OpenDatumApp {
     /// Why the open dialog's previewed feature does not regenerate.
     fn preview_failure(&self) -> Option<String> {
         match self.model.preview_status()? {

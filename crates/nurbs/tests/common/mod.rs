@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use glam::DVec3;
-use openshape_nurbs::{NurbsCurve, NurbsSurface};
+use opendatum_nurbs::{NurbsCurve, NurbsSurface};
 use proptest::prelude::*;
 
 /// Clamped knot vector for `n_ctrl` control points of degree `p` whose spans

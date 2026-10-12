@@ -6,12 +6,12 @@ use eframe::egui;
 use egui::{
     Align2, Color32, CursorIcon, FontId, Pos2, Rect, Response, RichText, Sense, Stroke, Ui, Vec2,
 };
-use openshape_core_model::{Feature, FeatureId, InsertAt, ModelOp};
-use openshape_features::FeatureStatus;
-use openshape_kernel::Kernel;
-use openshape_ui_kit::{paint_icon, Icon, Theme};
+use opendatum_core_model::{Feature, FeatureId, InsertAt, ModelOp};
+use opendatum_features::FeatureStatus;
+use opendatum_kernel::Kernel;
+use opendatum_ui_kit::{paint_icon, Icon, Theme};
 
-use crate::app::{Action, OpenShapeApp, PartProperties, Renaming, Selection};
+use crate::app::{Action, OpenDatumApp, PartProperties, Renaming, Selection};
 use crate::commands::Command;
 use crate::planes::StdPlane;
 use crate::shell::menu_row;
@@ -139,7 +139,7 @@ pub fn feature_icon(f: &Feature) -> Icon {
     }
 }
 
-impl OpenShapeApp {
+impl OpenDatumApp {
     pub(crate) fn feature_list(&mut self, ui: &mut Ui) {
         let theme = self.theme.clone();
         egui::Panel::left("feature list")
@@ -329,7 +329,7 @@ impl OpenShapeApp {
         &mut self,
         ui: &mut Ui,
         theme: &Theme,
-        f: &openshape_core_model::FeatureEntry,
+        f: &opendatum_core_model::FeatureEntry,
         index: usize,
         rolled_back: bool,
     ) -> Rect {

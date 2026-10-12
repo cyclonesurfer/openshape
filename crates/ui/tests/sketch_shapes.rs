@@ -5,13 +5,13 @@
 mod common;
 
 use common::*;
-use openshape_app::sketch_mode::{Inference, Tool};
-use openshape_core_model::sketch::{Constraint, Geometry};
-use openshape_core_model::DVec2;
-use openshape_sketch_solver::{ResolvedCurve, SolveStatus};
+use opendatum_app::sketch_mode::{Inference, Tool};
+use opendatum_core_model::sketch::{Constraint, Geometry};
+use opendatum_core_model::DVec2;
+use opendatum_sketch_solver::{ResolvedCurve, SolveStatus};
 use std::f64::consts::PI;
 
-fn lines(m: &openshape_app::Model, f: openshape_core_model::FeatureId) -> Vec<(DVec2, DVec2)> {
+fn lines(m: &opendatum_app::Model, f: opendatum_core_model::FeatureId) -> Vec<(DVec2, DVec2)> {
     curves(m, f, false)
         .into_iter()
         .filter_map(|(_, c)| match c {
@@ -254,9 +254,9 @@ fn tangent_arc_needs_a_curve_end() {
 
 /// Draws a line from `a` to `b` (millimetres) and ends the chain.
 fn line(
-    m: &mut openshape_app::Model,
-    ed: &mut openshape_app::sketch_mode::SketchEditor,
-    map: &openshape_app::sketch_mode::ScreenMap,
+    m: &mut opendatum_app::Model,
+    ed: &mut opendatum_app::sketch_mode::SketchEditor,
+    map: &opendatum_app::sketch_mode::ScreenMap,
     a: DVec2,
     b: DVec2,
 ) {

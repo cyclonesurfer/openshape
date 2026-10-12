@@ -7,10 +7,10 @@ mod common;
 
 use common::*;
 use egui::Pos2;
-use openshape_app::sketch_mode::{annotations, Annotation, Pick, ScreenMap, SketchEditor, Tool};
-use openshape_app::Model;
-use openshape_core_model::sketch::{Constraint, DistanceKind};
-use openshape_core_model::{DVec2, SketchId};
+use opendatum_app::sketch_mode::{annotations, Annotation, Pick, ScreenMap, SketchEditor, Tool};
+use opendatum_app::Model;
+use opendatum_core_model::sketch::{Constraint, DistanceKind};
+use opendatum_core_model::{DVec2, SketchId};
 
 /// The label of dimension `id` as drawn.
 fn label(m: &Model, ed: &SketchEditor, map: &ScreenMap, id: SketchId) -> Annotation {

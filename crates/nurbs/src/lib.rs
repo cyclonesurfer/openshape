@@ -1,6 +1,6 @@
-//! NURBS curves and surfaces for the OpenShape geometry kernel.
+//! NURBS curves and surfaces for the OpenDatum geometry kernel.
 //!
-//! This crate is kernel-private: only `openshape-kernel` depends on it. It
+//! This crate is kernel-private: only `opendatum-kernel` depends on it. It
 //! implements the core algorithms of *The NURBS Book* (Piegl & Tiller, 2nd
 //! edition) in `f64`:
 //!

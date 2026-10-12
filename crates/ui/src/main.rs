@@ -1,21 +1,21 @@
-//! OpenShape desktop application entry point.
+//! OpenDatum desktop application entry point.
 //!
 //! ```text
-//! openshape                         # windowed app (Wayland or X11)
-//! openshape <file.osdoc>            # open a document
-//! openshape --headless-demo <dir>   # offscreen end-to-end demo, writes PNGs
-//! openshape --screenshots <dir>     # the application shell offscreen, writes PNGs
-//! openshape --bench <dir> [frames]  # offscreen frame-time benchmark
-//! openshape --version               # prints the version
+//! opendatum                         # windowed app (Wayland or X11)
+//! opendatum <file.odatum>            # open a document
+//! opendatum --headless-demo <dir>   # offscreen end-to-end demo, writes PNGs
+//! opendatum --screenshots <dir>     # the application shell offscreen, writes PNGs
+//! opendatum --bench <dir> [frames]  # offscreen frame-time benchmark
+//! opendatum --version               # prints the version
 //! ```
 //!
-//! `OPENSHAPE_WGPU_BACKEND=vulkan|gl|any` restricts the window's graphics
+//! `OPENDATUM_WGPU_BACKEND=vulkan|gl|any` restricts the window's graphics
 //! backend as it does the offscreen renderer's.
 
 use std::path::PathBuf;
 
-use openshape_app::{app::OpenShapeApp, demo, screenshots, Model};
-use openshape_render::BackendPreference;
+use opendatum_app::{app::OpenDatumApp, demo, screenshots, Model};
+use opendatum_render::BackendPreference;
 
 fn main() -> std::process::ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
@@ -101,7 +101,7 @@ fn main() -> std::process::ExitCode {
         };
     }
     if args.first().map(String::as_str) == Some("--version") {
-        println!("openshape {}", env!("CARGO_PKG_VERSION"));
+        println!("opendatum {}", env!("CARGO_PKG_VERSION"));
         return std::process::ExitCode::SUCCESS;
     }
     let model = match args.first() {
@@ -116,7 +116,7 @@ fn main() -> std::process::ExitCode {
     };
     let mut options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("OpenShape")
+            .with_title("OpenDatum")
             .with_inner_size([1280.0, 800.0]),
         ..Default::default()
     };
@@ -130,18 +130,18 @@ fn main() -> std::process::ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("openshape: {e}");
+            eprintln!("opendatum: {e}");
             return std::process::ExitCode::FAILURE;
         }
     }
     match eframe::run_native(
-        "OpenShape",
+        "OpenDatum",
         options,
-        Box::new(|cc| Ok(Box::new(OpenShapeApp::new(cc, model)))),
+        Box::new(|cc| Ok(Box::new(OpenDatumApp::new(cc, model)))),
     ) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("openshape: {e}");
+            eprintln!("opendatum: {e}");
             std::process::ExitCode::FAILURE
         }
     }

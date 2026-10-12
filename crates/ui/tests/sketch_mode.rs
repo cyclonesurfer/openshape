@@ -4,15 +4,15 @@
 //! the solver's diagnostics, the regions and the bodies built from them.
 
 use egui::{Pos2, Rect};
-use openshape_app::profile_pick::{ProfilePick, SweepKind};
-use openshape_app::sketch_mode::{normal_view, ConstraintTool, ScreenMap, SketchEditor, Tool};
-use openshape_app::Model;
-use openshape_core_model::sketch::{Constraint, Geometry};
-use openshape_core_model::{DVec2, DVec3, FeatureId, PlaneRef};
-use openshape_features::FeatureStatus;
-use openshape_kernel::{Frame, Kernel};
-use openshape_render::{Camera, Projection};
-use openshape_sketch_solver::{SolveError, SolveStatus};
+use opendatum_app::profile_pick::{ProfilePick, SweepKind};
+use opendatum_app::sketch_mode::{normal_view, ConstraintTool, ScreenMap, SketchEditor, Tool};
+use opendatum_app::Model;
+use opendatum_core_model::sketch::{Constraint, Geometry};
+use opendatum_core_model::{DVec2, DVec3, FeatureId, PlaneRef};
+use opendatum_features::FeatureStatus;
+use opendatum_kernel::{Frame, Kernel};
+use opendatum_render::{Camera, Projection};
+use opendatum_sketch_solver::{SolveError, SolveStatus};
 
 const MM: f64 = 1e-3;
 /// Relative accuracy of geometry placed by clicking: screen positions are
@@ -29,7 +29,7 @@ fn view() -> ScreenMap {
     let (yaw, pitch) = normal_view(&Frame::top());
     let camera = Camera {
         target: DVec3::ZERO,
-        distance: 0.1 / (openshape_render::DEFAULT_FOV_Y_RAD as f64 * 0.5).tan(),
+        distance: 0.1 / (opendatum_render::DEFAULT_FOV_Y_RAD as f64 * 0.5).tan(),
         yaw,
         pitch,
         projection: Projection::Orthographic,
@@ -66,7 +66,7 @@ fn rectangle(m: &mut Model, ed: &mut SketchEditor, map: &ScreenMap, a: (f64, f64
     ed.set_tool(Tool::Select);
 }
 
-fn count<F: Fn(&Geometry<openshape_core_model::SketchId>) -> bool>(
+fn count<F: Fn(&Geometry<opendatum_core_model::SketchId>) -> bool>(
     m: &Model,
     f: FeatureId,
     pred: F,
@@ -80,7 +80,7 @@ fn count<F: Fn(&Geometry<openshape_core_model::SketchId>) -> bool>(
         .count()
 }
 
-fn constraints<F: Fn(&Constraint<openshape_core_model::SketchId>) -> bool>(
+fn constraints<F: Fn(&Constraint<opendatum_core_model::SketchId>) -> bool>(
     m: &Model,
     f: FeatureId,
     pred: F,
@@ -466,7 +466,7 @@ fn dimension(m: &mut Model, ed: &mut SketchEditor, map: &ScreenMap, shown: &str,
     assert!(ed.prompt.is_none(), "{:?}", ed.prompt);
 }
 
-fn solved(m: &Model, f: FeatureId) -> openshape_core_model::SketchData {
+fn solved(m: &Model, f: FeatureId) -> opendatum_core_model::SketchData {
     let r = m.sketch_result(f).unwrap();
     assert_eq!(r.solution.status, SolveStatus::Solved);
     r.solution.sketch.clone()
@@ -553,7 +553,7 @@ fn every_dimension_kind_is_placed_from_a_selection_and_drives_the_geometry() {
     click(&mut m, &mut ed, &map, -80.0, 60.0);
     ed.click(&mut m, &map, at(&map, -50.0, 80.0), true);
     ed.dimension(&m, at(&map, 90.0, 90.0));
-    ed.set_prompt_kind(&m, openshape_core_model::sketch::DistanceKind::Horizontal);
+    ed.set_prompt_kind(&m, opendatum_core_model::sketch::DistanceKind::Horizontal);
     let prompt = ed.prompt.as_mut().unwrap();
     assert_eq!(prompt.text, "30");
     prompt.text = "45".into();
@@ -574,7 +574,7 @@ fn every_dimension_kind_is_placed_from_a_selection_and_drives_the_geometry() {
         constraints(&m, f, |c| matches!(
             c,
             Constraint::Distance {
-                kind: openshape_core_model::sketch::DistanceKind::Horizontal,
+                kind: opendatum_core_model::sketch::DistanceKind::Horizontal,
                 ..
             }
         )),

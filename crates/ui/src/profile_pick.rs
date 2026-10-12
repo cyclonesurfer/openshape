@@ -7,14 +7,14 @@
 use std::collections::BTreeMap;
 
 use egui::Pos2;
-use openshape_core_model::units::{LengthUnit, Quantity};
-use openshape_core_model::{
+use opendatum_core_model::units::{LengthUnit, Quantity};
+use opendatum_core_model::{
     DVec2, Feature, FeatureEntry, FeatureId, ProfileSource, RegionKey, RevolveAxis, SketchId,
 };
-use openshape_features::regions::resolve_region;
-use openshape_features::SketchResult;
-use openshape_kernel::Kernel;
-use openshape_sketch_solver::ResolvedCurve;
+use opendatum_features::regions::resolve_region;
+use opendatum_features::SketchResult;
+use opendatum_kernel::Kernel;
+use opendatum_sketch_solver::ResolvedCurve;
 
 use crate::sketch_mode::{sample_curve, ScreenMap, SketchDisplay, CURVE_PICK};
 use crate::Model;

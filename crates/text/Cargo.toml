@@ -1,6 +1,6 @@
 [package]
-name = "openshape-text"
-description = "Lays out a line of text in OpenShape's bundled fonts as outline curves"
+name = "opendatum-text"
+description = "Lays out a line of text in OpenDatum's bundled fonts as outline curves"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

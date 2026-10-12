@@ -15,9 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::FRAC_PI_2;
 
 use glam::DVec2;
-use openshape_core_model::sketch::{Constraint, ConstraintEntry, DistanceKind, Geometry};
-use openshape_core_model::{SketchData, SketchEdit, SketchId};
-use openshape_sketch_solver::{
+use opendatum_core_model::sketch::{Constraint, ConstraintEntry, DistanceKind, Geometry};
+use opendatum_core_model::{SketchData, SketchEdit, SketchId};
+use opendatum_sketch_solver::{
     measure, resolve_curves, solve, ResolvedCurve, SolveError, SolveOptions, SolveStatus,
 };
 

@@ -2,7 +2,7 @@
 //! shaped widths, and refusals (ADR 0015).
 
 use glam::DVec2;
-use openshape_text::{lay_out, Font, Layout, LayoutError, Piece};
+use opendatum_text::{lay_out, Font, Layout, LayoutError, Piece};
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::raw::tables::os2::SelectionFlags;
@@ -172,7 +172,7 @@ fn bezier(ctrl: &[DVec2], t: f64) -> DVec2 {
 #[test]
 fn every_face_lays_out_closed_exact_contours() {
     for font in Font::ALL {
-        let layout = lay_out("OpenShape 2026 & Co. — ÅØ gjy%@", font).unwrap();
+        let layout = lay_out("OpenDatum 2026 & Co. — ÅØ gjy%@", font).unwrap();
         assert!(layout.aspect > 5.0 && layout.aspect < 30.0, "{font:?}");
         assert_closed(&layout);
         // Letters stay near their box (accents may rise a little above it).
@@ -346,7 +346,7 @@ fn what_cannot_be_laid_out_is_refused_by_name() {
     assert_eq!(lay_out("a\u{2028}b", font), Err(LayoutError::LineBreak));
     assert_eq!(lay_out("tab\there", font), Err(LayoutError::Control));
     assert_eq!(
-        lay_out(&"x".repeat(openshape_text::MAX_CHARS + 1), font),
+        lay_out(&"x".repeat(opendatum_text::MAX_CHARS + 1), font),
         Err(LayoutError::TooLong)
     );
     let err = lay_out("Part 漢", font).unwrap_err();

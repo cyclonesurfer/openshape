@@ -7,7 +7,7 @@ mod common;
 
 use common::gen::Rng;
 use common::{bits, violation, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     measure, resolve_curves, solve, Constraint, ConstraintEntry, DVec2, DistanceKind, Entity,
     EntityState, Geometry, ResolvedCurve, Sketch, Solution, SolveError, SolveOptions, SolveStatus,
     TangentKind, RHO_MIN,

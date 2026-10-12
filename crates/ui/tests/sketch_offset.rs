@@ -8,16 +8,16 @@
 mod common;
 
 use common::*;
-use openshape_app::sketch_mode::{Snap, SnapTarget, Tool};
-use openshape_app::sketch_ops::offset;
-use openshape_app::sketch_ops::trim::Preview;
-use openshape_app::sketch_ops::{shapes, Batch};
-use openshape_app::Model;
-use openshape_core_model::sketch::{Constraint, Geometry};
-use openshape_core_model::{DVec2, FeatureId, PlaneRef, SketchData, SketchId};
-use openshape_kernel::{Kernel, ProfileCurve};
+use opendatum_app::sketch_mode::{Snap, SnapTarget, Tool};
+use opendatum_app::sketch_ops::offset;
+use opendatum_app::sketch_ops::trim::Preview;
+use opendatum_app::sketch_ops::{shapes, Batch};
+use opendatum_app::Model;
+use opendatum_core_model::sketch::{Constraint, Geometry};
+use opendatum_core_model::{DVec2, FeatureId, PlaneRef, SketchData, SketchId};
+use opendatum_kernel::{Kernel, ProfileCurve};
 
-use openshape_sketch_solver::{ResolvedCurve, SolveStatus};
+use opendatum_sketch_solver::{ResolvedCurve, SolveStatus};
 use proptest::prelude::*;
 
 fn redundant(m: &Model, f: FeatureId) -> usize {
@@ -107,7 +107,7 @@ fn off_by(s: &SketchData, d: f64, pieces: &[(SketchId, SketchId, bool)]) -> f64 
 
 /// The kernel's profile curve of a solved sketch curve.
 fn profile(c: &ResolvedCurve) -> ProfileCurve {
-    openshape_features::kernel_curve(c).expect("a valid curve")
+    opendatum_features::kernel_curve(c).expect("a valid curve")
 }
 
 /// True if two of the images cross or touch anywhere but at an end point

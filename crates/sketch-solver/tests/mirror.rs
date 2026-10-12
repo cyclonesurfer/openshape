@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use common::gen::{generate, perturb, Rng};
 use common::{assert_satisfied, size, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     solve, Constraint, ConstraintEntry, DVec2, Entity, EntityState, Geometry, Sketch, SolveError,
     SolveOptions, SolveStatus,
 };
@@ -187,12 +187,12 @@ fn images_of_every_kind_follow_their_sources_exactly() {
 fn an_image_arc_runs_counter_clockwise_like_its_source() {
     let (s, _, pairs, _) = every_kind();
     let out = solve(&s, &opts());
-    let curves = openshape_sketch_solver::resolve_curves(&out.sketch).unwrap();
+    let curves = opendatum_sketch_solver::resolve_curves(&out.sketch).unwrap();
     let sweep = |k: u32| {
         curves
             .iter()
             .find_map(|(id, _, c)| match c {
-                openshape_sketch_solver::ResolvedCurve::Arc { sweep_angle, .. } if *id == k => {
+                opendatum_sketch_solver::ResolvedCurve::Arc { sweep_angle, .. } if *id == k => {
                     Some(*sweep_angle)
                 }
                 _ => None,
@@ -243,7 +243,7 @@ fn fully_constrained_sources_fix_their_images() {
         Constraint::Distance {
             a: center,
             b: end,
-            kind: openshape_sketch_solver::DistanceKind::Vertical,
+            kind: opendatum_sketch_solver::DistanceKind::Vertical,
             value: dy.abs(),
         },
     );

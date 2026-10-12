@@ -1,9 +1,9 @@
-# OpenShape
+# OpenDatum
 
 A native Linux, pure-Rust, history-based parametric 3D CAD system.
 License: GPL-3.0-or-later.
 
-OpenShape is early: Phase 0 (foundations), Phase 1 (kernel core) and the
+OpenDatum is early: Phase 0 (foundations), Phase 1 (kernel core) and the
 first Phase 2 milestones (the sketcher: constraint solver, sketch mode,
 dimensions, region extrude and revolve; and the application shell: feature
 list with rollback bar, toolbars, view cube, floating dialogs, tabs, command
@@ -17,9 +17,9 @@ RADV on AMD, `mesa-vulkan-drivers` on Debian/Ubuntu, `vulkan-radeon` on
 Arch, `mesa-vulkan-drivers` on Fedora).
 
 ```sh
-cargo run --release -p openshape            # the desktop app
-cargo run --release -p openshape -- --headless-demo out/   # offscreen demo
-cargo run --release -p openshape -- --bench out/            # frame times
+cargo run --release -p opendatum            # the desktop app
+cargo run --release -p opendatum -- --headless-demo out/   # offscreen demo
+cargo run --release -p opendatum -- --bench out/            # frame times
 cargo test --workspace
 ```
 

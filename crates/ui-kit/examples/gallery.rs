@@ -11,14 +11,14 @@
 //!   command palette open with the query "ex" (one match disabled).
 //!
 //! ```sh
-//! cargo run -p openshape-ui-kit --example gallery -- <out-dir>
+//! cargo run -p opendatum-ui-kit --example gallery -- <out-dir>
 //! ```
 
 use egui::emath::GuiRounding as _;
 use egui::{Color32, Pos2, Rect, RichText, Sense, Vec2};
-use openshape_render::{write_png, Camera};
-use openshape_ui_kit::view_cube::{self, CubeEdge, CubeTarget, CENTER_HALF};
-use openshape_ui_kit::{
+use opendatum_render::{write_png, Camera};
+use opendatum_ui_kit::view_cube::{self, CubeEdge, CubeTarget, CENTER_HALF};
+use opendatum_ui_kit::{
     icon_button, paint_icon, search_field, CommandPalette, Icon, PaletteEntry, PaletteOutcome,
     Theme, UiSnapshot,
 };
@@ -87,7 +87,7 @@ fn icons(
             painter.text(
                 Pos2::new(10.0, 8.0),
                 egui::Align2::LEFT_TOP,
-                "OpenShape icons at 16, 20, 24 and 32 px",
+                "OpenDatum icons at 16, 20, 24 and 32 px",
                 egui::FontId::proportional(theme.heading_size),
                 theme.text,
             );

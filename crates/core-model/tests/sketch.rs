@@ -1,8 +1,8 @@
 //! Sketch edits through the op log (ADR 0011): id resolution, atomic
 //! batches, cascading deletes, undo, merging, and serialization.
 
-use openshape_core_model::sketch::{Constraint, ConstraintEntry, Entity, Geometry};
-use openshape_core_model::{
+use opendatum_core_model::sketch::{Constraint, ConstraintEntry, Entity, Geometry};
+use opendatum_core_model::{
     DVec2, Feature, FeatureId, InsertAt, ModelOp, PlaneRef, ReplicaId, Session, SketchData,
     SketchDef, SketchEdit, SketchId,
 };
@@ -42,7 +42,7 @@ fn new_sketch(s: &mut Session) -> FeatureId {
     }))
 }
 
-fn edit(s: &mut Session, feature: FeatureId, edits: Vec<SketchEdit>) -> openshape_core_model::OpId {
+fn edit(s: &mut Session, feature: FeatureId, edits: Vec<SketchEdit>) -> opendatum_core_model::OpId {
     let element = s.first_studio().unwrap();
     s.apply(ModelOp::EditSketch {
         element,
@@ -61,7 +61,7 @@ fn sketch(s: &Session, feature: FeatureId) -> SketchDef {
 }
 
 /// A line with a horizontal constraint and a length, in one batch.
-fn draw_line(s: &mut Session, f: FeatureId) -> openshape_core_model::OpId {
+fn draw_line(s: &mut Session, f: FeatureId) -> opendatum_core_model::OpId {
     let n = SketchId::new_in_batch;
     edit(
         s,
@@ -128,7 +128,7 @@ fn a_failing_edit_leaves_the_sketch_unchanged() {
                 1,
                 n(0),
                 SketchId {
-                    op: openshape_core_model::OpId::NULL,
+                    op: opendatum_core_model::OpId::NULL,
                     index: 99,
                 },
             ),
@@ -180,7 +180,7 @@ fn invalid_values_are_rejected() {
 }
 
 /// A conic on three new points with ρ `rho`, and its ρ dimension.
-fn draw_conic(s: &mut Session, f: FeatureId, rho: f64) -> openshape_core_model::OpId {
+fn draw_conic(s: &mut Session, f: FeatureId, rho: f64) -> opendatum_core_model::OpId {
     let n = SketchId::new_in_batch;
     edit(
         s,
@@ -560,7 +560,7 @@ fn dimension_labels_are_placed_moved_and_returned_to_automatic() {
                 Constraint::Distance {
                     a: SketchId { op, index: 0 },
                     b: n(0),
-                    kind: openshape_core_model::sketch::DistanceKind::Aligned,
+                    kind: opendatum_core_model::sketch::DistanceKind::Aligned,
                     value: 0.01,
                 },
             ),

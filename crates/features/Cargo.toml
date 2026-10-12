@@ -1,5 +1,5 @@
 [package]
-name = "openshape-features"
+name = "opendatum-features"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,13 +8,13 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-openshape-core-model.workspace = true
-openshape-kernel.workspace = true
-openshape-sketch-solver.workspace = true
+opendatum-core-model.workspace = true
+opendatum-kernel.workspace = true
+opendatum-sketch-solver.workspace = true
 
 [dev-dependencies]
-openshape-oplog.workspace = true
-openshape-text.workspace = true
+opendatum-oplog.workspace = true
+opendatum-text.workspace = true
 
 [lints]
 workspace = true

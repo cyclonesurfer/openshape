@@ -9,7 +9,7 @@
 //! an `Rgba8Unorm` view. Otherwise (GL) the texture is `Rgba8Unorm` and the
 //! scene renderer encodes sRGB in its shader.
 
-use openshape_render::wgpu;
+use opendatum_render::wgpu;
 
 /// The format the scene renderer must be created with on this adapter.
 pub fn scene_format(adapter: &wgpu::Adapter) -> wgpu::TextureFormat {
@@ -51,7 +51,7 @@ impl ViewportTexture {
             &[]
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("openshape viewport"),
+            label: Some("opendatum viewport"),
             size: wgpu::Extent3d {
                 width: size.0,
                 height: size.1,

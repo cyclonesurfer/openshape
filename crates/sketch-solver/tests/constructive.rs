@@ -7,7 +7,7 @@ mod common;
 
 use common::gen::{generate, perturb};
 use common::{assert_satisfied, bits, size, worst};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     solve, DVec2, EntityState, Geometry, Sketch, SolveOptions, SolveStatus,
 };
 use proptest::prelude::*;
@@ -35,7 +35,7 @@ fn largest_move(a: &Sketch<u32>, b: &Sketch<u32>) -> f64 {
 }
 
 /// Checks the parts of a solution that hold whatever the outcome.
-fn check_common(input: &Sketch<u32>, s: &openshape_sketch_solver::Solution<u32>) {
+fn check_common(input: &Sketch<u32>, s: &opendatum_sketch_solver::Solution<u32>) {
     assert!(finite(&s.sketch), "non-finite geometry");
     assert!(
         s.max_residual.is_finite(),

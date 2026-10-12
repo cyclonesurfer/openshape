@@ -5,7 +5,7 @@
 use std::f64::consts::{FRAC_PI_2, TAU};
 
 use glam::{DVec2, DVec3};
-use openshape_nurbs::NurbsCurve;
+use opendatum_nurbs::NurbsCurve;
 
 use super::bezier::{self, Bez};
 use crate::{KernelError, ProfileCurve};

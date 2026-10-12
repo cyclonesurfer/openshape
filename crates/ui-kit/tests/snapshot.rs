@@ -6,8 +6,8 @@ mod common;
 
 use common::{max_channel_diff, maybe_dump, rgba, snapshot};
 use egui::{Color32, LayerId, Pos2, Rect, Vec2};
-use openshape_render::RenderError;
-use openshape_ui_kit::{Theme, UiSnapshot};
+use opendatum_render::RenderError;
+use opendatum_ui_kit::{Theme, UiSnapshot};
 
 /// Paints `cells` side by side as 16x16-point squares on `background`.
 fn paint_cells(ctx: &egui::Context, background: Color32, cells: &[Color32]) {
@@ -90,7 +90,7 @@ fn solid_colours_round_trip_on_an_srgb_target_too() {
 
 /// Half-transparent shapes over white, as egui composites them in the app's
 /// (non-sRGB) window surface.
-fn translucent(snap: &mut UiSnapshot) -> (openshape_render::RgbaImage, Vec<[u8; 4]>) {
+fn translucent(snap: &mut UiSnapshot) -> (opendatum_render::RgbaImage, Vec<[u8; 4]>) {
     let cells = [
         Color32::WHITE.gamma_multiply(0.5),
         Color32::BLACK.gamma_multiply(0.5),

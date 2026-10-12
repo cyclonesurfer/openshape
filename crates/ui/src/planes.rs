@@ -1,9 +1,9 @@
 //! The default geometry of a Part Studio (the three standard planes through
 //! the origin): their frames, display meshes and picking.
 
-use openshape_core_model::{DVec3, PlaneRef};
-use openshape_kernel::Frame;
-use openshape_render::MeshData;
+use opendatum_core_model::{DVec3, PlaneRef};
+use opendatum_kernel::Frame;
+use opendatum_render::MeshData;
 
 /// One of the three default planes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

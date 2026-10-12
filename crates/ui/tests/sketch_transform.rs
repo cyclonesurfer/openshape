@@ -9,14 +9,14 @@ use std::collections::BTreeSet;
 use std::f64::consts::PI;
 
 use common::*;
-use openshape_app::sketch_mode::{ScreenMap, SketchEditor, Snap, SnapTarget, Tool};
-use openshape_app::sketch_ops::transform::{moved_set, Similarity};
-use openshape_app::sketch_ops::trim::Preview;
-use openshape_app::sketch_ops::{mirror, Batch};
-use openshape_app::Model;
-use openshape_core_model::sketch::{Constraint, DistanceKind, Geometry};
-use openshape_core_model::{DVec2, FeatureId, SketchData, SketchEdit, SketchId};
-use openshape_sketch_solver::SolveStatus;
+use opendatum_app::sketch_mode::{ScreenMap, SketchEditor, Snap, SnapTarget, Tool};
+use opendatum_app::sketch_ops::transform::{moved_set, Similarity};
+use opendatum_app::sketch_ops::trim::Preview;
+use opendatum_app::sketch_ops::{mirror, Batch};
+use opendatum_app::Model;
+use opendatum_core_model::sketch::{Constraint, DistanceKind, Geometry};
+use opendatum_core_model::{DVec2, FeatureId, SketchData, SketchEdit, SketchId};
+use opendatum_sketch_solver::SolveStatus;
 use proptest::prelude::*;
 
 fn solved(m: &Model, f: FeatureId) -> SketchData {
@@ -1048,7 +1048,7 @@ proptest! {
         for &(a, b) in &scene.dims {
             let (a, b) = (points[a % points.len()], points[b % points.len()]);
             let mut c = Constraint::Distance { a, b, kind: DistanceKind::Aligned, value: 1.0 };
-            if let Ok(v) = openshape_sketch_solver::measure(&solved(&m, f), &c) {
+            if let Ok(v) = opendatum_sketch_solver::measure(&solved(&m, f), &c) {
                 if a != b && v > 1e-3 {
                     c.set_value(v);
                     let mut batch = Batch::default();
@@ -1140,6 +1140,6 @@ proptest! {
 }
 
 /// The degrees of freedom of a sketch definition, solved on its own.
-fn before_dof(def: &openshape_core_model::SketchDef) -> usize {
-    openshape_sketch_solver::solve(&def.sketch, &Default::default()).dof
+fn before_dof(def: &opendatum_core_model::SketchDef) -> usize {
+    opendatum_sketch_solver::solve(&def.sketch, &Default::default()).dof
 }

@@ -6,14 +6,14 @@
 mod common;
 
 use common::*;
-use openshape_app::sketch_mode::{Snap, SnapTarget, Tool};
-use openshape_app::sketch_ops::mirror::{self, Axis};
-use openshape_app::sketch_ops::trim::Preview;
-use openshape_app::sketch_ops::{shapes, Batch};
-use openshape_app::Model;
-use openshape_core_model::sketch::{Constraint, Geometry};
-use openshape_core_model::{DVec2, FeatureId, PlaneRef, SketchId};
-use openshape_sketch_solver::{ResolvedCurve, SolveStatus};
+use opendatum_app::sketch_mode::{Snap, SnapTarget, Tool};
+use opendatum_app::sketch_ops::mirror::{self, Axis};
+use opendatum_app::sketch_ops::trim::Preview;
+use opendatum_app::sketch_ops::{shapes, Batch};
+use opendatum_app::Model;
+use opendatum_core_model::sketch::{Constraint, Geometry};
+use opendatum_core_model::{DVec2, FeatureId, PlaneRef, SketchId};
+use opendatum_sketch_solver::{ResolvedCurve, SolveStatus};
 use proptest::prelude::*;
 
 fn redundant(m: &Model, f: FeatureId) -> usize {
@@ -690,7 +690,7 @@ proptest! {
 
 /// The points the mirrors about `axis` share between a source and its
 /// image (held on the line).
-fn shared_points(sketch: &openshape_core_model::SketchData, axis: SketchId) -> Vec<SketchId> {
+fn shared_points(sketch: &opendatum_core_model::SketchData, axis: SketchId) -> Vec<SketchId> {
     let mut out = Vec::new();
     for c in &sketch.constraints {
         let Constraint::Mirror { axis: a, pairs } = &c.constraint else {
@@ -712,7 +712,7 @@ fn shared_points(sketch: &openshape_core_model::SketchData, axis: SketchId) -> V
 
 /// The coincidence classes of the points the mirrors about `axis` share:
 /// the mirror holds one point of each on the line.
-fn held_classes(sketch: &openshape_core_model::SketchData, axis: SketchId) -> usize {
+fn held_classes(sketch: &opendatum_core_model::SketchData, axis: SketchId) -> usize {
     let mut root: std::collections::BTreeMap<SketchId, SketchId> = Default::default();
     fn find(root: &mut std::collections::BTreeMap<SketchId, SketchId>, x: SketchId) -> SketchId {
         let mut r = x;

@@ -1,18 +1,18 @@
 //! The application rendered offscreen: [`AppDriver`] runs the real
-//! [`OpenShapeApp`] in a [`UiSnapshot`] and feeds it synthetic pointer and
+//! [`OpenDatumApp`] in a [`UiSnapshot`] and feeds it synthetic pointer and
 //! keyboard input, for end-to-end tests of the shell and for the review
-//! screenshots that [`run`] writes (`openshape --screenshots <dir>`).
+//! screenshots that [`run`] writes (`opendatum --screenshots <dir>`).
 
 use std::path::{Path, PathBuf};
 
 use egui::{Event, Key, Modifiers, PointerButton, Pos2, Vec2};
-use openshape_core_model::sketch::Geometry;
-use openshape_core_model::{DVec2, DVec3, FeatureId, PlaneRef};
-use openshape_kernel::Frame;
-use openshape_render::{write_png, Camera, Projection, RgbaImage};
-use openshape_ui_kit::UiSnapshot;
+use opendatum_core_model::sketch::Geometry;
+use opendatum_core_model::{DVec2, DVec3, FeatureId, PlaneRef};
+use opendatum_kernel::Frame;
+use opendatum_render::{write_png, Camera, Projection, RgbaImage};
+use opendatum_ui_kit::UiSnapshot;
 
-use crate::app::{OpenShapeApp, Selection};
+use crate::app::{OpenDatumApp, Selection};
 use crate::dialogs::{FeatureDialog, Template};
 use crate::profile_pick::{ProfilePick, SweepKind};
 use crate::sketch_mode::{normal_view, ScreenMap, SketchEditor, Tool};
@@ -26,7 +26,7 @@ pub struct AppDriver {
     snap: UiSnapshot,
     rs: egui_wgpu::RenderState,
     /// The application.
-    pub app: OpenShapeApp,
+    pub app: OpenDatumApp,
     time: f64,
     pointer: Pos2,
 }
@@ -36,7 +36,7 @@ impl AppDriver {
     pub fn new(size: [u32; 2], pixels_per_point: f32, model: Model) -> Result<Self, String> {
         let snap = UiSnapshot::new(size, pixels_per_point).map_err(|e| e.to_string())?;
         let rs = snap.render_state();
-        let app = OpenShapeApp::with_render_state(snap.context(), Some(&rs), model);
+        let app = OpenDatumApp::with_render_state(snap.context(), Some(&rs), model);
         let mut d = AppDriver {
             snap,
             rs,
@@ -200,7 +200,7 @@ fn sketch_view(frame: Frame) -> ScreenMap {
     let (yaw, pitch) = normal_view(&frame);
     let camera = Camera {
         target: DVec3::ZERO,
-        distance: 0.12 / (openshape_render::DEFAULT_FOV_Y_RAD as f64 * 0.5).tan(),
+        distance: 0.12 / (opendatum_render::DEFAULT_FOV_Y_RAD as f64 * 0.5).tan(),
         yaw,
         pitch,
         projection: Projection::Orthographic,
@@ -269,7 +269,7 @@ pub fn demo_model() -> Result<(Model, FeatureId, FeatureId), String> {
 }
 
 /// The ids of a sketch's line entities.
-fn lines(m: &Model, sketch: FeatureId) -> Vec<openshape_core_model::SketchId> {
+fn lines(m: &Model, sketch: FeatureId) -> Vec<opendatum_core_model::SketchId> {
     m.sketch_def(sketch)
         .map(|d| {
             d.sketch
@@ -332,13 +332,13 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     d.app.select(None);
     d.app.roll_to_gap(1);
     d.app
-        .set_view(openshape_ui_kit::view_cube::CubeTarget::HOME);
+        .set_view(opendatum_ui_kit::view_cube::CubeTarget::HOME);
     save("06-rolled-back.png", &d.settle()?)?;
     d.app.roll_to_gap(usize::MAX);
 
     // The command palette with a query.
     d.app
-        .set_view(openshape_ui_kit::view_cube::CubeTarget::HOME);
+        .set_view(opendatum_ui_kit::view_cube::CubeTarget::HOME);
     d.key(Key::K, Modifiers::COMMAND)?;
     d.type_text("ex")?;
     save("07-command-palette.png", &d.settle()?)?;
@@ -447,7 +447,7 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
         p.distance = "30".into();
     }
     d.app
-        .set_view(openshape_ui_kit::view_cube::CubeTarget::HOME);
+        .set_view(opendatum_ui_kit::view_cube::CubeTarget::HOME);
     save("16-extrude-preview.png", &d.settle()?)?;
     d.key(Key::Escape, Modifiers::NONE)?;
     // A control-point spline left of the plate: being drawn (its control
@@ -639,8 +639,8 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     t.settle()?;
     t.app.run(crate::commands::Command::Tool(Tool::Text));
     if let Some(ed) = t.app.sketch_editor_mut() {
-        ed.text_content = "OpenShape".into();
-        ed.text_font = openshape_text::Font::SansBold;
+        ed.text_content = "OpenDatum".into();
+        ed.text_font = opendatum_text::Font::SansBold;
     }
     t.click(on_plane(&t, -60.0, -8.0)?)?;
     t.hover(on_plane(&t, -30.0, 12.0)?)?;
@@ -673,7 +673,7 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
         .and_then(|r| r.regions.as_ref().ok())
         .map(|regions| {
             let a = &regions.arrangement;
-            let edges = |l: &openshape_kernel::RegionLoop| -> Vec<usize> {
+            let edges = |l: &opendatum_kernel::RegionLoop| -> Vec<usize> {
                 let mut e: Vec<usize> = l.edges.iter().map(|(e, _)| *e).collect();
                 e.sort_unstable();
                 e
@@ -701,7 +701,7 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     t.app.model_mut().add_feature("Extrude 1", letters);
     // Closer than "fit", which frames the default planes too.
     t.app
-        .set_view(openshape_ui_kit::view_cube::CubeTarget::HOME);
+        .set_view(opendatum_ui_kit::view_cube::CubeTarget::HOME);
     t.app.camera.target = DVec3::new(-0.011, 0.002, 0.002);
     t.app.camera.distance *= 0.4;
     save("29-text-extruded.png", &t.settle()?)?;
@@ -765,7 +765,7 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     let solids = pick.build()?;
     c.app.model_mut().add_feature("Extrude 1", solids);
     c.app
-        .set_view(openshape_ui_kit::view_cube::CubeTarget::HOME);
+        .set_view(opendatum_ui_kit::view_cube::CubeTarget::HOME);
     c.app.camera.distance *= 0.6;
     save("32-closed-splines-extruded.png", &c.settle()?)?;
     Ok(written)

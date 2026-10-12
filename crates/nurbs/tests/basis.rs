@@ -1,6 +1,6 @@
 //! Basis function properties (acceptance test 1).
 
-use openshape_nurbs::KnotVector;
+use opendatum_nurbs::KnotVector;
 use proptest::prelude::*;
 
 /// Random clamped knot vector of degree `p` with interior multiplicities in

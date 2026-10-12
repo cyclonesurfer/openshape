@@ -15,9 +15,9 @@ pub mod trim;
 use std::collections::{BTreeMap, BTreeSet};
 
 use glam::DVec2;
-use openshape_core_model::sketch::{Constraint, ConstraintEntry, Entity, Geometry, TangentKind};
-use openshape_core_model::{SketchData, SketchEdit, SketchId};
-use openshape_sketch_solver::ResolvedCurve;
+use opendatum_core_model::sketch::{Constraint, ConstraintEntry, Entity, Geometry, TangentKind};
+use opendatum_core_model::{SketchData, SketchEdit, SketchId};
+use opendatum_sketch_solver::ResolvedCurve;
 
 use crate::sketch_mode::{Snap, SnapTarget};
 

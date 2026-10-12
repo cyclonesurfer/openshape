@@ -1,7 +1,7 @@
 //! Sketch data: entities, constraints and dimensions.
 //!
 //! These types are pure data shared with the document model
-//! (`openshape-core-model` stores them with its own key type, ADR 0011).
+//! (`opendatum-core-model` stores them with its own key type, ADR 0011).
 //! They are generic over the key `K` that identifies entities and
 //! constraints. Coordinates are in the sketch plane, in metres; angles are in
 //! radians, counter-clockwise positive.

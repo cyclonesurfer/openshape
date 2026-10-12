@@ -1,7 +1,7 @@
 //! Invalid input returns errors and never panics (acceptance test 8).
 
 use glam::{DVec3, DVec4};
-use openshape_nurbs::{KnotVector, NurbsCurve, NurbsError, NurbsSurface};
+use opendatum_nurbs::{KnotVector, NurbsCurve, NurbsError, NurbsSurface};
 use proptest::prelude::*;
 
 fn pts(n: usize) -> Vec<DVec3> {

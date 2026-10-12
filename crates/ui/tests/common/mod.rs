@@ -4,14 +4,14 @@
 #![allow(dead_code)]
 
 use egui::{Pos2, Rect};
-use openshape_app::profile_pick::{ProfilePick, SweepKind};
-use openshape_app::sketch_mode::{normal_view, ScreenMap, SketchEditor, Tool};
-use openshape_app::Model;
-use openshape_core_model::sketch::{Constraint, Geometry};
-use openshape_core_model::{DVec2, DVec3, FeatureId, PlaneRef, SketchId};
-use openshape_kernel::{Frame, Kernel};
-use openshape_render::{Camera, Projection};
-use openshape_sketch_solver::{ResolvedCurve, SolveStatus};
+use opendatum_app::profile_pick::{ProfilePick, SweepKind};
+use opendatum_app::sketch_mode::{normal_view, ScreenMap, SketchEditor, Tool};
+use opendatum_app::Model;
+use opendatum_core_model::sketch::{Constraint, Geometry};
+use opendatum_core_model::{DVec2, DVec3, FeatureId, PlaneRef, SketchId};
+use opendatum_kernel::{Frame, Kernel};
+use opendatum_render::{Camera, Projection};
+use opendatum_sketch_solver::{ResolvedCurve, SolveStatus};
 
 /// A millimetre in metres.
 pub const MM: f64 = 1e-3;
@@ -30,7 +30,7 @@ pub fn view() -> ScreenMap {
     let (yaw, pitch) = normal_view(&Frame::top());
     let camera = Camera {
         target: DVec3::ZERO,
-        distance: 0.1 / (openshape_render::DEFAULT_FOV_Y_RAD as f64 * 0.5).tan(),
+        distance: 0.1 / (opendatum_render::DEFAULT_FOV_Y_RAD as f64 * 0.5).tan(),
         yaw,
         pitch,
         projection: Projection::Orthographic,

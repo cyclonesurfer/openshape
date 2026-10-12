@@ -1,8 +1,8 @@
-//! The theme installs light visuals with OpenShape's tokens, its spacing and
+//! The theme installs light visuals with OpenDatum's tokens, its spacing and
 //! text sizes, and fonts that cover the constraint glyphs. No GPU needed.
 
 use egui::{Color32, FontFamily, TextStyle};
-use openshape_ui_kit::{font_definitions, Theme};
+use opendatum_ui_kit::{font_definitions, Theme};
 
 /// Runs one pass so pending fonts and styles take effect, dropping its
 /// texture uploads (no renderer here).

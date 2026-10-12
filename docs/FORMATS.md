@@ -7,7 +7,7 @@ fuzz target and a real-world corpus before it is ticked in the roadmap.
 
 | Format | Import | Export | Phase | Notes |
 |---|---|---|---|---|
-| OpenShape native (`.osdoc`) | ✔ | ✔ | 0/5 | op-log CBOR; spec in NATIVE_FORMAT.md |
+| OpenDatum native (`.odatum`) | ✔ | ✔ | 0/5 | op-log CBOR; spec in NATIVE_FORMAT.md |
 | STL ASCII/binary | – | ✔ | 1 | export in mm; import pending (mesh bodies) |
 | STEP AP203/214/242 | – | – | 4 | ISO 10303-21 text; PMI where feasible |
 | IGES | – | – | 13 | public spec (US PRO/IPO-100) |

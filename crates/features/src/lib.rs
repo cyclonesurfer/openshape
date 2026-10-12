@@ -10,17 +10,17 @@ pub mod regions;
 
 use std::f64::consts::TAU;
 
-use openshape_core_model::{
+use opendatum_core_model::{
     CurveDef, Feature, FeatureId, PartStudio, PlaneRef, ProfileDef, ProfileSource, RegionKey,
     RevolveAxis, SketchDef, SketchId,
 };
-use openshape_kernel::{
+use opendatum_kernel::{
     DVec2, DVec3, ExtrudeSpec, Frame, Kernel, KernelError, Profile, ProfileCurve, RevolveSpec,
     SketchArrangement,
 };
-use openshape_sketch_solver::{resolve_curves, solve, ResolvedCurve, SolveOptions, SolveStatus};
+use opendatum_sketch_solver::{resolve_curves, solve, ResolvedCurve, SolveOptions, SolveStatus};
 
-pub use openshape_sketch_solver::{EntityState, Solution};
+pub use opendatum_sketch_solver::{EntityState, Solution};
 
 /// The outcome of one feature.
 #[derive(Clone, Debug, PartialEq)]

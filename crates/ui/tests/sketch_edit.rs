@@ -6,13 +6,13 @@
 mod common;
 
 use common::*;
-use openshape_app::sketch_mode::{SketchEditor, Snap, SnapTarget, Tool};
-use openshape_app::sketch_ops::trim::{self, Preview};
-use openshape_app::sketch_ops::{shapes, Batch};
-use openshape_app::Model;
-use openshape_core_model::sketch::{Constraint, ConstraintEntry, Geometry, TangentKind};
-use openshape_core_model::{DVec2, FeatureId, PlaneRef, SketchEdit, SketchId};
-use openshape_sketch_solver::{conic, ResolvedCurve, SolveStatus};
+use opendatum_app::sketch_mode::{SketchEditor, Snap, SnapTarget, Tool};
+use opendatum_app::sketch_ops::trim::{self, Preview};
+use opendatum_app::sketch_ops::{shapes, Batch};
+use opendatum_app::Model;
+use opendatum_core_model::sketch::{Constraint, ConstraintEntry, Geometry, TangentKind};
+use opendatum_core_model::{DVec2, FeatureId, PlaneRef, SketchEdit, SketchId};
+use opendatum_sketch_solver::{conic, ResolvedCurve, SolveStatus};
 use proptest::prelude::*;
 use std::f64::consts::{PI, TAU};
 

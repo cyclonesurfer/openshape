@@ -1,7 +1,7 @@
 //! The egui desktop front end: the application shell of ADR 0012.
 //!
-//! [`OpenShapeApp`] holds the view state around a [`Model`]. Each frame
-//! [`OpenShapeApp::draw`] lays out the top bar, the feature toolbar, the
+//! [`OpenDatumApp`] holds the view state around a [`Model`]. Each frame
+//! [`OpenDatumApp::draw`] lays out the top bar, the feature toolbar, the
 //! element tabs, the feature list and the graphics area
 //! ([`crate::shell`], [`crate::feature_list`], [`crate::graphics`]), then the
 //! floating dialogs ([`crate::floating`]). Widgets do not change the model
@@ -14,11 +14,11 @@ use std::collections::{BTreeSet, HashMap};
 
 use eframe::egui;
 use egui::{Key, Modifiers, Pos2, Rect};
-use openshape_core_model::{DVec3, ElementId, Feature, FeatureId, InsertAt, ModelOp};
-use openshape_render::{Camera, DisplayMode, Projection};
-use openshape_ui_kit::palette::CommandPalette;
-use openshape_ui_kit::view_cube::CubeTarget;
-use openshape_ui_kit::Theme;
+use opendatum_core_model::{DVec3, ElementId, Feature, FeatureId, InsertAt, ModelOp};
+use opendatum_render::{Camera, DisplayMode, Projection};
+use opendatum_ui_kit::palette::CommandPalette;
+use opendatum_ui_kit::view_cube::CubeTarget;
+use opendatum_ui_kit::Theme;
 
 use crate::commands::{Command, Mode};
 use crate::dialogs::FeatureDialog;
@@ -187,7 +187,7 @@ pub(crate) struct PartProperties {
 }
 
 /// The application.
-pub struct OpenShapeApp {
+pub struct OpenDatumApp {
     pub(crate) model: Model,
     pub(crate) theme: Theme,
     pub(crate) camera: Camera,
@@ -215,7 +215,7 @@ pub struct OpenShapeApp {
     pub(crate) hidden_parts: BTreeSet<FeatureId>,
     /// A plane row under the pointer (highlighted in the view).
     pub(crate) hover_plane: Option<StdPlane>,
-    /// [`OpenShapeApp::sketch_bounds`] for a model generation.
+    /// [`OpenDatumApp::sketch_bounds`] for a model generation.
     pub(crate) sketch_bounds_cache: std::cell::Cell<Option<(u64, Option<Bounds>)>>,
     pub(crate) properties: Option<PartProperties>,
     pub(crate) layout: ShellLayout,
@@ -227,7 +227,7 @@ pub struct OpenShapeApp {
     pub(crate) pointer: Option<Pos2>,
 }
 
-impl OpenShapeApp {
+impl OpenDatumApp {
     /// Creates the app in an eframe window.
     pub fn new(cc: &eframe::CreationContext<'_>, model: Model) -> Self {
         Self::with_render_state(&cc.egui_ctx, cc.wgpu_render_state.as_ref(), model)
@@ -246,7 +246,7 @@ impl OpenShapeApp {
             Some(rs) => {
                 let info = rs.adapter.get_info();
                 log::info!(
-                    "openshape: window uses {} ({:?}, {:?}, driver {} {})",
+                    "opendatum: window uses {} ({:?}, {:?}, driver {} {})",
                     info.name,
                     info.backend,
                     info.device_type,
@@ -456,10 +456,10 @@ impl OpenShapeApp {
                 self.fit_pending = true;
             }
             Command::OpenDocument => {
-                self.file_prompt = Some((FileAction::Open, "part.osdoc".into()));
+                self.file_prompt = Some((FileAction::Open, "part.odatum".into()));
             }
             Command::SaveDocument => {
-                self.file_prompt = Some((FileAction::Save, "part.osdoc".into()));
+                self.file_prompt = Some((FileAction::Save, "part.odatum".into()));
             }
             Command::ExportStl => {
                 self.file_prompt = Some((FileAction::ExportStl, "part.stl".into()));
@@ -505,7 +505,7 @@ impl OpenShapeApp {
             Command::Display(m) => self.display_mode = m,
             Command::Perspective => {
                 self.camera.projection = Projection::Perspective {
-                    fov_y_rad: openshape_render::DEFAULT_FOV_Y_RAD,
+                    fov_y_rad: opendatum_render::DEFAULT_FOV_Y_RAD,
                 }
             }
             Command::Orthographic => self.camera.projection = Projection::Orthographic,
@@ -1012,7 +1012,7 @@ fn bounds(pts: &[DVec3]) -> Option<([f32; 3], [f32; 3])> {
     Some((lo.as_vec3().to_array(), hi.as_vec3().to_array()))
 }
 
-impl eframe::App for OpenShapeApp {
+impl eframe::App for OpenDatumApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let rs = frame.wgpu_render_state().cloned();
         self.draw(ui, rs.as_ref());

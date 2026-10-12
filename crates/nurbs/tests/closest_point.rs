@@ -4,7 +4,7 @@ mod common;
 
 use common::arb_curve;
 use glam::DVec3;
-use openshape_nurbs::NurbsCurve;
+use opendatum_nurbs::NurbsCurve;
 use proptest::prelude::*;
 
 fn dense_min_distance(curve: &NurbsCurve, p: DVec3, count: usize) -> f64 {

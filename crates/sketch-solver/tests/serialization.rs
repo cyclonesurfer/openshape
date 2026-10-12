@@ -5,7 +5,7 @@
 mod common;
 
 use common::{bits, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     resolve_curves, solve, Constraint, DVec2, DistanceKind, EntityState, Geometry, ResolvedCurve,
     Sketch, Solution, SolveError, SolveOptions, SolveStatus, TangentKind,
 };
@@ -145,7 +145,7 @@ fn sketches_round_trip_exactly() {
     }
     // Other key types.
     let mut t: Sketch<u64> = Sketch::default();
-    t.entities.push(openshape_sketch_solver::Entity {
+    t.entities.push(opendatum_sketch_solver::Entity {
         id: u64::MAX,
         geometry: Geometry::Point { at: DVec2::ONE },
         construction: false,

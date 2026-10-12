@@ -10,14 +10,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub mod oracle;
 pub mod raster;
 
-use openshape_kernel::arrangement::region_containing;
-use openshape_kernel::{
-    Body, DVec2, ExtrudeSpec, Frame, Kernel, KernelError, OsKernel, Profile, ProfileCurve,
+use opendatum_kernel::arrangement::region_containing;
+use opendatum_kernel::{
+    Body, BrepKernel, DVec2, ExtrudeSpec, Frame, Kernel, KernelError, Profile, ProfileCurve,
     SketchArrangement, Tolerance,
 };
 
-pub fn k() -> OsKernel {
-    OsKernel::default()
+pub fn k() -> BrepKernel {
+    BrepKernel::default()
 }
 
 pub fn tol() -> f64 {
@@ -180,7 +180,7 @@ pub fn shoelace(p: &[DVec2]) -> f64 {
 pub fn loop_polygon(
     a: &SketchArrangement,
     curves: &[ProfileCurve],
-    l: &openshape_kernel::RegionLoop,
+    l: &opendatum_kernel::RegionLoop,
     n: usize,
 ) -> Vec<DVec2> {
     let mut out = Vec::new();

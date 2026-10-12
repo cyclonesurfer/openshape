@@ -2342,7 +2342,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "openshape"
+name = "opendatum"
 version = "0.1.0"
 dependencies = [
  "eframe",
@@ -2351,25 +2351,25 @@ dependencies = [
  "env_logger",
  "glam",
  "log",
- "openshape-core-model",
- "openshape-features",
- "openshape-io",
- "openshape-kernel",
- "openshape-render",
- "openshape-sketch-solver",
- "openshape-text",
- "openshape-ui-kit",
+ "opendatum-core-model",
+ "opendatum-features",
+ "opendatum-io",
+ "opendatum-kernel",
+ "opendatum-render",
+ "opendatum-sketch-solver",
+ "opendatum-text",
+ "opendatum-ui-kit",
  "proptest",
  "winit",
 ]
 
 [[package]]
-name = "openshape-core-model"
+name = "opendatum-core-model"
 version = "0.1.0"
 dependencies = [
  "glam",
- "openshape-oplog",
- "openshape-sketch-solver",
+ "opendatum-oplog",
+ "opendatum-sketch-solver",
  "proptest",
  "serde",
  "serde_json",
@@ -2377,30 +2377,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "openshape-features"
+name = "opendatum-features"
 version = "0.1.0"
 dependencies = [
- "openshape-core-model",
- "openshape-kernel",
- "openshape-oplog",
- "openshape-sketch-solver",
- "openshape-text",
+ "opendatum-core-model",
+ "opendatum-kernel",
+ "opendatum-oplog",
+ "opendatum-sketch-solver",
+ "opendatum-text",
 ]
 
 [[package]]
-name = "openshape-io"
+name = "opendatum-io"
 version = "0.1.0"
 dependencies = [
- "openshape-kernel",
+ "opendatum-kernel",
  "thiserror 2.0.21",
 ]
 
 [[package]]
-name = "openshape-kernel"
+name = "opendatum-kernel"
 version = "0.1.0"
 dependencies = [
  "glam",
- "openshape-nurbs",
+ "opendatum-nurbs",
  "proptest",
  "robust",
  "serde",
@@ -2409,14 +2409,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "openshape-linalg"
+name = "opendatum-linalg"
 version = "0.1.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
-name = "openshape-nurbs"
+name = "opendatum-nurbs"
 version = "0.1.0"
 dependencies = [
  "glam",
@@ -2427,7 +2427,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openshape-oplog"
+name = "opendatum-oplog"
 version = "0.1.0"
 dependencies = [
  "ciborium",
@@ -2438,7 +2438,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openshape-render"
+name = "opendatum-render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
@@ -2454,12 +2454,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "openshape-sketch-solver"
+name = "opendatum-sketch-solver"
 version = "0.1.0"
 dependencies = [
  "glam",
- "openshape-linalg",
- "openshape-text",
+ "opendatum-linalg",
+ "opendatum-text",
  "proptest",
  "serde",
  "serde_json",
@@ -2467,7 +2467,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openshape-text"
+name = "opendatum-text"
 version = "0.1.0"
 dependencies = [
  "glam",
@@ -2478,14 +2478,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "openshape-ui-kit"
+name = "opendatum-ui-kit"
 version = "0.1.0"
 dependencies = [
  "egui",
  "egui-wgpu",
  "glam",
  "log",
- "openshape-render",
+ "opendatum-render",
  "pollster",
  "proptest",
  "wgpu",

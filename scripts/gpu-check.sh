@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds OpenShape, runs the test suite, the headless demo and the frame-time
+# Builds OpenDatum, runs the test suite, the headless demo and the frame-time
 # benchmark on this machine's GPU, and collects everything in one folder.
 #
 #   scripts/gpu-check.sh [out-dir]        (default: gpu-check-out)
@@ -16,18 +16,18 @@ out="${1:-gpu-check-out}"
 rm -rf "$out" "$out.tar.gz"
 mkdir -p "$out"
 report="$out/report.txt"
-export OPENSHAPE_WGPU_BACKEND="${OPENSHAPE_WGPU_BACKEND:-vulkan}"
-export RUST_LOG="${RUST_LOG:-openshape_render=info}"
+export OPENDATUM_WGPU_BACKEND="${OPENDATUM_WGPU_BACKEND:-vulkan}"
+export RUST_LOG="${RUST_LOG:-opendatum_render=info}"
 
 say() { echo "$*" | tee -a "$report"; }
 
-say "== OpenShape GPU check"
+say "== OpenDatum GPU check"
 say "date:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 say "commit:   $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 say "kernel:   $(uname -srm)"
 say "os:       $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME")"
 say "rustc:    $(rustc --version 2>/dev/null || echo 'not found')"
-say "backend:  OPENSHAPE_WGPU_BACKEND=$OPENSHAPE_WGPU_BACKEND"
+say "backend:  OPENDATUM_WGPU_BACKEND=$OPENDATUM_WGPU_BACKEND"
 say ""
 say "== Vulkan devices (vulkaninfo --summary)"
 if command -v vulkaninfo >/dev/null; then
@@ -56,9 +56,9 @@ step() {
 step build cargo build --release --workspace --all-targets
 # --no-fail-fast: run every test binary, so the report lists every failure.
 step tests cargo test --release --workspace --no-fail-fast
-step demo cargo run --release -p openshape -- --headless-demo "$out/demo"
-step bench cargo run --release -p openshape -- --bench "$out/bench" 600
-step render-timing cargo test --release -p openshape-render --test offscreen \
+step demo cargo run --release -p opendatum -- --headless-demo "$out/demo"
+step bench cargo run --release -p opendatum -- --bench "$out/bench" 600
+step render-timing cargo test --release -p opendatum-render --test offscreen \
     thousand_instances_timing -- --nocapture
 
 say ""

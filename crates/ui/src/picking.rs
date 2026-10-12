@@ -2,8 +2,8 @@
 //! view ray (Möller and Trumbore, "Fast, minimum storage ray/triangle
 //! intersection", Journal of Graphics Tools 2(1), 1997).
 
-use openshape_core_model::DVec3;
-use openshape_render::MeshData;
+use opendatum_core_model::DVec3;
+use opendatum_render::MeshData;
 
 /// Distance along `dir` from `origin` to the triangle `abc`, if the ray
 /// (t > 0) crosses it. Both sides count.

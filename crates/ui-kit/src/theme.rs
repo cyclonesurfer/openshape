@@ -1,9 +1,9 @@
-//! OpenShape's theme: colour, spacing and type tokens, and their mapping
+//! OpenDatum's theme: colour, spacing and type tokens, and their mapping
 //! onto egui's [`egui::Style`].
 //!
 //! The look is compact, light and crisp: white panels on a cool light-grey
 //! chrome, thin 1 px borders, small corner radii, subtle shadows and a
-//! single blue accent for selection and focus. The palette is OpenShape's
+//! single blue accent for selection and focus. The palette is OpenDatum's
 //! own; every token is a public field of [`Theme`] so custom widgets draw
 //! with the same values that [`Theme::apply`] gives egui's built-in ones.
 
@@ -137,7 +137,7 @@ impl Default for Theme {
 }
 
 impl Theme {
-    /// OpenShape's light theme.
+    /// OpenDatum's light theme.
     pub fn light() -> Theme {
         Theme {
             chrome: hex(0xEEF0F3),

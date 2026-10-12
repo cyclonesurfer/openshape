@@ -5,14 +5,14 @@ mod common;
 
 use common::*;
 use glam::Mat4;
-use openshape_render::{Camera, DisplayMode, MeshData, Projection, RgbaImage};
+use opendatum_render::{Camera, DisplayMode, MeshData, Projection, RgbaImage};
 use std::f64::consts::FRAC_PI_2;
 use std::time::Instant;
 
 const W: u32 = 320;
 const H: u32 = 240;
 
-fn background(r: &mut openshape_render::OffscreenRenderer, w: u32, h: u32) -> RgbaImage {
+fn background(r: &mut opendatum_render::OffscreenRenderer, w: u32, h: u32) -> RgbaImage {
     r.set_meshes(&[]).unwrap();
     r.render_rgba(&Camera::isometric(), w, h).unwrap()
 }
@@ -279,7 +279,7 @@ fn readback_handles_unaligned_widths() {
 }
 
 /// Larger scene with concave edges and smooth surfaces (also a visual check
-/// via OPENSHAPE_RENDER_TEST_OUT).
+/// via OPENDATUM_RENDER_TEST_OUT).
 #[test]
 fn mixed_scene_renders() {
     let mut r = renderer();
@@ -514,14 +514,14 @@ fn max_channel_diff(a: [u8; 4], b: [u8; 4]) -> u8 {
 
 /// Renders `scene` into a fresh texture of `format` and reads it back.
 fn render_target(
-    device: &openshape_render::wgpu::Device,
-    queue: &openshape_render::wgpu::Queue,
-    scene: &mut openshape_render::SceneRenderer,
-    format: openshape_render::wgpu::TextureFormat,
+    device: &opendatum_render::wgpu::Device,
+    queue: &opendatum_render::wgpu::Queue,
+    scene: &mut opendatum_render::SceneRenderer,
+    format: opendatum_render::wgpu::TextureFormat,
     camera: &Camera,
     (w, h): (u32, u32),
 ) -> RgbaImage {
-    use openshape_render::{read_texture_rgba8, wgpu};
+    use opendatum_render::{read_texture_rgba8, wgpu};
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("test viewport"),
         size: wgpu::Extent3d {
@@ -548,7 +548,7 @@ fn render_target(
 /// over the whole tonal range.
 #[test]
 fn shared_device_non_srgb_target_matches() {
-    use openshape_render::{wgpu, SceneRenderer};
+    use opendatum_render::{wgpu, SceneRenderer};
     let mut r = renderer();
     let camera = Camera::isometric().fitted([-0.5; 3], [0.5; 3]);
     let reference = r.render_meshes_rgba(&[unit_cube()], &camera, W, H).unwrap();
@@ -635,8 +635,8 @@ fn shared_device_non_srgb_target_matches() {
 #[test]
 fn renderer_types_are_send_and_sync() {
     fn check<T: Send + Sync + 'static>() {}
-    check::<openshape_render::SceneRenderer>();
-    check::<openshape_render::OffscreenRenderer>();
+    check::<opendatum_render::SceneRenderer>();
+    check::<opendatum_render::OffscreenRenderer>();
     check::<Camera>();
     check::<MeshData>();
 }
@@ -650,7 +650,7 @@ fn edge_width_is_respected() {
     let camera = Camera::isometric().fitted([-0.5; 3], [0.5; 3]);
     r.set_meshes(&[unit_cube()]).unwrap();
     r.scene_mut().set_display_mode(DisplayMode::Wireframe);
-    let ink = |r: &mut openshape_render::OffscreenRenderer, width: f32| {
+    let ink = |r: &mut opendatum_render::OffscreenRenderer, width: f32| {
         r.scene_mut().set_edge_width(width);
         let img = r.render_rgba(&camera, W, H).unwrap();
         maybe_dump(&format!("edge_width_{width}"), &img);

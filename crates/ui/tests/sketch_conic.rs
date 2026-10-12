@@ -6,16 +6,16 @@
 mod common;
 
 use common::*;
-use openshape_app::sketch_mode::{
+use opendatum_app::sketch_mode::{
     annotations, sample_resolved, ConstraintTool, SketchEditor, SnapTarget, Tool,
 };
-use openshape_app::sketch_ops::trim::{self, Preview};
-use openshape_app::sketch_ops::Batch;
-use openshape_app::Model;
-use openshape_core_model::sketch::{Constraint, ConstraintEntry, Geometry, TangentKind};
-use openshape_core_model::{DVec2, FeatureId, SketchEdit, SketchId};
-use openshape_sketch_solver::conic::point as conic_point;
-use openshape_sketch_solver::{ResolvedCurve, SolveStatus};
+use opendatum_app::sketch_ops::trim::{self, Preview};
+use opendatum_app::sketch_ops::Batch;
+use opendatum_app::Model;
+use opendatum_core_model::sketch::{Constraint, ConstraintEntry, Geometry, TangentKind};
+use opendatum_core_model::{DVec2, FeatureId, SketchEdit, SketchId};
+use opendatum_sketch_solver::conic::point as conic_point;
+use opendatum_sketch_solver::{ResolvedCurve, SolveStatus};
 
 /// `a` within `rel` (relative) of `b`.
 fn near(a: f64, b: f64, rel: f64) -> bool {
@@ -371,7 +371,7 @@ fn points_snap_onto_a_conic_exactly() {
     ed.set_tool(Tool::Point);
     // Near the curve between the drawn polyline's vertices.
     let c = conics(&m, f).remove(0);
-    let q = openshape_sketch_solver::conic::point(c.0, c.1, 0.27) / MM;
+    let q = opendatum_sketch_solver::conic::point(c.0, c.1, 0.27) / MM;
     hover(&m, &mut ed, &map, q.x + 0.3, q.y - 0.2);
     let s = ed.cursor.expect("a snap");
     assert_eq!(s.target, SnapTarget::Curve(conic));
@@ -1125,7 +1125,7 @@ fn a_piece_too_short_to_keep_its_shape_is_refused() {
     // curvature 2.5 m at its start) crossed half a millimetre from its
     // start, where the piece's corner lies t² mm ≈ 0.025 µm off its chord.
     let mut m = Model::new();
-    let f = m.add_sketch(openshape_core_model::PlaneRef::Top);
+    let f = m.add_sketch(opendatum_core_model::PlaneRef::Top);
     let mut b = Batch::default();
     let p = [DVec2::ZERO, DVec2::new(50.0, 1.0), DVec2::new(100.0, 0.0)].map(|x| x * MM);
     let [start, control, end] = p.map(|x| b.point(x));

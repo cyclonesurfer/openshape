@@ -11,7 +11,7 @@
 
 use std::collections::VecDeque;
 
-use openshape_kernel::{DVec2, ProfileCurve};
+use opendatum_kernel::{DVec2, ProfileCurve};
 
 use super::{curve_point, domain};
 

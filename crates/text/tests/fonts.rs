@@ -1,6 +1,6 @@
 //! The bundled font files are exactly the ones fonts/README.md records.
 
-use openshape_text::Font;
+use opendatum_text::Font;
 use sha2::{Digest, Sha256};
 
 #[test]

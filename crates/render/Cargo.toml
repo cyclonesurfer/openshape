@@ -1,6 +1,6 @@
 [package]
-name = "openshape-render"
-description = "wgpu-based 3D viewport renderer for OpenShape (headless-capable)."
+name = "opendatum-render"
+description = "wgpu-based 3D viewport renderer for OpenDatum (headless-capable)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

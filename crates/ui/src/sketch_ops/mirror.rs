@@ -14,9 +14,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use glam::DVec2;
-use openshape_core_model::sketch::{Constraint, Geometry};
-use openshape_core_model::{SketchData, SketchEdit, SketchId};
-use openshape_sketch_solver::ResolvedCurve;
+use opendatum_core_model::sketch::{Constraint, Geometry};
+use opendatum_core_model::{SketchData, SketchEdit, SketchId};
+use opendatum_sketch_solver::ResolvedCurve;
 
 use super::trim::{Plan, Preview};
 use super::{coincidence_classes, Batch, SAME_POINT};
@@ -187,7 +187,7 @@ pub fn sources(sketch: &SketchData, selection: &[SketchId]) -> Vec<SketchId> {
     let boxes = selection
         .iter()
         .flat_map(|id| super::text::box_lines(sketch, *id));
-    let picked: Vec<&openshape_core_model::sketch::Entity<SketchId>> = selection
+    let picked: Vec<&opendatum_core_model::sketch::Entity<SketchId>> = selection
         .iter()
         .copied()
         .chain(boxes)

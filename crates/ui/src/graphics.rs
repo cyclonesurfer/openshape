@@ -5,12 +5,12 @@
 
 use eframe::egui;
 use egui::{Align2, Color32, FontId, PointerButton, Pos2, Rect, Sense, Stroke, Ui, Vec2};
-use openshape_core_model::{DVec2, FeatureId};
-use openshape_kernel::Frame;
-use openshape_render::{wgpu, DisplayMode, MeshData, SceneRenderer};
-use openshape_ui_kit::{view_cube, Theme};
+use opendatum_core_model::{DVec2, FeatureId};
+use opendatum_kernel::Frame;
+use opendatum_render::{wgpu, DisplayMode, MeshData, SceneRenderer};
+use opendatum_ui_kit::{view_cube, Theme};
 
-use crate::app::{Action, OpenShapeApp, Selection};
+use crate::app::{Action, OpenDatumApp, Selection};
 use crate::commands::Command;
 use crate::picking::pick_mesh;
 use crate::planes::{self, StdPlane};
@@ -88,7 +88,7 @@ impl Viewport {
     }
 }
 
-impl OpenShapeApp {
+impl OpenDatumApp {
     /// The default planes' half size for the current parts and sketches.
     pub(crate) fn plane_half(&self) -> f64 {
         planes::half_size(self.model.bounds(), self.sketch_bounds())
@@ -334,7 +334,7 @@ impl OpenShapeApp {
         if menu_row(
             ui,
             theme,
-            Some(openshape_ui_kit::Icon::Sketch),
+            Some(opendatum_ui_kit::Icon::Sketch),
             sketches,
             None,
             true,
@@ -352,7 +352,7 @@ impl OpenShapeApp {
         if menu_row(
             ui,
             theme,
-            Some(openshape_ui_kit::Icon::Plane),
+            Some(opendatum_ui_kit::Icon::Plane),
             planes,
             None,
             true,
@@ -366,7 +366,7 @@ impl OpenShapeApp {
             && menu_row(
                 ui,
                 theme,
-                Some(openshape_ui_kit::Icon::Eye),
+                Some(opendatum_ui_kit::Icon::Eye),
                 "Show all parts",
                 None,
                 true,
@@ -449,7 +449,7 @@ impl OpenShapeApp {
         vp.scene.set_display_mode(self.display_mode);
         // Same apparent line weight on high-DPI screens.
         vp.scene
-            .set_edge_width(openshape_render::DEFAULT_EDGE_WIDTH_PX * ppp);
+            .set_edge_width(opendatum_render::DEFAULT_EDGE_WIDTH_PX * ppp);
         if vp.texture.as_ref().map(|t| t.size) != Some(size) {
             let t = ViewportTexture::new(&rs.device, vp.format, size);
             let mut renderer = rs.renderer.write();

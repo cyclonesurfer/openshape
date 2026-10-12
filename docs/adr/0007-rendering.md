@@ -2,7 +2,7 @@
 
 Status: accepted (Phase 0)
 
-* `openshape-render` uses wgpu (version pinned to egui-wgpu's, now 30).
+* `opendatum-render` uses wgpu (version pinned to egui-wgpu's, now 30).
   Primary target is Vulkan on Mesa RADV (AMD); GL is the fallback backend;
   software Vulkan (lavapipe) is used for CI and headless tests.
 * The renderer has no dependency on the kernel or egui: it consumes neutral

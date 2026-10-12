@@ -9,10 +9,10 @@
 use std::collections::BTreeSet;
 
 use glam::DVec2;
-use openshape_oplog::OpId;
+use opendatum_oplog::OpId;
 use serde::{Deserialize, Serialize};
 
-pub use openshape_sketch_solver::{
+pub use opendatum_sketch_solver::{
     check_text, Constraint, ConstraintEntry, DistanceKind, Entity, Geometry, Sketch, TangentKind,
     TextPiece, MAX_TEXT_ASPECT, RHO_MIN,
 };

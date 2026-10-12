@@ -6,7 +6,7 @@
 mod common;
 
 use common::{assert_satisfied, de_boor, dist_to_spline, pos, resolved, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     solve, Constraint, DVec2, Geometry, ResolvedCurve, Sketch, SolveError, SolveOptions,
     SolveStatus, TangentKind,
 };

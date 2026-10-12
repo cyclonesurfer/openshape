@@ -1,7 +1,7 @@
 //! Test 5: camera unit tests (no GPU needed).
 
 use glam::{DVec3, Vec3, Vec4};
-use openshape_render::{Camera, Projection, ViewPreset};
+use opendatum_render::{Camera, Projection, ViewPreset};
 use std::f64::consts::FRAC_PI_2;
 
 fn box_corners(min: [f32; 3], max: [f32; 3]) -> Vec<Vec3> {

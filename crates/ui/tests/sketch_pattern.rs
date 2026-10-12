@@ -8,14 +8,14 @@ mod common;
 use std::f64::consts::{PI, TAU};
 
 use common::*;
-use openshape_app::sketch_mode::{annotations, Snap, SnapTarget, Tool};
-use openshape_app::sketch_ops::pattern::{self, Anchor, Motion};
-use openshape_app::sketch_ops::trim::Preview;
-use openshape_app::sketch_ops::{mirror, shapes, Batch};
-use openshape_app::Model;
-use openshape_core_model::sketch::{Constraint, Geometry};
-use openshape_core_model::{DVec2, FeatureId, PlaneRef, SketchData, SketchEdit, SketchId};
-use openshape_sketch_solver::{ResolvedCurve, SolveStatus};
+use opendatum_app::sketch_mode::{annotations, Snap, SnapTarget, Tool};
+use opendatum_app::sketch_ops::pattern::{self, Anchor, Motion};
+use opendatum_app::sketch_ops::trim::Preview;
+use opendatum_app::sketch_ops::{mirror, shapes, Batch};
+use opendatum_app::Model;
+use opendatum_core_model::sketch::{Constraint, Geometry};
+use opendatum_core_model::{DVec2, FeatureId, PlaneRef, SketchData, SketchEdit, SketchId};
+use opendatum_sketch_solver::{ResolvedCurve, SolveStatus};
 use proptest::prelude::*;
 
 fn redundant(m: &Model, f: FeatureId) -> usize {
@@ -99,8 +99,8 @@ fn pattern_error(
 /// there), drawn with the rectangle tool; returns its four lines.
 fn square(
     m: &mut Model,
-    ed: &mut openshape_app::sketch_mode::SketchEditor,
-    map: &openshape_app::sketch_mode::ScreenMap,
+    ed: &mut opendatum_app::sketch_mode::SketchEditor,
+    map: &opendatum_app::sketch_mode::ScreenMap,
 ) -> Vec<SketchId> {
     draw(m, ed, map, Tool::Rectangle, &[(0.0, 0.0), (10.0, 10.0)]);
     m.sketch_def(ed.feature)

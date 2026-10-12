@@ -1,12 +1,12 @@
 //! Renders a shaded, edge-outlined unit cube headlessly and writes a PNG.
 //!
 //! ```sh
-//! cargo run -p openshape-render --example offscreen_cube -- out/cube.png [width height]
+//! cargo run -p opendatum-render --example offscreen_cube -- out/cube.png [width height]
 //! ```
 //!
-//! The backend can be forced with `OPENSHAPE_WGPU_BACKEND=vulkan|gl|any`.
+//! The backend can be forced with `OPENDATUM_WGPU_BACKEND=vulkan|gl|any`.
 
-use openshape_render::{write_png, Camera, MeshData, OffscreenRenderer};
+use opendatum_render::{write_png, Camera, MeshData, OffscreenRenderer};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -25,7 +25,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(path: &str, width: u32, height: u32) -> Result<(), openshape_render::RenderError> {
+fn run(path: &str, width: u32, height: u32) -> Result<(), opendatum_render::RenderError> {
     let cube = MeshData::cuboid([-0.5; 3], [0.5; 3], MeshData::DEFAULT_COLOR);
     let (min, max) = cube.bounds().expect("cube has bounds");
     let mut camera = Camera::isometric();

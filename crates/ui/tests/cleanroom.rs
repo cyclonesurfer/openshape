@@ -1,5 +1,5 @@
 //! Clean-room guard (docs/CLEANROOM.md): the name of the commercial product
-//! OpenShape's feature goals are benchmarked against appears nowhere in the
+//! OpenDatum's feature goals are benchmarked against appears nowhere in the
 //! repository except the three files that state the policy.
 
 use std::path::{Path, PathBuf};
@@ -85,7 +85,7 @@ fn the_reference_product_is_not_named_outside_the_policy_files() {
 fn whole_word_matching() {
     let w = name();
     assert_eq!(occurrences("RegionShape", &w), Vec::<usize>::new());
-    assert_eq!(occurrences("OpenShape", &w), Vec::<usize>::new());
+    assert_eq!(occurrences("OpenDatum", &w), Vec::<usize>::new());
     assert_eq!(
         occurrences(&format!("an {} tab", w.to_uppercase()), &w),
         vec![3]

@@ -5,12 +5,12 @@
 mod common;
 
 use common::*;
-use openshape_app::sketch_mode::{ConstraintTool, SnapTarget, Tool};
-use openshape_app::sketch_ops::trim::Preview;
-use openshape_app::Model;
-use openshape_core_model::sketch::{Constraint, Geometry, TangentKind};
-use openshape_core_model::{DVec2, FeatureId, SketchId};
-use openshape_sketch_solver::{ResolvedCurve, SolveStatus};
+use opendatum_app::sketch_mode::{ConstraintTool, SnapTarget, Tool};
+use opendatum_app::sketch_ops::trim::Preview;
+use opendatum_app::Model;
+use opendatum_core_model::sketch::{Constraint, Geometry, TangentKind};
+use opendatum_core_model::{DVec2, FeatureId, SketchId};
+use opendatum_sketch_solver::{ResolvedCurve, SolveStatus};
 use std::f64::consts::{FRAC_PI_6, PI, TAU};
 
 /// `a` within `rel` (relative) of `b`.
@@ -95,7 +95,7 @@ fn scaled(b: f64, deg: f64, k: f64) -> (f64, f64) {
 
 /// Draws the nominal ellipse with semi-minor `b` mm (negative: on the
 /// right of the major axis).
-fn draw_ellipse(m: &mut Model, ed: &mut openshape_app::sketch_mode::SketchEditor, b: f64) {
+fn draw_ellipse(m: &mut Model, ed: &mut opendatum_app::sketch_mode::SketchEditor, b: f64) {
     let map = view();
     // The third click is off the minor axis: only its distance across the
     // major axis counts.
@@ -180,7 +180,7 @@ fn a_second_axis_on_the_first_is_refused() {
 /// `from` to `to`, hovering through `via` on the way.
 fn draw_arc(
     m: &mut Model,
-    ed: &mut openshape_app::sketch_mode::SketchEditor,
+    ed: &mut opendatum_app::sketch_mode::SketchEditor,
     b: f64,
     from: f64,
     via: &[f64],
@@ -207,7 +207,7 @@ fn draw_arc(
 
 /// Closes an arc of the nominal ellipse with a line between its ends and
 /// checks the region against the elliptic segment (ab/2)(Δ − sin Δ).
-fn check_segment(m: &mut Model, ed: &mut openshape_app::sketch_mode::SketchEditor, b: f64) {
+fn check_segment(m: &mut Model, ed: &mut opendatum_app::sketch_mode::SketchEditor, b: f64) {
     let f = ed.feature;
     let e = ellipses(m, f).remove(0);
     let (s, t) = ends(&e);
@@ -877,7 +877,7 @@ fn an_ellipse_needs_two_crossings_and_an_uncut_one_goes() {
 /// Uses `tool` once at a plane point (millimetres) and returns its message.
 fn act(
     m: &mut Model,
-    ed: &mut openshape_app::sketch_mode::SketchEditor,
+    ed: &mut opendatum_app::sketch_mode::SketchEditor,
     tool: Tool,
     x: f64,
     y: f64,
@@ -891,7 +891,7 @@ fn act(
 
 /// The arc of the nominal ellipse from 30° to 150° crossed by vertical
 /// lines at x = 0 and 20 mm (anomalies 109.47° and 70.53°).
-fn crossed_arc() -> (Model, openshape_app::sketch_mode::SketchEditor) {
+fn crossed_arc() -> (Model, opendatum_app::sketch_mode::SketchEditor) {
     let (mut m, mut ed, map) = setup();
     draw_arc(&mut m, &mut ed, 15.0, 30.0, &[90.0], 150.0);
     for x in [0.0, 20.0] {

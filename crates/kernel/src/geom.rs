@@ -6,7 +6,7 @@
 //! (closest point) and affine transformation.
 
 use glam::{DMat4, DVec3};
-use openshape_nurbs::{NurbsCurve, NurbsSurface};
+use opendatum_nurbs::{NurbsCurve, NurbsSurface};
 use serde::{Deserialize, Serialize};
 
 use crate::math::{wrap_angle, Frame};

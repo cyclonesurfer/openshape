@@ -6,7 +6,7 @@
 
 pub mod gen;
 
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     resolve_curves, Constraint, ConstraintEntry, DVec2, DistanceKind, Entity, Geometry,
     ResolvedCurve, Sketch, TangentKind,
 };

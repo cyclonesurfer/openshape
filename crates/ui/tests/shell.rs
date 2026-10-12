@@ -4,14 +4,14 @@
 //! layout record. They need a Vulkan or GL adapter (lavapipe in CI).
 
 use egui::{Key, Modifiers, Pos2, Rect, Vec2};
-use openshape_app::app::Selection;
-use openshape_app::commands::{Command, Mode};
-use openshape_app::screenshots::{demo_model, AppDriver};
-use openshape_app::sketch_mode::{annotations, normal_view, ScreenMap, SketchDisplay};
-use openshape_app::{Model, PREVIEW_FEATURE};
-use openshape_core_model::{DVec3, Feature, FeatureId, InsertAt, ModelOp};
-use openshape_kernel::{Frame, Kernel};
-use openshape_render::{Camera, Projection, RgbaImage};
+use opendatum_app::app::Selection;
+use opendatum_app::commands::{Command, Mode};
+use opendatum_app::screenshots::{demo_model, AppDriver};
+use opendatum_app::sketch_mode::{annotations, normal_view, ScreenMap, SketchDisplay};
+use opendatum_app::{Model, PREVIEW_FEATURE};
+use opendatum_core_model::{DVec3, Feature, FeatureId, InsertAt, ModelOp};
+use opendatum_kernel::{Frame, Kernel};
+use opendatum_render::{Camera, Projection, RgbaImage};
 
 const SIZE: [u32; 2] = [1280, 800];
 
@@ -98,7 +98,7 @@ fn toolbar_buttons_open_their_dialogs() {
     d.key(Key::Escape, Modifiers::NONE).unwrap();
     assert!(d.app.profile_pick_mut().is_none());
 
-    let cylinder = Command::Template(openshape_app::dialogs::Template::Cylinder);
+    let cylinder = Command::Template(opendatum_app::dialogs::Template::Cylinder);
     let before = feature_ids(&d).len();
     d.app.run(cylinder);
     d.settle().unwrap();
@@ -118,7 +118,7 @@ fn a_new_sketch_from_a_plane_row_and_cancelling_it() {
         .layout()
         .plane_rows
         .iter()
-        .find(|(p, _)| *p == openshape_app::planes::StdPlane::Top)
+        .find(|(p, _)| *p == opendatum_app::planes::StdPlane::Top)
         .map(|(_, r)| *r)
         .expect("a Top row");
     d.double_click(top.center()).unwrap();
@@ -159,7 +159,7 @@ fn cancelling_an_edit_restores_the_sketch() {
         .find(|e| {
             matches!(
                 e.geometry,
-                openshape_core_model::sketch::Geometry::Line { .. }
+                opendatum_core_model::sketch::Geometry::Line { .. }
             )
         })
         .unwrap()
@@ -405,7 +405,7 @@ fn dimensions_sit_outside_the_sketch() {
     let (yaw, pitch) = normal_view(&frame);
     let camera = Camera {
         target: DVec3::ZERO,
-        distance: 0.1 / (openshape_render::DEFAULT_FOV_Y_RAD as f64 * 0.5).tan(),
+        distance: 0.1 / (opendatum_render::DEFAULT_FOV_Y_RAD as f64 * 0.5).tan(),
         yaw,
         pitch,
         projection: Projection::Orthographic,
@@ -415,7 +415,7 @@ fn dimensions_sit_outside_the_sketch() {
     let map = ScreenMap::new(&camera, frame, rect);
     let d = SketchDisplay::from_result(r);
     let corner = |x: f64, y: f64| {
-        map.to_screen(openshape_core_model::DVec2::new(x, y) * 1e-3)
+        map.to_screen(opendatum_core_model::DVec2::new(x, y) * 1e-3)
             .unwrap()
     };
     let outline = Rect::from_two_pos(corner(-40.0, -25.0), corner(40.0, 25.0));
@@ -511,7 +511,7 @@ fn volume(d: &AppDriver, feature: FeatureId) -> f64 {
 
 #[test]
 fn a_new_feature_dialog_previews_its_values_live() {
-    use openshape_app::dialogs::Template;
+    use opendatum_app::dialogs::Template;
     let mut d = driver(Model::new());
     let ops = d.app.model().session().log().len();
     d.app.run(Command::Template(Template::Box));
@@ -575,7 +575,7 @@ fn editing_an_extrude_previews_the_new_depth_until_cancelled() {
 
 #[test]
 fn the_view_cube_turns_the_view() {
-    use openshape_ui_kit::view_cube::{self, CubeFace, CubeTarget};
+    use opendatum_ui_kit::view_cube::{self, CubeFace, CubeTarget};
     let (mut d, _, _) = demo();
     let cube = d.app.layout().view_cube.unwrap();
     let camera = d.app.camera_mut().clone();

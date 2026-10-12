@@ -2,7 +2,7 @@
 
 Status: accepted (Phase 0)
 
-OpenShape is GPL-3.0-or-later. Every dependency must be compatible with
+OpenDatum is GPL-3.0-or-later. Every dependency must be compatible with
 GPL-3.0. `deny.toml` allows: MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception,
 BSD-2-Clause, BSD-3-Clause, ISC, Zlib, 0BSD, Unicode-3.0, Unicode-DFS-2016,
 BSL-1.0, CC0-1.0, MPL-2.0, LGPL-2.1-or-later, LGPL-3.0-or-later,

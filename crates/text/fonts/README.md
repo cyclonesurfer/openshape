@@ -3,7 +3,7 @@
 The six faces here are the Liberation fonts, version 2.1.5, unmodified:
 Liberation Sans, Liberation Serif and Liberation Mono, each regular and
 bold. They are licensed under the SIL Open Font License 1.1 (OFL.txt, with
-the copyright notices); the OpenShape code that uses them is
+the copyright notices); the OpenDatum code that uses them is
 GPL-3.0-or-later. ADR 0015 records why they were chosen.
 
 Provenance: the files were taken from Debian's `fonts-liberation` package,

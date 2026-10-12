@@ -1,4 +1,4 @@
-//! 2D geometric constraint solver for OpenShape sketches.
+//! 2D geometric constraint solver for OpenDatum sketches.
 //!
 //! See `docs/design/0005-sketch-solver.md`. The data model ([`Sketch`],
 //! [`Entity`], [`Geometry`], [`Constraint`]) is shared with the document

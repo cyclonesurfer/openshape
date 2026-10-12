@@ -1,7 +1,7 @@
 //! Diagnosis at the solution (design note 0005 §5 step 4): numerical rank,
 //! degrees of freedom, free unknowns, redundant and conflicting equations.
 
-use openshape_linalg::{
+use opendatum_linalg::{
     lstsq_min_norm, norm2, select_columns_in_order, svd, CompleteOrthogonal, Matrix, QrPivoted,
 };
 

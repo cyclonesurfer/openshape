@@ -1,7 +1,7 @@
 //! Serialization round trips and validation on deserialization.
 
 use glam::DVec3;
-use openshape_nurbs::{NurbsCurve, NurbsSurface};
+use opendatum_nurbs::{NurbsCurve, NurbsSurface};
 
 #[test]
 fn curve_round_trip() {

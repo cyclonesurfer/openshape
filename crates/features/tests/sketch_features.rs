@@ -4,14 +4,14 @@
 
 use std::f64::consts::{PI, TAU};
 
-use openshape_core_model::sketch::{Constraint, ConstraintEntry, Entity, Geometry};
-use openshape_core_model::{
+use opendatum_core_model::sketch::{Constraint, ConstraintEntry, Entity, Geometry};
+use opendatum_core_model::{
     DVec2, Feature, FeatureId, InsertAt, ModelOp, OpId, PlaneRef, ProfileSource, RegionKey,
     ReplicaId, RevolveAxis, Session, SketchData, SketchDef, SketchEdit, SketchId,
 };
-use openshape_features::{regenerate, regions::resolve_region, FeatureStatus, StudioResult};
-use openshape_kernel::{Body, Kernel, OsKernel};
-use openshape_sketch_solver::SolveStatus;
+use opendatum_features::{regenerate, regions::resolve_region, FeatureStatus, StudioResult};
+use opendatum_kernel::{Body, BrepKernel, Kernel};
+use opendatum_sketch_solver::SolveStatus;
 
 const MM: f64 = 1e-3;
 
@@ -143,7 +143,7 @@ fn rectangle(s: &mut Session, sketch: FeatureId, x: f64, y: f64, w: f64, h: f64)
 
 fn regen(s: &Session) -> StudioResult<Body> {
     let el = s.document().element(s.first_studio().unwrap()).unwrap();
-    regenerate(&OsKernel::default(), &el.studio)
+    regenerate(&BrepKernel::default(), &el.studio)
 }
 
 fn keys(s: &Session, sketch: FeatureId) -> Vec<RegionKey> {
@@ -181,7 +181,7 @@ fn volume(r: &StudioResult<Body>, f: FeatureId) -> f64 {
         .iter()
         .find(|b| b.feature == f)
         .unwrap_or_else(|| panic!("no body; status {:?}", r.status(f)));
-    OsKernel::default()
+    BrepKernel::default()
         .mass_properties(&b.body, 1e-10)
         .unwrap()
         .volume
@@ -224,7 +224,7 @@ fn a_fully_defined_rectangle_extrudes() {
     assert_eq!(r.status(e), Some(&FeatureStatus::Ok));
     assert_close(volume(&r, e), 8000.0 * MM.powi(3));
     let body = &r.bodies.iter().find(|b| b.feature == e).unwrap().body;
-    let t = OsKernel::default().topology(body);
+    let t = BrepKernel::default().topology(body);
     assert_eq!((t.faces, t.edges, t.vertices), (6, 12, 8));
 }
 
@@ -293,7 +293,7 @@ fn a_split_region_resolves_to_the_part_holding_its_interior_point() {
     let r = regen(&s);
     let regions = r.sketch(sk).unwrap().regions.as_ref().unwrap();
     assert_eq!(regions.keys.len(), 2);
-    let i = resolve_region(&OsKernel::default(), regions, &key[0]).expect("resolves");
+    let i = resolve_region(&BrepKernel::default(), regions, &key[0]).expect("resolves");
     let picked = &regions.arrangement.regions[i];
     // The region chosen is the one containing the stored interior point.
     let interior = key[0].interior;

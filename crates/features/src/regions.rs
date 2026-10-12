@@ -3,9 +3,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use openshape_core_model::sketch::{EdgeKey, VertexKey};
-use openshape_core_model::{RegionKey, SketchId};
-use openshape_kernel::{Kernel, RegionLoop, SketchArrangement};
+use opendatum_core_model::sketch::{EdgeKey, VertexKey};
+use opendatum_core_model::{RegionKey, SketchId};
+use opendatum_kernel::{Kernel, RegionLoop, SketchArrangement};
 
 use crate::SketchRegions;
 

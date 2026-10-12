@@ -6,8 +6,8 @@ mod common;
 
 use common::{max_channel_diff, maybe_dump, rgba, snapshot};
 use egui::{Color32, LayerId, Pos2, Rect, Vec2};
-use openshape_render::RgbaImage;
-use openshape_ui_kit::{icon_button, paint_icon, Icon, Theme};
+use opendatum_render::RgbaImage;
+use opendatum_ui_kit::{icon_button, paint_icon, Icon, Theme};
 use std::collections::HashSet;
 
 const COLUMNS: usize = 10;

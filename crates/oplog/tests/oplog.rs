@@ -1,6 +1,6 @@
 //! Behavioural and property tests for the operation log.
 
-use openshape_oplog::{Integrated, OpKind, OpLog, OpLogError, ReplicaId};
+use opendatum_oplog::{Integrated, OpKind, OpLog, OpLogError, ReplicaId};
 use proptest::prelude::*;
 
 fn payloads(log: &OpLog<u32>) -> Vec<u32> {
@@ -63,6 +63,33 @@ fn encode_decode_roundtrip_preserves_state_and_undo() {
 }
 
 #[test]
+fn decode_reads_documents_written_before_the_rename() {
+    // ADR 0017: the container is unchanged apart from its magic, and both
+    // magics are 15 bytes, so an old file is a new one with them swapped.
+    let mut log: OpLog<u32> = OpLog::new(ReplicaId(3));
+    log.append(1);
+    log.append(2);
+    let bytes = log.encode().unwrap();
+    let swap = |from: &[u8], to: &[u8]| {
+        let at = bytes
+            .windows(from.len())
+            .position(|w| w == from)
+            .expect("magic in the container");
+        let mut b = bytes.clone();
+        b[at..at + to.len()].copy_from_slice(to);
+        b
+    };
+    let old = swap(b"OpenDatum-oplog", b"OpenShape-oplog");
+    let back: OpLog<u32> = OpLog::decode(&old, ReplicaId(3)).unwrap();
+    assert_eq!(back.encode().unwrap(), bytes);
+    let other = swap(b"OpenDatum-oplog", b"SomethingsOplog");
+    assert!(matches!(
+        OpLog::<u32>::decode(&other, ReplicaId(3)),
+        Err(OpLogError::UnsupportedFormat(m)) if m == "SomethingsOplog"
+    ));
+}
+
+#[test]
 fn decode_rejects_garbage() {
     assert!(matches!(
         OpLog::<u32>::decode(b"not cbor at all", ReplicaId(1)),
@@ -88,7 +115,7 @@ fn out_of_order_delivery_is_buffered() {
 
 #[test]
 fn rejects_causality_violation_and_bad_undo() {
-    use openshape_oplog::{Op, OpId};
+    use opendatum_oplog::{Op, OpId};
     let mut a = OpLog::new(ReplicaId(1));
     let x = a.append(1);
     let mut b: OpLog<u32> = OpLog::new(ReplicaId(2));
@@ -214,7 +241,7 @@ proptest! {
 
 #[test]
 fn rejects_null_ids_and_drops_invalid_buffered_ops() {
-    use openshape_oplog::{Op, OpId};
+    use opendatum_oplog::{Op, OpId};
     let mut a = OpLog::new(ReplicaId(1));
     let x = a.append(1);
     let y = a.append(2);
@@ -255,12 +282,12 @@ fn rejects_null_ids_and_drops_invalid_buffered_ops() {
     };
     assert_eq!(
         b.integrate(stray.clone()),
-        Ok(openshape_oplog::Integrated::Pending)
+        Ok(opendatum_oplog::Integrated::Pending)
     );
     b.integrate(a.get(x).unwrap().clone()).unwrap();
     assert_eq!(
         b.integrate(a.get(y).unwrap().clone()),
-        Ok(openshape_oplog::Integrated::Added)
+        Ok(opendatum_oplog::Integrated::Added)
     );
     assert_eq!(b.pending_len(), 0);
     assert_eq!(b.rejected().len(), 1);

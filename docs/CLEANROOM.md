@@ -1,14 +1,14 @@
 # Clean-room policy
 
-OpenShape is an independent implementation of a parametric 3D CAD system.
+OpenDatum is an independent implementation of a parametric 3D CAD system.
 This document states how it is built so that the origin of every part of it
 can be shown. It binds every contributor, human or AI agent.
 
 ## Functional reference
 
-OpenShape's feature goals and its general workflow are benchmarked against
+OpenDatum's feature goals and its general workflow are benchmarked against
 commercial browser-based parametric CAD systems, in particular Onshape
-(a trademark of PTC Inc.; OpenShape is not affiliated with, endorsed by or
+(a trademark of PTC Inc.; OpenDatum is not affiliated with, endorsed by or
 derived from it or its owner). "Functional reference" means only the
 publicly known feature set and the publicly observable way such a system is
 used: which modelling operations exist, and how a user generally moves
@@ -36,7 +36,7 @@ documentation shipped with the program, file formats or metadata. The test
 ## What is used
 
 - **Our own reasoning and code.** All source code in this repository is
-  written for OpenShape. Third-party code enters only as declared Cargo
+  written for OpenDatum. Third-party code enters only as declared Cargo
   dependencies, recorded in `Cargo.lock`. `cargo deny check` (configuration
   in `deny.toml`, rationale in [ADR 0009](adr/0009-dependency-licensing.md))
   fails the build unless every dependency's licence is compatible with
@@ -49,7 +49,7 @@ documentation shipped with the program, file formats or metadata. The test
   public specifications, cited in [FORMATS.md](FORMATS.md).
 - **Open-source prior art.** A design note may name an open-source project
   whose published approach it compares with. That names prior art. It does
-  not mean code was taken: no code from such projects is in OpenShape.
+  not mean code was taken: no code from such projects is in OpenDatum.
 - **Common user-interface conventions.** The application uses the layout
   conventions shared across parametric CAD software: a feature list on the
   left with a rollback marker, a command toolbar, a graphics area with an
@@ -59,10 +59,10 @@ documentation shipped with the program, file formats or metadata. The test
 
 ## Visual assets
 
-- Every icon is an original drawing made for OpenShape, drawn in code
+- Every icon is an original drawing made for OpenDatum, drawn in code
   (`crates/ui-kit/src/icons.rs`); no image files are used. Each icon's
   documentation says what it depicts.
-- The colour palette is OpenShape's own, defined in one place
+- The colour palette is OpenDatum's own, defined in one place
   (`crates/ui-kit/src/theme.rs`).
 - Text and a few symbols are drawn with the fonts bundled with the egui
   toolkit (Ubuntu Light, Hack, Noto Emoji and emoji-icon-font), under their
@@ -79,7 +79,7 @@ documentation shipped with the program, file formats or metadata. The test
 
 ## Records
 
-The record of how OpenShape was built is the git history, the architecture
+The record of how OpenDatum was built is the git history, the architecture
 decision records in [adr/](adr/), the design notes in [design/](design/),
 [STATUS.md](../STATUS.md) and this policy. Contributors describe their own
 decisions and sources in commit messages and documents. Anyone who finds

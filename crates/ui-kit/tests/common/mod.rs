@@ -1,8 +1,8 @@
 //! Shared helpers for the GPU tests (they run on Mesa lavapipe in CI).
 #![allow(dead_code)]
 
-use openshape_render::{write_png, RgbaImage};
-use openshape_ui_kit::UiSnapshot;
+use opendatum_render::{write_png, RgbaImage};
+use opendatum_ui_kit::UiSnapshot;
 
 /// Creates a snapshot renderer or panics loudly: these tests must never pass
 /// silently on a machine without a usable adapter.
@@ -15,15 +15,15 @@ pub fn snapshot(size: [u32; 2], pixels_per_point: f32) -> UiSnapshot {
         }
         Err(e) => panic!(
             "no wgpu adapter available ({e}); install Mesa lavapipe (mesa-vulkan-drivers) \
-             or set OPENSHAPE_WGPU_BACKEND"
+             or set OPENDATUM_WGPU_BACKEND"
         ),
     }
 }
 
-/// Writes `image` to `$OPENSHAPE_RENDER_TEST_OUT/<name>.png` when that
+/// Writes `image` to `$OPENDATUM_RENDER_TEST_OUT/<name>.png` when that
 /// variable is set (for eyeballing test renders).
 pub fn maybe_dump(name: &str, image: &RgbaImage) {
-    if let Ok(dir) = std::env::var("OPENSHAPE_RENDER_TEST_OUT") {
+    if let Ok(dir) = std::env::var("OPENDATUM_RENDER_TEST_OUT") {
         std::fs::create_dir_all(&dir).expect("create dump dir");
         let path = std::path::Path::new(&dir).join(format!("{name}.png"));
         write_png(&path, image).expect("write png");

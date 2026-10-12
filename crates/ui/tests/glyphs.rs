@@ -48,7 +48,7 @@ fn source_characters() -> BTreeMap<char, String> {
 #[test]
 fn every_source_character_has_a_glyph() {
     let ctx = egui::Context::default();
-    ctx.set_fonts(openshape_ui_kit::font_definitions());
+    ctx.set_fonts(opendatum_ui_kit::font_definitions());
     let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
     out.textures_delta.clear();
     // `Fonts::has_glyph` reports false for any character that lives in the

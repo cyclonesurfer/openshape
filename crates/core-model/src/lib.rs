@@ -1,4 +1,4 @@
-//! The OpenShape document model.
+//! The OpenDatum document model.
 //!
 //! A [`Document`] is derived state: it is computed by replaying the effective
 //! [`ModelOp`]s of an [`OpLog`] through a deterministic reducer
@@ -13,7 +13,7 @@ pub mod sketch;
 pub mod units;
 
 pub use glam::{DVec2, DVec3};
-pub use openshape_oplog::{Op, OpId, OpKind, OpLog, OpLogError, ReplicaId};
+pub use opendatum_oplog::{Op, OpId, OpKind, OpLog, OpLogError, ReplicaId};
 use serde::{Deserialize, Serialize};
 pub use sketch::{RegionKey, SketchData, SketchDef, SketchEdit, SketchId};
 

@@ -1,5 +1,5 @@
 [package]
-name = "openshape-io"
+name = "opendatum-io"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-openshape-kernel.workspace = true
+opendatum-kernel.workspace = true
 thiserror.workspace = true
 
 [lints]

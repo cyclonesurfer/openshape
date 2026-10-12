@@ -1,6 +1,6 @@
 # Design note 0005 — Sketch constraint solver
 
-Crate: `crates/sketch-solver` (`openshape-sketch-solver`), using
+Crate: `crates/sketch-solver` (`opendatum-sketch-solver`), using
 `crates/linalg` (ADR 0010). The data types (entities, constraints) are the
 contract shared with `core-model` (ADR 0011) and are defined in
 `src/model.rs`.

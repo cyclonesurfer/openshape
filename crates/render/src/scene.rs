@@ -204,17 +204,17 @@ impl SceneRenderer {
     ) -> Self {
         let sample_count = sample_count.max(1);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("openshape-render shader"),
+            label: Some("opendatum-render shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("shader.wgsl"))),
         });
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("openshape-render globals"),
+            label: Some("opendatum-render globals"),
             size: std::mem::size_of::<Globals>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("openshape-render globals layout"),
+            label: Some("opendatum-render globals layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
@@ -227,7 +227,7 @@ impl SceneRenderer {
             }],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("openshape-render globals"),
+            label: Some("opendatum-render globals"),
             layout: &bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -235,7 +235,7 @@ impl SceneRenderer {
             }],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("openshape-render pipeline layout"),
+            label: Some("opendatum-render pipeline layout"),
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
@@ -387,7 +387,7 @@ impl SceneRenderer {
         stats.batches = self.opaque.len() + self.transparent.len() + self.edges.len();
         self.stats = stats;
         self.bounds = bounds;
-        log::debug!("openshape-render: uploaded {stats:?}");
+        log::debug!("opendatum-render: uploaded {stats:?}");
     }
 
     /// Renders one frame into `target` (a view of a texture of
@@ -405,7 +405,7 @@ impl SceneRenderer {
         size: (u32, u32),
     ) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("openshape-render frame"),
+            label: Some("opendatum-render frame"),
         });
         self.render_to_encoder(device, queue, &mut encoder, camera, target, size);
         queue.submit(Some(encoder.finish()));
@@ -456,7 +456,7 @@ impl SceneRenderer {
             },
         };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("openshape-render scene"),
+            label: Some("opendatum-render scene"),
             color_attachments: &[Some(color_attachment)],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &attachments.depth,
@@ -519,8 +519,8 @@ impl SceneRenderer {
                 .create_view(&wgpu::TextureViewDescriptor::default())
         };
         let msaa_color =
-            (self.sample_count > 1).then(|| make("openshape-render msaa color", self.color_format));
-        let depth = make("openshape-render depth", DEPTH_FORMAT);
+            (self.sample_count > 1).then(|| make("opendatum-render msaa color", self.color_format));
+        let depth = make("opendatum-render depth", DEPTH_FORMAT);
         self.attachments = Some(Attachments {
             size,
             msaa_color,
@@ -618,20 +618,20 @@ fn sanitize(mesh_index: usize, mesh: &MeshData) -> Cow<'_, MeshData> {
             .copied()
             .collect();
         log::warn!(
-            "openshape-render: mesh {mesh_index}: dropped {} triangle(s) with invalid indices",
+            "opendatum-render: mesh {mesh_index}: dropped {} triangle(s) with invalid indices",
             before - fixed.triangle_count()
         );
     }
     if odd_edges {
         fixed.edge_lines.pop();
         log::warn!(
-            "openshape-render: mesh {mesh_index}: odd edge_lines length, dropped last vertex"
+            "opendatum-render: mesh {mesh_index}: odd edge_lines length, dropped last vertex"
         );
     }
     if !fixed.has_normals() {
         if !mesh.normals.is_empty() {
             log::warn!(
-                "openshape-render: mesh {mesh_index}: {} normals for {n} positions, recomputing",
+                "opendatum-render: mesh {mesh_index}: {} normals for {n} positions, recomputing",
                 mesh.normals.len()
             );
         }
@@ -671,7 +671,7 @@ impl MeshBatcher {
         let ni = mesh.indices.len();
         if nv > self.max_vertices || ni > self.max_indices {
             log::error!(
-                "openshape-render: mesh with {nv} vertices / {ni} indices exceeds the GPU buffer \
+                "opendatum-render: mesh with {nv} vertices / {ni} indices exceeds the GPU buffer \
                  limit and is not drawn; split it into smaller meshes"
             );
             return;
@@ -702,12 +702,12 @@ impl MeshBatcher {
             return;
         }
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("openshape-render mesh vertices"),
+            label: Some("opendatum-render mesh vertices"),
             contents: bytemuck::cast_slice(&self.vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("openshape-render mesh indices"),
+            label: Some("opendatum-render mesh indices"),
             contents: bytemuck::cast_slice(&self.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
@@ -762,7 +762,7 @@ impl EdgeBatcher {
             return;
         }
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("openshape-render edge segments"),
+            label: Some("opendatum-render edge segments"),
             contents: bytemuck::cast_slice(&self.segments),
             usage: wgpu::BufferUsages::VERTEX,
         });
@@ -809,7 +809,7 @@ impl PipelineBuilder<'_> {
         };
         let (label, vs, fs, buffers, topology, depth_write, depth_compare, blend) = match kind {
             PipelineKind::Background => (
-                "openshape-render background",
+                "opendatum-render background",
                 "vs_background",
                 "fs_background",
                 None,
@@ -819,7 +819,7 @@ impl PipelineBuilder<'_> {
                 None,
             ),
             PipelineKind::Opaque => (
-                "openshape-render opaque",
+                "opendatum-render opaque",
                 "vs_mesh",
                 "fs_mesh",
                 Some(mesh_layout),
@@ -829,7 +829,7 @@ impl PipelineBuilder<'_> {
                 None,
             ),
             PipelineKind::Transparent => (
-                "openshape-render transparent",
+                "opendatum-render transparent",
                 "vs_mesh",
                 "fs_mesh",
                 Some(mesh_layout),
@@ -839,7 +839,7 @@ impl PipelineBuilder<'_> {
                 Some(wgpu::BlendState::ALPHA_BLENDING),
             ),
             PipelineKind::Edges => (
-                "openshape-render edges",
+                "opendatum-render edges",
                 "vs_edge",
                 "fs_edge",
                 Some(edge_layout),

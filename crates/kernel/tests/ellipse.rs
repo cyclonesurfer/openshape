@@ -5,14 +5,14 @@
 
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
-use openshape_kernel::{
-    BodyMesh, DVec2, ExtrudeSpec, Frame, Kernel, OsKernel, Profile, ProfileCurve, RevolveSpec,
+use opendatum_kernel::{
+    BodyMesh, BrepKernel, DVec2, ExtrudeSpec, Frame, Kernel, Profile, ProfileCurve, RevolveSpec,
     SurfaceKind, TessellationOptions,
 };
 use proptest::prelude::*;
 
-fn k() -> OsKernel {
-    OsKernel::default()
+fn k() -> BrepKernel {
+    BrepKernel::default()
 }
 
 /// `|q| − 1` with `p = c + [a b]·q`: zero exactly on the ellipse, for any
@@ -231,7 +231,7 @@ fn assert_watertight(mesh: &BodyMesh) {
     }
 }
 
-fn check_body(body: &openshape_kernel::Body, volume: f64, area: f64) {
+fn check_body(body: &opendatum_kernel::Body, volume: f64, area: f64) {
     let kern = k();
     let issues = kern.validate(body);
     assert!(issues.is_empty(), "invalid body: {issues:?}");
@@ -280,7 +280,7 @@ fn an_extruded_ellipse_is_an_elliptic_cylinder() {
 
 /// The half ellipse with semi-axis `polar` along the y axis and `equatorial`
 /// along x, closed by the axis, revolved a full turn about the y axis.
-fn spheroid(equatorial: f64, polar: f64) -> openshape_kernel::Body {
+fn spheroid(equatorial: f64, polar: f64) -> opendatum_kernel::Body {
     let arc = ProfileCurve::elliptical_arc(
         DVec2::ZERO,
         DVec2::new(equatorial, 0.0),

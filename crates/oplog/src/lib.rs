@@ -1,4 +1,4 @@
-//! The OpenShape operation log.
+//! The OpenDatum operation log.
 //!
 //! A document is an append-only log of operations. Everything else (the
 //! current model, undo/redo, history, versions, branches, merge and sync) is
@@ -156,7 +156,10 @@ pub struct OpLog<P> {
 }
 
 /// Magic bytes and version of the serialized log container.
-const MAGIC: &str = "OpenShape-oplog";
+const MAGIC: &str = "OpenDatum-oplog";
+/// The magic written before the product was renamed (ADR 0017); such
+/// documents are read as they are, since the container is unchanged.
+const LEGACY_MAGIC: &str = "OpenShape-oplog";
 const FORMAT_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
@@ -487,7 +490,7 @@ impl<P: Clone + PartialEq + Serialize + DeserializeOwned> OpLog<P> {
     pub fn decode(bytes: &[u8], replica: ReplicaId) -> Result<Self, OpLogError> {
         let c: Container<P> =
             ciborium::from_reader(bytes).map_err(|e| OpLogError::Decode(e.to_string()))?;
-        if c.magic != MAGIC {
+        if c.magic != MAGIC && c.magic != LEGACY_MAGIC {
             return Err(OpLogError::UnsupportedFormat(c.magic));
         }
         if c.version != FORMAT_VERSION {

@@ -6,7 +6,7 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use common::{arb_curve, arb_surface, close};
 use glam::{DMat4, DQuat, DVec3};
-use openshape_nurbs::{NurbsCurve, NurbsSurface};
+use opendatum_nurbs::{NurbsCurve, NurbsSurface};
 use proptest::prelude::*;
 
 /// A parameter strictly inside the knot span selected by `which`, at

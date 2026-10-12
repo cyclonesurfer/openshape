@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use glam::Vec3;
-use openshape_render::{write_png, Camera, MeshData, OffscreenRenderer, RgbaImage};
+use opendatum_render::{write_png, Camera, MeshData, OffscreenRenderer, RgbaImage};
 use std::f32::consts::TAU;
 
 /// Creates a headless renderer or panics loudly: these tests must never pass
@@ -19,15 +19,15 @@ pub fn renderer() -> OffscreenRenderer {
         }
         Err(e) => panic!(
             "no wgpu adapter available ({e}); install Mesa lavapipe (mesa-vulkan-drivers) \
-             or set OPENSHAPE_WGPU_BACKEND"
+             or set OPENDATUM_WGPU_BACKEND"
         ),
     }
 }
 
-/// Writes `image` to `$OPENSHAPE_RENDER_TEST_OUT/<name>.png` when that
+/// Writes `image` to `$OPENDATUM_RENDER_TEST_OUT/<name>.png` when that
 /// variable is set (for eyeballing test renders).
 pub fn maybe_dump(name: &str, image: &RgbaImage) {
-    if let Ok(dir) = std::env::var("OPENSHAPE_RENDER_TEST_OUT") {
+    if let Ok(dir) = std::env::var("OPENDATUM_RENDER_TEST_OUT") {
         std::fs::create_dir_all(&dir).expect("create dump dir");
         let path = std::path::Path::new(&dir).join(format!("{name}.png"));
         write_png(&path, image).expect("write png");

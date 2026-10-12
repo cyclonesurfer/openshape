@@ -5,7 +5,7 @@
 mod common;
 
 use common::{assert_satisfied, bits, circ, pos, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     solve, Constraint, DVec2, EntityState, Geometry, SolveError, SolveOptions, SolveStatus,
 };
 use std::f64::consts::TAU;

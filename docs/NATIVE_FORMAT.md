@@ -1,4 +1,4 @@
-# OpenShape native document format (draft, container version 1)
+# OpenDatum native document format (draft, container version 1)
 
 Status: draft. The container is implemented (`OpLog::encode`/`decode`) and
 used by the desktop app's Save/Open; payload schemas will be frozen and
@@ -14,11 +14,12 @@ versioned when Phase 5 (documents and history) completes.
 
 ## Container
 
-File extension `.osdoc`. One CBOR map:
+File extension `.odatum` (documents saved as `.osdoc` before the rename of
+ADR 0017 open too: opening does not look at the extension). One CBOR map:
 
 | key | type | meaning |
 |---|---|---|
-| `magic` | text | always `"OpenShape-oplog"` |
+| `magic` | text | `"OpenDatum-oplog"`; readers also accept `"OpenShape-oplog"`, written before the rename (ADR 0017) |
 | `version` | uint | container version, currently `1` |
 | `ops` | array of `Op` | every operation, in replay order (ascending `OpId`) |
 

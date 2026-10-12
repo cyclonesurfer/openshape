@@ -7,7 +7,7 @@
 //! [`Camera::up_dir`], [`Camera::back_dir`]), so it never shows perspective
 //! distortion. Its local axes are the world axes: the front face looks
 //! towards -Y, the right face towards +X and the top face towards +Z,
-//! matching [`openshape_render::ViewPreset`].
+//! matching [`opendatum_render::ViewPreset`].
 //!
 //! Every visible face is split into a 3x3 grid: the centre cell picks the
 //! face, the side cells pick the edge shared with the neighbouring face and
@@ -18,7 +18,7 @@ use crate::icons::{paint_icon, Icon};
 use crate::theme::Theme;
 use egui::{Color32, CornerRadius, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
 use glam::DVec3;
-use openshape_render::{Camera, ViewPreset};
+use opendatum_render::{Camera, ViewPreset};
 
 /// Half-width of a face's centre cell, in face coordinates where the face
 /// spans `-1..=1`; the bands outside it (20 % of the face width on each
@@ -442,7 +442,7 @@ fn target_cell(face: CubeFace, target: CubeTarget) -> Option<(i8, i8)> {
 pub fn show(ui: &mut Ui, rect: Rect, camera: &Camera, theme: &Theme) -> Option<CubeTarget> {
     // An automatic id (unique per widget position in `ui`) without moving
     // the layout cursor: the cube is usually an overlay on the viewport.
-    let id = ui.auto_id_with("openshape_view_cube");
+    let id = ui.auto_id_with("opendatum_view_cube");
     ui.skip_ahead_auto_ids(1);
     let response = ui.interact(rect, id, Sense::click());
     let home = home_rect(rect);

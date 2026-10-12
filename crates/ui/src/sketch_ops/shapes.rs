@@ -10,9 +10,9 @@
 use std::f64::consts::TAU;
 
 use glam::DVec2;
-use openshape_core_model::sketch::{Constraint, Geometry};
-use openshape_core_model::SketchId;
-use openshape_sketch_solver::conic as conic_curve;
+use opendatum_core_model::sketch::{Constraint, Geometry};
+use opendatum_core_model::SketchId;
+use opendatum_sketch_solver::conic as conic_curve;
 
 use super::{perp, Batch, Ends, SAME_POINT};
 use crate::sketch_mode::Snap;

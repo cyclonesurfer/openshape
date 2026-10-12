@@ -1,4 +1,4 @@
-//! The OpenShape geometry kernel: a pure-Rust boundary-representation
+//! The OpenDatum geometry kernel: a pure-Rust boundary-representation
 //! modeller.
 //!
 //! The rest of the application talks to the kernel only through the
@@ -259,13 +259,13 @@ pub trait Kernel: Send + Sync {
     ) -> Result<Vec<CurvatureSample>, KernelError>;
 }
 
-/// The built-in OpenShape kernel.
+/// The built-in OpenDatum kernel.
 #[derive(Clone, Debug, Default)]
-pub struct OsKernel {
+pub struct BrepKernel {
     tol: Tolerance,
 }
 
-impl OsKernel {
+impl BrepKernel {
     /// A kernel with the given tolerances.
     pub fn with_tolerance(tol: Tolerance) -> Self {
         Self { tol }
@@ -283,7 +283,7 @@ impl OsKernel {
     }
 }
 
-impl Kernel for OsKernel {
+impl Kernel for BrepKernel {
     type Body = Body;
 
     fn tolerance(&self) -> Tolerance {

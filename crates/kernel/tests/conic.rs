@@ -6,14 +6,14 @@
 
 use std::f64::consts::PI;
 
-use openshape_kernel::{
-    BodyMesh, DVec2, ExtrudeSpec, Frame, Kernel, OsKernel, Profile, ProfileCurve, RevolveSpec,
+use opendatum_kernel::{
+    BodyMesh, BrepKernel, DVec2, ExtrudeSpec, Frame, Kernel, Profile, ProfileCurve, RevolveSpec,
     TessellationOptions,
 };
 use proptest::prelude::*;
 
-fn k() -> OsKernel {
-    OsKernel::default()
+fn k() -> BrepKernel {
+    BrepKernel::default()
 }
 
 fn line(a: DVec2, b: DVec2) -> ProfileCurve {
@@ -254,7 +254,7 @@ fn assert_watertight(mesh: &BodyMesh) {
     }
 }
 
-fn check_body(body: &openshape_kernel::Body, volume: f64, area: f64) {
+fn check_body(body: &opendatum_kernel::Body, volume: f64, area: f64) {
     let kern = k();
     let issues = kern.validate(body);
     assert!(issues.is_empty(), "invalid body: {issues:?}");
@@ -275,7 +275,7 @@ fn check_body(body: &openshape_kernel::Body, volume: f64, area: f64) {
     }
 }
 
-fn revolve(curves: Vec<ProfileCurve>) -> openshape_kernel::Body {
+fn revolve(curves: Vec<ProfileCurve>) -> opendatum_kernel::Body {
     k().revolve(
         &Profile {
             plane: Frame::front(),

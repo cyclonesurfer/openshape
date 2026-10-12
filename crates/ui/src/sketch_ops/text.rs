@@ -1,17 +1,17 @@
 //! Sketch text (ADR 0015): placing a line of text in a box of four
 //! construction lines, and changing a text's characters or font.
 //!
-//! The layout comes from `openshape-text`; the document stores its outline
+//! The layout comes from `opendatum-text`; the document stores its outline
 //! in box units, so these functions only lay out when someone types and
 //! never when a sketch regenerates.
 
 use std::collections::BTreeSet;
 
 use glam::DVec2;
-use openshape_core_model::sketch::{Constraint, Geometry, TextPiece};
-use openshape_core_model::{SketchData, SketchEdit, SketchId};
-use openshape_sketch_solver::text_curves;
-use openshape_text::{lay_out, Font, Layout};
+use opendatum_core_model::sketch::{Constraint, Geometry, TextPiece};
+use opendatum_core_model::{SketchData, SketchEdit, SketchId};
+use opendatum_sketch_solver::text_curves;
+use opendatum_text::{lay_out, Font, Layout};
 
 use super::{Batch, SAME_POINT};
 use crate::sketch_mode::{sample_resolved, Snap};

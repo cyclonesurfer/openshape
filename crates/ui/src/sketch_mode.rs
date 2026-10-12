@@ -13,19 +13,19 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use egui::{Pos2, Rect, Vec2};
 use glam::DMat4;
-use openshape_core_model::sketch::{
+use opendatum_core_model::sketch::{
     Constraint, ConstraintEntry, DistanceKind, Entity, Geometry, TangentKind,
 };
-use openshape_core_model::units::{LengthUnit, Quantity};
-use openshape_core_model::{DVec2, DVec3, FeatureId, OpId, SketchData, SketchEdit, SketchId};
-use openshape_features::{kernel_curve, EntityState, SketchResult, Solution};
-use openshape_kernel::{CurvatureSample, Frame, ProfileCurve};
-use openshape_render::{Camera, Projection};
-use openshape_sketch_solver::{
+use opendatum_core_model::units::{LengthUnit, Quantity};
+use opendatum_core_model::{DVec2, DVec3, FeatureId, OpId, SketchData, SketchEdit, SketchId};
+use opendatum_features::{kernel_curve, EntityState, SketchResult, Solution};
+use opendatum_kernel::{CurvatureSample, Frame, ProfileCurve};
+use opendatum_render::{Camera, Projection};
+use opendatum_sketch_solver::{
     conic, measure, resolve_curves, solve, ResolvedCurve, SolveError, SolveOptions, SolveStatus,
     RHO_MIN,
 };
-use openshape_text::Font;
+use opendatum_text::Font;
 
 use crate::comb;
 use crate::sketch_ops::fillet::fillet;
@@ -1378,10 +1378,10 @@ pub fn chord_params(points: &[DVec2]) -> Option<Vec<f64>> {
 pub fn closed_spline(points: &[DVec2], control: bool) -> Option<ResolvedCurve> {
     let n = points.len().checked_sub(1)?;
     if control {
-        openshape_sketch_solver::control_spline_curve(points, control_degree(n), true)
+        opendatum_sketch_solver::control_spline_curve(points, control_degree(n), true)
     } else {
         let params = chord_params(points)?;
-        openshape_sketch_solver::interpolated_spline_curve(points, &params, true)
+        opendatum_sketch_solver::interpolated_spline_curve(points, &params, true)
     }
 }
 
@@ -1394,7 +1394,7 @@ pub fn control_spline(control: &[DVec2]) -> Option<ProfileCurve> {
     let degree = control_degree(control.len()) as usize;
     Some(ProfileCurve::Spline {
         degree,
-        knots: openshape_sketch_solver::clamped_uniform_knots(control.len(), degree),
+        knots: opendatum_sketch_solver::clamped_uniform_knots(control.len(), degree),
         points: control.to_vec(),
         weights: None,
     })

@@ -1,6 +1,6 @@
 [package]
-name = "openshape-nurbs"
-description = "Kernel-private NURBS curve and surface mathematics for OpenShape"
+name = "opendatum-nurbs"
+description = "Kernel-private NURBS curve and surface mathematics for OpenDatum"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

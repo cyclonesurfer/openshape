@@ -5,7 +5,7 @@ mod common;
 
 use common::gen::{generate_with, perturb};
 use common::{bits, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     solve, Constraint, ConstraintEntry, DVec2, Entity, Geometry, Sketch, SketchKey, Solution,
     SolveOptions, TangentKind,
 };

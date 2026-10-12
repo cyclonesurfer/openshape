@@ -6,7 +6,7 @@
 mod common;
 
 use common::{assert_satisfied, bits, B};
-use openshape_sketch_solver::{
+use opendatum_sketch_solver::{
     measure, solve, Constraint, DVec2, DistanceKind, EntityState, SolveError, SolveOptions,
     SolveStatus,
 };
@@ -270,7 +270,7 @@ fn appended_inconsistent_constraints_conflict_and_leave_geometry() {
         let mut b = base.clone();
         // Start away from the solution so that "unchanged" is meaningful.
         for e in b.sketch.entities.iter_mut() {
-            if let openshape_sketch_solver::Geometry::Point { at } = &mut e.geometry {
+            if let opendatum_sketch_solver::Geometry::Point { at } = &mut e.geometry {
                 *at += DVec2::new(0.01, -0.02);
             }
         }

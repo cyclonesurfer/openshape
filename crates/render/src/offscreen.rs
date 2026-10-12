@@ -10,7 +10,7 @@ use std::path::Path;
 /// Environment variable selecting the backend of [`OffscreenRenderer::new`]
 /// and of the application window: `vulkan`, `gl` or `any`
 /// (case-insensitive). Unset means [`BackendPreference::PreferVulkan`].
-pub const BACKEND_ENV_VAR: &str = "OPENSHAPE_WGPU_BACKEND";
+pub const BACKEND_ENV_VAR: &str = "OPENDATUM_WGPU_BACKEND";
 
 /// Which wgpu backend an [`OffscreenRenderer`] may use.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -19,11 +19,11 @@ pub enum BackendPreference {
     /// other backends (the default).
     #[default]
     PreferVulkan,
-    /// Vulkan only (`OPENSHAPE_WGPU_BACKEND=vulkan`).
+    /// Vulkan only (`OPENDATUM_WGPU_BACKEND=vulkan`).
     Vulkan,
-    /// OpenGL / GLES only (`OPENSHAPE_WGPU_BACKEND=gl`).
+    /// OpenGL / GLES only (`OPENDATUM_WGPU_BACKEND=gl`).
     Gl,
-    /// Whatever wgpu picks among all backends (`OPENSHAPE_WGPU_BACKEND=any`).
+    /// Whatever wgpu picks among all backends (`OPENDATUM_WGPU_BACKEND=any`).
     Any,
 }
 
@@ -186,7 +186,7 @@ impl HeadlessGpu {
             match pollster::block_on(instance.request_adapter(&options)) {
                 Ok(adapter) => return Self::from_adapter(instance, adapter, label),
                 Err(e) => {
-                    log::info!("openshape-render: no adapter for {backends:?}: {e}");
+                    log::info!("opendatum-render: no adapter for {backends:?}: {e}");
                     last_error = Some((backends, e));
                 }
             }
@@ -206,7 +206,7 @@ impl HeadlessGpu {
     ) -> Result<Self, RenderError> {
         let info = adapter.get_info();
         log::info!(
-            "openshape-render: using {} ({:?}, {:?}, driver {} {})",
+            "opendatum-render: using {} ({:?}, {:?}, driver {} {})",
             info.name,
             info.backend,
             info.device_type,
@@ -269,7 +269,7 @@ impl OffscreenRenderer {
             adapter,
             device,
             queue,
-        } = HeadlessGpu::with_backend(preference, "openshape-render offscreen")?;
+        } = HeadlessGpu::with_backend(preference, "opendatum-render offscreen")?;
         let scene = SceneRenderer::new(&device, Self::COLOR_FORMAT);
         Ok(OffscreenRenderer {
             _instance: instance,
@@ -344,7 +344,7 @@ impl OffscreenRenderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("openshape-render offscreen frame"),
+                label: Some("opendatum-render offscreen frame"),
             });
         self.scene.render_to_encoder(
             &self.device,
@@ -411,7 +411,7 @@ impl OffscreenRenderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("openshape-render timed frame"),
+                label: Some("opendatum-render timed frame"),
             });
         self.scene.render_to_encoder(
             &self.device,
@@ -436,7 +436,7 @@ impl OffscreenRenderer {
             return;
         }
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("openshape-render offscreen target"),
+            label: Some("opendatum-render offscreen target"),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -452,7 +452,7 @@ impl OffscreenRenderer {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let padded_bytes_per_row = padded_bytes_per_row(width);
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("openshape-render readback"),
+            label: Some("opendatum-render readback"),
             size: padded_bytes_per_row as u64 * height as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
@@ -507,14 +507,14 @@ pub fn read_texture_rgba8(
     let (width, height) = (texture.width(), texture.height());
     let padded = padded_bytes_per_row(width);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("openshape-render texture readback"),
+        label: Some("opendatum-render texture readback"),
         size: padded as u64 * height as u64,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("openshape-render texture readback"),
+        label: Some("opendatum-render texture readback"),
     });
     encoder.copy_texture_to_buffer(
         texture.as_image_copy(),
