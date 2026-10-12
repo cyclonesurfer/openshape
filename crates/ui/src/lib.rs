@@ -21,6 +21,7 @@ pub mod profile_pick;
 pub mod screenshots;
 pub mod shell;
 pub mod sketch_mode;
+pub mod sketch_ops;
 pub mod sketch_paint;
 pub mod viewport;
 

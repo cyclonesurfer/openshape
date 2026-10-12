@@ -162,7 +162,7 @@ pub fn paint_editor(
                 painter.text(
                     p + Vec2::new(12.0, 12.0),
                     Align2::LEFT_TOP,
-                    if h { "H" } else { "V" },
+                    h.glyph(),
                     FontId::proportional(LABEL_FONT),
                     k.free,
                 );

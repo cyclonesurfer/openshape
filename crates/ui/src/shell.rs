@@ -53,6 +53,27 @@ pub(crate) fn clear_menu_rows(ctx: &egui::Context) {
     ctx.data_mut(|d| d.insert_temp(menu_rows_id(), Vec::<(String, Rect)>::new()));
 }
 
+/// A narrow button with a small downward triangle, opening a drop-down
+/// next to the toolbar button before it.
+pub(crate) fn drop_down_button(ui: &mut Ui, theme: &Theme, tooltip: &str) -> Response {
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(11.0, theme.toolbar_button), Sense::click());
+    if r.hovered() || r.is_pointer_button_down_on() {
+        ui.painter()
+            .rect_filled(rect, theme.rounding, theme.hover_soft);
+    }
+    let c = rect.center();
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(c.x - 3.0, c.y - 1.5),
+            Pos2::new(c.x + 3.0, c.y - 1.5),
+            Pos2::new(c.x, c.y + 2.0),
+        ],
+        theme.text_muted,
+        Stroke::NONE,
+    ));
+    r.on_hover_text(tooltip)
+}
+
 /// The width of a menu whose rows all fit in it.
 pub(crate) const MENU_WIDTH: f32 = 210.0;
 
@@ -372,7 +393,10 @@ impl OpenShapeApp {
         self.command_button(ui, Command::Tool(Tool::Select));
         divider(ui, &theme);
         for t in Tool::ALL.into_iter().filter(|t| *t != Tool::Select) {
-            self.command_button(ui, Command::Tool(t));
+            let group = t.group();
+            if group[0] == t {
+                self.tool_group(ui, group);
+            }
         }
         divider(ui, &theme);
         self.command_button(ui, Command::Construction);
@@ -389,6 +413,32 @@ impl OpenShapeApp {
             self.layout.commands.push((Command::FinishSketch, r.rect));
             if r.on_hover_text("Finish sketch").clicked() {
                 self.actions.push(Action::Run(Command::FinishSketch));
+            }
+        });
+    }
+
+    /// One toolbar button for a group of tools: the active or last used
+    /// one, with a drop-down listing the others.
+    fn tool_group(&mut self, ui: &mut Ui, group: &'static [Tool]) {
+        let current = self.sketch.as_ref().map(|ed| ed.tool);
+        let shown = match current {
+            Some(t) if group.contains(&t) => t,
+            _ => self.tool_choice.get(&group[0]).copied().unwrap_or(group[0]),
+        };
+        self.command_button(ui, Command::Tool(shown));
+        if group.len() < 2 {
+            return;
+        }
+        let theme = self.theme.clone();
+        let more = drop_down_button(ui, &theme, "More tools like this");
+        egui::Popup::menu(&more).show(|ui| {
+            for &t in group {
+                let c = Command::Tool(t);
+                let key = c.shortcut().map(|s| ui.ctx().format_shortcut(&s));
+                if menu_row(ui, &theme, c.icon(), t.label(), key.as_deref(), true).clicked() {
+                    self.actions.push(Action::Run(c));
+                    ui.close();
+                }
             }
         });
     }

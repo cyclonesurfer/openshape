@@ -90,11 +90,16 @@ application shell done; sketch editing tools next.
     zooms, in both Part Studio and sketch mode.
   `openshape --screenshots <dir>` writes review screenshots of the whole
   app rendered offscreen.
-- **Sketch mode**: line (chained), corner rectangle, circle, 3-point arc,
-  centre arc, point, through-point spline, construction toggle; 12
+- **Sketch mode**: line (chained), corner, centre-point and aligned
+  rectangles, circle, 3-point, centre and tangent arcs, slot, regular
+  polygon (3 to 64 sides), point, through-point spline, construction
+  toggle (design note 0007 §4; each shape's degrees of freedom and the
+  absence of redundant constraints are tested); 12
   constraint tools and dimensions (length, distance aligned/horizontal/
   vertical, angle, radius, diameter) typed with units; snapping to points,
-  curves and the origin with horizontal/vertical inference; dragging with
+  curves and the origin; while drawing a line, inference of horizontal,
+  vertical, tangent (leaving an arc or spline) and perpendicular or
+  parallel (to the line it continues or one the pointer passed); dragging with
   live solving; box selection and delete; colour-coded state (free, fully
   constrained, redundant, conflicting) with constraint glyphs and dimension
   labels placed outside the sketch. Every edit is one undoable op; Cancel
@@ -174,10 +179,9 @@ application shell done; sketch editing tools next.
 
 ## Not yet / known limits
 
-- Sketch editing tools are not done: trim, extend, offset, sketch fillet,
-  mirror, patterns, slots, polygons, ellipses, conics, tangent arcs, centre
-  and aligned rectangles, text, use/project. Parallel, perpendicular and
-  tangent inference while drawing is not done.
+- Sketch editing tools are not done: trim, extend, split, offset, sketch
+  fillet, mirror, patterns (in progress, design note 0007), and ellipses,
+  conics, text, use/project.
 - Shell gaps: features reorder with Move up/down but not by dragging rows;
   dimension labels are placed automatically (outside the sketch) and cannot
   be dragged; feature dialogs do not preview the result live, and there is
@@ -211,9 +215,9 @@ application shell done; sketch editing tools next.
 
 ## Next steps
 
-1. Sketch editing tools: trim, extend, offset, sketch fillet, mirror,
-   patterns, slots, polygons, centre/aligned rectangles, tangent arcs;
-   parallel/perpendicular/tangent inference; draggable dimension labels.
+1. Sketch editing tools (design note 0007): trim, extend, split, sketch
+   fillet, mirror, offset, linear and circular patterns; draggable
+   dimension labels.
 2. Live preview in feature dialogs.
 3. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.

@@ -135,6 +135,38 @@ pub enum Icon {
     Point,
     /// A smooth S-shaped curve through four dotted points.
     Spline,
+    /// A rectangle with a dot at its centre and one corner, joined by a
+    /// dashed half-diagonal.
+    CenterRectangle,
+    /// A rectangle tilted up to the right with dots on the two ends of its
+    /// lower-left side.
+    AlignedRectangle,
+    /// A horizontal line running into a quarter arc that turns up to the
+    /// right, with a dot where they meet.
+    TangentArc,
+    /// A stadium (two half-circles joined by straight sides) with a dot at
+    /// each half-circle's centre.
+    Slot,
+    /// A regular hexagon with a dot at its centre.
+    Polygon,
+    /// Two crossing lines; one arm past the crossing is dashed (cut away).
+    Trim,
+    /// A vertical boundary line; a horizontal line reaches it, its new part
+    /// dashed and ending in a solid arrowhead.
+    Extend,
+    /// A diagonal line cut in two by a gap, a dot at each side of the gap.
+    Split,
+    /// A corner rounded by an arc, with the original sharp corner dashed.
+    SketchFillet,
+    /// An L-shaped corner and a smaller copy nested inside it.
+    Offset,
+    /// A dashed vertical axis with an open angle on the left and its mirror
+    /// image on the right, under an arrow pointing right.
+    Mirror,
+    /// Three small squares in a row above an arrow pointing right.
+    LinearPattern,
+    /// Five small circles spaced round a centre dot.
+    CircularPattern,
     /// A dashed diagonal line (construction geometry).
     Construction,
     /// Two extension lines with a dimension line between them ending in
@@ -220,6 +252,19 @@ impl Icon {
         Icon::CenterArc,
         Icon::Point,
         Icon::Spline,
+        Icon::CenterRectangle,
+        Icon::AlignedRectangle,
+        Icon::TangentArc,
+        Icon::Slot,
+        Icon::Polygon,
+        Icon::Trim,
+        Icon::Extend,
+        Icon::Split,
+        Icon::SketchFillet,
+        Icon::Offset,
+        Icon::Mirror,
+        Icon::LinearPattern,
+        Icon::CircularPattern,
         Icon::Construction,
         Icon::Dimension,
         Icon::Coincident,
@@ -285,6 +330,19 @@ impl Icon {
             Icon::CenterArc => "Center arc",
             Icon::Point => "Point",
             Icon::Spline => "Spline",
+            Icon::CenterRectangle => "Center rectangle",
+            Icon::AlignedRectangle => "Aligned rectangle",
+            Icon::TangentArc => "Tangent arc",
+            Icon::Slot => "Slot",
+            Icon::Polygon => "Polygon",
+            Icon::Trim => "Trim",
+            Icon::Extend => "Extend",
+            Icon::Split => "Split",
+            Icon::SketchFillet => "Sketch fillet",
+            Icon::Offset => "Offset",
+            Icon::Mirror => "Mirror",
+            Icon::LinearPattern => "Linear pattern",
+            Icon::CircularPattern => "Circular pattern",
             Icon::Construction => "Construction",
             Icon::Dimension => "Dimension",
             Icon::Coincident => "Coincident",
@@ -940,6 +998,88 @@ fn draw(pen: &Pen<'_>, icon: Icon) {
             for q in knots {
                 pen.dot(q, 1.7);
             }
+        }
+        Icon::CenterRectangle => {
+            pen.rect(4.0, 6.5, 20.0, 17.5);
+            pen.dashed((12.0, 12.0), (20.0, 6.5), 2.6, 1.6);
+            pen.dot((12.0, 12.0), 2.0);
+            pen.dot((20.0, 6.5), 2.0);
+        }
+        Icon::AlignedRectangle => {
+            // Side (12, −6) and its perpendicular (3.6, 7.2).
+            let (a, b) = ((4.0, 13.5), (16.0, 7.5));
+            pen.closed(&[a, b, (19.6, 14.7), (7.6, 20.7)]);
+            pen.dot(a, 2.0);
+            pen.dot(b, 2.0);
+        }
+        Icon::TangentArc => {
+            pen.line((3.0, 17.0), (11.0, 17.0));
+            pen.arc((11.0, 9.0), 8.0, -90.0, 30.0);
+            pen.dot((11.0, 17.0), 2.0);
+        }
+        Icon::Slot => {
+            let mut pts = arc_pts((16.0, 12.0), 5.0, -90.0, 90.0);
+            pts.extend(arc_pts((8.0, 12.0), 5.0, 90.0, 270.0));
+            pts.push((16.0, 17.0));
+            pen.poly(&pts);
+            pen.dot((8.0, 12.0), 1.6);
+            pen.dot((16.0, 12.0), 1.6);
+        }
+        Icon::Polygon => {
+            let pts: Vec<P> = (0..6)
+                .map(|k| on_ellipse((12.0, 12.0), 9.0, 9.0, 60.0 * k as f32))
+                .collect();
+            pen.closed(&pts);
+            pen.dot((12.0, 12.0), 1.6);
+        }
+        Icon::Trim => {
+            pen.line((11.0, 3.0), (11.0, 21.0));
+            pen.line((3.0, 12.0), (11.0, 12.0));
+            pen.dashed((14.0, 12.0), (21.0, 12.0), 2.6, 1.8);
+        }
+        Icon::Extend => {
+            pen.line((19.5, 3.0), (19.5, 21.0));
+            pen.line((3.0, 12.0), (10.0, 12.0));
+            pen.dashed((10.0, 12.0), (13.5, 12.0), 2.0, 1.5);
+            pen.solid_head((18.5, 12.0), 0.0, 4.5, 2.6);
+        }
+        Icon::Split => {
+            pen.line((3.0, 19.0), (9.5, 14.5));
+            pen.line((14.5, 9.5), (21.0, 5.0));
+            pen.dot((9.5, 14.5), 2.0);
+            pen.dot((14.5, 9.5), 2.0);
+        }
+        Icon::SketchFillet => {
+            pen.line((4.5, 21.0), (4.5, 12.0));
+            pen.arc((12.5, 12.0), 8.0, 180.0, 90.0);
+            pen.line((12.5, 4.0), (21.0, 4.0));
+            pen.dashed((4.5, 9.0), (4.5, 4.0), 2.0, 1.5);
+            pen.dashed((4.5, 4.0), (9.5, 4.0), 2.0, 1.5);
+        }
+        Icon::Offset => {
+            pen.poly(&[(3.5, 21.0), (3.5, 3.5), (21.0, 3.5)]);
+            pen.poly(&[(9.0, 21.0), (9.0, 9.0), (21.0, 9.0)]);
+        }
+        Icon::Mirror => {
+            pen.dashed((12.0, 7.5), (12.0, 21.5), 3.0, 1.8);
+            pen.poly(&[(9.5, 9.0), (4.0, 14.5), (9.5, 20.0)]);
+            pen.poly(&[(14.5, 9.0), (20.0, 14.5), (14.5, 20.0)]);
+            pen.line((5.5, 4.5), (18.0, 4.5));
+            pen.chevron((18.5, 4.5), 0.0, 3.0);
+        }
+        Icon::LinearPattern => {
+            for x in [3.0, 9.5, 16.0] {
+                pen.rect(x, 5.0, x + 5.0, 10.0);
+            }
+            pen.line((3.0, 17.0), (17.0, 17.0));
+            pen.solid_head((21.0, 17.0), 0.0, 4.5, 2.6);
+        }
+        Icon::CircularPattern => {
+            for k in 0..5 {
+                let c = on_ellipse((12.0, 12.0), 7.5, 7.5, 90.0 + 72.0 * k as f32);
+                pen.circle(c, 2.0);
+            }
+            pen.dot((12.0, 12.0), 1.6);
         }
         Icon::Construction => {
             pen.dashed((4.0, 20.0), (20.0, 4.0), 4.0, 3.2);

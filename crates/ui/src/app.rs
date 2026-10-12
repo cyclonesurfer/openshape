@@ -10,7 +10,7 @@
 //! ([`crate::screenshots`]), so tests and screenshots exercise the real
 //! application.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use eframe::egui;
 use egui::{Key, Modifiers, Pos2, Rect};
@@ -25,7 +25,7 @@ use crate::dialogs::FeatureDialog;
 use crate::graphics::Viewport;
 use crate::planes::StdPlane;
 use crate::profile_pick::{ProfilePick, SweepKind};
-use crate::sketch_mode::{normal_view, SketchDisplay, SketchEditor};
+use crate::sketch_mode::{normal_view, SketchDisplay, SketchEditor, Tool};
 use crate::Model;
 
 /// An axis-aligned box `(min, max)` in model space.
@@ -203,6 +203,9 @@ pub struct OpenShapeApp {
     pub(crate) palette: Option<CommandPalette>,
     /// The plane menu of the Sketch command is open.
     pub(crate) plane_menu: bool,
+    /// The last tool used from each toolbar group, by the group's first
+    /// tool.
+    pub(crate) tool_choice: HashMap<Tool, Tool>,
     pub(crate) message: Option<(String, f64)>,
     pub(crate) adapter: String,
     pub(crate) display_mode: DisplayMode,
@@ -263,6 +266,7 @@ impl OpenShapeApp {
             file_prompt: None,
             palette: None,
             plane_menu: false,
+            tool_choice: HashMap::new(),
             message: None,
             adapter,
             display_mode: DisplayMode::ShadedWithEdges,
@@ -489,6 +493,7 @@ impl OpenShapeApp {
                 if let Some(ed) = self.sketch.as_mut() {
                     ed.set_tool(t);
                 }
+                self.tool_choice.insert(t.group()[0], t);
             }
             Command::Construction => {
                 if let Some(ed) = self.sketch.as_mut() {

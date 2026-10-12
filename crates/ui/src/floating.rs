@@ -15,6 +15,8 @@ use crate::app::{Action, FileAction, OpenShapeApp, Selection};
 use crate::commands::Command;
 use crate::dialogs::FieldKind;
 use crate::profile_pick::SweepKind;
+use crate::sketch_mode::Tool;
+use crate::sketch_ops::shapes::{MAX_SIDES, MIN_SIDES};
 use crate::sketch_paint;
 use crate::Model;
 
@@ -349,6 +351,8 @@ impl OpenShapeApp {
             .map_or(theme.text_muted, |d| sketch_paint::status_color(d, &theme));
         let hint = ed.tool.hint(ed.clicks.len());
         let message = ed.message.clone();
+        let tool = ed.tool;
+        let mut sides = ed.polygon_sides;
         let (action, rect) = floating_dialog(
             ctx,
             &theme,
@@ -367,6 +371,11 @@ impl OpenShapeApp {
                         ui.label(RichText::new("State").color(theme.text_muted));
                         ui.label(RichText::new(&status).color(status_color));
                         ui.end_row();
+                        if tool == Tool::Polygon {
+                            ui.label(RichText::new("Sides").color(theme.text_muted));
+                            ui.add(egui::DragValue::new(&mut sides).range(MIN_SIDES..=MAX_SIDES));
+                            ui.end_row();
+                        }
                     });
                 ui.add_space(4.0);
                 ui.label(
@@ -381,6 +390,9 @@ impl OpenShapeApp {
             },
         );
         self.layout.dialog = Some(rect);
+        if let Some(ed) = self.sketch.as_mut() {
+            ed.polygon_sides = sides;
+        }
         match action {
             DialogAction::Accept => self.actions.push(Action::Run(Command::FinishSketch)),
             DialogAction::Cancel => self.actions.push(Action::Run(Command::CancelSketch)),

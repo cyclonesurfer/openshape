@@ -25,6 +25,8 @@ use openshape_sketch_solver::{
     measure, resolve_curves, solve, ResolvedCurve, SolveError, SolveOptions, SolveStatus,
 };
 
+use crate::sketch_ops::shapes::{self, TangentStart};
+use crate::sketch_ops::{curve_ending_at, leaving_direction, Batch};
 use crate::{geometry_edits, Model};
 
 /// Pick radius for points, in screen points.
@@ -860,64 +862,20 @@ pub fn snap(d: &SketchDisplay, map: &ScreenMap, pos: Pos2, exclude: &[SketchId])
 // Building edit batches
 // ---------------------------------------------------------------------------
 
-/// Builds one sketch edit batch with batch-local ids.
-#[derive(Default)]
-struct Batch {
-    edits: Vec<SketchEdit>,
-    next: u32,
-}
-
-impl Batch {
-    fn entity(&mut self, geometry: Geometry<SketchId>, construction: bool) -> SketchId {
-        let id = SketchId::new_in_batch(self.next);
-        self.next += 1;
-        self.edits.push(SketchEdit::AddEntity(Entity {
-            id,
-            geometry,
-            construction,
-        }));
-        id
-    }
-
-    fn point(&mut self, at: DVec2) -> SketchId {
-        self.entity(Geometry::Point { at }, false)
-    }
-
-    fn constraint(&mut self, constraint: Constraint<SketchId>) -> SketchId {
-        let id = SketchId::new_in_batch(self.next);
-        self.next += 1;
-        self.edits.push(SketchEdit::AddConstraint(ConstraintEntry {
-            id,
-            constraint,
-        }));
-        id
-    }
-
-    /// A new point at a snap, constrained to what it snapped to.
-    fn snapped_point(&mut self, s: &Snap) -> SketchId {
-        let p = self.point(s.at);
-        self.attach(p, s);
-        p
-    }
-
-    /// Constrains an existing new point to what `s` snapped to.
-    fn attach(&mut self, p: SketchId, s: &Snap) {
-        match s.target {
-            SnapTarget::Free => {}
-            SnapTarget::Point(q) => {
-                self.constraint(Constraint::Coincident { a: q, b: p });
-            }
-            SnapTarget::Curve(c) => {
-                self.constraint(Constraint::PointOnCurve { point: p, curve: c });
-            }
-            SnapTarget::Origin => {
-                self.constraint(Constraint::Fix {
-                    point: p,
-                    at: DVec2::ZERO,
-                });
-            }
-        }
-    }
+/// Where a tangent arc clicked at `s` starts: `s` must have snapped to the
+/// end point of a line, arc or spline.
+fn tangent_start(d: &SketchDisplay, s: &Snap) -> Option<TangentStart> {
+    let SnapTarget::Point(point) = s.target else {
+        return None;
+    };
+    let (curve, at_end) = curve_ending_at(&d.sketch, point)?;
+    let direction = leaving_direction(&d.curve(curve)?.curve, at_end)?;
+    Some(TangentStart {
+        curve,
+        point,
+        at: d.sketch.point(point)?,
+        direction,
+    })
 }
 
 /// Centre and radius of the circle through three points.
@@ -961,12 +919,22 @@ pub enum Tool {
     Line,
     /// Axis-aligned rectangle from two corners.
     Rectangle,
+    /// Axis-aligned rectangle from its centre and a corner.
+    CenterRectangle,
+    /// Rectangle at any angle: two corners along one side, then the width.
+    AlignedRectangle,
     /// Circle from its centre and a point on it.
     Circle,
     /// Arc through three points (start, end, a point on the arc).
     Arc,
     /// Arc from its centre, start and end.
     CenterArc,
+    /// Arc continuing a curve tangentially from its end.
+    TangentArc,
+    /// Slot: two arc centres, then the width.
+    Slot,
+    /// Regular polygon from its centre and a vertex.
+    Polygon,
     /// A point.
     Point,
     /// Spline through clicked points (finish with Enter or a double-click).
@@ -975,26 +943,58 @@ pub enum Tool {
 
 impl Tool {
     /// Every tool, in toolbar order.
-    pub const ALL: [Tool; 8] = [
+    pub const ALL: [Tool; 13] = [
         Tool::Select,
         Tool::Line,
         Tool::Rectangle,
+        Tool::CenterRectangle,
+        Tool::AlignedRectangle,
         Tool::Circle,
         Tool::Arc,
         Tool::CenterArc,
+        Tool::TangentArc,
+        Tool::Slot,
+        Tool::Polygon,
         Tool::Point,
         Tool::Spline,
     ];
+
+    /// The tools sharing one toolbar button with this one (shown in its
+    /// drop-down), in menu order; the first is the group's default.
+    pub fn group(self) -> &'static [Tool] {
+        match self {
+            Tool::Rectangle | Tool::CenterRectangle | Tool::AlignedRectangle => &[
+                Tool::Rectangle,
+                Tool::CenterRectangle,
+                Tool::AlignedRectangle,
+            ],
+            Tool::Arc | Tool::CenterArc | Tool::TangentArc => {
+                &[Tool::Arc, Tool::CenterArc, Tool::TangentArc]
+            }
+            Tool::Select => &[Tool::Select],
+            Tool::Line => &[Tool::Line],
+            Tool::Circle => &[Tool::Circle],
+            Tool::Slot => &[Tool::Slot],
+            Tool::Polygon => &[Tool::Polygon],
+            Tool::Point => &[Tool::Point],
+            Tool::Spline => &[Tool::Spline],
+        }
+    }
 
     /// Toolbar label.
     pub fn label(self) -> &'static str {
         match self {
             Tool::Select => "Select",
             Tool::Line => "Line",
-            Tool::Rectangle => "Rectangle",
+            Tool::Rectangle => "Corner rectangle",
+            Tool::CenterRectangle => "Centre-point rectangle",
+            Tool::AlignedRectangle => "Aligned rectangle",
             Tool::Circle => "Circle",
             Tool::Arc => "3-point arc",
             Tool::CenterArc => "Centre arc",
+            Tool::TangentArc => "Tangent arc",
+            Tool::Slot => "Slot",
+            Tool::Polygon => "Polygon",
             Tool::Point => "Point",
             Tool::Spline => "Spline",
         }
@@ -1003,14 +1003,19 @@ impl Tool {
     /// Keyboard shortcut.
     pub fn key(self) -> Option<egui::Key> {
         Some(match self {
-            Tool::Select => return None,
             Tool::Line => egui::Key::L,
             Tool::Rectangle => egui::Key::R,
             Tool::Circle => egui::Key::C,
             Tool::Arc => egui::Key::A,
-            Tool::CenterArc => return None,
             Tool::Point => egui::Key::P,
             Tool::Spline => egui::Key::S,
+            Tool::Select
+            | Tool::CenterRectangle
+            | Tool::AlignedRectangle
+            | Tool::CenterArc
+            | Tool::TangentArc
+            | Tool::Slot
+            | Tool::Polygon => return None,
         })
     }
 
@@ -1024,6 +1029,11 @@ impl Tool {
             (Tool::Line, _) => "Click the end point (double-click or Esc ends the chain)",
             (Tool::Rectangle, 0) => "Click the first corner",
             (Tool::Rectangle, _) => "Click the opposite corner",
+            (Tool::CenterRectangle, 0) => "Click the centre",
+            (Tool::CenterRectangle, _) => "Click a corner",
+            (Tool::AlignedRectangle, 0) => "Click the first corner",
+            (Tool::AlignedRectangle, 1) => "Click the next corner along one side",
+            (Tool::AlignedRectangle, _) => "Click to set the width",
             (Tool::Circle, 0) => "Click the centre",
             (Tool::Circle, _) => "Click a point on the circle",
             (Tool::Arc, 0) => "Click the start point",
@@ -1032,9 +1042,45 @@ impl Tool {
             (Tool::CenterArc, 0) => "Click the centre",
             (Tool::CenterArc, 1) => "Click the start point",
             (Tool::CenterArc, _) => "Move around the centre and click the end point",
+            (Tool::TangentArc, 0) => "Click the end of a line, arc or spline",
+            (Tool::TangentArc, _) => "Click the end of the arc",
+            (Tool::Slot, 0) => "Click the first end's centre",
+            (Tool::Slot, 1) => "Click the second end's centre",
+            (Tool::Slot, _) => "Click to set the width",
+            (Tool::Polygon, 0) => "Click the centre",
+            (Tool::Polygon, _) => "Click a vertex",
             (Tool::Point, _) => "Click to place a point",
             (Tool::Spline, 0) => "Click the first point",
             (Tool::Spline, _) => "Click more points; Enter or double-click finishes",
+        }
+    }
+}
+
+/// A relation inferred for the line being drawn (design note 0007 §5),
+/// added as a constraint with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Inference {
+    /// Along the sketch x axis.
+    Horizontal,
+    /// Along the sketch y axis.
+    Vertical,
+    /// Parallel to a line.
+    Parallel(SketchId),
+    /// Perpendicular to a line.
+    Perpendicular(SketchId),
+    /// Tangent to the curve whose end the line starts at.
+    Tangent(SketchId),
+}
+
+impl Inference {
+    /// The glyph shown next to the pointer (the constraint's glyph).
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Inference::Horizontal => "H",
+            Inference::Vertical => "V",
+            Inference::Parallel(_) => "‖",
+            Inference::Perpendicular(_) => "⟂",
+            Inference::Tangent(_) => "T",
         }
     }
 }
@@ -1503,11 +1549,17 @@ pub struct SketchEditor {
     pub hover: Option<Pick>,
     /// Where the pointer snaps (drawing tools).
     pub cursor: Option<Snap>,
-    /// Horizontal (true) or vertical (false) inferred for the line being
-    /// drawn.
-    pub inferred: Option<bool>,
+    /// The relation inferred for the line being drawn.
+    pub inferred: Option<Inference>,
     /// Clicks of the drawing tool so far.
     pub clicks: Vec<Snap>,
+    /// Number of sides for the polygon tool.
+    pub polygon_sides: u32,
+    /// The last line the pointer passed over while drawing lines (for
+    /// parallel and perpendicular inference).
+    last_line: Option<SketchId>,
+    /// Where the tangent arc being drawn starts.
+    tangent_start: Option<TangentStart>,
     /// Signed angle the pointer has turned around a centre-point arc's
     /// centre since its start point.
     turn: f64,
@@ -1532,6 +1584,9 @@ impl SketchEditor {
             cursor: None,
             inferred: None,
             clicks: Vec::new(),
+            polygon_sides: 6,
+            last_line: None,
+            tangent_start: None,
             turn: 0.0,
             last_angle: None,
             drag: None,
@@ -1559,12 +1614,14 @@ impl SketchEditor {
     pub fn set_tool(&mut self, tool: Tool) {
         self.tool = tool;
         self.reset_tool();
+        self.last_line = None;
         self.hover = None;
     }
 
     fn reset_tool(&mut self) {
         self.clicks.clear();
         self.inferred = None;
+        self.tangent_start = None;
         self.turn = 0.0;
         self.last_angle = None;
     }
@@ -1598,6 +1655,19 @@ impl SketchEditor {
                 self.message = Some(format!("Edit refused: {e}"));
                 None
             }
+        }
+    }
+
+    /// Commits a shape tool's batch and resets the tool, or shows why the
+    /// shape could not be made (keeping the clicks so far).
+    fn commit_shape(&mut self, model: &mut Model, made: Result<Vec<SketchEdit>, String>) {
+        match made {
+            Ok(edits) => {
+                if self.commit(model, edits).is_some() {
+                    self.reset_tool();
+                }
+            }
+            Err(e) => self.message = Some(e),
         }
     }
 
@@ -1658,16 +1728,17 @@ impl SketchEditor {
         let Some(mut s) = snap(&d, map, pos, &[]) else {
             return;
         };
-        if self.tool == Tool::Line && s.target == SnapTarget::Free {
-            if let Some(start) = self.clicks.first() {
-                let v = s.at - start.at;
-                if v.length() > 0.0 {
-                    if v.y.abs() <= INFER_ANGLE.tan() * v.x.abs() {
-                        s.at.y = start.at.y;
-                        self.inferred = Some(true);
-                    } else if v.x.abs() <= INFER_ANGLE.tan() * v.y.abs() {
-                        s.at.x = start.at.x;
-                        self.inferred = Some(false);
+        if self.tool == Tool::Line {
+            if let SnapTarget::Curve(id) = s.target {
+                if kind(&d.sketch, id) == Some(Kind::Line) {
+                    self.last_line = Some(id);
+                }
+            }
+            if s.target == SnapTarget::Free {
+                if let Some(start) = self.clicks.first().copied() {
+                    if let Some((at, inference)) = self.infer(&d, &start, s.at) {
+                        s.at = at;
+                        self.inferred = Some(inference);
                     }
                 }
             }
@@ -1692,6 +1763,57 @@ impl SketchEditor {
             self.last_angle = Some(a);
         }
         self.cursor = Some(s);
+    }
+
+    /// The relation a line from `start` to `to` is close to (design note
+    /// 0007 §5), with `to` moved onto it.
+    fn infer(&self, d: &SketchDisplay, start: &Snap, to: DVec2) -> Option<(DVec2, Inference)> {
+        let v = to - start.at;
+        if v.length() <= SAME_POINT {
+            return None;
+        }
+        let mut candidates = vec![
+            (DVec2::X, Inference::Horizontal),
+            (DVec2::Y, Inference::Vertical),
+        ];
+        let line_dir = |id: SketchId| match d.curve(id).map(|c| &c.curve) {
+            Some(ResolvedCurve::Line { start, end }) => {
+                Some((*end - *start).normalize_or_zero()).filter(|w| *w != DVec2::ZERO)
+            }
+            _ => None,
+        };
+        if let SnapTarget::Point(p) = start.target {
+            if let Some((curve, at_end)) = curve_ending_at(&d.sketch, p) {
+                match kind(&d.sketch, curve) {
+                    Some(Kind::Line) => {
+                        if let Some(w) = line_dir(curve) {
+                            candidates.push((perp(w), Inference::Perpendicular(curve)));
+                            candidates.push((w, Inference::Parallel(curve)));
+                        }
+                    }
+                    Some(Kind::Arc) | Some(Kind::Spline) => {
+                        if let Some(w) = d
+                            .curve(curve)
+                            .and_then(|c| leaving_direction(&c.curve, at_end))
+                        {
+                            candidates.push((w, Inference::Tangent(curve)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(l) = self.last_line {
+            if let Some(w) = line_dir(l) {
+                candidates.push((perp(w), Inference::Perpendicular(l)));
+                candidates.push((w, Inference::Parallel(l)));
+            }
+        }
+        candidates.into_iter().find_map(|(w, inference)| {
+            let along = v.dot(w);
+            (v.perp_dot(w).abs() <= INFER_ANGLE.tan() * along.abs() && along != 0.0)
+                .then(|| (start.at + w * along, inference))
+        })
     }
 
     /// Geometry of the tool in progress, as plane polylines.
@@ -1736,6 +1858,32 @@ impl SketchEditor {
                     vec![c[0].at, cur.at],
                 ]
             }
+            (Tool::CenterRectangle, 1) => {
+                let k = shapes::centre_rectangle_corners(c[0].at, cur.at);
+                vec![vec![k[0], k[1], k[2], k[3], k[0]], vec![k[0], k[2]]]
+            }
+            (Tool::AlignedRectangle | Tool::Slot, 1) => vec![vec![c[0].at, cur.at]],
+            (Tool::AlignedRectangle, 2) => {
+                match shapes::aligned_rectangle_corners(c[0].at, c[1].at, cur.at) {
+                    Some(k) => vec![vec![k[0], k[1], k[2], k[3], k[0]]],
+                    None => vec![vec![c[0].at, c[1].at]],
+                }
+            }
+            (Tool::Slot, 2) => match shapes::slot_geometry(c[0].at, c[1].at, cur.at) {
+                Some(g) => vec![shapes::slot_outline(&g), vec![c[0].at, c[1].at]],
+                None => vec![vec![c[0].at, c[1].at]],
+            },
+            (Tool::Polygon, 1) => {
+                let mut v = shapes::polygon_vertices(c[0].at, cur.at, self.polygon_sides);
+                if let Some(first) = v.first().copied() {
+                    v.push(first);
+                }
+                vec![v]
+            }
+            (Tool::TangentArc, 1) => match &self.tangent_start {
+                Some(t) => vec![shapes::tangent_arc_outline(t, cur.at)],
+                None => Vec::new(),
+            },
             (Tool::Spline, n) if n >= 1 => {
                 let mut pts: Vec<DVec2> = c.iter().map(|s| s.at).collect();
                 pts.push(cur.at);
@@ -1814,11 +1962,20 @@ impl SketchEditor {
                 let p1 = b.snapped_point(&s);
                 let line = b.entity(Geometry::Line { start: p0, end: p1 }, construction);
                 match self.inferred {
-                    Some(true) => {
+                    Some(Inference::Horizontal) => {
                         b.constraint(Constraint::Horizontal { line });
                     }
-                    Some(false) => {
+                    Some(Inference::Vertical) => {
                         b.constraint(Constraint::Vertical { line });
+                    }
+                    Some(Inference::Parallel(m)) => {
+                        b.constraint(Constraint::Parallel { a: m, b: line });
+                    }
+                    Some(Inference::Perpendicular(m)) => {
+                        b.constraint(Constraint::Perpendicular { a: m, b: line });
+                    }
+                    Some(Inference::Tangent(c)) => {
+                        b.tangent_at(c, line, p0);
                     }
                     None => {}
                 }
@@ -1883,6 +2040,60 @@ impl SketchEditor {
                 if self.commit(model, b.edits).is_some() {
                     self.reset_tool();
                 }
+            }
+            Tool::CenterRectangle | Tool::Polygon => {
+                let Some(first) = self.clicks.first().copied() else {
+                    self.clicks.push(s);
+                    return;
+                };
+                if !distinct(&first, &s) {
+                    return;
+                }
+                let mut b = Batch::default();
+                let made = if self.tool == Tool::Polygon {
+                    shapes::polygon(&mut b, &first, &s, self.polygon_sides, construction)
+                } else {
+                    shapes::centre_rectangle(&mut b, &first, &s, construction)
+                };
+                self.commit_shape(model, made.map(|()| b.edits));
+            }
+            Tool::AlignedRectangle | Tool::Slot => {
+                if self.clicks.len() < 2 {
+                    if self.clicks.first().is_none_or(|a| distinct(a, &s)) {
+                        self.clicks.push(s);
+                    }
+                    return;
+                }
+                let (first, second) = (self.clicks[0], self.clicks[1]);
+                let mut b = Batch::default();
+                let made = if self.tool == Tool::Slot {
+                    shapes::slot(&mut b, &first, &second, s.at, construction)
+                } else {
+                    shapes::aligned_rectangle(&mut b, &first, &second, s.at, construction)
+                };
+                self.commit_shape(model, made.map(|()| b.edits));
+            }
+            Tool::TangentArc => {
+                let Some(start) = self.tangent_start else {
+                    match self.display(model).and_then(|d| tangent_start(&d, &s)) {
+                        Some(t) => {
+                            self.tangent_start = Some(t);
+                            self.clicks.push(s);
+                        }
+                        None => {
+                            self.message = Some(
+                                "Start a tangent arc at the end of a line, arc or spline".into(),
+                            )
+                        }
+                    }
+                    return;
+                };
+                if !distinct(&self.clicks[0], &s) {
+                    return;
+                }
+                let mut b = Batch::default();
+                let made = shapes::tangent_arc(&mut b, &start, &self.clicks[0], &s, construction);
+                self.commit_shape(model, made.map(|()| b.edits));
             }
             Tool::Circle => {
                 let Some(c) = self.clicks.first().copied() else {
