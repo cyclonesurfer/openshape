@@ -387,6 +387,12 @@ impl OpenShapeApp {
         let mut sides = ed.polygon_sides;
         let mut radius_mm = ed.fillet_radius * 1e3;
         let mut count = ed.pattern_count;
+        let mut offset_mm = ed.transform_offset * 1e3;
+        let mut angle_deg = ed.transform_angle.to_degrees();
+        let mut factor = ed.transform_factor;
+        let mut copy = ed.transform_copy;
+        let mut keep = ed.transform_keep;
+        let mut apply = false;
         let (action, rect) = floating_dialog(
             ctx,
             &theme,
@@ -428,7 +434,64 @@ impl OpenShapeApp {
                             ));
                             ui.end_row();
                         }
+                        if tool.is_transform() {
+                            // The typed amount, applied with the button on
+                            // its (last) row.
+                            let mut row = |name: &str, value: egui::DragValue<'_>, last: bool| {
+                                ui.label(RichText::new(name).color(theme.text_muted));
+                                ui.horizontal(|ui| {
+                                    ui.add(value);
+                                    if last && ui.button("Apply").clicked() {
+                                        apply = true;
+                                    }
+                                });
+                                ui.end_row();
+                            };
+                            match tool {
+                                Tool::Move => {
+                                    row(
+                                        "X",
+                                        egui::DragValue::new(&mut offset_mm.x)
+                                            .speed(0.1)
+                                            .suffix(" mm"),
+                                        false,
+                                    );
+                                    row(
+                                        "Y",
+                                        egui::DragValue::new(&mut offset_mm.y)
+                                            .speed(0.1)
+                                            .suffix(" mm"),
+                                        true,
+                                    );
+                                }
+                                Tool::Rotate => row(
+                                    "Angle",
+                                    egui::DragValue::new(&mut angle_deg)
+                                        .range(-360.0..=360.0)
+                                        .speed(0.5)
+                                        .suffix("°"),
+                                    true,
+                                ),
+                                _ => row(
+                                    "Factor",
+                                    egui::DragValue::new(&mut factor)
+                                        .range(0.001..=1000.0)
+                                        .speed(0.01),
+                                    true,
+                                ),
+                            }
+                        }
                     });
+                if tool.is_transform() {
+                    ui.checkbox(&mut copy, "Copy (keep the original)");
+                    ui.add_enabled_ui(!copy, |ui| {
+                        ui.checkbox(&mut keep, "Keep constraints to the rest")
+                            .on_hover_text(
+                                "On: the rest of the sketch follows the selection. \
+                                 Off: constraints tying them are removed.",
+                            );
+                    });
+                }
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(hint)
@@ -445,6 +508,18 @@ impl OpenShapeApp {
         if let Some(ed) = self.sketch.as_mut() {
             ed.polygon_sides = sides;
             ed.pattern_count = count;
+            ed.transform_copy = copy;
+            ed.transform_keep = keep;
+            if offset_mm != ed.transform_offset * 1e3 {
+                ed.transform_offset = offset_mm * 1e-3;
+            }
+            if angle_deg != ed.transform_angle.to_degrees() {
+                ed.transform_angle = angle_deg.to_radians();
+            }
+            ed.transform_factor = factor;
+            if apply {
+                ed.apply_typed_transform(&mut self.model);
+            }
             if radius_mm != ed.fillet_radius * 1e3 {
                 ed.fillet_radius = radius_mm * 1e-3;
             }

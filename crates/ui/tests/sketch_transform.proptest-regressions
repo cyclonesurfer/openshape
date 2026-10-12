@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c9188528737d3ec444f9b39c1b5292b069c83969ee643c4cd5467dc8b65383f4 # shrinks to scene = Scene { rects: [((0.0, 0.0), (8.0, 8.0))], circles: [((0.0, 0.0), 3.0)], links: [], mirror: false, pattern: true, dims: [] }, pick = [false, false, false, false, false, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false], kind = Move(0.0, -34.36833662555148), keep = false, copy = false

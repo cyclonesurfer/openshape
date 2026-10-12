@@ -180,6 +180,15 @@ pub enum Icon {
     LinearPattern,
     /// Five small circles spaced round a centre dot.
     CircularPattern,
+    /// A cross of two lines with a solid arrowhead at each of its four
+    /// ends.
+    Move,
+    /// Three quarters of a circle about a centre dot, ending in an open
+    /// arrowhead.
+    Rotate,
+    /// A small square in a dashed large one sharing its lower left corner,
+    /// with an arrow from the small square's corner towards the large one's.
+    Scale,
     /// A dashed diagonal line (construction geometry).
     Construction,
     /// Two extension lines with a dimension line between them ending in
@@ -282,6 +291,9 @@ impl Icon {
         Icon::Mirror,
         Icon::LinearPattern,
         Icon::CircularPattern,
+        Icon::Move,
+        Icon::Rotate,
+        Icon::Scale,
         Icon::Construction,
         Icon::Dimension,
         Icon::Coincident,
@@ -364,6 +376,9 @@ impl Icon {
             Icon::Mirror => "Mirror",
             Icon::LinearPattern => "Linear pattern",
             Icon::CircularPattern => "Circular pattern",
+            Icon::Move => "Move",
+            Icon::Rotate => "Rotate",
+            Icon::Scale => "Scale",
             Icon::Construction => "Construction",
             Icon::Dimension => "Dimension",
             Icon::Coincident => "Coincident",
@@ -1162,6 +1177,31 @@ fn draw(pen: &Pen<'_>, icon: Icon) {
                 pen.circle(c, 2.0);
             }
             pen.dot((12.0, 12.0), 1.6);
+        }
+        Icon::Move => {
+            pen.line((12.0, 6.5), (12.0, 17.5));
+            pen.line((6.5, 12.0), (17.5, 12.0));
+            pen.solid_head((12.0, 2.5), 90.0, 4.5, 2.8);
+            pen.solid_head((12.0, 21.5), 270.0, 4.5, 2.8);
+            pen.solid_head((2.5, 12.0), 180.0, 4.5, 2.8);
+            pen.solid_head((21.5, 12.0), 0.0, 4.5, 2.8);
+        }
+        Icon::Rotate => {
+            // Counter-clockwise from the top round to just below the
+            // right, where the arrowhead points along the circle.
+            let (c, r) = ((12.0, 12.0), 7.5);
+            pen.arc(c, r, 100.0, 350.0);
+            pen.chevron(on_ellipse(c, r, r, 350.0), 80.0, 4.0);
+            pen.dot(c, 1.6);
+        }
+        Icon::Scale => {
+            pen.rect(3.5, 13.5, 10.5, 20.5);
+            pen.dashed((3.5, 13.5), (3.5, 3.5), 2.6, 1.8);
+            pen.dashed((3.5, 3.5), (20.5, 3.5), 2.6, 1.8);
+            pen.dashed((20.5, 3.5), (20.5, 20.5), 2.6, 1.8);
+            pen.dashed((10.5, 20.5), (20.5, 20.5), 2.6, 1.8);
+            pen.line((10.5, 13.5), (14.5, 9.5));
+            pen.solid_head((17.0, 7.0), 45.0, 4.5, 2.6);
         }
         Icon::Construction => {
             pen.dashed((4.0, 20.0), (20.0, 4.0), 4.0, 3.2);

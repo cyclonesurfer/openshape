@@ -9,7 +9,7 @@
 //! drives the same editor headlessly.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use egui::{Pos2, Rect, Vec2};
 use glam::DMat4;
@@ -28,6 +28,7 @@ use openshape_sketch_solver::{
 
 use crate::sketch_ops::fillet::fillet;
 use crate::sketch_ops::shapes::{self, TangentStart};
+use crate::sketch_ops::transform::{self, Similarity};
 use crate::sketch_ops::trim::{self, Cuts, Plan};
 use crate::sketch_ops::{curve_ending_at, deletion, leaving_direction, Batch};
 use crate::sketch_ops::{mirror, offset, pattern};
@@ -1462,11 +1463,18 @@ pub enum Tool {
     /// Conic arc: its start, its end, where its end tangents meet, then
     /// its shoulder (design note 0009 §7).
     Conic,
+    /// Moves the selection (or a copy) from one point to another (design
+    /// note 0007 §13).
+    Move,
+    /// Turns the selection (or a copy) about a centre.
+    Rotate,
+    /// Scales the selection (or a copy) about a base point.
+    Scale,
 }
 
 impl Tool {
     /// Every tool, in toolbar order.
-    pub const ALL: [Tool; 25] = [
+    pub const ALL: [Tool; 28] = [
         Tool::Select,
         Tool::Line,
         Tool::Rectangle,
@@ -1492,6 +1500,9 @@ impl Tool {
         Tool::Offset,
         Tool::LinearPattern,
         Tool::CircularPattern,
+        Tool::Move,
+        Tool::Rotate,
+        Tool::Scale,
     ];
 
     /// The tools sharing one toolbar button with this one (shown in its
@@ -1525,6 +1536,7 @@ impl Tool {
             Tool::LinearPattern | Tool::CircularPattern => {
                 &[Tool::LinearPattern, Tool::CircularPattern]
             }
+            Tool::Move | Tool::Rotate | Tool::Scale => &[Tool::Move, Tool::Rotate, Tool::Scale],
         }
     }
 
@@ -1556,6 +1568,9 @@ impl Tool {
             Tool::Ellipse => "Ellipse",
             Tool::EllipticalArc => "Elliptical arc",
             Tool::Conic => "Conic",
+            Tool::Move => "Move",
+            Tool::Rotate => "Rotate",
+            Tool::Scale => "Scale",
         }
     }
 
@@ -1571,6 +1586,11 @@ impl Tool {
     /// True for the pattern tools.
     pub fn is_pattern(self) -> bool {
         matches!(self, Tool::LinearPattern | Tool::CircularPattern)
+    }
+
+    /// True for the transform tools (move, rotate, scale).
+    pub fn is_transform(self) -> bool {
+        matches!(self, Tool::Move | Tool::Rotate | Tool::Scale)
     }
 
     /// Keyboard shortcut.
@@ -1600,7 +1620,10 @@ impl Tool {
             | Tool::ControlSpline
             | Tool::Ellipse
             | Tool::EllipticalArc
-            | Tool::Conic => return None,
+            | Tool::Conic
+            | Tool::Move
+            | Tool::Rotate
+            | Tool::Scale => return None,
         })
     }
 
@@ -1659,6 +1682,9 @@ impl Tool {
             }
             (Tool::LinearPattern, _) => "Click where the step to the first copy ends",
             (Tool::CircularPattern, _) => "Select curves or points, then click the centre",
+            (Tool::Move, _) => "Select curves or points, then click where to move them from",
+            (Tool::Rotate, _) => "Select curves or points, then click the centre to turn them about",
+            (Tool::Scale, _) => "Select curves or points, then click the base point to scale them about",
             (Tool::Ellipse | Tool::EllipticalArc, 0) => "Click the centre",
             (Tool::Ellipse | Tool::EllipticalArc, 1) => "Click the end of the first axis",
             (Tool::Ellipse, _) | (Tool::EllipticalArc, 2) => "Click to set the second axis",
@@ -2311,6 +2337,20 @@ pub struct SketchEditor {
     pub pattern_sources: Vec<SketchId>,
     /// Instances a pattern tool makes, the sources included.
     pub pattern_count: u32,
+    /// What the transform tools move: the selection when the tool was
+    /// chosen.
+    pub transform_sources: Vec<SketchId>,
+    /// The transform tools keep the originals and move copies.
+    pub transform_copy: bool,
+    /// The transform tools keep constraints between the selection and the
+    /// rest of the sketch (ADR 0014); otherwise they are removed.
+    pub transform_keep: bool,
+    /// The Move tool's typed offset (metres).
+    pub transform_offset: DVec2,
+    /// The Rotate tool's typed angle (radians, counter-clockwise).
+    pub transform_angle: f64,
+    /// The Scale tool's typed factor.
+    pub transform_factor: f64,
 }
 
 /// What the trim, extend or split tool would do at the pointer.
@@ -2351,6 +2391,12 @@ impl SketchEditor {
             offset_chain: None,
             pattern_sources: Vec::new(),
             pattern_count: 3,
+            transform_sources: Vec::new(),
+            transform_copy: false,
+            transform_keep: true,
+            transform_offset: DVec2::ZERO,
+            transform_angle: FRAC_PI_2,
+            transform_factor: 2.0,
         }
     }
 
@@ -2389,6 +2435,11 @@ impl SketchEditor {
             self.mirror_sources = self.selection.clone();
         }
         self.pattern_sources = if tool.is_pattern() {
+            self.selection.clone()
+        } else {
+            Vec::new()
+        };
+        self.transform_sources = if tool.is_transform() {
             self.selection.clone()
         } else {
             Vec::new()
@@ -2480,6 +2531,32 @@ impl SketchEditor {
             return "Move to the side to offset to and click; type the distance after; Esc chooses another curve"
                 .into();
         }
+        if self.tool.is_transform() {
+            let items = match self.transform_sources.len() {
+                0 => {
+                    return format!(
+                        "Select the curves and points to {}, then choose the tool",
+                        self.tool.label().to_lowercase()
+                    )
+                }
+                1 => "the selected item".to_string(),
+                n => format!("the {n} selected items"),
+            };
+            return match (self.tool, self.clicks.len()) {
+                (Tool::Move, 0) => {
+                    format!("Click a point to move {items} from, or type the offsets and Apply")
+                }
+                (Tool::Move, _) => "Click where that point goes; Esc starts again".into(),
+                (Tool::Rotate, 0) => format!("Click the centre to turn {items} about"),
+                (Tool::Rotate, 1) => "Click a reference point, or type the angle and Apply".into(),
+                (Tool::Rotate, _) => {
+                    "Click where the reference point turns to; Esc starts again".into()
+                }
+                (_, 0) => format!("Click the base point to scale {items} about"),
+                (_, 1) => "Click a reference point, or type the factor and Apply".into(),
+                _ => "Click where the reference point goes; Esc starts again".into(),
+            };
+        }
         if self.tool.is_pattern() {
             let items = match self.pattern_sources.len() {
                 0 => return "Select the curves and points to pattern, then choose the tool".into(),
@@ -2549,6 +2626,16 @@ impl SketchEditor {
         }
         if self.tool == Tool::Offset {
             self.curve_edit = self.plan_offset(model, &d, map, pos);
+            return;
+        }
+        if self.tool.is_transform() {
+            let Some(s) = snap(&d, map, pos, &[]) else {
+                return;
+            };
+            self.cursor = Some(s);
+            if let Some(t) = self.transform_at(s) {
+                self.curve_edit = self.plan_transform(model, &d, t);
+            }
             return;
         }
         if self.tool == Tool::SketchFillet {
@@ -2869,6 +2956,172 @@ impl SketchEditor {
         self.hover(model, map, Some(pos));
     }
 
+    /// The similarity the transform tool's clicks and the pointer snapped
+    /// at `s` give: Move from the first click to `s`; Rotate about the
+    /// first click from the second's direction to `s`'s; Scale about the
+    /// first click by `s`'s distance over the second's.
+    fn transform_at(&self, s: Snap) -> Option<Similarity> {
+        let c = &self.clicks;
+        match (self.tool, c.len()) {
+            (Tool::Move, 1) => {
+                let v = s.at - c[0].at;
+                (v.length() > SAME_POINT).then(|| Similarity::translation(v))
+            }
+            (Tool::Rotate, 2) => {
+                let (a, b) = (c[1].at - c[0].at, s.at - c[0].at);
+                (a.length() > SAME_POINT && b.length() > SAME_POINT)
+                    .then(|| Similarity::rotation(c[0].at, a.perp_dot(b).atan2(a.dot(b))))
+            }
+            (Tool::Scale, 2) => {
+                let (a, b) = ((c[1].at - c[0].at).length(), (s.at - c[0].at).length());
+                (a > SAME_POINT && b > SAME_POINT).then(|| Similarity::scaling(c[0].at, b / a))
+            }
+            _ => None,
+        }
+    }
+
+    /// The transform tool's plan for `t` (not checked).
+    fn transform_plan(
+        &self,
+        model: &Model,
+        d: &SketchDisplay,
+        t: Similarity,
+    ) -> Result<transform::Transformed, String> {
+        let curves: Vec<(SketchId, ResolvedCurve)> =
+            d.curves.iter().map(|c| (c.id, c.curve.clone())).collect();
+        let labels = model
+            .sketch_def(self.feature)
+            .map(|def| def.labels.clone())
+            .unwrap_or_default();
+        let sources = mirror::sources(&d.sketch, &self.transform_sources);
+        transform::transform(
+            &d.sketch,
+            &labels,
+            &curves,
+            &sources,
+            t,
+            transform::Options {
+                copy: self.transform_copy,
+                keep: self.transform_keep,
+            },
+        )
+    }
+
+    /// The transform tools' preview for `t`, checked like the edit, with
+    /// the first source as the target.
+    fn plan_transform(&self, model: &Model, d: &SketchDisplay, t: Similarity) -> Option<CurveEdit> {
+        let target = *self.transform_sources.first()?;
+        let plan = self.transform_plan(model, d, t).and_then(|p| {
+            model
+                .check_sketch_edit(self.feature, &p.plan.edits)
+                .map(|_| p.plan)
+        });
+        Some(CurveEdit { target, plan })
+    }
+
+    /// Commits a transform tool's click at `pos`: the clicks before the
+    /// last set the points; the last transforms the selection.
+    fn click_transform(&mut self, model: &mut Model, map: &ScreenMap, pos: Pos2) {
+        self.hover(model, map, Some(pos));
+        let Some(s) = self.cursor else {
+            return;
+        };
+        if self.transform_sources.is_empty() {
+            self.message = Some(format!(
+                "Select the curves and points to {} first",
+                self.tool.label().to_lowercase()
+            ));
+            return;
+        }
+        let needed = if self.tool == Tool::Move { 1 } else { 2 };
+        if self.clicks.len() < needed {
+            if self
+                .clicks
+                .first()
+                .is_some_and(|c| (c.at - s.at).length() <= SAME_POINT)
+            {
+                self.message = Some("Click a point away from the centre".into());
+                return;
+            }
+            self.clicks.push(s);
+            self.hover(model, map, Some(pos));
+            return;
+        }
+        match self.transform_at(s) {
+            Some(t) => self.commit_transform(model, t),
+            None => self.message = Some("Click a point away from the first one".into()),
+        }
+    }
+
+    /// Applies the transform tool's typed amount: the offsets (Move), the
+    /// angle about the clicked centre (Rotate) or the factor about the
+    /// clicked base point (Scale), in one undo step.
+    pub fn apply_typed_transform(&mut self, model: &mut Model) {
+        if self.transform_sources.is_empty() {
+            self.message = Some(format!(
+                "Select the curves and points to {} first",
+                self.tool.label().to_lowercase()
+            ));
+            return;
+        }
+        let t = match (self.tool, self.clicks.first()) {
+            (Tool::Move, _) => Similarity::translation(self.transform_offset),
+            (Tool::Rotate, Some(c)) => Similarity::rotation(c.at, self.transform_angle),
+            (Tool::Scale, Some(c)) => Similarity::scaling(c.at, self.transform_factor),
+            (Tool::Rotate, None) => {
+                self.message = Some("Click the centre to turn about first".into());
+                return;
+            }
+            (Tool::Scale, None) => {
+                self.message = Some("Click the base point to scale about first".into());
+                return;
+            }
+            _ => return,
+        };
+        self.commit_transform(model, t);
+    }
+
+    /// Transforms the selection by `t` through the checked edit, then
+    /// returns to Select with the moved entities (or the copies) selected.
+    fn commit_transform(&mut self, model: &mut Model, t: Similarity) {
+        let Some(d) = self.display(model) else {
+            return;
+        };
+        let outcome = self.transform_plan(model, &d, t).and_then(|p| {
+            model
+                .edit_sketch_checked(self.feature, p.plan.edits.clone())
+                .map(|op| (p, op))
+        });
+        match outcome {
+            Ok((p, op)) => {
+                let verb = match (self.transform_copy, self.tool) {
+                    (true, _) => "Copied",
+                    (_, Tool::Rotate) => "Rotated",
+                    (_, Tool::Scale) => "Scaled",
+                    _ => "Moved",
+                };
+                self.message = self.solve_message(model).or(Some(p.message(verb)));
+                let result: Vec<SketchId> = p
+                    .result
+                    .iter()
+                    .map(|id| {
+                        if id.is_new_in_batch() {
+                            SketchId {
+                                op,
+                                index: id.index,
+                            }
+                        } else {
+                            *id
+                        }
+                    })
+                    .collect();
+                self.set_tool(Tool::Select);
+                self.selection = result;
+            }
+            Err(e) => self.message = Some(format!("Not done: {e}")),
+        }
+    }
+
     /// The pattern for the pointer snapped at `s`, once the anchor is
     /// known: a linear pattern's start clicked (and the pointer elsewhere),
     /// or a circular pattern's centre under the pointer.
@@ -3131,7 +3384,12 @@ impl SketchEditor {
                 }
                 None => vec![vec![c[0].at, c[1].at]],
             },
-            (Tool::CenterArc, 1) | (Tool::LinearPattern, 1) => vec![vec![c[0].at, cur.at]],
+            (Tool::CenterArc, 1)
+            | (Tool::LinearPattern, 1)
+            | (Tool::Move, 1)
+            | (Tool::Rotate, 1)
+            | (Tool::Scale, 1) => vec![vec![c[0].at, cur.at]],
+            (Tool::Rotate, 2) | (Tool::Scale, 2) => vec![vec![c[1].at, c[0].at, cur.at]],
             (Tool::CenterArc, 2) => {
                 let r = (c[1].at - c[0].at).length();
                 let a0 = (c[1].at - c[0].at).to_angle();
@@ -3283,6 +3541,10 @@ impl SketchEditor {
             self.click_pattern(model, map, pos);
             return;
         }
+        if self.tool.is_transform() {
+            self.click_transform(model, map, pos);
+            return;
+        }
         if self.tool.edits_curves() {
             self.edit_curve(model, map, pos);
             return;
@@ -3308,7 +3570,10 @@ impl SketchEditor {
             | Tool::Mirror
             | Tool::Offset
             | Tool::LinearPattern
-            | Tool::CircularPattern => {}
+            | Tool::CircularPattern
+            | Tool::Move
+            | Tool::Rotate
+            | Tool::Scale => {}
             Tool::Point => {
                 let mut b = Batch::default();
                 let p = b.snapped_point(&s);

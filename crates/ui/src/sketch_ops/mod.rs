@@ -8,6 +8,7 @@ pub mod mirror;
 pub mod offset;
 pub mod pattern;
 pub mod shapes;
+pub mod transform;
 pub mod trim;
 
 use std::collections::{BTreeMap, BTreeSet};

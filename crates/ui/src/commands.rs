@@ -289,6 +289,9 @@ impl Command {
                 Tool::Ellipse => Icon::Ellipse,
                 Tool::EllipticalArc => Icon::EllipticalArc,
                 Tool::Conic => Icon::Conic,
+                Tool::Move => Icon::Move,
+                Tool::Rotate => Icon::Rotate,
+                Tool::Scale => Icon::Scale,
             },
             Command::Construction => Icon::Construction,
             Command::Constrain(c) => match c {

@@ -17,6 +17,7 @@ Phase 2:
 * trim, extend, split;
 * sketch fillet;
 * mirror, offset, linear and circular patterns;
+* move, rotate and scale (transform), with copies;
 * dimension labels the user can drag.
 
 The behaviour (what a user sees and can do) follows what parametric CAD
@@ -707,7 +708,76 @@ positions unchanged), `crates/ui/tests/sketch_labels.rs` (the editor end to
 end for every dimension kind, labels following moved geometry, reset) and
 the shell test `dragging_a_dimension_label_in_the_viewport`.
 
-## 13. Tests
+## 13. Transform
+
+Move, rotate and scale the selection, or copies of it (ADR 0014 records
+the choices below and the alternatives).
+
+* **The map** is a similarity T(p) = c + s·R(θ)(p − c) + v with s > 0:
+  Move is a translation (two clicks: from, to), Rotate a turn θ about a
+  centre (clicks: centre, a reference point, the target direction), Scale
+  a factor s about a base point (clicks: base, a reference point, where it
+  goes: s = |t − c| / |r − c|). The amounts can also be typed. A turn
+  within 1e-9 rad of a whole number of quarter turns is taken as exactly
+  that, with cos and sin exactly 0 or ±1, so horizontal and vertical stay
+  exact. Similarities keep orientation, so arcs keep their start and end,
+  tangent sides and ρ; they keep every angle and multiply every length by
+  s (any text on similarity geometry, e.g. Coxeter, *Introduction to
+  Geometry*, 2nd ed., 1969, ch. 5). That is why constraints among the
+  selection survive it.
+* **What moves.** The moved set M is the selected curves and points, the
+  points of selected curves, and every other curve all of whose points are
+  in M. Each moved point goes to T(p) and each moved circle's radius
+  becomes s·r. A curve with only some of its points moved (it shares a
+  point with the selection) is stretched by the solve below.
+* **Constraints** are *internal* (all their entities in M), *external*
+  (none) or *boundary*; a derived constraint (mirror, offset, pattern) is
+  classified pair by pair, together with its mirror line, direction line
+  or centre.
+  * External: unchanged.
+  * Internal: kept, dimensions of length multiplied by s exactly (angles
+    and ρ unchanged). A fix's position moves with its point. Under a whole
+    number of quarter turns, horizontal and vertical constraints (lines,
+    point pairs, distances) swap for an odd number and stay for an even
+    one. Under any other turn, the first horizontal or vertical line (in
+    constraint order) loses its constraint, freeing exactly the rotation,
+    and every other becomes parallel (same kind) or perpendicular (the
+    other kind) to it; a horizontal or vertical distance between points
+    that were level the other way (within 1e-7 m) becomes an aligned
+    distance; horizontal and vertical point pairs and other such distances
+    are removed. Removals are reported.
+  * Boundary dimensions are measured anew on the result; one that measures
+    1e-7 m or less is removed and reported.
+  * Boundary relations are kept ("Keep constraints", the default: the rest
+    of the sketch follows, as in a drag) or removed (detached).
+* **Solve and landing.** The sketch with the moved geometry placed at T
+  and the adjusted constraints (boundary dimensions left out) is solved
+  with every moved point pinned at T(p), every moved circle's radius at
+  s·r and every moved conic's ρ where it was (temporary fixes, radius and
+  ρ dimensions that are not committed). So the selection lands exactly
+  where T puts it, and only the rest of the sketch can move to satisfy
+  what ties it to the selection. If that does not solve the transform is
+  refused, never approximated: "the rest of the sketch holds the
+  selection" (a conflict, or no convergence), or "that would collapse a
+  curve joined to the selection" (a line from a moved point to an unmoved
+  one shrunk to nothing). Boundary dimensions then get their measured
+  values. The batch (constraint changes and the solved geometry) goes
+  through the checked edit: no new redundancy, still solvable.
+* **Copy** adds transformed copies of M with the internal constraints,
+  adjusted the same way, and nothing tying them to the rest of the sketch;
+  the originals are untouched. A copy onto its original (the identity) is
+  refused.
+* **Labels** of internal dimensions placed by the user turn and scale with
+  them (§12).
+* **Tools.** Move, Rotate and Scale share a toolbar button and act on the
+  selection made before choosing them. Hovering previews the result (or
+  shows why it is refused); the last click commits as one undo step and
+  returns to Select with the moved entities (or the copies) selected. The
+  sketch dialog holds the options (Copy, Keep constraints) and the typed
+  amounts (X and Y offsets, angle, factor), applied with its Apply button
+  once the centre or base point is clicked (Move needs none).
+
+## 14. Tests
 
 * Shapes: entity and constraint counts, DOF exactly as in §4, no redundant
   constraint, regions and extruded volumes exact.

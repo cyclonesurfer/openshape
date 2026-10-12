@@ -1,7 +1,7 @@
 # OpenShape status
 
 Updated 2026-10-12, Phase 2 (sketcher): core sketcher, the application
-shell, the editing tools, ellipses and conics done; transform, curvature
+shell, the editing tools, ellipses, conics and transform done; curvature
 and text next.
 
 ## What works
@@ -181,11 +181,32 @@ and text next.
   anchor's freedom added, and exact again after a new step or angle; 428
   were refused with the reason (nothing to pattern, or all of it on the
   centre).
+  Move, rotate and scale (design note 0007 §13, ADR 0014) apply a
+  similarity to a selection, by clicked points with a live preview or by
+  typed offsets, angle or factor, optionally as a copy. The selection
+  lands exactly (a translation adds the offset; a turn within 1e-9 rad of
+  a quarter turn is snapped to it): its dimensions scale exactly, angles
+  and ρ stay, fixes follow their point, quarter turns swap horizontal and
+  vertical, and other turns keep lines that were horizontal or vertical
+  parallel or perpendicular to one another, freeing only the rotation.
+  Relations to the rest of the sketch are kept (the rest follows, as in a
+  drag) or, with Keep constraints off, removed; dimensions to the rest are
+  measured anew; copies get the constraints among the selection only.
+  Every removed constraint is counted in the status message, and a
+  transform the rest cannot follow is refused with the reason. Fuzzed
+  over 3,000 random sketches (rectangles, circles, links, a mirror, a
+  circular pattern, distances) and random moves, turns and scales with and
+  without Copy and Keep: 2,579 committed, every moved point within
+  6.4e-14 m of where the similarity puts it, no new redundancy, detached
+  geometry unmoved, degrees of freedom changed only when the message says
+  so; 422 refused with the reason (243 held by kept constraints, 176
+  identities or copies onto the original, 3 that would collapse a line
+  joined to the selection).
   Every edit is one undoable op; Cancel
   undoes the whole sketch session. The editor is UI-toolkit independent and
   tested end to end by driving it with screen clicks.
 - **UI kit** (`openshape-ui-kit`): the application's look in one place
-  (ADR 0012): theme tokens with pinned contrast ratios, 76 original icons
+  (ADR 0012): theme tokens with pinned contrast ratios, 80 original icons
   drawn in code, a view cube, the command palette and search field, and an
   offscreen egui renderer used for screenshots and UI tests.
 - **I/O** (`openshape-io`): STL export, ASCII and binary.
@@ -280,6 +301,11 @@ and text next.
   shots showed sketches drawn over the parts that hide them (they are now
   rendered in 3D with depth).
 
+- Transform, 2026-10-12, on Mesa lavapipe: fmt, clippy with
+  `-D warnings`, 703 tests and `cargo deny` pass. Besides the fuzz above,
+  14 end-to-end tests drive the three tools by clicks and typed values
+  (snapping, previews, quarter turns, other turns, scaling areas by s²,
+  copies, labels, every curve kind).
 - Conics, 2026-10-12, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   686 tests and `cargo deny` pass. The solver's conic points are checked
   against Lee's implicit equation of the control triangle, which is
@@ -313,8 +339,9 @@ and text next.
 
 ## Not yet / known limits
 
-- Sketch tools not done: text, use/project and transform; the curvature
-  constraint.
+- Sketch tools not done: text and use/project; the curvature constraint.
+  Transform has no on-screen manipulator (drag handles): the selection
+  moves by clicked points or typed values.
   Conics cannot yet be trimmed, extended or split (refused with a message;
   every piece of a conic is an exact conic, design note 0009 §8), nor made
   tangent to a curve away from their ends, so a sketch fillet at a conic's
@@ -381,9 +408,8 @@ and text next.
 
 ## Next steps
 
-1. The rest of the Phase 2 sketcher that needs no faces: transform (move,
-   rotate, scale a selection), the curvature constraint, text, smooth
-   closed splines, and trim/extend/split of ellipses and conics. Project/convert,
+1. The rest of the Phase 2 sketcher that needs no faces: the curvature
+   constraint, text, smooth closed splines, and trim/extend/split of ellipses and conics. Project/convert,
    intersection curves and pierce wait for Phase 3 faces.
 2. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.

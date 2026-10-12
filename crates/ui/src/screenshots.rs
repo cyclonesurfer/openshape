@@ -523,6 +523,48 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     d.app.select(None);
     d.hover(on_plane(&d, 120.0, -80.0)?)?;
     save("22-conics.png", &d.settle()?)?;
+    // The conics turned about the first one's start: previewed with the
+    // reference at its end and the pointer 40° up, the dialog showing the
+    // angle and the options.
+    let conics: Vec<_> = d
+        .app
+        .model()
+        .sketch_def(sketch)
+        .map(|def| {
+            def.sketch
+                .entities
+                .iter()
+                .filter(|e| matches!(e.geometry, Geometry::Conic { .. }))
+                .map(|e| e.id)
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(ed) = d.app.sketch_editor_mut() {
+        ed.selection = conics.clone();
+    }
+    d.app.run(crate::commands::Command::Tool(Tool::Rotate));
+    d.click(on_plane(&d, 6.0, -50.0)?)?;
+    d.click(on_plane(&d, 34.0, -50.0)?)?;
+    let turn = 40f64.to_radians();
+    d.hover(on_plane(
+        &d,
+        6.0 + 28.0 * turn.cos(),
+        -50.0 + 28.0 * turn.sin(),
+    )?)?;
+    save("23-rotate-preview.png", &d.settle()?)?;
+    d.key(Key::Escape, Modifiers::NONE)?;
+    // Copied above the plate, with their ρ dimension.
+    if let Some(ed) = d.app.sketch_editor_mut() {
+        ed.selection = conics;
+    }
+    d.app.run(crate::commands::Command::Tool(Tool::Move));
+    if let Some(ed) = d.app.sketch_editor_mut() {
+        ed.transform_copy = true;
+    }
+    d.click(on_plane(&d, 6.0, -50.0)?)?;
+    d.click(on_plane(&d, 6.0, 32.0)?)?;
+    d.hover(on_plane(&d, 120.0, -80.0)?)?;
+    save("24-moved-copy.png", &d.settle()?)?;
     d.app.run(crate::commands::Command::CancelSketch);
     Ok(written)
 }
