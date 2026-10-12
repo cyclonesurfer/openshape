@@ -136,7 +136,13 @@ fn line_line(a: &Crv, b: &Crv, tol: f64, out: &mut Vec<(f64, f64)>) {
             && (-ea..=1.0 + ea).contains(&s)
             && (-eb..=1.0 + eb).contains(&t)
         {
-            out.push((s.clamp(0.0, 1.0), t.clamp(0.0, 1.0)));
+            // For nearly parallel lines the crossing's position along them
+            // is ill-conditioned (rounding moves `s` and `t` by far more
+            // than the tolerance, each its own way), while its distance
+            // from the other line is not: pair `s` with the point of `b`
+            // nearest to `a(s)`, so the contact is not lost.
+            let s = s.clamp(0.0, 1.0);
+            out.push((s, b.closest(a.point(s), 0.0, 1.0).0));
         }
     }
     let valid: Vec<(f64, f64)> = out

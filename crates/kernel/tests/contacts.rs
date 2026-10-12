@@ -39,6 +39,28 @@ fn crossing_lines_meet_once() {
 }
 
 #[test]
+fn nearly_parallel_lines_far_from_the_origin_still_cross() {
+    // Within the tolerance of each other over 1 km, crossing at a
+    // 1e-10 rad angle near (1952, 1048): rounding moves the crossing's
+    // parameters by about a millimetre along the lines, which must not
+    // lose it (the arrangement then saw the lines swap sides between two
+    // vertices with no crossing between them).
+    let t = tol();
+    let r = v(2000.0, 1000.0 + 1.1 * t);
+    let chord = line(v(1000.0, 2000.0), r);
+    let long = line(v(3000.0, 0.0), v(3.0 * t, 3000.0));
+    let c = contacts(&chord, &long);
+    assert_eq!(c.len(), 2, "{c:?}");
+    assert!(c.iter().any(|x| (x.point - r).length() <= t), "{c:?}");
+    let f = 0.1 / 2.1;
+    let crossing = r + (v(1000.0, 2000.0) - r) * f;
+    assert!(
+        c.iter().any(|x| (x.point - crossing).length() < 1e-2),
+        "{c:?}"
+    );
+}
+
+#[test]
 fn segments_that_miss_do_not_meet() {
     // The infinite lines cross at (5, 5), outside both segments.
     let c = contacts(

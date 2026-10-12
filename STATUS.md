@@ -4,7 +4,9 @@ Updated 2026-10-12, Phase 2 (sketcher): core sketcher, the application
 shell, the editing tools, ellipses, conics, transform, curvature
 continuity, text, smooth closed splines, trimming of ellipses and conics,
 and curvature combs done; region detection now absorbs faces thinner than
-the tolerance instead of refusing them. Phase 3 groundwork next.
+the tolerance instead of refusing them. Phase 3 groundwork started: the
+design notes for intersections (0011), booleans (0012) and persistent
+naming (0013) are written; their implementation is next.
 
 ## What works
 
@@ -478,7 +480,7 @@ the tolerance instead of refusing them. Phase 3 groundwork next.
   arrangement inconsistent (Euler's formula fails) and it refused the
   sketch (see the known issues).
 - Curvature combs and region robustness, 2026-10-12, on Mesa lavapipe:
-  fmt, clippy with `-D warnings`, 819 tests and `cargo deny` pass. The
+  fmt, clippy with `-D warnings`, 822 tests and `cargo deny` pass. The
   comb's samples are checked against closed forms (circle, ellipse,
   parabola, equal arc lengths by an independent quadrature) and against
   exact one-sided differences at spline knots; the editor tests check a
@@ -489,10 +491,13 @@ the tolerance instead of refusing them. Phase 3 groundwork next.
   the day (an internal inconsistency), and each failure it found since
   is fixed and kept as a regression test with the exact curves'
   regions: half-edges are ordered beyond a vertex's merged points, faces
-  thinner than the tolerance that are artefacts of it are absorbed, and
-  the profile builder refuses micron-sized loops by name. Successive
-  runs passed 7,533, 13,908, 2,868, 8,360 and 14,673 cases before the
-  next defect.
+  thinner than the tolerance that are artefacts of it are absorbed
+  (before the face checks, including faces whose area is rounding noise),
+  points of a curve inside a merged vertex count as at it, the crossing
+  of two nearly parallel lines far from the origin is no longer lost to
+  rounding, and the profile builder refuses micron-sized loops by name.
+  Successive runs passed 7,533, 13,908, 2,868, 8,360, 14,673, 39,619 and
+  21,360 cases before the next defect.
 - Curvature continuity, 2026-10-12, on Mesa lavapipe: fmt, clippy with
   `-D warnings`, 717 tests and `cargo deny` pass. The solver tests
   check every joint against curvatures computed in the test from closed
@@ -618,19 +623,24 @@ the tolerance instead of refusing them. Phase 3 groundwork next.
   moved by about a tolerance or more.
 - Solver conflict detection is local: from a start far from any solution it
   can call a sketch conflicting although another branch would satisfy it.
-- No booleans: each feature makes its own part (Phase 3).
+- No booleans: each feature makes its own part (Phase 3; design notes
+  0011 and 0012 are the plan).
 - No persistent naming or incremental regeneration: every edit regenerates
-  the whole studio (Phase 3). Features don't reference model geometry yet, so
-  nothing can break on upstream edits today.
+  the whole studio (Phase 3; design note 0013 is the naming plan). Features
+  don't reference model geometry yet, so nothing can break on upstream
+  edits today.
 - Non-manifold topology deferred to Phase 3.
 - No STEP or other exchange formats beyond STL (Phase 4; see docs/FORMATS.md).
 
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Phase 3 groundwork: design notes for curve/surface intersection, booleans
-   and persistent naming; make the kernel's tessellation and profile checks
+2. Phase 3 groundwork: make the kernel's tessellation and profile checks
    adapt to local feature size, and scale the mass-property rounding floor
-   to the coordinates curves are evaluated in. The rest of the Phase 2
-   sketcher (project/convert, intersection curves, pierce) needs Phase 3
-   faces.
+   to the coordinates curves are evaluated in.
+3. Phase 3, in the order the design notes give: origin tables and entity
+   handles for box, extrude and revolve (design note 0013 §10); the
+   boolean pipeline end to end on polyhedral solids with plane/plane
+   intersections and the volume identities (0012 §8, 0011 §8). The rest
+   of the Phase 2 sketcher (project/convert, intersection curves, pierce)
+   needs Phase 3 faces.

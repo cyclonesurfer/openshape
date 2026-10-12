@@ -48,8 +48,13 @@ the left. Those curves feed `extrude`/`revolve` unchanged.
    (sweep over x-sorted boxes): closed form for line–line, line–circle and
    circle–circle (arcs as their circles, then filtered by angle range with
    tolerance); Bézier clipping for anything involving a spline, refined by
-   Newton to 1e-12 relative. Tangential contacts are found as double roots
-   and kept as one intersection (refined to the point of contact, design
+   Newton to 1e-12 relative. Where two lines are nearly parallel, their
+   crossing's position along them is ill-conditioned while its distance
+   from each line is not, so the crossing's parameter on one line is
+   paired with the nearest point of the other rather than with the
+   other's own (equally rounded) parameter, which can be a millimetre
+   away for lines 1 km long a tolerance apart. Tangential contacts are
+   found as double roots and kept as one intersection (refined to the point of contact, design
    note 0007 §6). **Overlaps** (collinear segments, arcs on
    the same circle, a spline overlapping itself or another curve within
    tolerance over an interval) are detected explicitly; the overlapping
@@ -96,6 +101,16 @@ inputs perturbed by about a tolerance, and both once internal errors
   other. Measured from the mean only, that circle stayed whole, the
   overlap's pieces no longer ran between the same vertices, and they were
   not recognised as duplicates.
+* **Inside a vertex.** A curve is at a vertex while it stays within the
+  tolerance beyond the vertex's farthest member (at least twice the
+  tolerance): consecutive incidences of a curve with no excursion beyond
+  that are one stop, and when two pieces between the same vertices are
+  compared for an overlap, their points inside an end vertex count as
+  matching. Otherwise two tangent curves through a vertex merged from
+  points three tolerances apart kept separate pieces a few tolerances
+  long inside it, coincident to rounding, whose order and enclosed area
+  were noise (found at 2 km from the origin, where their area's sign
+  made a second outer boundary).
 * **Order.** Inside a few tolerances of a vertex its members' positions
   are noise: a half-edge starts up to the vertex's spread from it, and its
   tangent there can disagree with where it actually runs (two pieces a few
@@ -125,7 +140,10 @@ is the tolerance inside (found by the lattice test, perturbations of 0.3
 tolerances). Before refusing such a face as "degenerate" or "thinner than
 the tolerance", the builder absorbs the two kinds that are artefacts of
 the tolerance itself, then builds again (at most eight rounds; each merges
-vertices or removes a piece, and all such faces are taken at once):
+vertices or removes a piece, and all such faces are taken at once). This
+runs before the topology checks, on bounded faces and on faces whose area
+is within the tolerance squared of zero either way (rounding can give a
+face of coincident pieces either sign):
 
 * **A face within the tolerance of one point.** Three curves crossing
   nearly at one point cross pairwise 1.3 to 1.4 tolerances apart, too far

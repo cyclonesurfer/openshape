@@ -148,6 +148,10 @@ struct Vtx {
     /// and where the pieces of each curve through the vertex end.
     point: DVec2,
     members: Vec<usize>,
+    /// How far a curve may be from `pos` and still be at the vertex: the
+    /// tolerance beyond its farthest member, and at least twice the
+    /// tolerance.
+    at: f64,
     end: bool,
     removed: bool,
     /// The parameter at which each curve's pieces end at this vertex (the
@@ -195,7 +199,7 @@ pub(super) fn build(curves: &[ProfileCurve], tol: f64) -> Result<SketchArrangeme
         b.snap()?;
         let (mut verts, vert_of) = b.vertices()?;
         let mut pieces = b.split(&mut verts, &vert_of);
-        b.eliminate(&mut pieces);
+        b.eliminate(&mut pieces, &verts);
         // Vertices with pieces before pruning (dangling ends stay vertices).
         let mut used: Option<Vec<bool>> = None;
         loop {
@@ -521,6 +525,7 @@ impl Builder<'_> {
                 pos,
                 point: self.precise_mean(&g),
                 end: g.iter().any(|&m| self.incs[m].end),
+                at: (2.0 * self.tol).max(self.tol + spread),
                 members: g,
                 removed: false,
                 params: BTreeMap::new(),
@@ -538,11 +543,12 @@ impl Builder<'_> {
     }
 
     /// Splits every curve at its vertices. Where a curve's incidences at one
-    /// vertex follow each other without the curve leaving the vertex, they
-    /// are one stop, at the parameter of the best-ranked of them (then the
-    /// one nearest the vertex's point), so that consecutive pieces of a
-    /// curve meet exactly and pieces of different curves meet where their
-    /// most precise contact is.
+    /// vertex follow each other without the curve leaving the vertex (going
+    /// farther from it than the tolerance beyond its farthest member, and
+    /// at least twice the tolerance), they are one stop, at the parameter of
+    /// the best-ranked of them (then the one nearest the vertex's point), so
+    /// that consecutive pieces of a curve meet exactly and pieces of
+    /// different curves meet where their most precise contact is.
     fn split(&mut self, verts: &mut Vec<Vtx>, vert_of: &[usize]) -> Vec<Piece> {
         let n = self.crvs.len();
         // (parameter, vertex, rank) of each incidence, by curve.
@@ -563,6 +569,7 @@ impl Builder<'_> {
                     pos: self.incs[k].p,
                     point: self.incs[k].p,
                     members: vec![k],
+                    at: 2.0 * self.tol,
                     end: false,
                     removed: false,
                     params: BTreeMap::new(),
@@ -581,7 +588,7 @@ impl Builder<'_> {
             // True if the curve stays at one vertex from stop `i` to `i + 1`.
             let stays = |i: usize| {
                 let (a, b) = (stop(i), stop(i + 1));
-                a.1 == b.1 && !self.leaves(ci, a.0, b.0, verts[a.1].pos, 2.0 * self.tol)
+                a.1 == b.1 && !self.leaves(ci, a.0, b.0, verts[a.1].pos, verts[a.1].at)
             };
             // Runs of stops at one vertex, starting after a place where the
             // curve leaves its vertex (for a closed curve).
@@ -652,8 +659,10 @@ impl Builder<'_> {
     }
 
     /// True if every point of `p` is within `lim` of `q` (end points within
-    /// twice the tolerance or `lim`, since both ends may be off their vertex).
-    fn one_sided(&self, p: &Piece, q: &Piece, lim: f64) -> bool {
+    /// twice the tolerance or `lim`, since both ends may be off their
+    /// vertex), or at one of `p`'s end vertices (within [`Vtx::at`]: inside
+    /// a vertex, where both pieces are, positions are noise).
+    fn one_sided(&self, p: &Piece, q: &Piece, lim: f64, verts: &[Vtx]) -> bool {
         let cp = &self.crvs[p.curve];
         let cq = &self.crvs[q.curve];
         let n = match &cp.geom {
@@ -676,7 +685,11 @@ impl Builder<'_> {
             } else {
                 lim
             };
-            if cq.closest(cp.point(t), q.t0, q.t1).1 > lim {
+            let x = cp.point(t);
+            let inside = [p.v0, p.v1]
+                .iter()
+                .any(|&v| (x - verts[v].pos).length() <= verts[v].at);
+            if !inside && cq.closest(x, q.t0, q.t1).1 > lim {
                 return false;
             }
         }
@@ -684,7 +697,7 @@ impl Builder<'_> {
     }
 
     /// Marks pieces that duplicate a kept piece between the same vertices.
-    fn eliminate(&self, pieces: &mut [Piece]) {
+    fn eliminate(&self, pieces: &mut [Piece], verts: &[Vtx]) {
         let mut groups: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
         for (k, p) in pieces.iter().enumerate() {
             groups
@@ -699,8 +712,8 @@ impl Builder<'_> {
             let mut kept: Vec<usize> = Vec::new();
             for &k in g {
                 let dup = kept.iter().any(|&q| {
-                    self.one_sided(&pieces[k], &pieces[q], self.tol)
-                        && self.one_sided(&pieces[q], &pieces[k], self.tol)
+                    self.one_sided(&pieces[k], &pieces[q], self.tol, verts)
+                        && self.one_sided(&pieces[q], &pieces[k], self.tol, verts)
                 });
                 if dup {
                     pieces[k].state = State::Duplicate;
@@ -1134,41 +1147,6 @@ impl Builder<'_> {
             .map(|c| c.iter().map(|&h| side(h)).collect())
             .collect();
         let areas: Vec<f64> = sides.iter().map(|s| measure::loop_area(crvs, s)).collect();
-        // Components and Euler's formula.
-        let mut uf = Uf {
-            p: (0..nv).collect(),
-        };
-        for e in &edges {
-            uf.union(e.v0, e.v1);
-        }
-        let mut comp_v: HashMap<usize, (usize, usize, usize, usize)> = HashMap::new();
-        for (v, hes) in out_he.iter().enumerate() {
-            if !hes.is_empty() {
-                comp_v.entry(uf.find(v)).or_default().0 += 1;
-            }
-        }
-        for e in &edges {
-            comp_v.entry(uf.find(e.v0)).or_default().1 += 1;
-        }
-        for (c, s) in cycles.iter().zip(&areas) {
-            let k = comp_v.entry(uf.find(start(c[0]))).or_default();
-            k.2 += 1;
-            if *s < 0.0 {
-                k.3 += 1;
-            }
-        }
-        for &(v, e, f, neg) in comp_v.values() {
-            if v + f != e + 2 {
-                return Err(inconsistent(format!(
-                    "Euler's formula fails (V={v}, E={e}, F={f})"
-                )));
-            }
-            if neg != 1 {
-                return Err(inconsistent(format!(
-                    "{neg} outer boundaries in one component"
-                )));
-            }
-        }
         // Faces thinner than the tolerance, absorbed (design note 0006
         // §4.2) rather than refused:
         // * a bounded face whose boundary stays within twice the tolerance
@@ -1188,14 +1166,17 @@ impl Builder<'_> {
             let mut groups: Vec<Vec<usize>> = Vec::new();
             let mut drop: Vec<usize> = Vec::new();
             for (c, &a) in cycles.iter().zip(&areas) {
-                if a.is_nan() || a <= 0.0 {
+                // Bounded faces, and faces whose area is rounding noise
+                // either way (coincident pieces at coordinates far from the
+                // origin), before they upset the checks below.
+                if a.is_nan() || (a <= 0.0 && -a > tol * tol) {
                     continue;
                 }
                 if let [h, g] = c[..] {
                     let (p, q) = (&edges[h / 2], &edges[g / 2]);
                     if start(h) != end(h)
-                        && self.one_sided(p, q, 2.0 * tol)
-                        && self.one_sided(q, p, 2.0 * tol)
+                        && self.one_sided(p, q, 2.0 * tol, verts)
+                        && self.one_sided(q, p, 2.0 * tol, verts)
                     {
                         // Pieces are ordered by curve and parameter, as
                         // `eliminate` keeps the first.
@@ -1234,6 +1215,41 @@ impl Builder<'_> {
                     merge: groups,
                     drop,
                 });
+            }
+        }
+        // Components and Euler's formula.
+        let mut uf = Uf {
+            p: (0..nv).collect(),
+        };
+        for e in &edges {
+            uf.union(e.v0, e.v1);
+        }
+        let mut comp_v: HashMap<usize, (usize, usize, usize, usize)> = HashMap::new();
+        for (v, hes) in out_he.iter().enumerate() {
+            if !hes.is_empty() {
+                comp_v.entry(uf.find(v)).or_default().0 += 1;
+            }
+        }
+        for e in &edges {
+            comp_v.entry(uf.find(e.v0)).or_default().1 += 1;
+        }
+        for (c, s) in cycles.iter().zip(&areas) {
+            let k = comp_v.entry(uf.find(start(c[0]))).or_default();
+            k.2 += 1;
+            if *s < 0.0 {
+                k.3 += 1;
+            }
+        }
+        for &(v, e, f, neg) in comp_v.values() {
+            if v + f != e + 2 {
+                return Err(inconsistent(format!(
+                    "Euler's formula fails (V={v}, E={e}, F={f})"
+                )));
+            }
+            if neg != 1 {
+                return Err(inconsistent(format!(
+                    "{neg} outer boundaries in one component"
+                )));
             }
         }
         for (c, &a) in cycles.iter().zip(&areas) {

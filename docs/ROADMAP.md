@@ -37,10 +37,10 @@ item is delivered in the phase noted.
 - [x] Application shell in the common parametric-CAD layout with our own look (ADR 0012), driven end to end by offscreen UI tests
 
 ## Phase 3 — Booleans and core features
-- [ ] Curve/curve, curve/surface, surface/surface intersection (design note first)
-- [ ] Robust booleans; fuzzing; `|A∪B| = |A|+|B|−|A∩B|` property test; failure-rate metric in CI
+- [ ] Curve/curve, curve/surface, surface/surface intersection (design note 0011 written)
+- [ ] Robust booleans; fuzzing; `|A∪B| = |A|+|B|−|A∩B|` property test; failure-rate metric in CI (design note 0012 written)
 - [ ] Incremental regeneration engine (`regen`): dependency graph, caching, cancellation, error propagation
-- [ ] Persistent naming (`naming`) with reorder/suppress/pattern-count tests
+- [ ] Persistent naming (`naming`) with reorder/suppress/pattern-count tests (design note 0013 written)
 - [ ] Hole, patterns, mirror, construction planes
 - [ ] Milestone: a real bracket survives upstream edits with no broken references
 

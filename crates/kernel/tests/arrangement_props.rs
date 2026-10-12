@@ -545,6 +545,60 @@ fn lattice_tangent_arcs_leave_no_sliver() {
     }
 }
 
+/// Three circles tangent at one point (two inside each other, one outside)
+/// and two lines starting there, moved by up to three tolerances (found by
+/// the lattice test at scale 10³ and, shrinking, at scale 1). The contacts
+/// make two vertices three tolerances apart joined by pieces of the
+/// tangent curves that coincide to rounding: their area's sign was noise,
+/// so one read as a second outer boundary, and pieces seen at their
+/// middles inside the vertices were ordered by noise (Euler's formula
+/// failed). Points inside a vertex now count as at it when overlaps are
+/// found, and faces with an area of rounding noise are absorbed before
+/// the checks: the first sketch gets its four regions at every scale; the
+/// second, whose line starts three tolerances above the tangency, leaves
+/// a triangle 0.9 tolerances thick there and is refused, naming where.
+#[test]
+fn lattice_tangent_circles_with_lines_at_the_tangency() {
+    let cases = [
+        [
+            (Lat::Arc(0, 1, 1, 2, -2), [0.0; 4]),
+            (Lat::Line(0, 2, 7, 1), [0.0, 3.0, 0.0, 0.0]),
+            (Lat::Circle(0, 0, 2), [-0.3, 0.0, 0.0, 0.0]),
+            (Lat::Arc(0, 3, 1, 3, -4), [0.0, 0.0, 0.0, 1.1]),
+            (Lat::Line(0, 2, 1, 1), [-0.3, 0.0, 0.0, 0.0]),
+        ],
+        [
+            (Lat::Arc(0, 1, 1, 2, -2), [0.0; 4]),
+            (Lat::Line(0, 2, 7, 1), [0.0, 3.0, 0.0, 0.0]),
+            (Lat::Circle(0, 0, 2), [-0.3, 0.0, 0.0, 0.0]),
+            (Lat::Arc(0, 3, 1, 3, 1), [0.0, 0.0, 0.0, 1.1]),
+            (Lat::Line(0, 4, 6, 2), [0.0, 0.0, -0.3, -0.3]),
+        ],
+    ];
+    for items in &cases {
+        for scale in [1.0, 1e-3, 1e3] {
+            check_lattice(items, true, scale).unwrap();
+        }
+    }
+}
+
+/// A chord of a circle on a longer line that diverges from it by about a
+/// tolerance, with a line tangent to the circle at its end.
+#[test]
+fn lattice_chord_along_a_nearly_collinear_line() {
+    let cases = [[
+        (Lat::Circle(1, 1, 1), [0.0; 4]),
+        (Lat::Line(1, 2, 7, 1), [0.0, 0.0, 0.0, 1.1]),
+        (Lat::Line(3, 0, 3, 3), [0.0, 0.0, 3.0, 0.0]),
+        (Lat::Line(0, 0, 0, 1), [0.0; 4]),
+    ]];
+    for items in &cases {
+        for scale in [1.0, 1e-3, 1e3] {
+            check_lattice(items, true, scale).unwrap_or_else(|e| panic!("scale {scale}: {e}"));
+        }
+    }
+}
+
 /// A closed star-shaped spline about `c` through the star polygon's
 /// corners, optionally with random weights (then it passes through the first
 /// and last points only).
