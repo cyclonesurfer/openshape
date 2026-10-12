@@ -419,6 +419,64 @@ fn dimensions_sit_outside_the_sketch() {
 }
 
 #[test]
+fn dragging_a_dimension_label_in_the_viewport() {
+    let (mut d, sketch, _) = demo();
+    d.app.enter_sketch(sketch);
+    d.settle().unwrap();
+    let labels = |d: &mut AppDriver| {
+        let rect = d.app.layout().graphics;
+        let camera = d.app.camera_mut().clone();
+        let model = d.app.model();
+        let frame = model.sketch_result(sketch).unwrap().frame;
+        let shown = d.app.sketch_editor().unwrap().display(model).unwrap();
+        annotations(&shown, &ScreenMap::new(&camera, frame, rect))
+    };
+    let a = labels(&mut d)
+        .into_iter()
+        .find(|a| a.dimension && a.text.contains("mm"))
+        .expect("a length dimension");
+    let to = a.rect.center() + Vec2::new(-40.0, -70.0);
+    let ops = d.app.model().session().log().len();
+    d.drag(a.rect.center(), to, 8).unwrap();
+    d.settle().unwrap();
+    assert_eq!(d.app.model().session().log().len(), ops + 1);
+    assert!(d
+        .app
+        .model()
+        .sketch_def(sketch)
+        .unwrap()
+        .label(a.constraint)
+        .is_some());
+    let moved = labels(&mut d)
+        .into_iter()
+        .find(|b| b.constraint == a.constraint)
+        .unwrap();
+    assert!(
+        moved.rect.center().distance(to) < 0.5,
+        "{:?} not at {to:?}",
+        moved.rect.center()
+    );
+    assert!(d.app.enabled(Command::ResetLabels));
+    d.key(Key::Z, Modifiers::COMMAND).unwrap();
+    assert_eq!(
+        d.app
+            .model()
+            .sketch_def(sketch)
+            .unwrap()
+            .label(a.constraint),
+        None,
+        "undo returns it to automatic placement"
+    );
+    assert!(!d.app.enabled(Command::ResetLabels));
+    // Redone, then reset from the command instead.
+    d.key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT)
+        .unwrap();
+    assert!(d.app.enabled(Command::ResetLabels));
+    d.app.run(Command::ResetLabels);
+    assert!(d.app.model().sketch_def(sketch).unwrap().labels.is_empty());
+}
+
+#[test]
 fn the_view_cube_turns_the_view() {
     use openshape_ui_kit::view_cube::{self, CubeFace, CubeTarget};
     let (mut d, _, _) = demo();

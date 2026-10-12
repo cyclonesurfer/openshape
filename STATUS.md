@@ -102,7 +102,10 @@ application shell done; sketch editing tools next.
   parallel (to the line it continues or one the pointer passed); dragging with
   live solving; box selection and delete; colour-coded state (free, fully
   constrained, redundant, conflicting) with constraint glyphs and dimension
-  labels placed outside the sketch. Trim (a piece between crossings; an
+  labels placed outside the sketch automatically, or dragged where the user
+  wants them (stored per dimension as an offset from what it measures, so
+  they move with the geometry; one undo step per drag; a command returns
+  them to automatic placement; design note 0007 §12). Trim (a piece between crossings; an
   uncrossed curve is deleted; a circle cut twice becomes an arc), extend (a
   line along its ray, an arc around its circle, to the next curve) and split
   (design note 0007 §7): cut ends are put on the crossing curve, the far end
@@ -266,8 +269,7 @@ application shell done; sketch editing tools next.
   curves yet), and splines can be trimmed only whole: their pieces are not
   exact splines of the sketch's two kinds (§7.5).
 - Shell gaps: features reorder with Move up/down but not by dragging rows;
-  dimension labels are placed automatically (outside the sketch) and cannot
-  be dragged; feature dialogs do not preview the result live, and there is
+  feature dialogs do not preview the result live, and there is
   no toggle to see the final model while editing; parts highlight when
   selected but not on hover; there is no box selection of parts; shortcuts
   are not remappable; only the light theme exists; File > Open and Save use
@@ -298,10 +300,9 @@ application shell done; sketch editing tools next.
 
 ## Next steps
 
-1. Draggable dimension labels (design note 0007 §12).
-2. Live preview in feature dialogs.
-3. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
+1. Live preview in feature dialogs.
+2. Re-run `scripts/gpu-check.sh` on RADV (docs/huginn-tasks.md prompt 1) and
    run the windowed app on a desktop.
-4. Phase 3 groundwork: design notes for curve/surface intersection, booleans
+3. Phase 3 groundwork: design notes for curve/surface intersection, booleans
    and persistent naming; make the kernel's tessellation and profile checks
    adapt to local feature size.

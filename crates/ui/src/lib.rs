@@ -361,10 +361,7 @@ impl Model {
         let name = self.next_name("Sketch");
         self.add_feature(
             &name,
-            Feature::Sketch(SketchDef {
-                plane,
-                sketch: SketchData::default(),
-            }),
+            Feature::Sketch(SketchDef::new(plane, SketchData::default())),
         )
     }
 

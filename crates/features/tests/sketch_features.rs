@@ -29,10 +29,7 @@ fn new_sketch(s: &mut Session, plane: PlaneRef) -> FeatureId {
     insert(
         s,
         "Sketch",
-        Feature::Sketch(SketchDef {
-            plane,
-            sketch: SketchData::default(),
-        }),
+        Feature::Sketch(SketchDef::new(plane, SketchData::default())),
     )
 }
 

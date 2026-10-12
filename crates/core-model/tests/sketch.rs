@@ -38,10 +38,7 @@ fn new_sketch(s: &mut Session) -> FeatureId {
         element,
         at: InsertAt::End,
         name: "Sketch 1".into(),
-        feature: Feature::Sketch(SketchDef {
-            plane: PlaneRef::Top,
-            sketch: SketchData::default(),
-        }),
+        feature: Feature::Sketch(SketchDef::new(PlaneRef::Top, SketchData::default())),
     }))
 }
 
@@ -318,4 +315,168 @@ fn sketch_ops_round_trip_through_save_and_open() {
     draw_line(&mut s, f);
     let reopened = Session::open(&s.save().unwrap(), ReplicaId(3)).unwrap();
     assert_eq!(sketch(&reopened, f), sketch(&s, f));
+}
+
+#[test]
+fn dimension_labels_are_placed_moved_and_returned_to_automatic() {
+    let mut s = Session::new_document(ReplicaId(1));
+    let f = new_sketch(&mut s);
+    let op = draw_line(&mut s, f);
+    let len = SketchId { op, index: 4 };
+    let place = |offset| {
+        vec![SketchEdit::PlaceLabel {
+            dimension: len,
+            offset,
+        }]
+    };
+    assert_eq!(sketch(&s, f).label(len), None);
+    edit(&mut s, f, place(Some(DVec2::new(0.0, 0.004))));
+    assert_eq!(sketch(&s, f).label(len), Some(DVec2::new(0.0, 0.004)));
+    edit(&mut s, f, place(Some(DVec2::new(0.001, -0.003))));
+    let d = sketch(&s, f);
+    assert_eq!(d.label(len), Some(DVec2::new(0.001, -0.003)));
+    assert_eq!(d.labels.len(), 1);
+    // A second dimension's label keeps the list sorted by id.
+    let n = SketchId::new_in_batch;
+    let op2 = edit(
+        &mut s,
+        f,
+        vec![
+            point(0, 0.0, 0.01),
+            constraint(
+                1,
+                Constraint::Distance {
+                    a: SketchId { op, index: 0 },
+                    b: n(0),
+                    kind: openshape_core_model::sketch::DistanceKind::Aligned,
+                    value: 0.01,
+                },
+            ),
+            SketchEdit::PlaceLabel {
+                dimension: n(1),
+                offset: Some(DVec2::new(-0.002, 0.0)),
+            },
+            SketchEdit::PlaceLabel {
+                dimension: len,
+                offset: Some(DVec2::new(0.0, 0.005)),
+            },
+        ],
+    );
+    let d = sketch(&s, f);
+    let dist = SketchId { op: op2, index: 1 };
+    assert_eq!(
+        d.labels,
+        vec![
+            (len, DVec2::new(0.0, 0.005)),
+            (dist, DVec2::new(-0.002, 0.0))
+        ]
+    );
+    // Back to automatic placement; again is harmless.
+    edit(&mut s, f, place(None));
+    edit(&mut s, f, place(None));
+    let d = sketch(&s, f);
+    assert_eq!(d.label(len), None);
+    assert_eq!(d.label(dist), Some(DVec2::new(-0.002, 0.0)));
+    assert!(s.document().conflicts.is_empty());
+    // Placing a label is one undo step.
+    assert!(s.undo());
+    assert!(s.undo());
+    assert_eq!(sketch(&s, f).label(len), Some(DVec2::new(0.0, 0.005)));
+}
+
+#[test]
+fn labels_only_go_on_dimensions_and_finite_offsets() {
+    let mut s = Session::new_document(ReplicaId(1));
+    let f = new_sketch(&mut s);
+    let op = draw_line(&mut s, f);
+    let id = |index| SketchId { op, index };
+    for (dimension, offset) in [
+        // The horizontal constraint, the line, and an id never used.
+        (id(3), DVec2::ZERO),
+        (id(2), DVec2::ZERO),
+        (id(77), DVec2::ZERO),
+        (id(4), DVec2::new(f64::NAN, 0.0)),
+        (id(4), DVec2::new(0.0, f64::INFINITY)),
+    ] {
+        let before = sketch(&s, f);
+        let n_conflicts = s.document().conflicts.len();
+        edit(
+            &mut s,
+            f,
+            vec![SketchEdit::PlaceLabel {
+                dimension,
+                offset: Some(offset),
+            }],
+        );
+        assert_eq!(sketch(&s, f), before, "{dimension:?} {offset}");
+        assert_eq!(s.document().conflicts.len(), n_conflicts + 1);
+    }
+}
+
+#[test]
+fn deleting_a_dimension_or_what_it_measures_drops_its_label() {
+    let mut s = Session::new_document(ReplicaId(1));
+    let f = new_sketch(&mut s);
+    let op = draw_line(&mut s, f);
+    let len = SketchId { op, index: 4 };
+    let place = SketchEdit::PlaceLabel {
+        dimension: len,
+        offset: Some(DVec2::new(0.0, 0.004)),
+    };
+    edit(&mut s, f, vec![place.clone()]);
+    edit(&mut s, f, vec![SketchEdit::Delete { items: vec![len] }]);
+    assert!(sketch(&s, f).labels.is_empty());
+    assert!(s.undo());
+    assert_eq!(sketch(&s, f).labels.len(), 1);
+    // Deleting an end point takes the line, its length, and the label.
+    edit(
+        &mut s,
+        f,
+        vec![SketchEdit::Delete {
+            items: vec![SketchId { op, index: 0 }],
+        }],
+    );
+    let d = sketch(&s, f);
+    assert!(d.sketch.constraints.is_empty());
+    assert!(d.labels.is_empty());
+}
+
+#[test]
+fn concurrent_label_moves_converge_and_labels_survive_save() {
+    let mut a = Session::new_document(ReplicaId(1));
+    let f = new_sketch(&mut a);
+    let op = draw_line(&mut a, f);
+    let len = SketchId { op, index: 4 };
+    let mut b = Session::open(&a.save().unwrap(), ReplicaId(2)).unwrap();
+    let place = |s: &mut Session, y| {
+        edit(
+            s,
+            f,
+            vec![SketchEdit::PlaceLabel {
+                dimension: len,
+                offset: Some(DVec2::new(0.0, y)),
+            }],
+        )
+    };
+    let in_a = place(&mut a, 0.003);
+    let in_b = place(&mut b, -0.003);
+    let to_b = a.log().missing_for(&b.log().heads());
+    let to_a = b.log().missing_for(&a.log().heads());
+    b.integrate(to_b).unwrap();
+    a.integrate(to_a).unwrap();
+    assert_eq!(sketch(&a, f), sketch(&b, f));
+    // The later op in replay order wins.
+    let last = if in_a > in_b { 0.003 } else { -0.003 };
+    assert_eq!(sketch(&a, f).label(len), Some(DVec2::new(0.0, last)));
+    let reopened = Session::open(&a.save().unwrap(), ReplicaId(3)).unwrap();
+    assert_eq!(sketch(&reopened, f), sketch(&a, f));
+}
+
+#[test]
+fn a_sketch_saved_without_labels_reads_with_none() {
+    let def = SketchDef::new(PlaneRef::Front, SketchData::default());
+    let mut json: serde_json::Value = serde_json::to_value(&def).unwrap();
+    assert!(json.as_object_mut().unwrap().remove("labels").is_some());
+    let back: SketchDef = serde_json::from_value(json).unwrap();
+    assert_eq!(back, def);
 }

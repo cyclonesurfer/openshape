@@ -636,6 +636,61 @@ follows the label (for a length, the line runs parallel to the measured
 segment through the label). Dimensions without a stored position are
 placed automatically as before (outside, away from the sketch's centroid).
 
+### 12.1 As built (labels)
+
+* Storage. `SketchDef::labels` holds `(dimension, offset)` pairs sorted by
+  id (pairs, not a map, so a definition serializes to formats whose map
+  keys must be strings; `#[serde(default)]`, so documents saved before it
+  read with none). `SketchEdit::PlaceLabel { dimension, offset }` sets an
+  offset, or with `None` returns the label to automatic placement; it is
+  refused for a missing id, a constraint that is not a dimension, or a
+  non-finite offset. `Delete` drops the labels of every dimension it
+  removes, including those removed because what they measured went.
+  Concurrent placements of one label converge on the op later in replay
+  order, like concurrent value edits.
+* Anchors: a length's or aligned/horizontal/vertical distance's two
+  points' midpoint; for a point–line or line–line distance, the middle of
+  the point (or first line's midpoint) and its foot on the other line; a
+  radius's or diameter's centre; an angle's vertex (the lines'
+  intersection); an offset's middle of its first source–image segment; a
+  circular pattern's centre. The offset is in plane coordinates, so a
+  label keeps its direction from the anchor when what it measures turns.
+* Drawing with a placed label at L (the label's centre is always L):
+  * length and aligned distance: the dimension line is parallel to the
+    measured segment through L, reaching L when it lies past an end, with
+    extension lines from the measured points to a quarter of the automatic
+    offset beyond it;
+  * horizontal or vertical distance: the dimension line at L's y (or x),
+    likewise extended, with extension lines from both points;
+  * point–line distance and offset: the measured segment plus a leader
+    from its nearest point to L;
+  * radius: from the centre towards L, out to L when L is outside the
+    circle (to the circle otherwise); a diameter likewise, from the far
+    side;
+  * angle: an arc of radius |L − vertex| in whichever of the two equal
+    vertical angles L is on, widened to L's direction when L is outside
+    it, with extension lines along the rays where the lines stop short of
+    the arc (also drawn for automatic labels now);
+  * circular pattern: the arc from the first source to its first copy at
+    radius |L − centre|, widened likewise, with both radii.
+* Editing. In the Select tool, dragging a dimension's label moves it: the
+  drawing follows the pointer and the release commits one `PlaceLabel`
+  (one undo step); a drag that ends where it started commits nothing.
+  Constraint glyphs are not draggable (a drag on one box-selects as
+  before). The command "Reset dimension label positions" returns the
+  selected dimensions' labels, or all placed ones when no dimension is
+  selected, to automatic placement in one step.
+
+Tests: `crates/core-model/tests/sketch.rs` (placing, replacing, clearing,
+refusals, deletion of the dimension and of what it measures, concurrent
+placements, saving, documents without the field), the geometry unit tests
+and property test in `crates/ui/src/sketch_mode.rs` (every kind of
+dimension with a placed label is drawn at it with its lines reaching it;
+dimension lines follow labels; angles pick their side and widen; automatic
+positions unchanged), `crates/ui/tests/sketch_labels.rs` (the editor end to
+end for every dimension kind, labels following moved geometry, reset) and
+the shell test `dragging_a_dimension_label_in_the_viewport`.
+
 ## 13. Tests
 
 * Shapes: entity and constraint counts, DOF exactly as in §4, no redundant

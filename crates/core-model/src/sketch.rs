@@ -68,6 +68,14 @@ pub struct SketchDef {
     pub plane: PlaneRef,
     /// Entities and constraints, with their last solved positions.
     pub sketch: SketchData,
+    /// Where the user placed dimension labels (design note 0007 §12): per
+    /// dimension, the label's offset in plane coordinates (metres) from the
+    /// dimension's anchor, the middle of what it measures. Sorted by id, one
+    /// entry per dimension; dimensions without one are placed
+    /// automatically. Kept as pairs rather than a map so the definition
+    /// serializes to formats whose map keys must be strings.
+    #[serde(default)]
+    pub labels: Vec<(SketchId, DVec2)>,
 }
 
 /// One edit within a sketch edit batch.
@@ -122,9 +130,36 @@ pub enum SketchEdit {
     },
     /// Moves the sketch to another plane.
     SetPlane(PlaneRef),
+    /// Places a dimension's label, or with `offset: None` returns it to
+    /// automatic placement.
+    PlaceLabel {
+        /// The dimension.
+        dimension: SketchId,
+        /// The label's offset from the dimension's anchor (plane
+        /// coordinates, metres; finite).
+        offset: Option<DVec2>,
+    },
 }
 
 impl SketchDef {
+    /// A sketch on `plane` with no stored label positions.
+    pub fn new(plane: PlaneRef, sketch: SketchData) -> SketchDef {
+        SketchDef {
+            plane,
+            sketch,
+            labels: Vec::new(),
+        }
+    }
+
+    /// Where the user placed `dimension`'s label: its offset from the
+    /// dimension's anchor, or `None` for automatic placement.
+    pub fn label(&self, dimension: SketchId) -> Option<DVec2> {
+        self.labels
+            .binary_search_by_key(&dimension, |(id, _)| *id)
+            .ok()
+            .map(|i| self.labels[i].1)
+    }
+
     /// Applies a batch created by op `op`, atomically: on error the sketch
     /// is unchanged and the error names the failing edit.
     pub fn apply_edits(&mut self, op: OpId, edits: &[SketchEdit]) -> Result<(), String> {
@@ -248,6 +283,9 @@ impl SketchDef {
                         })
                     })
                     .collect();
+                let kept: BTreeSet<SketchId> =
+                    self.sketch.constraints.iter().map(|c| c.id).collect();
+                self.labels.retain(|(id, _)| kept.contains(id));
                 Ok(())
             }
             SketchEdit::SetConstruction {
@@ -296,6 +334,31 @@ impl SketchDef {
             }
             SketchEdit::SetPlane(plane) => {
                 self.plane = *plane;
+                Ok(())
+            }
+            SketchEdit::PlaceLabel { dimension, offset } => {
+                let id = r(*dimension);
+                let c = self
+                    .sketch
+                    .constraints
+                    .iter()
+                    .find(|c| c.id == id)
+                    .ok_or_else(|| format!("dimension {id:?} does not exist"))?;
+                if c.constraint.value().is_none() {
+                    return Err(format!("{id:?} is not a dimension"));
+                }
+                let at = self.labels.binary_search_by_key(&id, |(i, _)| *i);
+                match (offset, at) {
+                    (Some(o), _) if !o.is_finite() => {
+                        return Err("label offset is not finite".into())
+                    }
+                    (Some(o), Ok(i)) => self.labels[i].1 = *o,
+                    (Some(o), Err(i)) => self.labels.insert(i, (id, *o)),
+                    (None, Ok(i)) => {
+                        self.labels.remove(i);
+                    }
+                    (None, Err(_)) => {}
+                }
                 Ok(())
             }
         }

@@ -101,10 +101,7 @@ fn features_after_the_rollback_bar_are_not_regenerated() {
     let sketch = insert(
         &mut s,
         "Sketch",
-        Feature::Sketch(SketchDef {
-            plane: PlaneRef::Top,
-            sketch: SketchData::default(),
-        }),
+        Feature::Sketch(SketchDef::new(PlaneRef::Top, SketchData::default())),
     );
     let b = insert(&mut s, "B", boxed(0.02));
     let regen = |s: &Session| regenerate(&k, &s.document().elements[0].studio);

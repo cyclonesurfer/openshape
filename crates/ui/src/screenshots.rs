@@ -430,6 +430,38 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
     d.click(on_plane(&d, 0.0, 0.0)?)?;
     save("14-circular-pattern.png", &d.settle()?)?;
     d.key(Key::Escape, Modifiers::NONE)?;
+    // Dimension labels dragged to where the user wants them: the width
+    // further below, the height out to the right, the pattern's angle out
+    // past the copies.
+    for (text, x, y) in [("80", -22.0, -42.0), ("50", 60.0, 8.0), ("90°", 24.0, 24.0)] {
+        let from = label_centre(&mut d, sketch, text)?;
+        d.drag(from, on_plane(&d, x, y)?, 6)?;
+    }
+    d.app.select(None);
+    d.hover(on_plane(&d, 120.0, -80.0)?)?;
+    save("15-placed-labels.png", &d.settle()?)?;
     d.app.run(crate::commands::Command::CancelSketch);
     Ok(written)
+}
+
+/// The screen centre of the dimension label of `sketch` (being edited)
+/// that reads `text`.
+fn label_centre(d: &mut AppDriver, sketch: FeatureId, text: &str) -> Result<Pos2, String> {
+    let rect = d.app.layout().graphics;
+    let camera = d.app.camera.clone();
+    let model = d.app.model();
+    let frame = model
+        .sketch_result(sketch)
+        .ok_or("the sketch does not solve")?
+        .frame;
+    let shown = d
+        .app
+        .sketch_editor()
+        .and_then(|ed| ed.display(model))
+        .ok_or("not editing the sketch")?;
+    crate::sketch_mode::annotations(&shown, &ScreenMap::new(&camera, frame, rect))
+        .into_iter()
+        .find(|a| a.dimension && a.text.starts_with(text))
+        .map(|a| a.rect.center())
+        .ok_or_else(|| format!("no dimension reads {text}"))
 }

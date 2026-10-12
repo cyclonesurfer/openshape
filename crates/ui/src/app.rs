@@ -387,6 +387,10 @@ impl OpenShapeApp {
                 .sketch
                 .as_ref()
                 .is_some_and(|ed| !ed.selection.is_empty()),
+            Command::ResetLabels => self
+                .sketch
+                .as_ref()
+                .is_some_and(|ed| !ed.labels_to_reset(&self.model).is_empty()),
             _ => true,
         }
     }
@@ -511,6 +515,11 @@ impl OpenShapeApp {
                     .unwrap_or_else(|| self.layout.graphics.center());
                 if let Some(ed) = self.sketch.as_mut() {
                     ed.dimension(&self.model, at);
+                }
+            }
+            Command::ResetLabels => {
+                if let Some(ed) = self.sketch.as_mut() {
+                    ed.reset_labels(&mut self.model);
                 }
             }
             Command::DeleteSelection => {

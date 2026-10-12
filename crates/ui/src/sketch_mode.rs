@@ -247,6 +247,9 @@ pub struct SketchDisplay {
     pub status: SolveStatus,
     /// Remaining degrees of freedom.
     pub dof: usize,
+    /// Placed dimension labels: offsets from each dimension's anchor
+    /// (`SketchDef::labels`, or the label being dragged).
+    pub labels: BTreeMap<SketchId, DVec2>,
 }
 
 impl SketchDisplay {
@@ -306,6 +309,7 @@ impl SketchDisplay {
             redundant: solution.redundant.iter().copied().collect(),
             status: solution.status.clone(),
             dof: solution.dof,
+            labels: BTreeMap::new(),
         }
     }
 
@@ -323,6 +327,15 @@ impl SketchDisplay {
     /// The drawn curve of an entity.
     pub fn curve(&self, id: SketchId) -> Option<&DisplayCurve> {
         self.curves.iter().find(|c| c.id == id)
+    }
+
+    /// Where a dimension's label offset is measured from: the middle of
+    /// what it measures (design note 0007 §12). `None` for constraints
+    /// that are not dimensions.
+    pub fn dimension_anchor(&self, dimension: SketchId) -> Option<DVec2> {
+        let points: BTreeMap<SketchId, DVec2> = self.points().collect();
+        let c = self.sketch.constraint(dimension)?;
+        Some(measured(&self.sketch, &points, &c.constraint)?.anchor())
     }
 }
 
@@ -551,82 +564,80 @@ fn circular(
     }
 }
 
-fn dimension_annotation(
-    d: &SketchDisplay,
-    points: &BTreeMap<SketchId, DVec2>,
-    map: &ScreenMap,
-    c: &ConstraintEntry<SketchId>,
-) -> Option<Annotation> {
-    let sketch = &d.sketch;
-    let anchor = c.constraint.referenced().iter().find_map(|e| {
-        points
-            .get(e)
-            .copied()
-            .or_else(|| line_ends(sketch, points, *e).map(|(a, _)| a))
-            .or_else(|| circular(sketch, points, *e).map(|(c, _, _)| c))
-    })?;
-    let ppp = map.plane_per_point(map.to_screen(anchor)?);
-    let off = 24.0 * ppp;
-    // Labels go outside: on the side away from the sketch's centre, or
-    // above (to the left) when the dimension passes through it.
-    let centre = if points.is_empty() {
-        DVec2::ZERO
-    } else {
-        points.values().copied().sum::<DVec2>() / points.len() as f64
-    };
-    let tiny = 1e-9 * (1.0 + centre.length());
-    let aligned = |a: DVec2, b: DVec2| -> (Vec<[DVec2; 2]>, DVec2) {
-        let mut n = perp((b - a).normalize_or_zero());
-        let away = ((a + b) * 0.5 - centre).dot(n);
-        if away.abs() > tiny {
-            if away < 0.0 {
-                n = -n;
+/// What a dimension measures, in plane coordinates: enough to draw it and to
+/// find its anchor.
+#[derive(Clone, Copy, Debug)]
+enum Measured {
+    /// Between two points along their direction (a length, an aligned
+    /// distance).
+    Aligned(DVec2, DVec2),
+    /// Between two points along x.
+    Horizontal(DVec2, DVec2),
+    /// Between two points along y.
+    Vertical(DVec2, DVec2),
+    /// From a point (or a line's midpoint) to its foot on a line, whose
+    /// nearer end is `near`.
+    Foot { p: DVec2, foot: DVec2, near: DVec2 },
+    /// A circle's or arc's radius or diameter; `dir` is where an automatic
+    /// label goes.
+    Radial {
+        centre: DVec2,
+        radius: f64,
+        dir: DVec2,
+        diameter: bool,
+    },
+    /// The angle between two lines meeting at `vertex`, turning `sweep`
+    /// from direction angle `start`; `a` and `b` are the lines.
+    Angle {
+        vertex: DVec2,
+        start: f64,
+        sweep: f64,
+        a: (DVec2, DVec2),
+        b: (DVec2, DVec2),
+    },
+    /// An offset's distance, from a source to its image.
+    Across { from: DVec2, to: DVec2 },
+    /// A circular pattern's angle, about `centre` from `source` (a point of
+    /// its first source).
+    Turn {
+        centre: DVec2,
+        source: DVec2,
+        sweep: f64,
+    },
+}
+
+impl Measured {
+    /// The middle of what is measured: a placed label's offset is from here
+    /// (design note 0007 §12).
+    fn anchor(&self) -> DVec2 {
+        match *self {
+            Measured::Aligned(a, b) | Measured::Horizontal(a, b) | Measured::Vertical(a, b) => {
+                (a + b) * 0.5
             }
-        } else if n.y < 0.0 || (n.y == 0.0 && n.x > 0.0) {
-            n = -n;
+            Measured::Foot { p, foot, .. } => (p + foot) * 0.5,
+            Measured::Radial { centre, .. } | Measured::Turn { centre, .. } => centre,
+            Measured::Angle { vertex, .. } => vertex,
+            Measured::Across { from, to } => (from + to) * 0.5,
         }
-        let (a2, b2) = (a + n * off, b + n * off);
-        (
-            vec![[a, a + n * off * 1.25], [b, b + n * off * 1.25], [a2, b2]],
-            // The label sits on the dimension line, covering its middle.
-            (a2 + b2) * 0.5,
-        )
-    };
-    let (lines, at) = match &c.constraint {
+    }
+}
+
+fn measured(
+    sketch: &SketchData,
+    points: &BTreeMap<SketchId, DVec2>,
+    c: &Constraint<SketchId>,
+) -> Option<Measured> {
+    Some(match c {
         Constraint::Length { line, .. } => {
             let (a, b) = line_ends(sketch, points, *line)?;
-            aligned(a, b)
+            Measured::Aligned(a, b)
         }
         Constraint::Distance { a, b, kind, .. } => {
             match (points.get(a).copied(), points.get(b).copied()) {
                 (Some(pa), Some(pb)) => match kind {
-                    DistanceKind::Aligned => aligned(pa, pb),
-                    DistanceKind::Horizontal => {
-                        let below = (pa.y + pb.y) * 0.5 < centre.y - tiny;
-                        let s = if below { -1.0 } else { 1.0 };
-                        let y = if below {
-                            pa.y.min(pb.y)
-                        } else {
-                            pa.y.max(pb.y)
-                        } + s * off;
-                        let (a2, b2) = (DVec2::new(pa.x, y), DVec2::new(pb.x, y));
-                        let out = DVec2::new(0.0, s * off * 0.25);
-                        (
-                            vec![[pa, a2 + out], [pb, b2 + out], [a2, b2]],
-                            (a2 + b2) * 0.5,
-                        )
-                    }
-                    DistanceKind::Vertical => {
-                        let left = (pa.x + pb.x) * 0.5 < centre.x - tiny;
-                        let s = if left { -1.0 } else { 1.0 };
-                        let x = if left { pa.x.min(pb.x) } else { pa.x.max(pb.x) } + s * off;
-                        let (a2, b2) = (DVec2::new(x, pa.y), DVec2::new(x, pb.y));
-                        let out = DVec2::new(s * off * 0.25, 0.0);
-                        (
-                            vec![[pa, a2 + out], [pb, b2 + out], [a2, b2]],
-                            (a2 + b2) * 0.5,
-                        )
-                    }
+                    DistanceKind::Aligned => Measured::Aligned(pa, pb),
+                    DistanceKind::Horizontal => Measured::Horizontal(pa, pb),
+                    DistanceKind::Vertical => Measured::Vertical(pa, pb),
                 },
                 _ => {
                     // Point to line, or line to line: from a point (or the
@@ -647,53 +658,40 @@ fn dimension_annotation(
                     } else {
                         l1
                     };
-                    let n = perp((foot - p).normalize_or_zero());
-                    (
-                        vec![[p, foot], [foot, near]],
-                        (p + foot) * 0.5 + n * off * 0.6,
-                    )
+                    Measured::Foot { p, foot, near }
                 }
             }
         }
-        Constraint::Radius { curve, .. } => {
-            let (center, r, dir) = circular(sketch, points, *curve)?;
-            (
-                vec![[center, center + dir * (r + off)]],
-                center + dir * (r + off * 1.7),
-            )
-        }
-        Constraint::Diameter { curve, .. } => {
-            let (center, r, dir) = circular(sketch, points, *curve)?;
-            (
-                vec![[center - dir * r, center + dir * (r + off)]],
-                center + dir * (r + off * 1.7),
-            )
+        Constraint::Radius { curve, .. } | Constraint::Diameter { curve, .. } => {
+            let (centre, radius, dir) = circular(sketch, points, *curve)?;
+            Measured::Radial {
+                centre,
+                radius,
+                dir,
+                diameter: matches!(c, Constraint::Diameter { .. }),
+            }
         }
         Constraint::Angle { a, b, value } => {
             let (a0, a1) = line_ends(sketch, points, *a)?;
             let (b0, b1) = line_ends(sketch, points, *b)?;
             let (da, db) = (a1 - a0, b1 - b0);
             let cross = da.perp_dot(db);
-            let x = if cross.abs() > 1e-12 * da.length() * db.length() {
+            let vertex = if cross.abs() > 1e-12 * da.length() * db.length() {
                 a0 + da * ((b0 - a0).perp_dot(db) / cross)
             } else {
                 (a0 + a1) * 0.5
             };
-            let r = off * 1.6;
-            let start = da.to_angle();
-            let n = 24;
-            let arc: Vec<DVec2> = (0..=n)
-                .map(|i| x + DVec2::from_angle(start + value * i as f64 / n as f64) * r)
-                .collect();
-            let lines = arc.windows(2).map(|w| [w[0], w[1]]).collect();
-            (
-                lines,
-                x + DVec2::from_angle(start + value * 0.5) * (r + off * 0.9),
-            )
+            Measured::Angle {
+                vertex,
+                start: da.to_angle(),
+                sweep: *value,
+                a: (a0, a1),
+                b: (b0, b1),
+            }
         }
         Constraint::Offset { pieces, .. } => {
             // From the middle of the first source square across to its
-            // image, the label just beyond the image.
+            // image.
             let &(src, img, _) = pieces.first()?;
             let (from, to) = match (
                 line_ends(sketch, points, src),
@@ -710,19 +708,16 @@ fn dimension_annotation(
                     (c + dir * r, c + dir * r2)
                 }
             };
-            let n = (to - from).normalize_or_zero();
-            (vec![[from, to]], to + n * off * 0.8)
+            Measured::Across { from, to }
         }
         Constraint::CircularPattern {
             centre,
             angle,
             copies,
         } => {
-            // An arc about the centre from a point of the first source to
-            // its first copy, with the two radii.
             let c = *points.get(centre)?;
             let &(src, _, _) = copies.first()?;
-            let p = match sketch.entity(src)?.geometry {
+            let source = match sketch.entity(src)?.geometry {
                 Geometry::Point { .. } => *points.get(&src)?,
                 Geometry::Line { .. } => {
                     let (a, b) = line_ends(sketch, points, src)?;
@@ -739,26 +734,304 @@ fn dimension_annotation(
                     sum / pts.len().max(1) as f64
                 }
             };
-            let v = p - c;
-            let (r, start) = if v.length() > off {
-                (v.length(), v.to_angle())
-            } else {
-                (off * 1.6, 0.0)
-            };
-            let n = 32;
-            let arc: Vec<DVec2> = (0..=n)
-                .map(|i| c + DVec2::from_angle(start + angle * i as f64 / n as f64) * r)
-                .collect();
-            let mut lines: Vec<[DVec2; 2]> = arc.windows(2).map(|w| [w[0], w[1]]).collect();
-            lines.push([c, arc[0]]);
-            lines.push([c, arc[n]]);
-            (
-                lines,
-                c + DVec2::from_angle(start + angle * 0.5) * (r + off * 0.9),
-            )
+            Measured::Turn {
+                centre: c,
+                source,
+                sweep: *angle,
+            }
         }
         _ => return None,
+    })
+}
+
+/// `x` wrapped into (−π, π].
+fn wrap_angle(x: f64) -> f64 {
+    let w = (x + PI).rem_euclid(TAU) - PI;
+    if w <= -PI {
+        w + TAU
+    } else {
+        w
+    }
+}
+
+/// The closest point of segment `ab` to `p` (plane coordinates).
+fn closest_on_segment(p: DVec2, a: DVec2, b: DVec2) -> DVec2 {
+    let ab = b - a;
+    let t = if ab.length_squared() > 0.0 {
+        ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
+    } else {
+        0.0
     };
+    a + ab * t
+}
+
+/// An arc about `centre` of radius `r`, turning `sweep` from angle `start`,
+/// widened to reach the direction of `reach` (a placed label) when given.
+fn dimension_arc(
+    centre: DVec2,
+    r: f64,
+    start: f64,
+    sweep: f64,
+    reach: Option<DVec2>,
+) -> Vec<[DVec2; 2]> {
+    let (mut lo, mut hi) = (sweep.min(0.0), sweep.max(0.0));
+    if let Some(l) = reach {
+        let rel = sweep * 0.5 + wrap_angle((l - centre).to_angle() - start - sweep * 0.5);
+        lo = lo.min(rel);
+        hi = hi.max(rel);
+    }
+    let n = ((hi - lo).abs() / (TAU / 96.0)).ceil().clamp(8.0, 96.0) as usize;
+    let arc: Vec<DVec2> = (0..=n)
+        .map(|i| centre + DVec2::from_angle(start + lo + (hi - lo) * i as f64 / n as f64) * r)
+        .collect();
+    arc.windows(2).map(|w| [w[0], w[1]]).collect()
+}
+
+/// An extension line along the ray from `vertex` in direction `e` out to
+/// radius `r`, from where the segment `seg` stops reaching along it; `None`
+/// when the segment already reaches the arc.
+fn ray_extension(vertex: DVec2, e: DVec2, seg: (DVec2, DVec2), r: f64) -> Option<[DVec2; 2]> {
+    let reach = (seg.0 - vertex)
+        .dot(e)
+        .max((seg.1 - vertex).dot(e))
+        .max(0.0);
+    (reach < r).then(|| [vertex + e * reach, vertex + e * r * 1.08])
+}
+
+/// A dimension's lines and label centre (plane coordinates). `placed` is
+/// where the user put the label; without it the label goes outside, on the
+/// side away from `centre` (the sketch's centroid), `off` from what is
+/// measured.
+fn dimension_geometry(
+    m: Measured,
+    placed: Option<DVec2>,
+    off: f64,
+    centre: DVec2,
+) -> (Vec<[DVec2; 2]>, DVec2) {
+    let tiny = 1e-9 * (1.0 + centre.length());
+    let leader = |a: DVec2, b: DVec2, l: DVec2| {
+        let q = closest_on_segment(l, a, b);
+        ((l - q).length() > tiny).then_some([q, l])
+    };
+    match (m, placed) {
+        (Measured::Aligned(a, b), None) => {
+            let mut n = perp((b - a).normalize_or_zero());
+            let away = ((a + b) * 0.5 - centre).dot(n);
+            if away.abs() > tiny {
+                if away < 0.0 {
+                    n = -n;
+                }
+            } else if n.y < 0.0 || (n.y == 0.0 && n.x > 0.0) {
+                n = -n;
+            }
+            let (a2, b2) = (a + n * off, b + n * off);
+            (
+                vec![[a, a + n * off * 1.25], [b, b + n * off * 1.25], [a2, b2]],
+                // The label sits on the dimension line, covering its middle.
+                (a2 + b2) * 0.5,
+            )
+        }
+        (Measured::Aligned(a, b), Some(l)) => {
+            // The dimension line runs parallel to the measured segment
+            // through the label, reaching out to it past either end.
+            let u = (b - a).normalize_or(DVec2::X);
+            let n = perp(u);
+            let h = (l - a).dot(n);
+            let t = (l - a).dot(u);
+            let len = (b - a).dot(u);
+            let over = n * h.signum() * off * 0.25;
+            let (a2, b2) = (a + n * h, b + n * h);
+            (
+                vec![
+                    [a, a2 + over],
+                    [b, b2 + over],
+                    [a2 + u * t.min(0.0), a2 + u * t.max(len)],
+                ],
+                l,
+            )
+        }
+        (Measured::Horizontal(pa, pb), placement) => {
+            let y = match placement {
+                Some(l) => l.y,
+                None => {
+                    let below = (pa.y + pb.y) * 0.5 < centre.y - tiny;
+                    if below {
+                        pa.y.min(pb.y) - off
+                    } else {
+                        pa.y.max(pb.y) + off
+                    }
+                }
+            };
+            let (a2, b2) = (DVec2::new(pa.x, y), DVec2::new(pb.x, y));
+            let over = |p: DVec2| DVec2::new(0.0, (y - p.y).signum() * off * 0.25);
+            let (x0, x1) = match placement {
+                Some(l) => (pa.x.min(pb.x).min(l.x), pa.x.max(pb.x).max(l.x)),
+                None => (pa.x.min(pb.x), pa.x.max(pb.x)),
+            };
+            (
+                vec![
+                    [pa, a2 + over(pa)],
+                    [pb, b2 + over(pb)],
+                    [DVec2::new(x0, y), DVec2::new(x1, y)],
+                ],
+                placement.unwrap_or((a2 + b2) * 0.5),
+            )
+        }
+        (Measured::Vertical(pa, pb), placement) => {
+            let x = match placement {
+                Some(l) => l.x,
+                None => {
+                    let left = (pa.x + pb.x) * 0.5 < centre.x - tiny;
+                    if left {
+                        pa.x.min(pb.x) - off
+                    } else {
+                        pa.x.max(pb.x) + off
+                    }
+                }
+            };
+            let (a2, b2) = (DVec2::new(x, pa.y), DVec2::new(x, pb.y));
+            let over = |p: DVec2| DVec2::new((x - p.x).signum() * off * 0.25, 0.0);
+            let (y0, y1) = match placement {
+                Some(l) => (pa.y.min(pb.y).min(l.y), pa.y.max(pb.y).max(l.y)),
+                None => (pa.y.min(pb.y), pa.y.max(pb.y)),
+            };
+            (
+                vec![
+                    [pa, a2 + over(pa)],
+                    [pb, b2 + over(pb)],
+                    [DVec2::new(x, y0), DVec2::new(x, y1)],
+                ],
+                placement.unwrap_or((a2 + b2) * 0.5),
+            )
+        }
+        (Measured::Foot { p, foot, near }, placement) => {
+            let mut lines = vec![[p, foot], [foot, near]];
+            let at = match placement {
+                Some(l) => {
+                    lines.extend(leader(p, foot, l));
+                    l
+                }
+                None => {
+                    let n = perp((foot - p).normalize_or_zero());
+                    (p + foot) * 0.5 + n * off * 0.6
+                }
+            };
+            (lines, at)
+        }
+        (
+            Measured::Radial {
+                centre: c,
+                radius: r,
+                dir,
+                diameter,
+            },
+            placement,
+        ) => {
+            // Along the direction of the label, out to it when it is
+            // outside the circle.
+            let (dir, out, at) = match placement {
+                Some(l) => {
+                    let dir = (l - c).try_normalize().unwrap_or(dir);
+                    (dir, (l - c).length().max(r), l)
+                }
+                None => (dir, r + off, c + dir * (r + off * 1.7)),
+            };
+            let from = if diameter { c - dir * r } else { c };
+            (vec![[from, c + dir * out]], at)
+        }
+        (
+            Measured::Angle {
+                vertex,
+                start,
+                sweep,
+                a,
+                b,
+            },
+            placement,
+        ) => {
+            // A placed label picks which of the two opposite angles (equal
+            // to each other) the arc spans: the one on its side.
+            let flip = placement
+                .is_some_and(|l| (l - vertex).dot(DVec2::from_angle(start + sweep * 0.5)) < 0.0);
+            let start = if flip { start + PI } else { start };
+            let r = match placement {
+                Some(l) => (l - vertex).length(),
+                None => off * 1.6,
+            };
+            let mut lines = dimension_arc(vertex, r, start, sweep, placement);
+            let (ea, eb) = (DVec2::from_angle(start), DVec2::from_angle(start + sweep));
+            lines.extend(ray_extension(vertex, ea, a, r));
+            lines.extend(ray_extension(vertex, eb, b, r));
+            let at = placement.unwrap_or_else(|| {
+                vertex + DVec2::from_angle(start + sweep * 0.5) * (r + off * 0.9)
+            });
+            (lines, at)
+        }
+        (Measured::Across { from, to }, placement) => {
+            let mut lines = vec![[from, to]];
+            let at = match placement {
+                Some(l) => {
+                    lines.extend(leader(from, to, l));
+                    l
+                }
+                None => to + (to - from).normalize_or_zero() * off * 0.8,
+            };
+            (lines, at)
+        }
+        (
+            Measured::Turn {
+                centre: c,
+                source,
+                sweep,
+            },
+            placement,
+        ) => {
+            // An arc about the centre from the source to its first copy,
+            // with the two radii; a placed label sets the arc's radius.
+            let v = source - c;
+            let start = if v.length() > off { v.to_angle() } else { 0.0 };
+            let r = match placement {
+                Some(l) => (l - c).length(),
+                None if v.length() > off => v.length(),
+                None => off * 1.6,
+            };
+            let mut lines = dimension_arc(c, r, start, sweep, placement);
+            lines.push([c, c + DVec2::from_angle(start) * r]);
+            lines.push([c, c + DVec2::from_angle(start + sweep) * r]);
+            let at = placement
+                .unwrap_or_else(|| c + DVec2::from_angle(start + sweep * 0.5) * (r + off * 0.9));
+            (lines, at)
+        }
+    }
+}
+
+fn dimension_annotation(
+    d: &SketchDisplay,
+    points: &BTreeMap<SketchId, DVec2>,
+    map: &ScreenMap,
+    c: &ConstraintEntry<SketchId>,
+) -> Option<Annotation> {
+    let m = measured(&d.sketch, points, &c.constraint)?;
+    // Automatic offsets are a fixed screen distance, scaled where the
+    // dimension's first item is (an angle's vertex, between nearly
+    // parallel lines, can be far off screen).
+    let sketch = &d.sketch;
+    let near = c.constraint.referenced().iter().find_map(|e| {
+        points
+            .get(e)
+            .copied()
+            .or_else(|| line_ends(sketch, points, *e).map(|(a, _)| a))
+            .or_else(|| circular(sketch, points, *e).map(|(c, _, _)| c))
+    })?;
+    let ppp = map.plane_per_point(map.to_screen(near)?);
+    let anchor = m.anchor();
+    let centre = if points.is_empty() {
+        DVec2::ZERO
+    } else {
+        points.values().copied().sum::<DVec2>() / points.len() as f64
+    };
+    let placed = d.labels.get(&c.id).map(|o| anchor + *o);
+    let (lines, at) = dimension_geometry(m, placed, 24.0 * ppp, centre);
     let text = dimension_text(&c.constraint);
     let center = map.to_screen(at)?;
     let lines = lines
@@ -1162,7 +1435,7 @@ impl Tool {
     pub fn hint(self, clicks: usize) -> &'static str {
         match (self, clicks) {
             (Tool::Select, _) => {
-                "Click to select (Shift adds), drag to move or box-select, Delete removes"
+                "Click to select (Shift adds), drag to move, box-select or place a dimension label, Delete removes"
             }
             (Tool::Line, 0) => "Click the start point",
             (Tool::Line, _) => "Click the end point (double-click or Esc ends the chain)",
@@ -1714,6 +1987,14 @@ enum Drag {
     Radius { circle: SketchId },
     /// Box selection.
     Box { from: Pos2, to: Pos2 },
+    /// Moving a dimension's label: its offset from the dimension's anchor
+    /// was `from` when the pointer was at `grab` (plane coordinates).
+    Label {
+        dimension: SketchId,
+        grab: DVec2,
+        from: DVec2,
+        offset: DVec2,
+    },
     /// A drawing tool's press-drag-release (a click at each end).
     Draw { from: Pos2 },
 }
@@ -1815,13 +2096,24 @@ impl SketchEditor {
         }
     }
 
-    /// The geometry to draw: the drag preview, or the regenerated sketch.
+    /// The geometry to draw: the drag preview, or the regenerated sketch,
+    /// with its placed dimension labels.
     pub fn display(&self, model: &Model) -> Option<SketchDisplay> {
         let r = model.sketch_result(self.feature)?;
-        Some(match &self.preview {
+        let mut d = match &self.preview {
             Some(p) => SketchDisplay::from_solution(self.feature, r.frame, p),
             None => SketchDisplay::from_result(r),
-        })
+        };
+        if let Some(def) = model.sketch_def(self.feature) {
+            d.labels = def.labels.iter().copied().collect();
+        }
+        if let Some(Drag::Label {
+            dimension, offset, ..
+        }) = self.drag
+        {
+            d.labels.insert(dimension, offset);
+        }
+        Some(d)
     }
 
     /// The sketch plane.
@@ -2996,8 +3288,26 @@ impl SketchEditor {
             return;
         };
         let grab = map.to_plane(pos);
-        let picked = pick(&d, &annotations(&d, map), map, pos);
+        let notes = annotations(&d, map);
+        let picked = pick(&d, &notes, map, pos);
         self.drag = match (picked, grab) {
+            (Some(Pick::Constraint(id)), Some(grab)) if d.dimension_anchor(id).is_some() => {
+                // Grabbing a dimension's label moves it.
+                let anchor = d.dimension_anchor(id);
+                let label = notes
+                    .iter()
+                    .find(|a| a.constraint == id)
+                    .and_then(|a| map.to_plane(a.rect.center()));
+                match (anchor, label) {
+                    (Some(anchor), Some(label)) => Some(Drag::Label {
+                        dimension: id,
+                        grab,
+                        from: label - anchor,
+                        offset: label - anchor,
+                    }),
+                    _ => None,
+                }
+            }
             (Some(Pick::Entity(id)), Some(grab)) => {
                 let sketch = &d.sketch;
                 match kind(sketch, id) {
@@ -3031,6 +3341,15 @@ impl SketchEditor {
         let Some(drag) = self.drag.as_mut() else {
             return;
         };
+        if let Drag::Label {
+            grab, from, offset, ..
+        } = drag
+        {
+            if let Some(p) = map.to_plane(pos) {
+                *offset = *from + (p - *grab);
+            }
+            return;
+        }
         let base = match &self.preview {
             Some(p) => p.sketch.clone(),
             None => match model.sketch_result(self.feature) {
@@ -3043,6 +3362,7 @@ impl SketchEditor {
                 *to = pos;
                 return;
             }
+            Drag::Label { .. } => return,
             Drag::Draw { .. } => {
                 self.hover(model, map, Some(pos));
                 return;
@@ -3134,6 +3454,22 @@ impl SketchEditor {
                     }
                 }
             }
+            Some(Drag::Label {
+                dimension,
+                from,
+                offset,
+                ..
+            }) => {
+                if offset != from {
+                    self.commit(
+                        model,
+                        vec![SketchEdit::PlaceLabel {
+                            dimension,
+                            offset: Some(offset),
+                        }],
+                    );
+                }
+            }
             Some(Drag::Draw { from }) if from.distance(pos) > DRAG_THRESHOLD => {
                 self.click(model, map, pos, false);
             }
@@ -3163,6 +3499,42 @@ impl SketchEditor {
         let items = deletion(&def.sketch, &selected);
         self.selection.clear();
         self.commit(model, vec![SketchEdit::Delete { items }]);
+    }
+
+    /// The dimensions whose labels [`SketchEditor::reset_labels`] returns
+    /// to automatic placement: the selected ones that were placed, or every
+    /// placed one when no dimension is selected.
+    pub fn labels_to_reset(&self, model: &Model) -> Vec<SketchId> {
+        let Some(def) = model.sketch_def(self.feature) else {
+            return Vec::new();
+        };
+        let is_dimension = |id: &SketchId| {
+            def.sketch
+                .constraint(*id)
+                .is_some_and(|c| c.constraint.value().is_some())
+        };
+        let placed = def.labels.iter().map(|(id, _)| *id);
+        if self.selection.iter().any(is_dimension) {
+            placed.filter(|id| self.selection.contains(id)).collect()
+        } else {
+            placed.collect()
+        }
+    }
+
+    /// Returns dimension labels to automatic placement (one undo step):
+    /// see [`SketchEditor::labels_to_reset`].
+    pub fn reset_labels(&mut self, model: &mut Model) {
+        let edits: Vec<SketchEdit> = self
+            .labels_to_reset(model)
+            .into_iter()
+            .map(|dimension| SketchEdit::PlaceLabel {
+                dimension,
+                offset: None,
+            })
+            .collect();
+        if !edits.is_empty() {
+            self.commit(model, edits);
+        }
     }
 
     /// Toggles construction on the selected curves.
@@ -3431,6 +3803,252 @@ mod tests {
             };
             assert!((cam.back_dir() - frame.z).length() < 1e-9, "{frame:?}");
             assert!((cam.right_dir() - frame.x).length() < 1e-9, "{frame:?}");
+        }
+    }
+
+    /// Distance from `p` to the nearest of `lines`.
+    fn nearest(lines: &[[DVec2; 2]], p: DVec2) -> f64 {
+        lines
+            .iter()
+            .map(|[a, b]| (p - closest_on_segment(p, *a, *b)).length())
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    fn every_measure() -> Vec<Measured> {
+        let (a, b) = (DVec2::new(-0.02, 0.0), DVec2::new(0.02, 0.01));
+        vec![
+            Measured::Aligned(a, b),
+            Measured::Horizontal(a, b),
+            Measured::Vertical(a, b),
+            Measured::Foot {
+                p: DVec2::new(0.0, 0.02),
+                foot: DVec2::ZERO,
+                near: DVec2::new(0.01, 0.0),
+            },
+            Measured::Radial {
+                centre: DVec2::new(0.01, 0.0),
+                radius: 0.01,
+                dir: DVec2::X,
+                diameter: false,
+            },
+            Measured::Radial {
+                centre: DVec2::new(0.01, 0.0),
+                radius: 0.01,
+                dir: DVec2::X,
+                diameter: true,
+            },
+            Measured::Angle {
+                vertex: DVec2::ZERO,
+                start: 0.0,
+                sweep: 0.6,
+                a: (DVec2::ZERO, DVec2::new(0.03, 0.0)),
+                b: (DVec2::ZERO, DVec2::from_angle(0.6) * 0.03),
+            },
+            Measured::Across {
+                from: DVec2::ZERO,
+                to: DVec2::new(0.0, 0.005),
+            },
+            Measured::Turn {
+                centre: DVec2::ZERO,
+                source: DVec2::new(0.02, 0.0),
+                sweep: -1.2,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_placed_label_sits_where_it_was_put_and_its_lines_reach_it() {
+        let off = 0.008;
+        for m in every_measure() {
+            for placed in [
+                DVec2::new(0.0, 0.04),
+                DVec2::new(0.05, -0.01),
+                DVec2::new(-0.03, -0.025),
+                m.anchor(),
+            ] {
+                let (lines, at) = dimension_geometry(m, Some(placed), off, DVec2::ZERO);
+                assert_eq!(at, placed, "{m:?}");
+                assert!(lines.iter().flatten().all(|p| p.is_finite()), "{m:?}");
+                // The label covers part of a line: it is attached (arcs
+                // are polylines, within their sag).
+                let sag = match m {
+                    Measured::Angle { .. } | Measured::Turn { .. } => {
+                        (placed - m.anchor()).length() * (1.0 - (TAU / 192.0).cos())
+                    }
+                    _ => 0.0,
+                };
+                assert!(nearest(&lines, placed) <= sag + 1e-12, "{m:?} at {placed}");
+            }
+        }
+    }
+
+    #[test]
+    fn placed_dimension_lines_follow_the_label() {
+        let off = 0.008;
+        let (a, b) = (DVec2::new(-0.02, 0.0), DVec2::new(0.02, 0.01));
+        // Aligned: parallel to the segment, through the label, reaching
+        // past the end the label lies beyond; extension lines start at the
+        // measured points.
+        let l = DVec2::new(0.06, 0.04);
+        let (lines, _) = dimension_geometry(Measured::Aligned(a, b), Some(l), off, DVec2::ZERO);
+        let u = (b - a).normalize();
+        let [p, q] = lines[2];
+        assert!((q - p).normalize().perp_dot(u).abs() < 1e-12);
+        assert!((l - p).perp_dot(u).abs() < 1e-12);
+        assert!((q - l).length() < 1e-12, "the line ends at the label");
+        assert_eq!((lines[0][0], lines[1][0]), (a, b));
+        // Horizontal: at the label's height, spanning both points and it.
+        let l = DVec2::new(-0.03, -0.02);
+        let (lines, _) = dimension_geometry(Measured::Horizontal(a, b), Some(l), off, DVec2::ZERO);
+        let [p, q] = lines[2];
+        assert_eq!((p.y, q.y), (l.y, l.y));
+        assert_eq!((p.x, q.x), (l.x, b.x));
+        // The extension lines run down from the points, past the line.
+        assert!(lines[0][1].y < l.y && lines[1][1].y < l.y);
+        // Vertical: at the label's x.
+        let (lines, _) = dimension_geometry(Measured::Vertical(a, b), Some(l), off, DVec2::ZERO);
+        assert_eq!((lines[2][0].x, lines[2][1].x), (l.x, l.x));
+        assert_eq!((lines[2][0].y, lines[2][1].y), (l.y, b.y));
+        // Radius and diameter: along the direction of the label.
+        let c = DVec2::new(0.01, 0.0);
+        for diameter in [false, true] {
+            let m = Measured::Radial {
+                centre: c,
+                radius: 0.01,
+                dir: DVec2::X,
+                diameter,
+            };
+            let l = c + DVec2::from_angle(2.0) * 0.03;
+            let (lines, _) = dimension_geometry(m, Some(l), off, DVec2::ZERO);
+            let [p, q] = lines[0];
+            assert!((q - l).length() < 1e-12);
+            let from = if diameter {
+                c - DVec2::from_angle(2.0) * 0.01
+            } else {
+                c
+            };
+            assert!((p - from).length() < 1e-12, "{diameter}");
+            // Inside the circle the line still reaches the circle.
+            let (lines, _) = dimension_geometry(m, Some(c + DVec2::Y * 0.004), off, DVec2::ZERO);
+            assert!((lines[0][1] - (c + DVec2::Y * 0.01)).length() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn a_placed_angle_label_chooses_the_side_and_widens_the_arc() {
+        let off = 0.008;
+        let m = Measured::Angle {
+            vertex: DVec2::ZERO,
+            start: 0.0,
+            sweep: 0.6,
+            a: (DVec2::new(0.01, 0.0), DVec2::new(0.03, 0.0)),
+            b: (DVec2::from_angle(0.6) * 0.01, DVec2::from_angle(0.6) * 0.03),
+        };
+        let arc_points = |lines: &[[DVec2; 2]], r: f64| -> Vec<DVec2> {
+            lines
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|p| (p.length() - r).abs() < 1e-12)
+                .collect()
+        };
+        // Inside the angle: the arc spans it, at the label's radius, and
+        // extension lines run from the lines' near ends to inside it.
+        let l = DVec2::from_angle(0.3) * 0.005;
+        let (lines, _) = dimension_geometry(m, Some(l), off, DVec2::ZERO);
+        let r = l.length();
+        let on_arc = arc_points(&lines, r);
+        assert!(on_arc
+            .iter()
+            .all(|p| (-1e-9..=0.6 + 1e-9).contains(&p.to_angle())));
+        // Beyond the lines' ends: extension lines from the far ends.
+        let l = DVec2::from_angle(0.3) * 0.05;
+        let (lines, _) = dimension_geometry(m, Some(l), off, DVec2::ZERO);
+        let from_end = |e: DVec2| lines.iter().any(|[p, _]| (*p - e).length() < 1e-12);
+        assert!(from_end(DVec2::new(0.03, 0.0)) && from_end(DVec2::from_angle(0.6) * 0.03));
+        // Across the vertex: the opposite (equal) angle.
+        let l = DVec2::from_angle(0.3 + PI) * 0.02;
+        let (lines, _) = dimension_geometry(m, Some(l), off, DVec2::ZERO);
+        let on_arc = arc_points(&lines, 0.02);
+        assert!(!on_arc.is_empty());
+        assert!(on_arc.iter().all(|p| p.dot(DVec2::from_angle(0.3)) < 0.0));
+        // Outside both: the arc widens to reach the label's direction.
+        let l = DVec2::from_angle(1.2) * 0.02;
+        let (lines, _) = dimension_geometry(m, Some(l), off, DVec2::ZERO);
+        let on_arc = arc_points(&lines, 0.02);
+        let top = on_arc.iter().map(|p| p.to_angle()).fold(f64::MIN, f64::max);
+        assert!((top - 1.2).abs() < 1e-9, "{top}");
+    }
+
+    #[test]
+    fn automatic_labels_are_unchanged_by_the_placement_code() {
+        // The automatic positions the shell tests rely on: outside, `off`
+        // from what is measured.
+        let off = 0.008;
+        let (a, b) = (DVec2::new(-0.02, 0.01), DVec2::new(0.02, 0.01));
+        let (_, at) = dimension_geometry(Measured::Aligned(a, b), None, off, DVec2::ZERO);
+        assert!((at - DVec2::new(0.0, 0.01 + off)).length() < 1e-15);
+        let (_, at) = dimension_geometry(Measured::Horizontal(a, b), None, off, DVec2::ZERO);
+        assert!((at - DVec2::new(0.0, 0.01 + off)).length() < 1e-15);
+        let (_, at) = dimension_geometry(
+            Measured::Vertical(DVec2::new(-0.02, -0.01), DVec2::new(-0.02, 0.01)),
+            None,
+            off,
+            DVec2::ZERO,
+        );
+        assert!((at - DVec2::new(-0.02 - off, 0.0)).length() < 1e-15);
+        let m = Measured::Radial {
+            centre: DVec2::ZERO,
+            radius: 0.01,
+            dir: DVec2::Y,
+            diameter: false,
+        };
+        let (lines, at) = dimension_geometry(m, None, off, DVec2::ZERO);
+        assert_eq!(lines, vec![[DVec2::ZERO, DVec2::Y * (0.01 + off)]]);
+        assert!((at - DVec2::Y * (0.01 + off * 1.7)).length() < 1e-15);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn placed_labels_are_attached_and_finite(
+            ax in -0.1f64..0.1, ay in -0.1f64..0.1,
+            bx in -0.1f64..0.1, by in -0.1f64..0.1,
+            lx in -0.2f64..0.2, ly in -0.2f64..0.2,
+            sweep in -3.0f64..3.0, start in -4.0f64..4.0,
+            r in 1e-4f64..0.05,
+        ) {
+            let (a, b, l) = (DVec2::new(ax, ay), DVec2::new(bx, by), DVec2::new(lx, ly));
+            let off = 0.008;
+            let ms = [
+                Measured::Aligned(a, b),
+                Measured::Horizontal(a, b),
+                Measured::Vertical(a, b),
+                Measured::Foot { p: a, foot: b, near: b + DVec2::X * 0.01 },
+                Measured::Radial { centre: a, radius: r, dir: DVec2::X, diameter: true },
+                Measured::Angle {
+                    vertex: a,
+                    start,
+                    sweep,
+                    a: (a, a + DVec2::from_angle(start) * r),
+                    b: (b, b + DVec2::from_angle(start + sweep) * r),
+                },
+                Measured::Across { from: a, to: b },
+                Measured::Turn { centre: a, source: b, sweep },
+            ];
+            for m in ms {
+                let (lines, at) = dimension_geometry(m, Some(l), off, DVec2::ZERO);
+                proptest::prop_assert_eq!(at, l);
+                proptest::prop_assert!(lines.iter().flatten().all(|p| p.is_finite()));
+                // Arcs are polylines: the label lies on a chord within its
+                // sag of the arc.
+                let sag = match m {
+                    Measured::Angle { .. } | Measured::Turn { .. } => {
+                        (l - a).length() * (1.0 - (TAU / 192.0).cos()) + 1e-12
+                    }
+                    _ => 1e-12,
+                };
+                proptest::prop_assert!(nearest(&lines, l) <= sag, "{:?}: {}", m, nearest(&lines, l));
+            }
         }
     }
 }

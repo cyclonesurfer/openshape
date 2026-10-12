@@ -64,6 +64,9 @@ pub enum Command {
     Constrain(ConstraintTool),
     /// Dimensions the sketch selection.
     Dimension,
+    /// Returns dimension labels to automatic placement: the selected
+    /// dimensions', or every placed one when no dimension is selected.
+    ResetLabels,
     /// Deletes the sketch selection.
     DeleteSelection,
     /// Accepts the sketch and leaves sketch mode.
@@ -108,6 +111,7 @@ impl Command {
         v.extend(Tool::ALL.map(Command::Tool));
         v.push(Command::Construction);
         v.push(Command::Dimension);
+        v.push(Command::ResetLabels);
         v.extend(ConstraintTool::ALL.map(Command::Constrain));
         v.push(Command::DeleteSelection);
         v.extend([
@@ -168,6 +172,7 @@ impl Command {
             Command::Construction => "Construction".into(),
             Command::Constrain(c) => c.label().into(),
             Command::Dimension => "Dimension".into(),
+            Command::ResetLabels => "Reset dimension label positions".into(),
             Command::DeleteSelection => "Delete selection".into(),
             Command::FinishSketch => "Finish sketch".into(),
             Command::CancelSketch => "Cancel sketch".into(),
@@ -199,6 +204,7 @@ impl Command {
             Command::Tool(_)
             | Command::Construction
             | Command::Dimension
+            | Command::ResetLabels
             | Command::DeleteSelection
             | Command::FinishSketch
             | Command::CancelSketch => "Sketch",
@@ -219,6 +225,7 @@ impl Command {
             Command::SaveDocument => &["write", "file"],
             Command::OpenDocument => &["load", "file"],
             Command::Dimension => &["measure", "distance", "length", "angle", "radius"],
+            Command::ResetLabels => &["automatic", "place", "move", "annotation"],
             Command::DeleteSelection => &["remove", "erase"],
             Command::FinishSketch => &["accept", "done", "exit", "ok"],
             Command::CancelSketch => &["discard", "abort", "exit"],
@@ -294,7 +301,7 @@ impl Command {
                 ConstraintTool::Normal => Icon::Normal,
                 ConstraintTool::Fix => Icon::Fix,
             },
-            Command::Dimension => Icon::Dimension,
+            Command::Dimension | Command::ResetLabels => Icon::Dimension,
             Command::DeleteSelection => Icon::Close,
             Command::FinishSketch => Icon::FinishSketch,
             Command::CancelSketch => Icon::Close,
