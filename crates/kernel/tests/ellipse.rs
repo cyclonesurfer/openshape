@@ -58,16 +58,20 @@ fn check_arc(c: DVec2, a: DVec2, b: DVec2, start: f64, sweep: f64) {
     } else {
         assert!((last - at(c, a, b, start + sweep)).length() < 1e-14 * size);
     }
-    // The anomaly runs from `start` by `sweep`, without turning back.
-    let mut total = 0.0;
-    let mut prev = anomaly(c, a, b, pts[0]);
+    // The anomaly runs from `start` by `sweep`, without turning back. The
+    // whole turns between samples are counted rather than the steps summed,
+    // so the total has the rounding of its two ends only, not of 2,000
+    // steps (summed, they missed the bound below by 3.5e-14 once).
+    let first = anomaly(c, a, b, pts[0]);
+    let (mut prev, mut turns) = (first, 0.0);
     for p in &pts[1..] {
         let t = anomaly(c, a, b, *p);
         let step = (t - prev + PI).rem_euclid(TAU) - PI;
         assert!(step * sweep.signum() >= 0.0, "turned back");
-        total += step;
+        turns += ((step - (t - prev)) / TAU).round();
         prev = t;
     }
+    let total = prev - first + TAU * turns;
     // Rounded coordinates fix the anomaly only to about ε·size/(shorter axis).
     let tol = 1e-14 * size / a.length().min(b.length());
     assert!((total - sweep).abs() < tol, "{total} vs {sweep}");

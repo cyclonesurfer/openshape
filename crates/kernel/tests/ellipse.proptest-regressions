@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 491bc4da4c1e8350ab493fbac6939972085358410b1f4d6914d5a2d7e3102737 # shrinks to h = 0.01, cx = 0.0, rot = 0.0, start = 0.0
+cc 7eadb6404bb30cf678da6afe886091c8532ec88be1c4fac49768185ddaff574b # shrinks to cx = 0.7022154828812179, cy = 0.43724595696222873, la = 1.9992426974271147, ratio = 0.6916251886971002, rot = 1.3586130826411946, flip = true, start = -2.180686137936559, sweep = 5.660975713415777
