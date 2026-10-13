@@ -4,6 +4,7 @@ use std::f64::consts::TAU;
 
 use glam::{DMat4, DVec2, DVec3, DVec4};
 use serde::{Deserialize, Serialize};
+use smallvec::{smallvec, SmallVec};
 
 use crate::curve::{arc_template, check_homogeneous, lift_points, normalize_sweep};
 use crate::knots::KnotVector;
@@ -11,7 +12,7 @@ use crate::util::{
     aabb_distance_squared, binomial, bounding_box, dehomogenize, homogenize, transform_homogeneous,
     unit,
 };
-use crate::{NurbsCurve, NurbsError};
+use crate::{NurbsCurve, NurbsError, SurfaceDerivatives};
 
 /// Maximum number of Newton iterations in point inversion.
 const MAX_NEWTON_ITERATIONS: usize = 64;
@@ -127,10 +128,10 @@ fn even_params(lo: f64, hi: f64, count: usize) -> Vec<f64> {
 
 /// Rational surface derivatives from homogeneous ones (Algorithm A4.4,
 /// RatSurfaceDerivs).
-fn rational_surface_derivatives(aders: &[Vec<DVec4>]) -> Vec<Vec<DVec3>> {
+fn rational_surface_derivatives(aders: &[SmallVec<[DVec4; 4]>]) -> SurfaceDerivatives {
     let d = aders.len() - 1;
     let w00 = aders[0][0].w;
-    let mut skl: Vec<Vec<DVec3>> = (0..=d).map(|k| vec![DVec3::ZERO; d + 1 - k]).collect();
+    let mut skl: SurfaceDerivatives = (0..=d).map(|k| smallvec![DVec3::ZERO; d + 1 - k]).collect();
     for k in 0..=d {
         for l in 0..=d - k {
             let mut val = aders[k][l].truncate();
@@ -377,14 +378,15 @@ impl NurbsSurface {
         d: usize,
         uspan: usize,
         vspan: usize,
-    ) -> Vec<Vec<DVec4>> {
+    ) -> SmallVec<[SmallVec<[DVec4; 4]>; 4]> {
         let (p, q) = (self.degree_u, self.degree_v);
         let du = d.min(p);
         let dv = d.min(q);
         let nu = self.knots_u.ders_basis_funs(uspan, u, p, du);
         let nv = self.knots_v.ders_basis_funs(vspan, v, q, dv);
-        let mut skl: Vec<Vec<DVec4>> = (0..=d).map(|k| vec![DVec4::ZERO; d + 1 - k]).collect();
-        let mut temp = vec![DVec4::ZERO; q + 1];
+        let mut skl: SmallVec<[SmallVec<[DVec4; 4]>; 4]> =
+            (0..=d).map(|k| smallvec![DVec4::ZERO; d + 1 - k]).collect();
+        let mut temp: SmallVec<[DVec4; 8]> = smallvec![DVec4::ZERO; q + 1];
         for k in 0..=du {
             for (s, t) in temp.iter_mut().enumerate() {
                 *t = (0..=p).fold(DVec4::ZERO, |acc, r| {
@@ -423,7 +425,7 @@ impl NurbsSurface {
     /// (RatSurfaceDerivs). Parameters are clamped to the domain; on knot
     /// lines the derivatives of the span above are returned (below at the
     /// end of the domain).
-    pub fn derivatives(&self, u: f64, v: f64, d: usize) -> Vec<Vec<DVec3>> {
+    pub fn derivatives(&self, u: f64, v: f64, d: usize) -> SurfaceDerivatives {
         let (u, v) = self.clamp_params(u, v);
         let uspan = self.knots_u.find_span(self.degree_u, self.count_u - 1, u);
         let vspan = self.knots_v.find_span(self.degree_v, self.count_v - 1, v);
@@ -432,7 +434,7 @@ impl NurbsSurface {
 
     /// Like [`NurbsSurface::derivatives`] but always evaluates the
     /// polynomial piece of the given cell (one-sided at knot lines).
-    fn derivatives_in_cell(&self, u: f64, v: f64, d: usize, cell: &Cell) -> Vec<Vec<DVec3>> {
+    fn derivatives_in_cell(&self, u: f64, v: f64, d: usize, cell: &Cell) -> SurfaceDerivatives {
         rational_surface_derivatives(
             &self.homogeneous_derivatives_in_span(u, v, d, cell.uspan, cell.vspan),
         )

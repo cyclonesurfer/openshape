@@ -14,7 +14,7 @@
 //!    the surface deviates from every triangle by less than the chord
 //!    tolerance and the normal varies by less than the angle tolerance.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glam::{DVec2, DVec3};
 use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
@@ -1234,12 +1234,18 @@ fn tessellate_face(
     }
     let scale = param_scale(s, &loops)?;
 
+    let is_planar = matches!(s, Surface::Plane(_));
     let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> =
         ConstrainedDelaunayTriangulation::new();
     // Per CDT vertex: parameter value and, for boundary vertices, the exact 3D point.
     let mut verts: Vec<(DVec2, Option<DVec3>)> = Vec::new();
+    // Per CDT vertex of a curved face: its surface point and normal,
+    // evaluated once.
+    let mut at: Vec<(DVec3, Option<DVec3>)> = Vec::new();
+    type At = Vec<(DVec3, Option<DVec3>)>;
     let insert = |cdt: &mut ConstrainedDelaunayTriangulation<Point2<f64>>,
                   verts: &mut Vec<(DVec2, Option<DVec3>)>,
+                  at: &mut At,
                   uv: DVec2,
                   p: Option<DVec3>|
      -> Result<spade::handles::FixedVertexHandle, String> {
@@ -1253,13 +1259,17 @@ fn tessellate_face(
             .map_err(|e| format!("triangulation insert failed: {e:?}"))?;
         if h.index() == verts.len() {
             verts.push((uv, p));
+            if !is_planar {
+                let sp = p.unwrap_or_else(|| s.point(uv.x, uv.y));
+                at.push((sp, s.normal(uv.x, uv.y)));
+            }
         }
         Ok(h)
     };
     for l in &loops {
         let mut handles = Vec::with_capacity(l.len());
         for smp in l {
-            handles.push(insert(&mut cdt, &mut verts, smp.uv, Some(smp.p))?);
+            handles.push(insert(&mut cdt, &mut verts, &mut at, smp.uv, Some(smp.p))?);
         }
         for i in 0..handles.len() {
             let a = handles[i];
@@ -1271,15 +1281,22 @@ fn tessellate_face(
     }
 
     let boundary_constraints = cdt.num_constraints();
-    let is_planar = matches!(s, Surface::Plane(_));
     if !is_planar {
         let min_area = (opts.chord_tolerance * 0.01).powi(2);
+        // Triangles found fine (or too small to refine) in an earlier pass:
+        // the test depends only on their vertices, so it is not repeated.
+        let mut settled: HashSet<[usize; 3]> = HashSet::new();
         for _pass in 0..12 {
             let tris = inside_triangles(&cdt);
             let mut new_pts: Vec<DVec2> = Vec::new();
             for t in &tris {
-                let uv: Vec<DVec2> = t.iter().map(|&i| verts[i].0).collect();
-                let q: Vec<DVec2> = uv.iter().map(|x| *x * scale).collect();
+                let mut key = *t;
+                key.sort_unstable();
+                if settled.contains(&key) {
+                    continue;
+                }
+                let uv = t.map(|i| verts[i].0);
+                let q = uv.map(|x| x * scale);
                 let area = 0.5 * (q[1] - q[0]).perp_dot(q[2] - q[0]).abs();
                 let longest = (q[1] - q[0])
                     .length_squared()
@@ -1288,39 +1305,31 @@ fn tessellate_face(
                 // Skip tiny triangles and slivers (whose centroid could land
                 // on a boundary constraint within round-off).
                 if area < min_area || 2.0 * area < 1e-8 * longest {
+                    settled.insert(key);
                     continue;
                 }
-                let p: Vec<DVec3> = t
-                    .iter()
-                    .map(|&i| {
-                        verts[i]
-                            .1
-                            .unwrap_or_else(|| s.point(verts[i].0.x, verts[i].0.y))
-                    })
-                    .collect();
+                let p = t.map(|i| at[i].0);
                 let tri_n = (p[1] - p[0]).cross(p[2] - p[0]);
                 if tri_n.length() <= 0.0 {
+                    settled.insert(key);
                     continue;
                 }
                 let tri_n = tri_n.normalize();
                 // Chord error: distance of the surface from the triangle's
                 // plane at the centroid and at interior-edge midpoints.
                 let c = (uv[0] + uv[1] + uv[2]) / 3.0;
-                let mut probes = vec![c];
-                for e in 0..3 {
-                    let (a, b) = (t[e], t[(e + 1) % 3]);
-                    if verts[a].1.is_none() || verts[b].1.is_none() {
-                        probes.push((verts[a].0 + verts[b].0) * 0.5);
-                    }
-                }
-                let mut refine = probes.iter().any(|w| {
-                    let sp = s.point(w.x, w.y);
-                    (sp - p[0]).dot(tri_n).abs() > opts.chord_tolerance
-                });
+                let off = |w: DVec2| (s.point(w.x, w.y) - p[0]).dot(tri_n).abs();
+                let mut refine = off(c) > opts.chord_tolerance
+                    || (0..3).any(|e| {
+                        let (a, b) = (t[e], t[(e + 1) % 3]);
+                        (verts[a].1.is_none() || verts[b].1.is_none())
+                            && off((verts[a].0 + verts[b].0) * 0.5) > opts.chord_tolerance
+                    });
                 if !refine {
                     if let Some(nc) = s.normal(c.x, c.y) {
-                        refine = uv.iter().any(|w| {
-                            s.normal(w.x, w.y)
+                        refine = t.iter().any(|&i| {
+                            at[i]
+                                .1
                                 .map(|nw| nw.angle_between(nc) > opts.max_angle)
                                 .unwrap_or(false)
                         });
@@ -1328,6 +1337,8 @@ fn tessellate_face(
                 }
                 if refine {
                     new_pts.push(c);
+                } else {
+                    settled.insert(key);
                 }
             }
             if new_pts.is_empty() {
@@ -1337,7 +1348,7 @@ fn tessellate_face(
                 return Err("tessellation exceeded the vertex budget".into());
             }
             for c in new_pts {
-                insert(&mut cdt, &mut verts, c, None)?;
+                insert(&mut cdt, &mut verts, &mut at, c, None)?;
             }
         }
         if cdt.num_constraints() != boundary_constraints {
@@ -1359,7 +1370,13 @@ fn tessellate_face(
                 continue;
             }
             let (uv, exact) = verts[i];
-            let p = exact.unwrap_or_else(|| s.point(uv.x, uv.y));
+            let p = exact.unwrap_or_else(|| {
+                if is_planar {
+                    s.point(uv.x, uv.y)
+                } else {
+                    at[i].0
+                }
+            });
             let key = [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
             if exact.is_some() {
                 if let Some(&j) = by_pos.get(&key) {
@@ -1367,7 +1384,11 @@ fn tessellate_face(
                     continue;
                 }
             }
-            let mut n = s.normal(uv.x, uv.y);
+            let mut n = if is_planar {
+                s.normal(uv.x, uv.y)
+            } else {
+                at[i].1
+            };
             let mut k = 1e-6;
             while n.is_none() && k < 0.5 {
                 let w = uv + (center - uv) * k;

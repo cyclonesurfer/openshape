@@ -4,13 +4,14 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use glam::{DMat4, DVec3, DVec4};
 use serde::{Deserialize, Serialize};
+use smallvec::{smallvec, SmallVec};
 
 use crate::knots::KnotVector;
 use crate::util::{
     aabb_distance_squared, binomial, bounding_box, dehomogenize, homogenize, integrate,
     local_minima, solve_banded, transform_homogeneous, unit,
 };
-use crate::NurbsError;
+use crate::{CurveDerivatives, NurbsError};
 
 /// Maximum number of Newton iterations in point inversion.
 const MAX_NEWTON_ITERATIONS: usize = 64;
@@ -173,8 +174,8 @@ pub(crate) fn normalize_sweep(sweep: f64) -> Result<f64, NurbsError> {
 }
 
 /// Rational derivatives from homogeneous ones (Algorithm A4.2, RatCurveDerivs).
-fn rational_derivatives(aders: &[DVec4]) -> Vec<DVec3> {
-    let mut ck: Vec<DVec3> = Vec::with_capacity(aders.len());
+fn rational_derivatives(aders: &[DVec4]) -> CurveDerivatives {
+    let mut ck = CurveDerivatives::with_capacity(aders.len());
     let w0 = aders[0].w;
     for k in 0..aders.len() {
         let mut v = aders[k].truncate();
@@ -310,13 +311,18 @@ impl NurbsCurve {
     /// the weight function are exactly zero (the basis derivatives sum to
     /// zero); they are then stored as exact zeros so that A4.2 reduces to the
     /// polynomial case without picking up rounding noise.
-    fn homogeneous_derivatives_in_span(&self, u: f64, d: usize, span: usize) -> Vec<DVec4> {
+    fn homogeneous_derivatives_in_span(
+        &self,
+        u: f64,
+        d: usize,
+        span: usize,
+    ) -> SmallVec<[DVec4; 4]> {
         let p = self.degree;
         let du = d.min(p);
         let nders = self.knots.ders_basis_funs(span, u, p, du);
         let active = &self.points[span - p..=span];
         let polynomial = active.iter().all(|pw| pw.w == active[0].w);
-        let mut ck = vec![DVec4::ZERO; d + 1];
+        let mut ck: SmallVec<[DVec4; 4]> = smallvec![DVec4::ZERO; d + 1];
         for (k, ders_k) in nders.iter().enumerate().take(du + 1) {
             ck[k] = ders_k
                 .iter()
@@ -336,7 +342,7 @@ impl NurbsCurve {
     /// Algorithm A4.2 (RatCurveDerivs). At knots the derivatives of the span
     /// to the right are returned (left span at the end of the domain). `t` is
     /// clamped to the domain.
-    pub fn derivatives(&self, t: f64, n: usize) -> Vec<DVec3> {
+    pub fn derivatives(&self, t: f64, n: usize) -> CurveDerivatives {
         let u = self.clamp_param(t);
         let span = self.knots.find_span(self.degree, self.last_index(), u);
         rational_derivatives(&self.homogeneous_derivatives_in_span(u, n, span))
@@ -344,7 +350,7 @@ impl NurbsCurve {
 
     /// Like [`NurbsCurve::derivatives`] but always evaluates the polynomial
     /// piece of knot span `span` (one-sided derivatives at knots).
-    fn derivatives_in_span(&self, u: f64, n: usize, span: usize) -> Vec<DVec3> {
+    fn derivatives_in_span(&self, u: f64, n: usize, span: usize) -> CurveDerivatives {
         rational_derivatives(&self.homogeneous_derivatives_in_span(u, n, span))
     }
 
@@ -660,7 +666,7 @@ impl NurbsCurve {
         let mut lo = Vec::with_capacity(n + 1);
         for &t in &params {
             let span = kv.find_span(p, n, t);
-            rows.push(kv.basis_funs(span, t, p));
+            rows.push(kv.basis_funs(span, t, p).to_vec());
             lo.push(span - p);
         }
         let ctrl = solve_banded(rows, &lo, points.to_vec()).ok_or(NurbsError::SingularSystem)?;

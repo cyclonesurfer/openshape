@@ -17,6 +17,11 @@
 //! Control points are stored in homogeneous form `(w x, w y, w z, w)`. All
 //! constructors validate their input and return [`NurbsError`] instead of
 //! panicking; evaluation clamps parameters to the domain.
+//!
+//! Evaluation allocates nothing on the heap for degrees up to 7 and
+//! derivatives up to order 3: its results and scratch space are small
+//! inline vectors ([`Basis`], [`CurveDerivatives`], ...), which spill to the
+//! heap only beyond those sizes.
 
 mod curve;
 mod error;
@@ -28,6 +33,21 @@ pub use curve::NurbsCurve;
 pub use error::NurbsError;
 pub use knots::KnotVector;
 pub use surface::NurbsSurface;
+
+use smallvec::SmallVec;
+
+/// Basis function values `N_{span-p,p} ..= N_{span,p}` at a parameter.
+pub type Basis = SmallVec<[f64; 8]>;
+
+/// Basis functions and their derivatives: row `k` holds the `k`-th
+/// derivatives (see [`KnotVector::ders_basis_funs`]).
+pub type BasisDerivatives = SmallVec<[Basis; 4]>;
+
+/// A curve's point and derivatives: element `k` is `C^(k)(t)`.
+pub type CurveDerivatives = SmallVec<[DVec3; 4]>;
+
+/// A surface's partial derivatives: `skl[k][l] = d^(k+l) S / du^k dv^l`.
+pub type SurfaceDerivatives = SmallVec<[SmallVec<[DVec3; 4]>; 4]>;
 
 /// Re-export of the `glam` vector and matrix types used in this crate's API.
 pub use glam::{DMat4, DVec2, DVec3, DVec4};

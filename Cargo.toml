@@ -45,6 +45,7 @@ ciborium = "0.2"
 thiserror = "2"
 robust = "1.2"
 spade = "2.15"
+smallvec = "1.13"
 bytemuck = { version = "1", features = ["derive"] }
 wgpu = "30"
 pollster = "1"

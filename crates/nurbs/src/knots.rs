@@ -1,8 +1,9 @@
 //! Knot vectors and B-spline basis functions (The NURBS Book, chapter 2).
 
 use serde::{Deserialize, Serialize};
+use smallvec::{smallvec, SmallVec};
 
-use crate::NurbsError;
+use crate::{Basis, BasisDerivatives, NurbsError};
 
 /// A non-decreasing sequence of finite knot values.
 ///
@@ -148,12 +149,12 @@ impl KnotVector {
     /// # Panics
     ///
     /// Panics if `span + degree` is not a valid knot index or `span < degree`.
-    pub fn basis_funs(&self, span: usize, u: f64, degree: usize) -> Vec<f64> {
+    pub fn basis_funs(&self, span: usize, u: f64, degree: usize) -> Basis {
         let knots = &self.knots;
         let p = degree;
-        let mut basis = vec![0.0; p + 1];
-        let mut left = vec![0.0; p + 1];
-        let mut right = vec![0.0; p + 1];
+        let mut basis: Basis = smallvec![0.0; p + 1];
+        let mut left: Basis = smallvec![0.0; p + 1];
+        let mut right: Basis = smallvec![0.0; p + 1];
         basis[0] = 1.0;
         for j in 1..=p {
             left[j] = u - knots[span + 1 - j];
@@ -179,37 +180,45 @@ impl KnotVector {
     /// # Panics
     ///
     /// Panics if `span + degree` is not a valid knot index or `span < degree`.
-    pub fn ders_basis_funs(&self, span: usize, u: f64, degree: usize, n: usize) -> Vec<Vec<f64>> {
+    pub fn ders_basis_funs(
+        &self,
+        span: usize,
+        u: f64,
+        degree: usize,
+        n: usize,
+    ) -> BasisDerivatives {
         let knots = &self.knots;
         let p = degree;
-        let mut ders = vec![vec![0.0; p + 1]; n + 1];
-        // ndu stores the basis functions (upper triangle) and knot differences
-        // (lower triangle).
-        let mut ndu = vec![vec![0.0; p + 1]; p + 1];
-        let mut left = vec![0.0; p + 1];
-        let mut right = vec![0.0; p + 1];
-        ndu[0][0] = 1.0;
+        let w = p + 1;
+        let mut ders: BasisDerivatives = smallvec![smallvec![0.0; w]; n + 1];
+        // ndu (row-major, w × w) stores the basis functions (upper triangle)
+        // and knot differences (lower triangle).
+        let mut ndu: SmallVec<[f64; 64]> = smallvec![0.0; w * w];
+        let at = |r: usize, c: usize| r * w + c;
+        let mut left: Basis = smallvec![0.0; w];
+        let mut right: Basis = smallvec![0.0; w];
+        ndu[0] = 1.0;
         for j in 1..=p {
             left[j] = u - knots[span + 1 - j];
             right[j] = knots[span + j] - u;
             let mut saved = 0.0;
             for r in 0..j {
-                ndu[j][r] = right[r + 1] + left[j - r];
-                let temp = ndu[r][j - 1] / ndu[j][r];
-                ndu[r][j] = saved + right[r + 1] * temp;
+                ndu[at(j, r)] = right[r + 1] + left[j - r];
+                let temp = ndu[at(r, j - 1)] / ndu[at(j, r)];
+                ndu[at(r, j)] = saved + right[r + 1] * temp;
                 saved = left[j - r] * temp;
             }
-            ndu[j][j] = saved;
+            ndu[at(j, j)] = saved;
         }
         for j in 0..=p {
-            ders[0][j] = ndu[j][p];
+            ders[0][j] = ndu[at(j, p)];
         }
         let nd = n.min(p);
         if nd == 0 {
             return ders;
         }
         // Two alternating rows of coefficients a_{k,j}.
-        let mut a = [vec![0.0; p + 1], vec![0.0; p + 1]];
+        let mut a: [Basis; 2] = [smallvec![0.0; w], smallvec![0.0; w]];
         let pi = p as isize;
         for r in 0..=p {
             let ri = r as isize;
@@ -221,24 +230,25 @@ impl KnotVector {
                 let rk = ri - ki;
                 let pk = pi - ki;
                 if ri >= ki {
-                    let v = a[s1][0] / ndu[(pk + 1) as usize][rk as usize];
+                    let v = a[s1][0] / ndu[at((pk + 1) as usize, rk as usize)];
                     a[s2][0] = v;
-                    d = v * ndu[rk as usize][pk as usize];
+                    d = v * ndu[at(rk as usize, pk as usize)];
                 }
                 let j1: isize = if rk >= -1 { 1 } else { -rk };
                 let j2: isize = if ri - 1 <= pk { ki - 1 } else { pi - ri };
                 let mut j = j1;
                 while j <= j2 {
                     let ju = j as usize;
-                    let v = (a[s1][ju] - a[s1][ju - 1]) / ndu[(pk + 1) as usize][(rk + j) as usize];
+                    let v =
+                        (a[s1][ju] - a[s1][ju - 1]) / ndu[at((pk + 1) as usize, (rk + j) as usize)];
                     a[s2][ju] = v;
-                    d += v * ndu[(rk + j) as usize][pk as usize];
+                    d += v * ndu[at((rk + j) as usize, pk as usize)];
                     j += 1;
                 }
                 if ri <= pk {
-                    let v = -a[s1][k - 1] / ndu[(pk + 1) as usize][r];
+                    let v = -a[s1][k - 1] / ndu[at((pk + 1) as usize, r)];
                     a[s2][k] = v;
-                    d += v * ndu[r][pk as usize];
+                    d += v * ndu[at(r, pk as usize)];
                 }
                 ders[k][r] = d;
                 std::mem::swap(&mut s1, &mut s2);
