@@ -14,7 +14,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use eframe::egui;
 use egui::{Key, Modifiers, Pos2, Rect};
-use opendatum_core_model::{DVec3, ElementId, Feature, FeatureId, InsertAt, ModelOp};
+use opendatum_core_model::naming::Use;
+use opendatum_core_model::{DVec3, ElementId, Feature, FeatureId, InsertAt, ModelOp, PlaneRef};
+use opendatum_naming::Pick;
 use opendatum_render::{Camera, DisplayMode, Projection};
 use opendatum_ui_kit::palette::CommandPalette;
 use opendatum_ui_kit::view_cube::CubeTarget;
@@ -22,6 +24,7 @@ use opendatum_ui_kit::Theme;
 
 use crate::commands::{Command, Mode};
 use crate::dialogs::FeatureDialog;
+use crate::entity_pick::EntityHit;
 use crate::graphics::Viewport;
 use crate::planes::StdPlane;
 use crate::profile_pick::{ProfilePick, SweepKind};
@@ -44,12 +47,14 @@ pub(crate) fn union(a: Option<Bounds>, b: Option<Bounds>) -> Option<Bounds> {
 }
 
 /// What is selected outside sketch mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Selection {
     /// A feature in the feature list.
     Feature(FeatureId),
     /// A part, by the feature that made it.
     Part(FeatureId),
+    /// A face, edge or vertex of a part, picked in the view (ADR 0019).
+    Entity(EntityHit),
     /// A default plane.
     Plane(StdPlane),
     /// The origin.
@@ -215,6 +220,13 @@ pub struct OpenDatumApp {
     pub(crate) hidden_parts: BTreeSet<FeatureId>,
     /// A plane row under the pointer (highlighted in the view).
     pub(crate) hover_plane: Option<StdPlane>,
+    /// The face, edge or vertex under the pointer (highlighted in the
+    /// view).
+    pub(crate) hover_entity: Option<EntityHit>,
+    /// The model generation a selected face, edge or vertex was picked in:
+    /// a regeneration may renumber the part's entities, so it is cleared
+    /// then.
+    pub(crate) entity_generation: u64,
     /// [`OpenDatumApp::sketch_bounds`] for a model generation.
     pub(crate) sketch_bounds_cache: std::cell::Cell<Option<(u64, Option<Bounds>)>>,
     pub(crate) properties: Option<PartProperties>,
@@ -283,6 +295,8 @@ impl OpenDatumApp {
             planes_visible: [true; 3],
             hidden_parts: BTreeSet::new(),
             hover_plane: None,
+            hover_entity: None,
+            entity_generation: 0,
             sketch_bounds_cache: std::cell::Cell::new(None),
             properties: None,
             layout: ShellLayout::default(),
@@ -321,6 +335,12 @@ impl OpenDatumApp {
     /// Selects something (or nothing).
     pub fn select(&mut self, s: Option<Selection>) {
         self.selection = s;
+        self.entity_generation = self.model.generation;
+    }
+
+    /// The face, edge or vertex under the pointer in the view.
+    pub fn hovered_entity(&self) -> Option<EntityHit> {
+        self.hover_entity
     }
 
     /// The sketch editor, in sketch mode.
@@ -483,6 +503,9 @@ impl OpenDatumApp {
             Command::CommandSearch => self.palette = Some(CommandPalette::new()),
             Command::Sketch => match self.selection {
                 Some(Selection::Plane(p)) => self.new_sketch(p),
+                Some(Selection::Entity(hit)) if matches!(hit.pick, Pick::Face(_)) => {
+                    self.new_sketch_on_face(&hit)
+                }
                 _ => self.plane_menu = true,
             },
             Command::SketchOn(p) => self.new_sketch(p),
@@ -652,6 +675,32 @@ impl OpenDatumApp {
         self.sketch_undo_depth = depth;
     }
 
+    /// Starts a new sketch on a planar face of a part (ADR 0019); a curved
+    /// face or one that cannot be referenced is refused with a message.
+    /// Cancelling sketch mode removes the sketch again.
+    pub fn new_sketch_on_face(&mut self, hit: &EntityHit) {
+        let Pick::Face(face) = hit.pick else {
+            self.notify("Select a planar face or a plane to sketch on");
+            return;
+        };
+        if self.model.face_plane(hit.feature, face).is_none() {
+            self.notify("Sketches go on planar faces: select a flat face or a plane");
+            return;
+        }
+        let reference = match self.model.reference(hit, Use::Carrier) {
+            Ok(r) => r,
+            Err(e) => {
+                self.notify(e);
+                return;
+            }
+        };
+        self.close_editors();
+        let depth = self.model.session().undo_depth();
+        let id = self.model.add_sketch(PlaneRef::Face(Box::new(reference)));
+        self.enter_sketch(id);
+        self.sketch_undo_depth = depth;
+    }
+
     /// Opens the editor for a feature: sketch mode, the profile picker or a
     /// parameter dialog.
     pub fn edit_feature(&mut self, id: FeatureId) {
@@ -799,6 +848,7 @@ impl OpenDatumApp {
                 Action::Run(c) => self.run(c),
                 Action::Select(s) => {
                     self.selection = s;
+                    self.entity_generation = self.model.generation;
                     self.plane_menu = false;
                 }
                 Action::EditFeature(f) => self.edit_feature(f),
@@ -985,6 +1035,11 @@ impl OpenDatumApp {
             if self.model.feature(f).is_none() {
                 self.selection = None;
             }
+        }
+        if matches!(self.selection, Some(Selection::Entity(_)))
+            && self.entity_generation != self.model.generation
+        {
+            self.selection = None;
         }
         self.shortcuts(&ctx);
         self.top_bar(ui);

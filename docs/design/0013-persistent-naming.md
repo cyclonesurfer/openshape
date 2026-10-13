@@ -303,4 +303,13 @@ edge behind each curve, so side and cap names come from the same keys
 the regions are named by; inline profiles get made-up keys from the
 feature and the curve index. Hints are checked against a fine mesh
 within 0.1 mm until the kernel can classify points against trimmed
-faces (ADR 0019 §6). Picking in the viewport is the rest of step 3.
+faces (ADR 0019 §6).
+
+Step 3, application side, 2026-10-13: the viewport picks the faces,
+edges and vertices of the parts under the pointer (a vertex within 7
+points first, then an edge within 5, then the face hit by the pointer's
+ray; a candidate hidden behind a nearer face is skipped, as are seams
+and anything the part's names do not cover), highlights the whole
+logical entity while hovered and when selected, starts a sketch on a
+selected planar face, and picks the face an extrude ends at. Step 3 is
+complete.

@@ -13,6 +13,7 @@ pub mod comb;
 pub mod commands;
 pub mod demo;
 pub mod dialogs;
+pub mod entity_pick;
 pub mod feature_list;
 pub mod floating;
 pub mod graphics;
@@ -30,13 +31,21 @@ use std::path::Path;
 
 use std::collections::BTreeMap;
 
+use opendatum_core_model::naming::{Hint, Reference, Use};
 use opendatum_core_model::sketch::Geometry;
 use opendatum_core_model::{
     Element, ElementId, ElementKind, Feature, FeatureEntry, FeatureId, InsertAt, ModelOp, OpId,
     PartStudio, PlaneRef, ReplicaId, Session, SketchData, SketchDef, SketchEdit, SketchId,
 };
-use opendatum_features::{regenerate, FeatureStatus, SketchResult, StudioResult};
-use opendatum_kernel::{Body, BodyMesh, BrepKernel, Kernel, TessellationOptions};
+use opendatum_features::{
+    regenerate, resolve_reference, FeatureStatus, PartBody, SketchResult, StudioResult,
+};
+use opendatum_kernel::{
+    Body, BodyMesh, BrepKernel, FaceIx, FacePlane, Kernel, TessellationOptions,
+};
+use opendatum_naming::Pick;
+
+use crate::entity_pick::{EntityHit, PickPart};
 use opendatum_render::MeshData;
 use opendatum_sketch_solver::{solve, SolveOptions, SolveStatus};
 
@@ -52,11 +61,25 @@ const PART_COLORS: [[f32; 4]; 6] = [
 
 /// Converts a kernel mesh into renderer mesh data (seam edges left out).
 pub fn to_mesh_data(mesh: &BodyMesh, color: [f32; 4]) -> MeshData {
+    to_mesh_data_where(mesh, color, |_| true, true)
+}
+
+/// Renderer mesh data of the faces of `mesh` that `face` keeps (by
+/// index), with its edges (seams left out) when `edges` is set.
+pub fn to_mesh_data_where(
+    mesh: &BodyMesh,
+    color: [f32; 4],
+    face: impl Fn(usize) -> bool,
+    edges: bool,
+) -> MeshData {
     let mut out = MeshData {
         color,
         ..MeshData::default()
     };
-    for f in &mesh.faces {
+    for (i, f) in mesh.faces.iter().enumerate() {
+        if !face(i) {
+            continue;
+        }
         let base = out.positions.len() as u32;
         out.positions
             .extend(f.positions.iter().map(|p| p.as_vec3().to_array()));
@@ -68,7 +91,7 @@ pub fn to_mesh_data(mesh: &BodyMesh, color: [f32; 4]) -> MeshData {
     }
     // Seams of split periodic faces are no creases: not drawn.
     for (i, e) in mesh.edges.iter().enumerate() {
-        if mesh.seams.get(i).copied().unwrap_or(false) {
+        if !edges || mesh.seams.get(i).copied().unwrap_or(false) {
             continue;
         }
         for w in e.windows(2) {
@@ -116,6 +139,9 @@ pub struct Model {
     kernel: BrepKernel,
     result: StudioResult<Body>,
     meshes: Vec<MeshData>,
+    /// The kernel meshes the display meshes were made from, for picking
+    /// faces, edges and vertices.
+    body_meshes: Vec<BodyMesh>,
     mesh_owners: Vec<FeatureId>,
     tessellation: TessellationOptions,
     /// The feature being edited: the model shows the history up to and
@@ -146,6 +172,7 @@ impl Model {
             kernel: BrepKernel::default(),
             result: StudioResult::default(),
             meshes: Vec::new(),
+            body_meshes: Vec::new(),
             mesh_owners: Vec::new(),
             tessellation: TessellationOptions {
                 chord_tolerance: 2e-5,
@@ -328,6 +355,89 @@ impl Model {
         &self.mesh_owners
     }
 
+    /// The kernel mesh of each display mesh (parallel to
+    /// [`Model::meshes`]).
+    pub fn body_meshes(&self) -> &[BodyMesh] {
+        &self.body_meshes
+    }
+
+    /// The part a feature made.
+    pub fn part(&self, feature: FeatureId) -> Option<&PartBody<Body>> {
+        self.result.bodies.iter().find(|b| b.feature == feature)
+    }
+
+    /// The kernel mesh of a feature's part.
+    pub fn body_mesh(&self, feature: FeatureId) -> Option<&BodyMesh> {
+        self.mesh_owners
+            .iter()
+            .position(|f| *f == feature)
+            .map(|i| &self.body_meshes[i])
+    }
+
+    /// The parts shown, for picking: all but those `hidden` says and the
+    /// preview of an open dialog.
+    pub fn pick_parts(&self, hidden: impl Fn(FeatureId) -> bool) -> Vec<PickPart<'_>> {
+        self.mesh_owners
+            .iter()
+            .zip(&self.body_meshes)
+            .filter(|(f, _)| !hidden(**f) && **f != PREVIEW_FEATURE)
+            .map(|(f, mesh)| PickPart {
+                feature: *f,
+                mesh,
+                names: self.part(*f).and_then(|p| p.names.as_ref().ok()),
+            })
+            .collect()
+    }
+
+    /// The plane of a planar face of a feature's part.
+    pub fn face_plane(&self, feature: FeatureId, face: FaceIx) -> Option<FacePlane> {
+        self.kernel.face_plane(&self.part(feature)?.body, face)
+    }
+
+    /// A reference to the entity the user sees as `hit` (ADR 0019), with
+    /// the picked point as its hint (on a planar face, exactly on its
+    /// plane); or why it cannot be referenced.
+    pub fn reference(&self, hit: &EntityHit, usage: Use) -> Result<Reference, String> {
+        let part = self
+            .part(hit.feature)
+            .ok_or("The part is no longer there")?;
+        let names = part
+            .names
+            .as_ref()
+            .map_err(|e| format!("The part's faces cannot be referenced: {e}"))?;
+        let name = names.name(hit.pick).ok_or("Pick a face, edge or vertex")?;
+        let mut hint = Hint {
+            point: hit.point,
+            direction: hit.direction,
+        };
+        if let Pick::Face(f) = hit.pick {
+            if let Some(plane) = self.face_plane(hit.feature, f) {
+                hint.point -= plane.normal * (hit.point - plane.point).dot(plane.normal);
+                hint.direction = plane.normal;
+            }
+        }
+        Ok(Reference { name, hint, usage })
+    }
+
+    /// A carrier reference to the planar face `hit` (a sketch plane, a face
+    /// to extrude up to), or why it cannot be one.
+    pub fn planar_reference(&self, hit: &EntityHit) -> Result<Reference, String> {
+        match hit.pick {
+            Pick::Face(f) if self.face_plane(hit.feature, f).is_some() => {
+                self.reference(hit, Use::Carrier)
+            }
+            Pick::Face(_) => Err("Pick a planar face".into()),
+            _ => Err("Pick a face".into()),
+        }
+    }
+
+    /// What a stored reference resolves to in the regenerated parts: the
+    /// part's feature and the kernel entities.
+    pub fn resolve(&self, reference: &Reference) -> Option<(FeatureId, Vec<Pick>)> {
+        let (b, r) = resolve_reference(&self.kernel, reference, &self.result.bodies).ok()?;
+        Some((self.result.bodies[b].feature, r.pieces))
+    }
+
     /// Bounds of all display meshes.
     pub fn bounds(&self) -> Option<([f32; 3], [f32; 3])> {
         self.meshes
@@ -501,15 +611,21 @@ impl Model {
         Ok(())
     }
 
-    /// A fresh name like "Extrude 3" for a new feature of this type.
+    /// A fresh name like "Extrude 3" for a new feature of this type: one
+    /// past the highest number among the studio's features named that way,
+    /// so deleting a feature never makes the next name a duplicate, and a
+    /// template ("Cylinder 1", an extrude) does not use up an extrude's
+    /// number.
     pub fn next_name(&self, type_name: &str) -> String {
+        let prefix = format!("{type_name} ");
         let n = self
             .studio()
             .features
             .iter()
-            .filter(|f| f.feature.type_name() == type_name)
-            .count();
-        format!("{type_name} {}", n + 1)
+            .filter_map(|f| f.name.strip_prefix(&prefix)?.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0);
+        format!("{type_name} {}", n.saturating_add(1))
     }
 
     /// The solved sketch of a regenerated studio, by feature.
@@ -604,11 +720,13 @@ impl Model {
         }
         self.result = regenerate(&self.kernel, &studio);
         let mut meshes = Vec::new();
+        let mut body_meshes = Vec::new();
         let mut owners = Vec::new();
         for (i, b) in self.result.bodies.iter().enumerate() {
             match self.kernel.tessellate(&b.body, &self.tessellation) {
                 Ok(m) => {
                     meshes.push(to_mesh_data(&m, PART_COLORS[i % PART_COLORS.len()]));
+                    body_meshes.push(m);
                     owners.push(b.feature);
                 }
                 Err(e) => {
@@ -624,6 +742,7 @@ impl Model {
             }
         }
         self.meshes = meshes;
+        self.body_meshes = body_meshes;
         self.mesh_owners = owners;
         self.generation += 1;
     }

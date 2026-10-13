@@ -29,6 +29,15 @@ pub enum SweepKind {
     Revolve,
 }
 
+/// Where an extrude ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndCondition {
+    /// At a typed depth.
+    Blind,
+    /// At the plane of a picked face (ADR 0019).
+    UpToFace,
+}
+
 /// An open extrude or revolve dialog that takes its profile from sketch
 /// regions picked in the viewport.
 #[derive(Clone, Debug)]
@@ -49,9 +58,13 @@ pub struct ProfilePick {
     pub distance: String,
     /// Extrude to both sides.
     pub symmetric: bool,
-    /// End the extrude at the plane of this face instead of the distance
-    /// (ADR 0019).
+    /// Where the extrude ends.
+    pub end: EndCondition,
+    /// The face an extrude ending at a face ends at (kept while the end
+    /// condition is switched, like the typed depth).
     pub up_to: Option<Box<Reference>>,
+    /// The next viewport click picks the face to end at.
+    pub picking_face: bool,
     /// Revolve angle as typed (bare numbers are degrees).
     pub angle: String,
     /// Why the last OK failed.
@@ -74,7 +87,9 @@ impl ProfilePick {
             picking_axis: false,
             distance: "10".into(),
             symmetric: false,
+            end: EndCondition::Blind,
             up_to: None,
+            picking_face: false,
             angle: "360".into(),
             error: None,
             hover: None,
@@ -98,6 +113,11 @@ impl ProfilePick {
                 regions: regions.clone(),
                 distance: mm(*distance),
                 symmetric: *symmetric,
+                end: if up_to.is_some() {
+                    EndCondition::UpToFace
+                } else {
+                    EndCondition::Blind
+                },
                 up_to: up_to.clone(),
                 ..ProfilePick::new(SweepKind::Extrude)
             },
@@ -135,8 +155,31 @@ impl ProfilePick {
     pub fn hint(&self) -> &'static str {
         if self.picking_axis {
             "Click a line of the sketch to revolve about"
+        } else if self.picking_face {
+            "Click a planar face to end the extrude at"
         } else {
             "Click sketch regions to add or remove them"
+        }
+    }
+
+    /// Sets where the extrude ends; picking a face starts at once when
+    /// none is picked yet.
+    pub fn set_end(&mut self, end: EndCondition) {
+        self.end = end;
+        self.picking_face = end == EndCondition::UpToFace && self.up_to.is_none();
+        self.picking_axis = false;
+        self.error = None;
+    }
+
+    /// Takes the face picked to end at, or shows why it cannot be one.
+    pub fn set_up_to(&mut self, face: Result<Reference, String>) {
+        match face {
+            Ok(r) => {
+                self.up_to = Some(Box::new(r));
+                self.picking_face = false;
+                self.error = None;
+            }
+            Err(e) => self.error = Some(e),
         }
     }
 
@@ -216,7 +259,10 @@ impl ProfilePick {
     pub fn ready(&self) -> bool {
         self.sketch.is_some()
             && !self.regions.is_empty()
-            && (self.kind == SweepKind::Extrude || self.axis.is_some())
+            && match self.kind {
+                SweepKind::Extrude => self.end == EndCondition::Blind || self.up_to.is_some(),
+                SweepKind::Revolve => self.axis.is_some(),
+            }
     }
 
     /// The feature the dialog describes.
@@ -232,7 +278,20 @@ impl ProfilePick {
         match self.kind {
             SweepKind::Extrude => {
                 let distance = Quantity::parse_length(&self.distance, LengthUnit::Millimetre)
-                    .map_err(|e| format!("Distance: {e}"))?;
+                    .map_err(|e| format!("Distance: {e}"));
+                if self.end == EndCondition::UpToFace {
+                    let face = self.up_to.clone().ok_or("Pick a face to extrude up to")?;
+                    // The face gives the depth; the typed one is kept for a
+                    // switch back to a blind extrude.
+                    let kept = distance.ok().filter(|d| *d != 0.0).unwrap_or(0.01);
+                    return Ok(Feature::Extrude {
+                        profile,
+                        distance: kept,
+                        symmetric: false,
+                        up_to: Some(face),
+                    });
+                }
+                let distance = distance?;
                 if distance == 0.0 {
                     return Err("Distance: must not be zero".into());
                 }
@@ -240,7 +299,7 @@ impl ProfilePick {
                     profile,
                     distance,
                     symmetric: self.symmetric,
-                    up_to: self.up_to.clone(),
+                    up_to: None,
                 })
             }
             SweepKind::Revolve => {

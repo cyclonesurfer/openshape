@@ -39,7 +39,13 @@ fn model_undo_redo_and_display_meshes() {
     assert!(m.redo());
     assert_eq!(m.meshes().len(), 2);
     assert!(!m.redo());
-    assert_eq!(m.next_name("Revolve"), "Revolve 2");
+    // The ring is a revolve but named as a template: it takes no number.
+    assert_eq!(m.next_name("Revolve"), "Revolve 1");
+    assert_eq!(m.next_name("Box"), "Box 2");
+    // One past the highest, so a deleted feature's number is not reused
+    // while a higher one exists.
+    m.add_feature("Box 7", FeatureDialog::new(Template::Box).build().unwrap());
+    assert_eq!(m.next_name("Box"), "Box 8");
 }
 
 #[test]

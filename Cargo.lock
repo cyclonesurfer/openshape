@@ -2355,6 +2355,7 @@ dependencies = [
  "opendatum-features",
  "opendatum-io",
  "opendatum-kernel",
+ "opendatum-naming",
  "opendatum-render",
  "opendatum-sketch-solver",
  "opendatum-text",

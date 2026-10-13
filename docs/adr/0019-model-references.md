@@ -141,9 +141,13 @@ gains point classification (needed for booleans anyway, design note 0012).
   `Kernel::region_profile_edges`.
 * The viewport picks faces (ray against the mesh), edges (screen distance
   to the polylines) and vertices (screen distance to the points), the
-  nearest kind within a few pixels winning in that order: vertex, edge,
-  face. A pick becomes a stored `Reference` with its name and the hit
-  point and normal or tangent as the hint.
+  nearest kind within a few pixels winning in that order: vertex (7
+  points), edge (5 points), face. A candidate behind a nearer face is
+  skipped. The whole logical entity is highlighted while hovered and
+  when selected. A pick becomes a stored `Reference` with its name and
+  the hit point and normal or tangent as the hint; on a planar face the
+  point is projected onto the plane and the hint's direction is the
+  outward normal.
 * Tests: references to box, sketch-extrude and inline-profile faces
   (caps, sides, a face in two pieces), through dimension changes, a
   region gaining a hole, a sketch edge redrawn, suppression, reordering

@@ -20,6 +20,7 @@ path = "src/main.rs"
 opendatum-core-model.workspace = true
 opendatum-kernel.workspace = true
 opendatum-features.workspace = true
+opendatum-naming.workspace = true
 opendatum-render.workspace = true
 opendatum-io.workspace = true
 opendatum-sketch-solver.workspace = true

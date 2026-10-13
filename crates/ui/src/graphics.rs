@@ -1,18 +1,19 @@
 //! The graphics area (ADR 0012): the 3D view rendered offscreen and shown
-//! through egui, the default planes, part and plane picking, sketches and
-//! sketch-mode feedback, the view cube, the graphics-area context menu and
-//! messages.
+//! through egui, the default planes, picking faces, edges, vertices and
+//! planes (ADR 0019) with their highlights, sketches and sketch-mode
+//! feedback, the view cube, the graphics-area context menu and messages.
 
 use eframe::egui;
 use egui::{Align2, Color32, FontId, PointerButton, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use opendatum_core_model::{DVec2, FeatureId};
 use opendatum_kernel::Frame;
+use opendatum_naming::Pick;
 use opendatum_render::{wgpu, DisplayMode, MeshData, SceneRenderer};
 use opendatum_ui_kit::{view_cube, Theme};
 
 use crate::app::{Action, OpenDatumApp, Selection};
 use crate::commands::Command;
-use crate::picking::pick_mesh;
+use crate::entity_pick::{logical_pieces, pick_entity, EntityHit, PickKinds};
 use crate::planes::{self, StdPlane};
 use crate::shell::menu_row;
 use crate::sketch_mode::{ScreenMap, SketchDisplay};
@@ -29,6 +30,8 @@ const MESSAGE_SECONDS: f64 = 6.0;
 struct SceneKey {
     generation: u64,
     selected: Option<FeatureId>,
+    /// Highlighted faces, edges and vertices, with their colours' roles.
+    highlights: Vec<(FeatureId, Pick, Highlight)>,
     hidden: Vec<FeatureId>,
     planes: [bool; 3],
     active_plane: Option<StdPlane>,
@@ -60,6 +63,19 @@ fn rgba(c: Color32) -> [f32; 4] {
 
 /// How far a selected part's colour moves towards the selection colour.
 const SELECTION_TINT: f32 = 0.3;
+
+/// How far a selected or hovered face's colour moves towards the
+/// selection or preselection colour.
+const FACE_TINT: f32 = 0.55;
+
+/// Why an entity is highlighted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Highlight {
+    /// Selected (or the face an open dialog uses).
+    Selected,
+    /// Under the pointer.
+    Hovered,
+}
 
 /// Tints a part colour towards the selection colour.
 fn tint(color: [f32; 4], toward: Color32, amount: f32) -> [f32; 4] {
@@ -110,24 +126,83 @@ impl OpenDatumApp {
         };
         // An open dialog's feature shows as selected.
         let previewed = self.model.preview().map(|p| p.feature());
-        let mut out: Vec<MeshData> = self
+        let highlights = self.highlights();
+        let color = |h: Highlight| match h {
+            Highlight::Selected => self.theme.selection,
+            Highlight::Hovered => self.theme.preselect,
+        };
+        let mut out: Vec<MeshData> = Vec::new();
+        let parts = self
             .model
             .meshes()
             .iter()
-            .zip(self.model.mesh_owners())
-            .filter(|(_, f)| !self.hidden_parts.contains(f))
-            .map(|(m, f)| {
-                if Some(*f) == selected || Some(*f) == previewed {
-                    MeshData {
-                        color: tint(m.color, self.theme.selection, SELECTION_TINT),
-                        edge_color: Some(rgba(self.theme.selection)),
-                        ..m.clone()
-                    }
-                } else {
-                    m.clone()
+            .zip(self.model.body_meshes())
+            .zip(self.model.mesh_owners());
+        for ((m, body), f) in parts {
+            if self.hidden_parts.contains(f) {
+                continue;
+            }
+            let m = if Some(*f) == selected || Some(*f) == previewed {
+                MeshData {
+                    color: tint(m.color, self.theme.selection, SELECTION_TINT),
+                    edge_color: Some(rgba(self.theme.selection)),
+                    ..m.clone()
                 }
-            })
-            .collect();
+            } else {
+                m.clone()
+            };
+            // Highlighted faces are drawn in their own meshes, so no face
+            // is drawn twice; the part's edges stay with the rest.
+            let faces: Vec<(usize, Highlight)> = highlights
+                .iter()
+                .filter(|(g, _, _)| g == f)
+                .filter_map(|(_, p, h)| match p {
+                    Pick::Face(ix) => Some((ix.0 as usize, *h)),
+                    _ => None,
+                })
+                .collect();
+            if faces.is_empty() {
+                out.push(m);
+            } else {
+                let lit = |i: usize| faces.iter().find(|(j, _)| *j == i).map(|(_, h)| *h);
+                out.push(MeshData {
+                    edge_color: m.edge_color,
+                    ..crate::to_mesh_data_where(body, m.color, |i| lit(i).is_none(), true)
+                });
+                for h in [Highlight::Hovered, Highlight::Selected] {
+                    if faces.iter().any(|(_, k)| *k == h) {
+                        out.push(crate::to_mesh_data_where(
+                            body,
+                            tint(m.color, color(h), FACE_TINT),
+                            |i| lit(i) == Some(h),
+                            false,
+                        ));
+                    }
+                }
+            }
+            // Highlighted edges, drawn again over the part's in their
+            // colour.
+            for h in [Highlight::Hovered, Highlight::Selected] {
+                let mut lines = Vec::new();
+                for (_, p, _) in highlights.iter().filter(|(g, _, k)| g == f && *k == h) {
+                    if let Pick::Edge(e) = p {
+                        if let Some(line) = body.edges.get(e.0 as usize) {
+                            for w in line.windows(2) {
+                                lines.push(w[0].as_vec3().to_array());
+                                lines.push(w[1].as_vec3().to_array());
+                            }
+                        }
+                    }
+                }
+                if !lines.is_empty() {
+                    out.push(MeshData {
+                        edge_lines: lines,
+                        edge_color: Some(rgba(color(h))),
+                        ..MeshData::default()
+                    });
+                }
+            }
+        }
         if let Some(editing) = self.sketches_in_3d() {
             for s in self.model.sketches() {
                 if Some(s.feature) == editing {
@@ -167,6 +242,43 @@ impl OpenDatumApp {
         out
     }
 
+    /// The kernel faces, edges and vertices to highlight: every piece of
+    /// the selected entity, of the one under the pointer, and of the face
+    /// an open extrude ends at. A hovered entity that is also selected
+    /// shows as selected.
+    fn highlights(&self) -> Vec<(FeatureId, Pick, Highlight)> {
+        let mut out: Vec<(FeatureId, Pick, Highlight)> = Vec::new();
+        let mut add = |f: FeatureId, pieces: Vec<Pick>, h: Highlight| {
+            for p in pieces {
+                if !out.iter().any(|(g, q, _)| *g == f && *q == p) {
+                    out.push((f, p, h));
+                }
+            }
+        };
+        let pieces = |hit: &EntityHit| {
+            let names = self
+                .model
+                .part(hit.feature)
+                .and_then(|p| p.names.as_ref().ok());
+            logical_pieces(names, hit.pick)
+        };
+        if let Some(Selection::Entity(hit)) = &self.selection {
+            add(hit.feature, pieces(hit), Highlight::Selected);
+        }
+        if let Some((f, picks)) = self
+            .pick
+            .as_ref()
+            .and_then(|p| p.up_to.as_ref())
+            .and_then(|r| self.model.resolve(r))
+        {
+            add(f, picks, Highlight::Selected);
+        }
+        if let Some(hit) = &self.hover_entity {
+            add(hit.feature, pieces(hit), Highlight::Hovered);
+        }
+        out
+    }
+
     /// `Some(the sketch being edited)` when sketches are drawn in 3D.
     fn sketches_in_3d(&self) -> Option<Option<FeatureId>> {
         self.show_sketches
@@ -180,6 +292,7 @@ impl OpenDatumApp {
                 Some(Selection::Part(f) | Selection::Feature(f)) => Some(f),
                 _ => None,
             },
+            highlights: self.highlights(),
             hidden: self.hidden_parts.iter().copied().collect(),
             planes: if self.sketch.is_none() {
                 self.planes_visible
@@ -191,34 +304,32 @@ impl OpenDatumApp {
         }
     }
 
-    /// The part or plane under a screen point of the graphics area.
+    /// The face, edge or vertex of a shown part under a screen point of
+    /// the graphics area (ADR 0019).
+    pub(crate) fn entity_at(&self, rect: Rect, pos: Pos2, kinds: PickKinds) -> Option<EntityHit> {
+        let parts = self.model.pick_parts(|f| self.hidden_parts.contains(&f));
+        pick_entity(&parts, &self.camera, rect, pos, kinds)
+    }
+
+    /// The face, edge, vertex or plane under a screen point of the
+    /// graphics area. Parts hide the planes behind them.
     fn pick_at(&self, rect: Rect, pos: Pos2) -> Option<Selection> {
+        if let Some(hit) = self.entity_at(rect, pos, PickKinds::All) {
+            return Some(Selection::Entity(hit));
+        }
         let (o, d) = self.camera.pixel_ray(
             pos.x - rect.min.x,
             pos.y - rect.min.y,
             rect.width(),
             rect.height(),
         );
-        let visible: Vec<(FeatureId, &MeshData)> = self
-            .model
-            .mesh_owners()
-            .iter()
-            .copied()
-            .zip(self.model.meshes())
-            .filter(|(f, _)| !self.hidden_parts.contains(f) && *f != crate::PREVIEW_FEATURE)
-            .collect();
-        let part = pick_mesh(visible.iter().map(|(_, m)| *m), o, d).map(|(i, t)| (visible[i].0, t));
         let h = self.plane_half();
-        let plane = StdPlane::ALL
+        StdPlane::ALL
             .into_iter()
             .filter(|p| self.planes_visible[p.index()])
             .filter_map(|p| planes::hit(p, h, o, d).map(|t| (p, t)))
-            .min_by(|a, b| a.1.total_cmp(&b.1));
-        match (part, plane) {
-            (Some((f, _)), _) => Some(Selection::Part(f)),
-            (None, Some((p, _))) => Some(Selection::Plane(p)),
-            (None, None) => None,
-        }
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(p, _)| Selection::Plane(p))
     }
 
     pub(crate) fn graphics(&mut self, ui: &mut Ui, rs: Option<&egui_wgpu::RenderState>) {
@@ -250,6 +361,19 @@ impl OpenDatumApp {
         }
         self.sketch_input(ui, &response, rect);
         let picking_profile = self.pick.is_some();
+        // Faces, edges and vertices under the pointer light up outside
+        // sketch mode; while an extrude picks the face it ends at, faces
+        // only.
+        let kinds = match &self.pick {
+            None => Some(PickKinds::All),
+            Some(p) if p.picking_face => Some(PickKinds::Faces),
+            Some(_) => None,
+        };
+        let hover = match (sketching, kinds, response.hover_pos()) {
+            (false, Some(k), Some(pos)) if !response.dragged() => self.entity_at(rect, pos, k),
+            _ => None,
+        };
+        self.hover_entity = hover;
         self.pick_input(&response, rect);
         if !sketching && !picking_profile {
             if response.clicked_by(PointerButton::Primary) {
@@ -258,11 +382,11 @@ impl OpenDatumApp {
                 }
             }
             if response.double_clicked_by(PointerButton::Primary) {
-                if let Some(Selection::Part(f)) = response
+                if let Some(Selection::Entity(hit)) = response
                     .interact_pointer_pos()
                     .and_then(|p| self.pick_at(rect, p))
                 {
-                    self.actions.push(Action::EditFeature(f));
+                    self.actions.push(Action::EditFeature(hit.feature));
                 }
             }
             let theme = self.theme.clone();
@@ -530,8 +654,23 @@ impl OpenDatumApp {
         }
     }
 
-    /// Routes viewport clicks to the profile picker.
+    /// Routes viewport clicks to the profile picker: regions and axes, or
+    /// the face an extrude ends at.
     fn pick_input(&mut self, response: &egui::Response, rect: Rect) {
+        if self.pick.as_ref().is_some_and(|p| p.picking_face) {
+            if response.clicked_by(PointerButton::Primary) {
+                let hit = response
+                    .interact_pointer_pos()
+                    .and_then(|pos| self.entity_at(rect, pos, PickKinds::Faces));
+                if let Some(hit) = hit {
+                    let picked = self.model.planar_reference(&hit);
+                    if let Some(p) = self.pick.as_mut() {
+                        p.set_up_to(picked);
+                    }
+                }
+            }
+            return;
+        }
         let Some(p) = self.pick.as_mut() else {
             return;
         };
@@ -618,6 +757,26 @@ impl OpenDatumApp {
         if let Some(ed) = &self.sketch {
             if let (Some(d), Some(frame)) = (ed.display(&self.model), ed.frame(&self.model)) {
                 sketch_paint::paint_editor(painter, &view.with_frame(frame), &d, ed, theme);
+            }
+        }
+        // Highlighted vertices: dots over the view.
+        if self.sketch.is_none() {
+            for (f, p, h) in self.highlights() {
+                let Pick::Vertex(v) = p else { continue };
+                let Some(q) = self
+                    .model
+                    .body_mesh(f)
+                    .and_then(|m| m.vertices.get(v.0 as usize))
+                else {
+                    continue;
+                };
+                if let Some(s) = view.world_to_screen(*q) {
+                    let c = match h {
+                        Highlight::Selected => theme.selection,
+                        Highlight::Hovered => theme.preselect,
+                    };
+                    painter.circle(s, 4.0, c, Stroke::new(1.5, theme.panel));
+                }
             }
         }
     }

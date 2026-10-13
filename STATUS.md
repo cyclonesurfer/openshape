@@ -8,10 +8,9 @@ sketch tests extrudes, slivers included, with mass properties exact to
 rounding; and persistent naming is built through its first references:
 the kernel's origin tables (ADR 0018), the `opendatum-naming` crate,
 which names the faces, edges and vertices of boxes, extrudes and
-revolves as the user sees them and resolves stored references, and in
-the model a sketch on a planar face and an extrude up to a parallel
-face (ADR 0019). Next: picking faces, edges and vertices in the
-viewport for those, then booleans.
+revolves as the user sees them and resolves stored references, and a
+sketch on a picked planar face and an extrude up to a picked parallel
+face, from the viewport through the model (ADR 0019). Next: booleans.
 The product is now named OpenDatum (ADR 0017): packages `opendatum-*`,
 binary `opendatum`, documents `.odatum`; documents saved under the old
 name open unchanged.
@@ -156,10 +155,18 @@ name open unchanged.
     part; inline rename; context menus (edit, rename, suppress, roll history
     here, move up/down across the bar, delete);
   - graphics area: the default planes as translucent outlined squares sized
-    to the model, part and plane picking (click to select, double-click to
-    edit), sketches drawn in 3D and hidden by the parts in front of them,
-    the view cube, a context menu (views, display modes, show/hide
-    sketches and planes), and messages;
+    to the model; picking of the parts' faces, edges and vertices (ADR
+    0019: a vertex within 7 points of the pointer wins, then an edge
+    within 5, then the face under it; hidden ones are skipped) with the
+    whole entity highlighted while hovered and when selected, and of
+    planes (click to select, double-click to edit); sketches drawn in 3D
+    and hidden by the parts in front of them, the view cube, a context
+    menu (views, display modes, show/hide sketches and planes), and
+    messages;
+  - Sketch with a planar face selected starts a sketch on that face (a
+    curved face is refused with a message); the extrude dialog ends at
+    a blind depth or "Up to face", picked in the view and highlighted
+    while the dialog is open;
   - floating feature dialogs with accept and cancel in their header; Enter
     accepts, Escape cancels; editing a feature shows the history up to it
     and greys the features after it (ADR 0013); the dialog's values are
@@ -558,6 +565,20 @@ name open unchanged.
   passed with every region's mass to 1e-10, no fallback; it refused 313
   unresolvable perturbed inputs, 18 loops below resolution and 44
   pinched profiles (the cases are random per run).
+- Picking and references in the application (ADR 0019), 2026-10-13, on
+  Mesa lavapipe: fmt, clippy with `-D warnings`, 867 tests and `cargo
+  deny` pass. The new UI tests (4) drive the real app offscreen: the
+  pointer picks a corner vertex before its edges and an edge before its
+  faces, each named as expected, with the hovered face lit; a click on
+  the plate's top face and Sketch makes a sketch on that face (its frame
+  at the face's height, cancelling removes it), while the cylinder's
+  side is refused; an extrude of the plate's region up to the cylinder's
+  picked top refuses the curved side with a message and ends at 30 mm
+  with the exact volume; nothing is picked where there are no parts.
+  New features are numbered one past the highest name of their type
+  (deleting one no longer leads to a duplicate name). Screenshots 33 to
+  37 show hovering, an edge and vertex, a sketch on a face and an
+  extrude up to a face.
 - References from features (ADR 0019), model side, 2026-10-13, on Mesa
   lavapipe: fmt, clippy with `-D warnings`, 863 tests and `cargo deny`
   pass. Every arrangement test region's profile now also checks the
@@ -752,12 +773,13 @@ name open unchanged.
   can call a sketch conflicting although another branch would satisfy it.
 - No booleans: each feature makes its own part (Phase 3; design notes
   0011 and 0012 are the plan).
-- References to model geometry (ADR 0019) exist in the model but not
-  yet in the application: a sketch on a planar face and an extrude up to
-  a face can be stored and regenerate, but the viewport cannot pick
-  faces yet (next). Up to a face works only for a planar face parallel
-  to the sketch; others fail with a message until surface intersection
-  exists. A sketch on a face that tilts through 45° between facing up
+- References to model geometry (ADR 0019): up to a face works only for
+  a planar face parallel to the sketch; others fail with a message
+  until surface intersection exists. Picked edges and vertices select
+  and highlight but no feature uses them yet (fillets, chamfers and
+  sketch projection will). Picking runs on the display mesh, so a
+  point picked on a curved edge or face lies within the display chord
+  of it (vertices, straight edges and planar faces are exact). A sketch on a face that tilts through 45° between facing up
   and facing sideways turns with the frame rule (ADR 0019 §2). Hints are
   checked against a mesh within 0.1 mm, so ties between pieces of an
   entity finer than that fail as ambiguous. A cap reference survives
@@ -772,12 +794,8 @@ name open unchanged.
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Phase 3, in the order the design notes give: the rest of design note
-   0013 §10 step 3, picking faces, edges and vertices in the viewport
-   (ADR 0019 consequences: vertex, then edge, then face within a few
-   pixels, with hover), a sketch started on a picked face, and "Up to
-   face" in the extrude dialog, with UI tests and screenshots. Then the
-   boolean pipeline end to end on polyhedral solids with
-   plane/plane intersections and the volume identities (0012 §8, 0011
-   §8). The rest of the Phase 2 sketcher (project/convert, intersection
+2. Phase 3, in the order the design notes give: the boolean pipeline
+   end to end on polyhedral solids with plane/plane intersections and
+   the volume identities (0012 §8, 0011 §8), then naming through
+   booleans (design note 0013 §10 step 4). The rest of the Phase 2 sketcher (project/convert, intersection
    curves, pierce) needs Phase 3 faces.

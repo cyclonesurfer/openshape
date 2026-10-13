@@ -364,7 +364,7 @@ fn the_palette_runs_a_command() {
 }
 
 #[test]
-fn clicking_parts_and_planes_selects_them() {
+fn clicking_faces_and_planes_selects_them() {
     let (mut d, _, extrude) = demo();
     d.app.select(None);
     d.settle().unwrap();
@@ -372,12 +372,29 @@ fn clicking_parts_and_planes_selects_them() {
     let p = on_screen(&mut d, DVec3::new(0.03, -0.015, 0.012));
     let unselected = pixel(&d.frame().unwrap(), p);
     let img = d.click(p).unwrap();
-    assert_eq!(d.app.selection(), Some(Selection::Part(extrude)));
+    match d.app.selection() {
+        Some(Selection::Entity(hit)) => {
+            assert_eq!(hit.feature, extrude);
+            assert!(
+                matches!(hit.pick, opendatum_naming::Pick::Face(_)),
+                "{hit:?}"
+            );
+            assert!(
+                (hit.point.z - 0.012).abs() < 1e-6,
+                "on the top face: {hit:?}"
+            );
+        }
+        other => panic!("expected the plate's top face, got {other:?}"),
+    }
+    // Move the pointer away, so the face shows selected, not hovered.
+    let g = d.app.layout().graphics;
+    d.hover(g.left_top() + Vec2::new(30.0, g.height() - 30.0))
+        .unwrap();
     let selected = pixel(&d.settle().unwrap(), p);
     assert!(
         i32::from(selected[2]) - i32::from(selected[0])
             > i32::from(unselected[2]) - i32::from(unselected[0]),
-        "the selected part turns towards the accent: {unselected:?} → {selected:?}"
+        "the selected face turns towards the accent: {unselected:?} → {selected:?}"
     );
     drop(img);
     // A click on empty space clears the selection.

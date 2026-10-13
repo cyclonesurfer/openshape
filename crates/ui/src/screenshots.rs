@@ -768,6 +768,79 @@ pub fn run(out: &Path) -> Result<Vec<PathBuf>, String> {
         .set_view(opendatum_ui_kit::view_cube::CubeTarget::HOME);
     c.app.camera.distance *= 0.6;
     save("32-closed-splines-extruded.png", &c.settle()?)?;
+
+    // Faces, edges and vertices of the parts (ADR 0019): the plate's top
+    // face under the pointer, then one of its edges selected with a
+    // corner under the pointer.
+    let (model, _, _) = demo_model()?;
+    let mut f = AppDriver::new(size, 1.0, model)?;
+    f.app.set_document_name("Bracket study");
+    let world = |d: &AppDriver, p: DVec3| {
+        ScreenMap::new(&d.app.camera, Frame::WORLD, d.app.layout().graphics)
+            .world_to_screen(p)
+            .ok_or("the point is off screen")
+    };
+    f.settle()?;
+    let top_face = DVec3::new(0.03, -0.015, 0.012);
+    f.hover(world(&f, top_face)?)?;
+    save("33-face-hovered.png", &f.settle()?)?;
+    f.click(world(&f, DVec3::new(0.0, -0.025, 0.012))? + Vec2::new(0.0, 2.0))?;
+    f.hover(world(&f, DVec3::new(0.04, -0.025, 0.012))? + Vec2::new(-3.0, 1.0))?;
+    save("34-edge-selected-vertex-hovered.png", &f.settle()?)?;
+
+    // A sketch on the picked face: a rectangle drawn looking straight at
+    // it, then seen from the side.
+    f.click(world(&f, top_face)?)?;
+    f.app.run(crate::commands::Command::Sketch);
+    let boss = f
+        .app
+        .sketch_editor()
+        .map(|ed| ed.feature)
+        .ok_or("no sketch on the face")?;
+    let frame = f
+        .app
+        .model()
+        .sketch_result(boss)
+        .ok_or("the sketch on the face does not solve")?
+        .frame;
+    let on_face = |d: &AppDriver, x: f64, y: f64| {
+        ScreenMap::new(&d.app.camera, frame, d.app.layout().graphics)
+            .to_screen(DVec2::new(x, y) * 1e-3)
+            .ok_or("the face is off screen")
+    };
+    f.settle()?;
+    f.app.run(crate::commands::Command::Tool(Tool::Rectangle));
+    f.click(on_face(&f, 18.0, -16.0)?)?;
+    f.click(on_face(&f, 34.0, 16.0)?)?;
+    f.app.run(crate::commands::Command::Tool(Tool::Select));
+    f.app
+        .set_view(opendatum_ui_kit::view_cube::CubeTarget::HOME);
+    f.app.camera.target = DVec3::new(0.01, 0.0, 0.012);
+    f.app.camera.distance *= 0.55;
+    f.hover(f.app.layout().graphics.left_bottom() + Vec2::new(30.0, -30.0))?;
+    save("35-sketch-on-face.png", &f.settle()?)?;
+    f.app.run(crate::commands::Command::FinishSketch);
+
+    // Extruding the rectangle up to the cylinder's top, picked in the
+    // view: the dialog, the face and the preview, then the result.
+    f.app.run(crate::commands::Command::Extrude);
+    f.settle()?;
+    f.click(on_face(&f, 26.0, 0.0)?)?;
+    if let Some(p) = f.app.profile_pick_mut() {
+        p.set_end(crate::profile_pick::EndCondition::UpToFace);
+    }
+    f.click(world(&f, DVec3::new(0.06, 0.015, 0.03))?)?;
+    if f.app
+        .profile_pick_mut()
+        .and_then(|p| p.up_to.as_ref())
+        .is_none()
+    {
+        return Err("the cylinder's top was not picked".into());
+    }
+    f.hover(f.app.layout().graphics.left_bottom() + Vec2::new(30.0, -30.0))?;
+    save("36-extrude-up-to-face.png", &f.settle()?)?;
+    f.key(Key::Enter, Modifiers::NONE)?;
+    save("37-extruded-up-to-face.png", &f.settle()?)?;
     Ok(written)
 }
 

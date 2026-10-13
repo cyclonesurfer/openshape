@@ -7,7 +7,7 @@ use egui::{
     Align, Area, Id, Key, Layout, Order, Pos2, Rect, Response, RichText, Sense, Stroke, Ui, Vec2,
 };
 use opendatum_core_model::sketch::DistanceKind;
-use opendatum_core_model::ModelOp;
+use opendatum_core_model::{ModelOp, PlaneRef};
 use opendatum_features::FeatureStatus;
 use opendatum_text::Font;
 use opendatum_ui_kit::palette::{PaletteEntry, PaletteOutcome};
@@ -16,7 +16,7 @@ use opendatum_ui_kit::{icon_button, paint_icon, Icon, Theme};
 use crate::app::{Action, FileAction, OpenDatumApp, Selection};
 use crate::commands::Command;
 use crate::dialogs::FieldKind;
-use crate::profile_pick::SweepKind;
+use crate::profile_pick::{EndCondition, SweepKind};
 use crate::sketch_mode::{CurveEdit, Tool};
 use crate::sketch_ops::shapes::{MAX_SIDES, MIN_SIDES};
 use crate::sketch_paint;
@@ -255,6 +255,13 @@ impl OpenDatumApp {
             SweepKind::Revolve => Icon::Revolve,
         };
         let picked = p.picked(&self.model).len();
+        // The part whose face the extrude ends at: `Some(None)` when the
+        // stored face no longer resolves.
+        let up_to_face: Option<Option<String>> = p.up_to.as_ref().map(|r| {
+            self.model
+                .resolve(r)
+                .and_then(|(f, _)| self.model.feature(f).map(|e| e.name.clone()))
+        });
         let live = match p.build() {
             Ok(_) => self.preview_failure(),
             Err(e) if p.ready() => Some(e),
@@ -299,10 +306,47 @@ impl OpenDatumApp {
                     .spacing([10.0, 6.0])
                     .show(ui, |ui| match p.kind {
                         SweepKind::Extrude => {
-                            field(ui, &theme, "Depth", &mut p.distance, "mm");
-                            ui.label(RichText::new("Symmetric").color(theme.text_muted));
-                            ui.checkbox(&mut p.symmetric, "");
+                            ui.label(RichText::new("End").color(theme.text_muted));
+                            ui.horizontal(|ui| {
+                                for (end, label) in [
+                                    (EndCondition::Blind, "Blind"),
+                                    (EndCondition::UpToFace, "Up to face"),
+                                ] {
+                                    if ui.selectable_label(p.end == end, label).clicked() {
+                                        p.set_end(end);
+                                    }
+                                }
+                            });
                             ui.end_row();
+                            match p.end {
+                                EndCondition::Blind => {
+                                    field(ui, &theme, "Depth", &mut p.distance, "mm");
+                                    ui.label(RichText::new("Symmetric").color(theme.text_muted));
+                                    ui.checkbox(&mut p.symmetric, "");
+                                    ui.end_row();
+                                }
+                                EndCondition::UpToFace => {
+                                    ui.label(RichText::new("Face").color(theme.text_muted));
+                                    ui.horizontal(|ui| {
+                                        match &up_to_face {
+                                            Some(Some(name)) => {
+                                                ui.label(format!("Face of {name}"));
+                                            }
+                                            Some(None) => {
+                                                ui.colored_label(theme.danger, "Missing");
+                                            }
+                                            None => {
+                                                ui.label("None");
+                                            }
+                                        }
+                                        if ui.selectable_label(p.picking_face, "Pick…").clicked()
+                                        {
+                                            p.picking_face = !p.picking_face;
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+                            }
                         }
                         SweepKind::Revolve => {
                             ui.label(RichText::new("Axis").color(theme.text_muted));
@@ -381,13 +425,19 @@ impl OpenDatumApp {
             .unwrap_or_default();
         let plane = model
             .sketch_def(ed.feature)
-            .map(|d| {
-                crate::planes::StdPlane::ALL
+            .map(|d| match &d.plane {
+                PlaneRef::Face(r) => model
+                    .resolve(r)
+                    .and_then(|(f, _)| model.feature(f))
+                    .map_or("Missing face".to_string(), |f| {
+                        format!("Face of {}", f.name)
+                    }),
+                plane => crate::planes::StdPlane::ALL
                     .into_iter()
-                    .find(|p| p.plane_ref() == d.plane)
+                    .find(|p| p.plane_ref() == *plane)
                     .map_or("Custom plane".to_string(), |p| {
                         format!("{} plane", p.label())
-                    })
+                    }),
             })
             .unwrap_or_default();
         let display = ed.display(model);
