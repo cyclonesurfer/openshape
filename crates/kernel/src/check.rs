@@ -3,10 +3,59 @@
 use glam::DVec3;
 use rustc_hash::FxHashMap;
 
-use crate::geom::Surface;
+use crate::geom::{Curve3, Surface};
+use crate::math::Frame;
 use crate::tess::{self, TessellationOptions};
 use crate::topo::Brep;
 use crate::{KernelError, Tolerance, TopologyCounts};
+
+/// A point between an edge's ends where it passes within `tol` of the axis
+/// of a surface of revolution (the z axis of `fr`), where the surface is
+/// singular: its angle is undefined there, so the edge has no parameters
+/// on the face and integrals and tessellations along it break. Points
+/// within `tol` of the edge's ends are its vertices, where an edge may
+/// meet the axis.
+///
+/// The distance from the axis is sampled along the edge and each sampled
+/// local least refined by golden-section search between its neighbours.
+fn through_axis(c: &Curve3, t0: f64, t1: f64, fr: &Frame, tol: f64) -> Option<DVec3> {
+    const SAMPLES: usize = 64;
+    let dist = |t: f64| (c.point(t) - fr.origin).cross(fr.z).length();
+    let at = |k: usize| t0 + (t1 - t0) * k as f64 / SAMPLES as f64;
+    let ds: Vec<f64> = (0..=SAMPLES).map(|k| dist(at(k))).collect();
+    let (a, b) = (c.point(t0), c.point(t1));
+    for k in 0..=SAMPLES {
+        let left = k.saturating_sub(1);
+        let right = (k + 1).min(SAMPLES);
+        if ds[k] > ds[left] || ds[k] > ds[right] {
+            continue;
+        }
+        // Golden-section search for the least distance on the bracket.
+        let (mut lo, mut hi) = (at(left), at(right));
+        let g = 0.5 * (5f64.sqrt() - 1.0);
+        let (mut x1, mut x2) = (hi - g * (hi - lo), lo + g * (hi - lo));
+        let (mut f1, mut f2) = (dist(x1), dist(x2));
+        for _ in 0..80 {
+            if f1 <= f2 {
+                hi = x2;
+                (x2, f2) = (x1, f1);
+                x1 = hi - g * (hi - lo);
+                f1 = dist(x1);
+            } else {
+                lo = x1;
+                (x1, f1) = (x2, f2);
+                x2 = lo + g * (hi - lo);
+                f2 = dist(x2);
+            }
+        }
+        let t = if f1 <= f2 { x1 } else { x2 };
+        let p = c.point(t);
+        if dist(t) <= tol && (p - a).length() > tol && (p - b).length() > tol {
+            return Some(p);
+        }
+    }
+    None
+}
 
 /// Counts entities and derives the genus from the Euler–Poincaré formula
 /// `V − E + F − R = 2 (S − H)` where `R` is the number of inner loops.
@@ -145,6 +194,15 @@ pub(crate) fn validate(b: &Brep, tol: &Tolerance) -> Vec<String> {
                         }
                     }
                 }
+                if let Some(fr) = half {
+                    if let Some(p) = through_axis(&e.curve, e.t0, e.t1, fr, on_tol) {
+                        issues.push(format!(
+                            "face {fi}: edge {} runs through the axis of its surface at {p:?} \
+                             between its ends (a singular point of a face's surface is a vertex)",
+                            c.edge.0
+                        ));
+                    }
+                }
             }
         }
     }
@@ -275,6 +333,83 @@ mod tests {
             assert_eq!(moved, 1);
             let issues = validate(&b, &tol);
             assert_eq!(issues.is_empty(), valid, "{lift}: {issues:?}");
+        }
+    }
+
+    /// Edges meeting the axis of a surface of revolution between their
+    /// ends are found, wherever along them and however they cross it;
+    /// edges meeting it at an end, or passing it at a distance, are not.
+    #[test]
+    fn edges_through_the_axis_of_a_surface_of_revolution_are_found() {
+        let tol = 1e-7;
+        let fr = Frame::WORLD;
+        let line = |a: DVec3, b: DVec3| Curve3::Line {
+            origin: a,
+            dir: b - a,
+        };
+        let circle = |center: DVec3, x: DVec3, y: DVec3, radius: f64| Curve3::Circle {
+            center,
+            x,
+            y,
+            radius,
+        };
+        let through = [
+            // Diameters of a flat cap, the axis at either end's side.
+            (
+                line(DVec3::new(1.0, 0.0, 2.0), DVec3::new(-0.04, 0.0, 2.0)),
+                0.0,
+                1.0,
+            ),
+            (
+                line(DVec3::new(0.03, 0.0, 0.0), DVec3::new(-1.0, 0.0, 0.0)),
+                0.0,
+                1.0,
+            ),
+            (
+                line(DVec3::new(0.3, 0.4, 0.0), DVec3::new(-0.3, -0.4, 0.0)),
+                0.0,
+                1.0,
+            ),
+            // A meridian of a sphere over a pole.
+            (circle(DVec3::ZERO, DVec3::X, DVec3::Z, 1.0), 1.0, 2.0),
+            // A circle in a plane across the axis.
+            (
+                circle(DVec3::new(0.5, 0.0, 0.0), DVec3::X, DVec3::Y, 0.5),
+                2.0,
+                4.0,
+            ),
+        ];
+        for (c, t0, t1) in &through {
+            assert!(through_axis(c, *t0, *t1, &fr, tol).is_some(), "{c:?}");
+        }
+        let clear = [
+            // A radius ending at the axis, and one leaving it.
+            (
+                line(DVec3::new(1.0, 0.0, 2.0), DVec3::new(0.0, 0.0, 2.0)),
+                0.0,
+                1.0,
+            ),
+            (
+                line(DVec3::new(0.0, 0.0, 2.0), DVec3::new(0.0, 1.0, 2.0)),
+                0.0,
+                1.0,
+            ),
+            // A chord passing the axis a micrometre away.
+            (
+                line(DVec3::new(1.0, 1e-6, 0.0), DVec3::new(-1.0, 1e-6, 0.0)),
+                0.0,
+                1.0,
+            ),
+            // A circle about the axis, and a meridian ending at a pole.
+            (circle(DVec3::ZERO, DVec3::X, DVec3::Y, 1.0), 0.0, 3.0),
+            (
+                circle(DVec3::ZERO, DVec3::X, DVec3::Z, 1.0),
+                0.0,
+                0.5 * std::f64::consts::PI,
+            ),
+        ];
+        for (c, t0, t1) in &clear {
+            assert!(through_axis(c, *t0, *t1, &fr, tol).is_none(), "{c:?}");
         }
     }
 

@@ -365,6 +365,9 @@ struct OChord {
     p: DVec2,
     q: DVec2,
     band: f64,
+    /// The part of `band` from the course's bend, which halving narrows;
+    /// the rest is how far the chord's ends are from the course's.
+    sag: f64,
     /// For a chord of a curved edge: its course and its parameters at `p`
     /// and `q`.
     course: Option<(usize, f64, f64)>,
@@ -395,6 +398,7 @@ impl<'a> Outline<'a> {
                         p: pa,
                         q: pb,
                         band: 0.0,
+                        sag: 0.0,
                         course: None,
                     }),
                     Some(c) => {
@@ -419,6 +423,7 @@ impl<'a> Outline<'a> {
                                 p: at[k],
                                 q: at[k + 1],
                                 band: c.band(ts[k], ts[k + 1]) + moved,
+                                sag: c.band(ts[k], ts[k + 1]),
                                 course: Some((traces.len(), ts[k], ts[k + 1])),
                             });
                         }
@@ -452,7 +457,7 @@ impl<'a> Outline<'a> {
     /// Whether the chart point `q` is in the face: `Some(true)` inside,
     /// `Some(false)` outside, `None` within `margin` of its boundary.
     /// Chords near `q` are halved, for this question only, until their
-    /// bands are within `fine` or clear of `q`; the answer is the parity of
+    /// sags are within `fine` or their bands clear of `q`; the answer is the parity of
     /// a ray from `q` across the chords, which is the parity across the
     /// boundary for a point outside every band.
     pub fn locate(&self, q: DVec2, margin: f64, fine: f64) -> Option<bool> {
@@ -469,7 +474,7 @@ impl<'a> Outline<'a> {
                 let d = point_segment(q, c.p, c.q);
                 if d <= c.band + margin {
                     match c.course {
-                        Some((k, t0, t1)) if c.band > fine => {
+                        Some((k, t0, t1)) if c.sag > fine => {
                             let trace = &self.traces[k];
                             let tm = 0.5 * (t0 + t1);
                             let m = trace.at(tm);
@@ -480,6 +485,7 @@ impl<'a> Outline<'a> {
                                     p,
                                     q: s,
                                     band: trace.band(a, b) + moved,
+                                    sag: trace.band(a, b),
                                     course: Some((k, a, b)),
                                 });
                             }

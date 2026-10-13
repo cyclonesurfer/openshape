@@ -1220,7 +1220,18 @@ pub(crate) fn polygon_cdt(loops: &[Vec<DVec2>]) -> Result<(Cdt, Vec<usize>), Str
         FxHashMap::with_capacity_and_hasher(n, Default::default());
     let mut verts: Vec<Point2<f64>> = Vec::with_capacity(n);
     let mut index = Vec::with_capacity(n);
+    // Coordinates this far below the polygon's size are rounding of a
+    // zero (a cap's centre mapped through a frame whose axes carry
+    // rounding came out at 8e-49), and the triangulation refuses nonzero
+    // coordinates under about 1.8e-43: they are taken as zero.
+    let size = loops
+        .iter()
+        .flatten()
+        .fold(0.0f64, |m, q| m.max(q.x.abs()).max(q.y.abs()));
+    let tiny = (size * 1e-30).max(1e-42);
+    let flush = |x: f64| if x.abs() < tiny { 0.0 } else { x };
     for q in loops.iter().flatten() {
+        let q = DVec2::new(flush(q.x), flush(q.y));
         // `+ 0.0` makes a negative zero positive, so equal points share a key.
         let key = [(q.x + 0.0).to_bits(), (q.y + 0.0).to_bits()];
         let i = *first.entry(key).or_insert_with(|| {
@@ -1592,6 +1603,19 @@ mod tests {
 
     fn poly(pts: &[(f64, f64)]) -> Vec<DVec2> {
         pts.iter().map(|&(x, y)| DVec2::new(x, y)).collect()
+    }
+
+    /// Coordinates far below a polygon's size are rounding of a zero and
+    /// taken as zero: the triangulation refuses nonzero ones under about
+    /// 1.8e-43 (a cap's centre came out of its chart at 8e-49).
+    #[test]
+    fn negligible_coordinates_are_zero() {
+        let square = poly(&[(8e-49, 6.8e-33), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]);
+        let (cdt, index) = polygon_cdt(&[square]).expect("a triangulation");
+        assert_eq!(cdt.num_vertices(), 4);
+        assert_eq!(index, vec![0, 1, 2, 3]);
+        let tiny = poly(&[(0.0, 0.0), (1e-20, 0.0), (1e-20, 1e-20), (0.0, 1e-20)]);
+        assert_eq!(polygon_cdt(&[tiny]).expect("kept").0.num_vertices(), 4);
     }
 
     #[test]

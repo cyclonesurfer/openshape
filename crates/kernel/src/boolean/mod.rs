@@ -550,7 +550,7 @@ const PROBE_ABOVE: usize = 64;
 /// as far from its sides as can be found, less the chords' bands, as a
 /// distance in space (the chart's lengths are lengths along the surface).
 /// While that is within the tolerance, chords are halved, until their
-/// bands are within a sixteenth of it.
+/// sags are within a sixteenth of it.
 fn interior(
     region: &planar::Region,
     edges: &[planar::Edge],
@@ -574,10 +574,11 @@ fn interior(
         }
         let (inner, clearance) = classify::interior_point(&polygons)?;
         let space = chart.space(clearance - band);
-        if space > eps || band <= eps / 16.0 {
+        let sag = r.sag();
+        if space > eps || sag <= eps / 16.0 {
             return Ok((inner, space));
         }
-        refined = Some(r.refined(edges, band / 4.0));
+        refined = Some(r.refined(edges, sag / 4.0));
     }
 }
 

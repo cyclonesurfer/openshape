@@ -501,6 +501,14 @@ impl Kernel for BrepKernel {
 
     fn tangent_plane(&self, body: &Body, face: FaceIx, near: DVec3) -> Option<FacePlane> {
         let f = body.brep.faces.get(face.0 as usize)?;
+        // A plane is regular everywhere, even where its parameters are not
+        // (the centre of a flat cap of a revolve).
+        if let Some((o, n)) = f.surface.plane() {
+            return Some(FacePlane {
+                point: near - n * (near - o).dot(n),
+                normal: if f.forward { n } else { -n },
+            });
+        }
         let (u, v) = f.surface.project(near);
         let n = f.surface.normal(u, v)?;
         Some(FacePlane {

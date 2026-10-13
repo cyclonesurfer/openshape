@@ -415,10 +415,11 @@ fn turned_solid(axis: Frame, origin: DVec3, pts: &[(f64, f64)], angle: f64) -> B
     .expect("a revolve")
 }
 
-/// A random solid of the kinds step 2 handles: a box turned any way, or a
-/// prism along `axis`'s normal of a profile with arcs (a circle, a slot or
-/// rounded rectangle, a D, a polygon with a round hole, a disc with a
-/// polygonal hole).
+/// A random solid of the kinds step 2 handles: a solid turned about
+/// `axis`'s normal (a rod, a tube or a stepped rod, turned a whole turn or
+/// half of one), a box turned any way, or a prism along `axis`'s normal of
+/// a profile with arcs (a circle, a slot or rounded rectangle, a D, a
+/// polygon with a round hole, a disc with a polygonal hole).
 fn random_curved(r: &mut Rng, axis: Frame) -> Body {
     let snap = r.chance(0.5);
     let centre = DVec3::new(
@@ -426,6 +427,35 @@ fn random_curved(r: &mut Rng, axis: Frame) -> Body {
         r.coord(-0.5, 0.5, snap),
         r.coord(-0.5, 0.5, snap),
     );
+    if r.chance(0.2) {
+        let rad = r.coord(0.25, 1.0, snap).max(0.25);
+        let (h0, h1) = (
+            -r.coord(0.25, 0.75, snap).max(0.25),
+            r.coord(0.25, 0.75, snap).max(0.25),
+        );
+        let pts = match r.next() % 3 {
+            0 => vec![(0.0, h0), (rad, h0), (rad, h1), (0.0, h1)],
+            1 => {
+                let inner = rad * if snap { 0.5 } else { r.range(0.3, 0.7) };
+                vec![(inner, h0), (rad, h0), (rad, h1), (inner, h1)]
+            }
+            _ => {
+                let small = rad * if snap { 0.5 } else { r.range(0.3, 0.7) };
+                let hm = 0.5 * (h0 + h1);
+                vec![
+                    (0.0, h0),
+                    (rad, h0),
+                    (rad, hm),
+                    (small, hm),
+                    (small, h1),
+                    (0.0, h1),
+                ]
+            }
+        };
+        let angle = if r.chance(0.8) { TAU } else { PI };
+        let origin = axis.origin + axis.x * centre.x + axis.y * centre.y + axis.z * centre.z;
+        return turned_solid(axis, origin, &pts, angle);
+    }
     if r.chance(0.3) {
         let size = DVec3::new(
             r.coord(0.25, 1.5, snap).max(0.25),
@@ -912,4 +942,288 @@ fn turned_rods_and_tubes_cut_by_boxes() {
             assert_eq!(counts(&r).0, faces[k], "{op:?}");
         }
     }
+}
+
+/// A half-turn rod (a D-shaped half cylinder) cut down its side by a box:
+/// its two flat sides lie on one plane and join into one face, and each
+/// cap's two radii, both then between the cap and that face, used to join
+/// into one diameter through the axis, where the cap's surface of
+/// revolution is singular. The mass properties of such a result did not
+/// converge (or, rarely, converged to a wrong volume); the centre stays a
+/// vertex now, and the validator refuses an edge through a face's axis.
+#[test]
+fn a_half_turned_rod_keeps_the_centres_of_its_caps() {
+    let rod = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (1.0, 0.0), (1.0, 2.0), (0.0, 2.0)],
+        PI,
+    );
+    let side = cuboid(DVec3::new(0.5, -2.0, -1.0), DVec3::new(2.0, 2.0, 3.0));
+    // Half of the part of the unit disc beyond x = 0.5, twice over.
+    let piece = PI / 3.0 - 3f64.sqrt() / 4.0;
+    let volumes = [24.0 + PI - piece, piece, PI - piece];
+    // Faces, edges and vertices: each cap keeps its centre.
+    let topology = [(10, 23, 16), (5, 9, 6), (5, 11, 8)];
+    for (k, op) in [BooleanOp::Union, BooleanOp::Intersect, BooleanOp::Subtract]
+        .into_iter()
+        .enumerate()
+    {
+        let r = run(&rod, &side, op);
+        assert!(
+            close(volume(&r), volumes[k]),
+            "{op:?}: {} vs {}",
+            volume(&r),
+            volumes[k]
+        );
+        assert_eq!(counts(&r), topology[k], "{op:?}");
+    }
+}
+
+/// A prism of `curves` on `plane`, `distance` long.
+fn prism(plane: Frame, curves: Vec<ProfileCurve>, distance: f64, symmetric: bool) -> Body {
+    k().extrude(
+        &Profile { plane, curves },
+        &ExtrudeSpec {
+            distance,
+            symmetric,
+        },
+    )
+    .expect("a prism")
+}
+
+/// Pairs a fuzz with turned solids found faulty (2026-10-13), with their
+/// operands as drawn: every operation must succeed, valid, with the volume
+/// identities and the membership of sampled points.
+///
+/// 1. A disc with a square hole and a stepped rod turned half a turn on
+///    it: a cap's centre came out of its chart at 8e-49, which the
+///    triangulation of a piece refuses as too small.
+/// 2. A slot and a stepped rod at an angle, and 3. a slot and a box at an
+///    angle: a curve's end moved 2.7e-8 to its cluster, more than a
+///    sixteenth of the tolerance, and its end chord was halved without end
+///    to narrow a band that halving cannot narrow.
+#[test]
+fn pairs_a_fuzz_of_turned_solids_found() {
+    let pairs = [
+        (
+            prism(
+                Frame {
+                    origin: DVec3::new(0.0, 0.0, 0.0),
+                    x: DVec3::new(1.0, 0.0, 0.0),
+                    y: DVec3::new(0.0, 1.0, 0.0),
+                    z: DVec3::new(0.0, 0.0, 1.0),
+                },
+                vec![
+                    ProfileCurve::Circle {
+                        center: DVec2::new(-0.5, -0.25),
+                        radius: 1.0,
+                    },
+                    ProfileCurve::Line {
+                        start: DVec2::new(-0.14174881657789773, -0.13917992250199768),
+                        end: DVec2::new(-0.6108200774980024, 0.10825118342210227),
+                    },
+                    ProfileCurve::Line {
+                        start: DVec2::new(-0.6108200774980024, 0.10825118342210227),
+                        end: DVec2::new(-0.8582511834221023, -0.3608200774980022),
+                    },
+                    ProfileCurve::Line {
+                        start: DVec2::new(-0.8582511834221023, -0.3608200774980022),
+                        end: DVec2::new(-0.3891799225019978, -0.6082511834221023),
+                    },
+                    ProfileCurve::Line {
+                        start: DVec2::new(-0.3891799225019978, -0.6082511834221023),
+                        end: DVec2::new(-0.14174881657789773, -0.13917992250199768),
+                    },
+                ],
+                0.5,
+                false,
+            ),
+            turned_solid(
+                Frame {
+                    origin: DVec3::new(0.0, 0.0, 0.0),
+                    x: DVec3::new(1.0, 0.0, 0.0),
+                    y: DVec3::new(0.0, 1.0, 0.0),
+                    z: DVec3::new(0.0, 0.0, 1.0),
+                },
+                DVec3::new(-0.25, 0.25, 0.5),
+                &[
+                    (0.0, -0.25),
+                    (0.75, -0.25),
+                    (0.75, 0.25),
+                    (0.375, 0.25),
+                    (0.375, 0.75),
+                    (0.0, 0.75),
+                ],
+                PI,
+            ),
+        ),
+        (
+            prism(
+                Frame {
+                    origin: DVec3::new(
+                        0.3198798658815176,
+                        0.009509306982644183,
+                        0.14267829601661042,
+                    ),
+                    x: DVec3::new(
+                        -0.5095606575811561,
+                        -0.30556614931921056,
+                        0.8043489694378242,
+                    ),
+                    y: DVec3::new(0.42423748938859496, 0.7240690809675032, 0.5438258164009292),
+                    z: DVec3::new(
+                        -0.7485789796960115,
+                        0.6183472280014727,
+                        -0.23932450100266184,
+                    ),
+                },
+                vec![
+                    ProfileCurve::Line {
+                        start: DVec2::new(-0.6128598662078211, -0.8688728997063812),
+                        end: DVec2::new(-0.07551125986357149, -0.8688728997063812),
+                    },
+                    ProfileCurve::Arc {
+                        center: DVec2::new(-0.07551125986357154, 0.06831019919853742),
+                        radius: 0.9371830989049186,
+                        start_angle: -FRAC_PI_2,
+                        sweep_angle: FRAC_PI_2,
+                    },
+                    ProfileCurve::Line {
+                        start: DVec2::new(0.861671839041347, 0.06831019919853742),
+                        end: DVec2::new(0.861671839041347, 0.6849782878507099),
+                    },
+                    ProfileCurve::Arc {
+                        center: DVec2::new(-0.07551125986357154, 0.6849782878507099),
+                        radius: 0.9371830989049186,
+                        start_angle: 0.0,
+                        sweep_angle: FRAC_PI_2,
+                    },
+                    ProfileCurve::Line {
+                        start: DVec2::new(-0.07551125986357149, 1.6221613867556286),
+                        end: DVec2::new(-0.6128598662078211, 1.6221613867556286),
+                    },
+                    ProfileCurve::Arc {
+                        center: DVec2::new(-0.6128598662078212, 0.6849782878507099),
+                        radius: 0.9371830989049186,
+                        start_angle: FRAC_PI_2,
+                        sweep_angle: FRAC_PI_2,
+                    },
+                    ProfileCurve::Line {
+                        start: DVec2::new(-1.5500429651127399, 0.68497828785071),
+                        end: DVec2::new(-1.5500429651127399, 0.06831019919853754),
+                    },
+                    ProfileCurve::Arc {
+                        center: DVec2::new(-0.6128598662078212, 0.06831019919853742),
+                        radius: 0.9371830989049186,
+                        start_angle: PI,
+                        sweep_angle: FRAC_PI_2,
+                    },
+                ],
+                0.8174169161354687,
+                true,
+            ),
+            turned_solid(
+                Frame {
+                    origin: DVec3::new(0.0, 0.0, 0.0),
+                    x: DVec3::new(
+                        -0.5095606575811561,
+                        -0.30556614931921056,
+                        0.8043489694378242,
+                    ),
+                    y: DVec3::new(0.42423748938859496, 0.7240690809675032, 0.5438258164009292),
+                    z: DVec3::new(
+                        -0.7485789796960115,
+                        0.6183472280014727,
+                        -0.23932450100266184,
+                    ),
+                },
+                DVec3::new(-0.3145349093192919, 0.07819526967056553, 0.1412561171087906),
+                &[
+                    (0.0, -0.25),
+                    (0.75, -0.25),
+                    (0.75, 0.125),
+                    (0.375, 0.125),
+                    (0.375, 0.5),
+                    (0.0, 0.5),
+                ],
+                TAU,
+            ),
+        ),
+        (
+            prism(
+                Frame {
+                    origin: DVec3::new(
+                        0.44989271050355284,
+                        0.14026408013845004,
+                        -0.4181833832883749,
+                    ),
+                    x: DVec3::new(1.0, 0.0, 0.0),
+                    y: DVec3::new(0.0, 1.0, 0.0),
+                    z: DVec3::new(0.0, 0.0, 1.0),
+                },
+                vec![
+                    ProfileCurve::Line {
+                        start: DVec2::new(-0.3980656106028941, -0.8620680373061178),
+                        end: DVec2::new(0.41308136483509467, -0.8620680373061178),
+                    },
+                    ProfileCurve::Arc {
+                        center: DVec2::new(0.4130813648350946, 0.05737362008177527),
+                        radius: 0.9194416573878931,
+                        start_angle: -FRAC_PI_2,
+                        sweep_angle: FRAC_PI_2,
+                    },
+                    ProfileCurve::Arc {
+                        center: DVec2::new(0.4130813648350946, 0.05737362008177527),
+                        radius: 0.9194416573878931,
+                        start_angle: 0.0,
+                        sweep_angle: FRAC_PI_2,
+                    },
+                    ProfileCurve::Line {
+                        start: DVec2::new(0.41308136483509467, 0.9768152774696683),
+                        end: DVec2::new(-0.3980656106028941, 0.9768152774696683),
+                    },
+                    ProfileCurve::Arc {
+                        center: DVec2::new(-0.39806561060289414, 0.05737362008177527),
+                        radius: 0.9194416573878931,
+                        start_angle: FRAC_PI_2,
+                        sweep_angle: FRAC_PI_2,
+                    },
+                    ProfileCurve::Arc {
+                        center: DVec2::new(-0.39806561060289414, 0.05737362008177527),
+                        radius: 0.9194416573878931,
+                        start_angle: PI,
+                        sweep_angle: FRAC_PI_2,
+                    },
+                ],
+                0.3403025177356964,
+                false,
+            ),
+            k().make_box(
+                &Frame {
+                    origin: DVec3::new(
+                        -0.06718975807541638,
+                        -0.2819102258866296,
+                        -0.6291372072111716,
+                    ),
+                    x: DVec3::new(0.09344293357510233, 0.6881420902924062, -0.7195337947121573),
+                    y: DVec3::new(
+                        -0.9949161505073416,
+                        0.09179772557000873,
+                        -0.041412933243448254,
+                    ),
+                    z: DVec3::new(0.03755358337804729, 0.7197455391651773, 0.6932215282485797),
+                },
+                DVec3::new(1.0409626070707354, 0.878961188058442, 1.1840879921925254),
+            )
+            .expect("a box"),
+        ),
+    ];
+    let mut t = Tally::default();
+    let mut points = Rng(0x5A3F_0E13);
+    for (i, (a, b)) in pairs.iter().enumerate() {
+        identities(&mut t, a, b, &format!("pair {}", i + 1), 0.0, &mut points);
+    }
+    assert!(t.refused.is_empty(), "{:?}", t.refused);
+    assert!(t.bugs.is_empty(), "{:?}", t.bugs);
 }

@@ -435,6 +435,16 @@ fn merge_edges(
             if u == w || seg_faces[&s0] != seg_faces[&s1] {
                 continue;
             }
+            // A point on the axis of a face's surface of revolution stays a
+            // vertex: the surface is singular there, and an edge running
+            // through it would have no parameters there on the face (its
+            // angle jumps by half a turn).
+            if seg_faces[&s0]
+                .iter()
+                .any(|&i| on_axis(geometry.pair, &faces[i], pts.rep[v], eps))
+            {
+                continue;
+            }
             // The courses from u to v and from v to w.
             let c0 = if g0.a == u {
                 g0.course
@@ -551,6 +561,16 @@ fn merge_edges(
         }
     }
     faces
+}
+
+/// True if `p` lies within `eps` of the axis of the surface of `f`'s
+/// operand face, if that is a surface of revolution: its singular points
+/// (a pole, an apex, the centre of a flat cap) are there.
+fn on_axis(pair: &Pair, f: &Out, p: DVec3, eps: f64) -> bool {
+    match &pair.get(f.operand).brep.faces[f.face].surface {
+        Surface::Revolution { frame, .. } => (p - frame.origin).cross(frame.z).length() <= eps,
+        _ => false,
+    }
 }
 
 /// Around every vertex the faces must form one fan: two fans are bodies

@@ -622,9 +622,14 @@ isometric), each curved segment a chain of chords with bands from a
 bound on its course's second derivative (§10.4). Chords are halved
 until no band can hide a contact; the chords at a node shared by two
 segments are halved at once (they always meet there), and each later
-round tests only its new chords. Ordering segments at a point by exact
+round tests only its new chords. A chord's band is its course's sag
+about it plus how far the chord's ends were moved to their clusters
+(which take in points within the tolerance); halving narrows only the
+sag, so a chord is halved while its sag, not its band, is over a
+sixteenth of the tolerance. Ordering segments at a point by exact
 tangents and curvature (§10.4) was not needed: the chords near a node
-are within a sixteenth of the tolerance of their courses.
+are within a sixteenth of the tolerance of their courses, besides the
+move of their ends to the node's cluster.
 
 **Classify** (`classify.rs`). A piece's point is found as in step 1,
 with the chords' bands subtracted from its clearance and the clearance
@@ -649,7 +654,11 @@ around the axis, which that record's parameters cannot hold, so a joined
 face on a plane is recorded as a plane (found 2026-10-13: before, a
 turned rod cut square by a box came back with its cap's parameters
 wrapped and its volume wrong, and validation now refuses any face of
-revolution whose boundary leaves its frame's half turn). Curved
+revolution whose boundary leaves its frame's half turn). A point on the
+axis of a face's surface of revolution stays a vertex: segments are not
+joined there, since an edge running through a singular point of its
+face's surface has no parameters on the face there (its angle jumps by
+half a turn), and validation refuses such an edge. Curved
 segments join end to end only when they are pieces of one operand edge
 or one track; straight ones join as in step 1. A result whose faces are all flat with straight
 edges gets step 1's exact shell volumes. Otherwise a lone shell is the
@@ -695,6 +704,23 @@ that satisfy all three identities. A second run takes prisms along two
 different axes: on 2,000 pairs every result is correct and every
 refusal (383 in 1,000 operations) is a quartic of two cylinders at an
 angle.
+
+**Turned solids** (2026-10-13). With rods, tubes and stepped rods
+turned a whole turn or half of one about the pair's axis among the
+random solids (a fifth of them), a run at 20 times the default size
+found three faults, now fixed and kept as tests: an edge through the
+centre of a cap (Assemble, above), whose mass properties did not
+converge (102 results) or, for 7 pairs, converged to volumes that broke
+the identities by up to 3e-7 of them; end chords halved without end
+(Split, above; 8 operations); and a cap's centre that came out of its
+chart at 8e-49, which the triangulation of a piece refuses as too small
+(4 operations; coordinates under 1e-30 of a polygon's size are now
+taken as zero). After the fixes, on 4,000 pairs along one axis and
+2,000 at an angle, every result is valid and correct by the identities
+and by point membership; along one axis 317 of 16,000 operations are
+refused (20 in 1,000: 312 tangent contacts, 5 non-manifold results),
+and at an angle 3,730 of 8,000, all quartics but one non-manifold
+result and one elliptical edge on a cylinder (§10.7, later items).
 
 ## 12. Step 2, item 3: cones and spheres (design, 2026-10-13)
 

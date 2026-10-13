@@ -653,7 +653,36 @@ name open unchanged.
   be resolved into chords" and 4 as a piece the triangulation finds too
   small; and the tangent plane of a turned rod's cap at its centre (on
   the axis) is missing, which the fuzz's own check of origins needs (218
-  operations). These are the next thing to fix.
+  operations). All fixed in the entry below.
+- What turned solids met in the booleans, fixed the same day
+  (2026-10-13; design note 0012 §11, "Turned solids"). Three faults, each
+  kept as a test that fails without its fix: (1) a turned solid of half
+  a turn has its two flat sides on one plane, joined into one face, and
+  each cap's two radii were then joined into a diameter through the
+  axis, where the cap's surface of revolution is singular; the boundary
+  integrand of the mass properties has a kink there, so they did not
+  converge, or (7 pairs) converged to volumes 3e-7 off. A point on the
+  axis of a face's surface of revolution now stays a vertex, and the
+  validator refuses an edge through such an axis between its ends. (2)
+  A curve's end moved to its cluster by more than a sixteenth of the
+  tolerance (clusters take in points within it) left its end chord
+  halved without end, as the move is part of the chord's band that
+  halving cannot narrow; chords are now halved by their sag alone (also
+  in the search for a piece's point and the face outlines' point test,
+  where the same move could have looped forever). (3) A cap's centre came
+  out of its chart at 8e-49, which the triangulation refuses as too
+  small; coordinates under 1e-30 of a polygon's size are taken as zero.
+  Also: the tangent plane of a planar face is now exact everywhere,
+  centres of caps included (it was missing there). Turned solids (a
+  fifth of the random solids) are now in the curved fuzz and in CI. At
+  20 times the default size: 4,000 pairs along one axis and 2,000 at an
+  angle, every result valid and correct by the identities and by point
+  membership; 20 refusals in 1,000 along one axis (312 tangent
+  contacts, 5 non-manifold of 16,000) and, at an angle, all quartics
+  but one non-manifold result and one elliptical edge. The same day a
+  property test of elliptical arcs failed the gate by chance (it summed
+  2,000 rounded steps against the rounding of one); it now counts whole
+  turns, and the failing case is kept.
 - Geometry for booleans of curved solids (design note 0012 §10.7, item
   1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   915 tests and `cargo deny` pass. Tested on its own; the boolean stages
@@ -1022,11 +1051,7 @@ name open unchanged.
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Phase 3, in the order the design notes give: first what turned
-   solids meet (above: volume identities broken by up to 3e-7, mass
-   properties that do not converge, curved segments not resolved into
-   chords, tangent planes on the axis), then turned solids in the CI
-   fuzz; booleans with cones and
+2. Phase 3, in the order the design notes give: booleans with cones and
    spheres (0012 §10.7 item 3, with the conics of a plane across a cone;
    planes and cylinders, item 2, are done, §11); then tangent contacts
    (the largest share of the curved refusals) and the elliptical edges
