@@ -5,7 +5,8 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use opendatum_kernel::{
     Body, BooleanOp, BrepKernel, DVec2, DVec3, EdgeOrigin, ExtrudeSpec, FaceIx, FaceOrigin, Frame,
-    Kernel, KernelError, Merged, Operand, Profile, ProfileCurve, TessellationOptions, VertexOrigin,
+    Kernel, KernelError, Merged, Operand, Profile, ProfileCurve, RevolveSpec, TessellationOptions,
+    VertexOrigin,
 };
 
 fn k() -> BrepKernel {
@@ -389,6 +390,29 @@ fn d_shape(c: DVec2, rad: f64, d: f64, angle: f64) -> Vec<ProfileCurve> {
         arc(c, rad, angle + half, TAU - 2.0 * half),
         line(c + b, c + a),
     ]
+}
+
+/// A solid turned about the line through `origin` along `axis`'s normal:
+/// the polygon `pts` of (radius, height) points revolved by `angle`. A full
+/// turn makes faces of half a turn each, its caps planes recorded as
+/// surfaces of revolution.
+fn turned_solid(axis: Frame, origin: DVec3, pts: &[(f64, f64)], angle: f64) -> Body {
+    let plane = Frame {
+        origin,
+        x: axis.x,
+        y: axis.z,
+        z: -axis.y,
+    };
+    let pts: Vec<DVec2> = pts.iter().map(|&(rho, h)| DVec2::new(rho, h)).collect();
+    k().revolve(
+        &Profile::polygon(plane, &pts),
+        &RevolveSpec {
+            axis_origin: DVec2::ZERO,
+            axis_dir: DVec2::Y,
+            angle,
+        },
+    )
+    .expect("a revolve")
 }
 
 /// A random solid of the kinds step 2 handles: a box turned any way, or a
@@ -819,15 +843,73 @@ fn volume_identities_on_random_pairs_at_an_angle() {
     report("random solids of planes and cylinders at an angle", &t);
 }
 
+/// A rod dipping into a pipe's wall from outside: the faces of the rod
+/// have their boundaries wholly outside the pipe, yet meet it, in quartic
+/// curves (two cylinders at an angle). Refused, never taken as apart.
 #[test]
-fn zz_oracle_on_the_rod() {
-    let big = cylinder(at_z(-5.0), DVec2::ZERO, 10.0, 10.0);
-    let f = Frame::from_normal(DVec3::new(-4.0, 10.5, 3.0), DVec3::X, DVec3::Z);
-    let rod = cylinder(f, DVec2::ZERO, 1.0, 24.0);
-    let mut t = Tally::default();
-    let mut points = Rng(1);
-    for _ in 0..20 {
-        identities(&mut t, &big, &rod, "rod", 0.0, &mut points);
+fn a_rod_dipping_into_a_pipe_wall_is_refused() {
+    let pipe = cylinder(at_z(-5.0), DVec2::ZERO, 10.0, 10.0);
+    for (y, z) in [(10.5, 0.0), (10.5, 3.0), (-10.5, -3.0)] {
+        let f = Frame::from_normal(DVec3::new(-4.0, y, z), DVec3::X, DVec3::Z);
+        let rod = cylinder(f, DVec2::ZERO, 1.0, 24.0);
+        for op in [BooleanOp::Union, BooleanOp::Intersect, BooleanOp::Subtract] {
+            match k().boolean(&pipe, &rod, op) {
+                Err(KernelError::Unsupported(m)) => assert!(m.contains("quartic"), "{op:?}: {m}"),
+                other => panic!("({y}, {z}) {op:?}: {:?}", other.map(|b| volume(&b))),
+            }
+        }
     }
-    report("rod", &t);
+}
+
+/// Turned rods and tubes (their caps planes recorded as surfaces of
+/// revolution, in two halves each) cut by boxes: a cap kept whole is one
+/// face again, recorded as a plane, and the volumes are exact.
+#[test]
+fn turned_rods_and_tubes_cut_by_boxes() {
+    let rod = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (1.0, 0.0), (1.0, 2.0), (0.0, 2.0)],
+        TAU,
+    );
+    let tube = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.5, 0.0), (1.0, 0.0), (1.0, 2.0), (0.5, 2.0)],
+        TAU,
+    );
+    let top = cuboid(DVec3::new(-2.0, -2.0, 1.5), DVec3::new(2.0, 2.0, 3.0));
+    let side = cuboid(DVec3::new(0.5, -2.0, -1.0), DVec3::new(2.0, 2.0, 3.0));
+    // The part of the unit disc beyond x = 0.5, twice over (z from 0 to 2).
+    let segment = 2.0 * (PI / 3.0 - 3f64.sqrt() / 4.0);
+    let cases = [
+        (&rod, &top, [24.0 + 1.5 * PI, 0.5 * PI, 1.5 * PI], [9, 4, 4]),
+        (
+            &rod,
+            &side,
+            [24.0 + 2.0 * PI - segment, segment, 2.0 * PI - segment],
+            [10, 5, 5],
+        ),
+        (
+            &tube,
+            &top,
+            [24.0 + 1.125 * PI, 0.375 * PI, 1.125 * PI],
+            [12, 6, 6],
+        ),
+    ];
+    for (a, b, volumes, faces) in cases {
+        for (k, op) in [BooleanOp::Union, BooleanOp::Intersect, BooleanOp::Subtract]
+            .into_iter()
+            .enumerate()
+        {
+            let r = run(a, b, op);
+            assert!(
+                close(volume(&r), volumes[k]),
+                "{op:?}: {} vs {}",
+                volume(&r),
+                volumes[k]
+            );
+            assert_eq!(counts(&r).0, faces[k], "{op:?}");
+        }
+    }
 }

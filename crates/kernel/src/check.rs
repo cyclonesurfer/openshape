@@ -112,6 +112,13 @@ pub(crate) fn validate(b: &Brep, tol: &Tolerance) -> Vec<String> {
             } else {
                 on_tol
             };
+            // A face on a surface of revolution lies within the half turn
+            // of its frame, its angles in [0, π] (ADR 0008): on the side of
+            // the frame's x–z plane that y points to.
+            let half = match &f.surface {
+                Surface::Revolution { frame, .. } => Some(frame),
+                _ => None,
+            };
             for c in &l.coedges {
                 let e = b.edge(c.edge);
                 for j in 0..=4 {
@@ -125,6 +132,17 @@ pub(crate) fn validate(b: &Brep, tol: &Tolerance) -> Vec<String> {
                             c.edge.0
                         ));
                         break;
+                    }
+                    if let Some(fr) = half {
+                        let below = -(p - fr.origin).dot(fr.y);
+                        if below > on_tol {
+                            issues.push(format!(
+                                "face {fi}: edge {} leaves the half turn of its surface by \
+                                 {below:.3e} (ADR 0008)",
+                                c.edge.0
+                            ));
+                            break;
+                        }
                     }
                 }
             }
@@ -258,5 +276,42 @@ mod tests {
             let issues = validate(&b, &tol);
             assert_eq!(issues.is_empty(), valid, "{lift}: {issues:?}");
         }
+    }
+
+    /// A face of a revolve turned half a turn on its surface lies on that
+    /// surface still, outside its frame's half turn: refused (ADR 0008).
+    #[test]
+    fn faces_of_revolution_keep_to_their_half_turn() {
+        use crate::profile::Profile;
+        use crate::sweep::{self, RevolveSpec};
+        use glam::DVec2;
+        let tol = Tolerance::default();
+        let pipe = Profile::polygon(
+            Frame::WORLD,
+            &[
+                DVec2::new(1.0, 0.0),
+                DVec2::new(2.0, 0.0),
+                DVec2::new(2.0, 1.0),
+                DVec2::new(1.0, 1.0),
+            ],
+        );
+        let spec = RevolveSpec {
+            axis_origin: DVec2::ZERO,
+            axis_dir: DVec2::Y,
+            angle: std::f64::consts::TAU,
+        };
+        let mut b = sweep::revolve(&pipe, &spec, &tol).expect("a pipe").0;
+        assert_eq!(validate(&b, &tol), Vec::<String>::new());
+        let f = b
+            .faces
+            .iter_mut()
+            .find(|f| matches!(f.surface, Surface::Revolution { .. }))
+            .expect("a face of revolution");
+        if let Surface::Revolution { frame, .. } = &mut f.surface {
+            frame.x = -frame.x;
+            frame.y = -frame.y;
+        }
+        let issues = validate(&b, &tol);
+        assert!(issues.iter().any(|m| m.contains("half turn")), "{issues:?}");
     }
 }

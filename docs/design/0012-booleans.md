@@ -642,7 +642,14 @@ the next direction.
 
 **Assemble** (`assemble.rs`). Pieces on a curved surface merge only with
 pieces of the same operand face facing the same way (they span no more
-than the face, half a turn); flat pieces merge as in step 1. Curved
+than the face, half a turn); flat pieces merge as in step 1. A flat
+face may be recorded as a surface of revolution (a revolve's cap, in
+faces of half a turn each, ADR 0008): joined from pieces, it can go
+around the axis, which that record's parameters cannot hold, so a joined
+face on a plane is recorded as a plane (found 2026-10-13: before, a
+turned rod cut square by a box came back with its cap's parameters
+wrapped and its volume wrong, and validation now refuses any face of
+revolution whose boundary leaves its frame's half turn). Curved
 segments join end to end only when they are pieces of one operand edge
 or one track; straight ones join as in step 1. A result whose faces are all flat with straight
 edges gets step 1's exact shell volumes. Otherwise a lone shell is the

@@ -627,6 +627,33 @@ name open unchanged.
   different axes: 2,000 such pairs, every result correct, 383 refusals
   in 1,000 operations, all quartics. The parallel fuzz at 10 times its
   default size refuses exactly the same operations as before the fix.
+- Wrong volumes for turned solids in the planes-and-cylinders booleans,
+  found and fixed the same day (2026-10-13), while building cones and
+  spheres. A revolve's flat cap is a plane recorded as a surface of
+  revolution, in two faces of half a turn each (ADR 0008). Where a
+  boolean kept both halves, it joined them into one face around the
+  axis on that record, whose parameters cannot hold it: a turned rod cut
+  square by a box came back valid with the wrong volume (π/2 kept as
+  1.309; 3π/2 as 3.927). A joined face on such a plane is now recorded
+  as a plane, and the validator refuses any face of revolution whose
+  boundary leaves its frame's half turn, which alone refuses every case
+  the fault made. Golden cases with exact volumes: turned rods and tubes
+  cut by boxes across the top and down the side. The rod golden test
+  the entry above names was missing from its commit (a scratch test went
+  in instead); it is added now.
+  A fuzz run with turned rods, tubes and stepped rods among the random
+  solids (4,000 pairs along one axis and 2,000 at an angle, at 20 times
+  the default size) found more, which also comes before the cap fix and
+  is not yet fixed, so turned solids are not in the CI fuzz yet. Seven
+  pairs along one axis break the volume identities by 3e-9 to 2e-6 (at
+  most 3e-7 of the volumes, against 1e-9 allowed), with no point found
+  on the wrong side: whether the results or their mass properties are
+  off is not yet known. Loudly: the mass properties of 102 results do
+  not converge; 8 operations are refused as "a curved segment could not
+  be resolved into chords" and 4 as a piece the triangulation finds too
+  small; and the tangent plane of a turned rod's cap at its centre (on
+  the axis) is missing, which the fuzz's own check of origins needs (218
+  operations). These are the next thing to fix.
 - Geometry for booleans of curved solids (design note 0012 §10.7, item
   1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   915 tests and `cargo deny` pass. Tested on its own; the boolean stages
@@ -995,7 +1022,11 @@ name open unchanged.
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Phase 3, in the order the design notes give: booleans with cones and
+2. Phase 3, in the order the design notes give: first what turned
+   solids meet (above: volume identities broken by up to 3e-7, mass
+   properties that do not converge, curved segments not resolved into
+   chords, tangent planes on the axis), then turned solids in the CI
+   fuzz; booleans with cones and
    spheres (0012 §10.7 item 3, with the conics of a plane across a cone;
    planes and cylinders, item 2, are done, §11); then tangent contacts
    (the largest share of the curved refusals) and the elliptical edges

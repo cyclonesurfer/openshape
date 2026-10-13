@@ -16,7 +16,7 @@ use super::{
     corners, imprint, key, planar, planar_edges, shape, show, slot, Course, Key, Pair, Piece,
     Segments, Source,
 };
-use crate::geom::Curve3;
+use crate::geom::{Curve3, Surface};
 use crate::math::Frame;
 use crate::origin::{
     EdgeIx, EdgeOrigin, FaceIx, FaceOrigin, Merged, Operand, Origins, VertexIx, VertexOrigin,
@@ -77,6 +77,9 @@ struct Out {
     loops: Vec<Vec<(usize, bool)>>,
     /// Every operand face it is made of or coincides with.
     sources: BTreeSet<(Operand, usize)>,
+    /// True if it joins several pieces (of one face or of faces on one
+    /// plane).
+    joined: bool,
 }
 
 /// Whether a piece is kept, and if so reversed (design note 0012 §4.4).
@@ -133,6 +136,7 @@ pub(super) fn assemble(
             reversed,
             loops,
             sources,
+            joined: false,
         });
     }
     if faces.is_empty() {
@@ -376,6 +380,7 @@ fn merge_faces(
                 reversed,
                 loops: region.loops,
                 sources: sources.clone(),
+                joined: true,
             });
         }
     }
@@ -903,8 +908,18 @@ fn build(
             }
             loops.push(Loop { coedges });
         }
+        // A face joined from pieces on a plane recorded as a surface of
+        // revolution (a revolve's cap, in faces of at most half a turn, ADR
+        // 0008) can go around the axis: it is recorded as a plane.
         let src = &pair.get(f.operand).brep.faces[f.face];
-        let id = brep.add_face(src.surface.clone(), src.forward != f.reversed, loops);
+        let id = if f.joined
+            && geometry.planar(f.operand, f.face)
+            && !matches!(src.surface, Surface::Plane(_))
+        {
+            brep.add_face(Surface::Plane(plane_of(pair, f)), true, loops)
+        } else {
+            brep.add_face(src.surface.clone(), src.forward != f.reversed, loops)
+        };
         org.faces.push(FaceOrigin::Operand {
             operand: f.operand,
             face: FaceIx(f.face as u32),
