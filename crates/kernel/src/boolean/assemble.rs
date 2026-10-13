@@ -366,13 +366,15 @@ fn merge_faces(
             &chart,
             boundary.iter().map(|&(_, s, fw)| (s, Some(fw))),
         )?;
-        let regions = planar::regions(&edges, &|c| chart.map(pts.rep[c]), eps).map_err(|p| {
-            let (m, c) = p.describe();
-            KernelError::InvalidResult(format!(
-                "boolean: merging faces: {m} near {}",
-                super::show(pts.rep[c])
-            ))
-        })?;
+        let reach = |q: DVec2| chart.reach(q, eps);
+        let regions =
+            planar::regions(&edges, &|c| chart.map(pts.rep[c]), &reach, eps).map_err(|p| {
+                let (m, c) = p.describe();
+                KernelError::InvalidResult(format!(
+                    "boolean: merging faces: {m} near {}",
+                    super::show(pts.rep[c])
+                ))
+            })?;
         for region in regions {
             out.push(Out {
                 operand,
@@ -966,34 +968,15 @@ fn build(
     Ok((brep, org, shell_ids))
 }
 
-/// The shell `shell` of `b` alone, as a body.
-fn shell_brep(b: &Brep, shell: ShellId) -> Brep {
-    let mut out = Brep {
-        vertices: b.vertices.clone(),
-        edges: b.edges.clone(),
-        ..Brep::default()
-    };
-    let ids = b.shells[shell.idx()]
-        .faces
-        .iter()
-        .map(|f| {
-            let face = &b.faces[f.idx()];
-            out.add_face(face.surface.clone(), face.forward, face.loops.clone())
-        })
-        .collect();
-    out.add_shell(ids);
-    out
-}
-
 /// Outer shells (enclosing positive volume) of a result with curved faces
 /// or edges, each with the void shells inside it, as [`solids`] finds them
 /// for flat ones. A lone shell is the outer shell of the one solid (were it
 /// inside out, validation would refuse the body). With several, a shell's
-/// volume is taken from a coarse mesh, as validation measures orientation
-/// ([`crate::check::shell_volumes`]), or from the kernel's mass properties
-/// (exact on the surfaces) where the mesh's error could reach its sign;
-/// each void goes in the smallest outer shell holding one of its vertices
-/// (by ray parity on the shell's own faces).
+/// volume is the one validation measures orientation by
+/// ([`crate::check::shell_signed_volumes`]: from a coarse mesh, or from the
+/// mass properties where the mesh's error could reach its sign); each void
+/// goes in the smallest outer shell holding one of its vertices (by ray
+/// parity on the shell's own faces).
 fn curved_solids(
     b: &Brep,
     shells: &[ShellId],
@@ -1003,22 +986,14 @@ fn curved_solids(
         return Ok(vec![(0, Vec::new())]);
     }
     let eps = tol.linear;
-    let size = crate::check::bounding_size(b).max(eps);
-    let coarse = crate::check::shell_volumes(b, tol)
+    let signed = crate::check::shell_signed_volumes(b, tol)
         .map_err(|e| KernelError::InvalidResult(format!("boolean: the shells' volumes: {e}")))?;
-    let bodies: Vec<Brep> = shells.iter().map(|&s| shell_brep(b, s)).collect();
+    let vols: Vec<f64> = shells.iter().map(|s| signed[s.idx()]).collect();
+    let bodies: Vec<Brep> = shells
+        .iter()
+        .map(|&s| crate::check::shell_brep(b, s))
+        .collect();
     let body = |i: usize| &bodies[i];
-    let mut vols = Vec::with_capacity(shells.len());
-    for (i, s) in shells.iter().enumerate() {
-        let (v, bound) = coarse[s.idx()];
-        if v.abs() > bound {
-            vols.push(v);
-            continue;
-        }
-        let m = crate::mass::mass_properties(body(i), size, 1e-6)
-            .map_err(|e| KernelError::InvalidResult(format!("boolean: a shell's volume: {e}")))?;
-        vols.push(m.volume);
-    }
     let mut solids: Vec<(usize, Vec<usize>)> = Vec::new();
     for (i, v) in vols.iter().enumerate() {
         if *v > 0.0 {

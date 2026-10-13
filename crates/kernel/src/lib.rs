@@ -510,7 +510,7 @@ impl Kernel for BrepKernel {
             });
         }
         let (u, v) = f.surface.project(near);
-        let n = f.surface.normal(u, v)?;
+        let n = f.surface.normal_or_limit(u, v)?;
         Some(FacePlane {
             point: f.surface.point(u, v),
             normal: if f.forward { n } else { -n },

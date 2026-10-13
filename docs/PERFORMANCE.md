@@ -50,13 +50,22 @@ machine. The limit is what the test enforces.
 | Mesh it | 8 ms | 100 ms |
 | Validate it | 8.6 ms | 100 ms |
 | Its mass properties to 1e-9 | 70 ms | 700 ms |
-| Mesh a revolved ring (115,352 triangles) | 270–340 ms | 3,000 ms |
+| Mesh a revolved ring (115,352 triangles) | 204–247 ms | 3,000 ms |
+| Mesh a unit ball (104,988 triangles) | 220–249 ms | 2,500 ms |
 | Extrude a plate with 100 round holes | 12.5–23 ms | 150 ms |
 | Mesh it | 140–220 ms | 1,500 ms |
 | Union or subtract two 256-sided star prisms | 38.5–44 ms | 500 ms |
 | Cut 64 holes into a box, one boolean each | 225–265 ms | 3,000 ms |
 | Drill 64 round holes into a plate, one boolean each | 860–1,050 ms | 10,000 ms |
 | Intersect or subtract a plate with 100 round holes and a box across them | 52–55 ms | 600 ms |
+| Dimple a plate with 16 balls, one boolean each | 113–125 ms | 1,200 ms |
+| Mesh it (155,654 triangles) | 227–267 ms | 2,500 ms |
+| Validate it | 5.3–8 ms | 80 ms |
+| Its mass properties to 1e-9 | 14–17 ms | 150 ms |
+| Cut 16 countersunk holes (a shank and a cone each) into a plate, one boolean each | 220–245 ms | 2,500 ms |
+| Mesh it (9,612 triangles) | 30–34 ms | 300 ms |
+| Validate it | 14.4–14.8 ms | 150 ms |
+| Its mass properties to 1e-9 | 22–24 ms | 250 ms |
 | Sketch regions of 122 curves (a 41 by 41 grid and 40 circles) | 100–115 ms | 1,200 ms |
 | Regenerate the demo document | 36.5–41 ms | 400 ms |
 
@@ -69,6 +78,7 @@ factor):
 | Union of two regular prisms, 128 to 1024 sides | 11.3–12.6 times |
 | Mesh a plate, 16 to 121 holes (7.6 times) | 7.4–7.6 times |
 | Cut a box across a plate's round holes, 16 to 121 holes (7.6 times) | 7.8–8.4 times |
+| Mesh a ball, 11,884 to 92,660 triangles (7.8 times) | 11.2–12.3 times |
 
 The union is scaled on regular prisms, whose result grows with their
 size. Two star prisms overlap in a band where many faces of each meet
@@ -215,6 +225,42 @@ clock: 211 ms at first.
 The single hole fell from 211 ms to 40 ms: 18 ms in splitting the two faces
 with holes into regions, 15 ms validating the result (which meshes it;
 see the slow spots below), every other stage under 3 ms.
+
+### Fourth pass: spheres and cones (item 3a)
+
+The time guards above for balls, cones and their meshes were added with
+booleans of spheres and cones (design note 0012 §13), and found two
+things.
+
+* **Validation measured every body exactly for a while.** Validation
+  now decides a shell's orientation as the booleans do: from the coarse
+  mesh's volume where its error bound cannot reach the sign, else from
+  the shell's mass properties (a thin ring a ball keeps outside a cone
+  meshed to no volume at all and was refused as inside out). The bound
+  was twice the area of the whole mesh times its distance from the
+  surfaces, which for a thin flat body exceeds its volume: validating the
+  1024-sided prism went from 10 ms to 87 ms, its extrude from 13 ms to
+  90 ms, and the prism's scaling check failed (65 times for 8). The mesh
+  of a flat face lies in its plane, so only curved faces can put the mesh
+  off the body: the bound now counts their area alone (plus the
+  rounding of the sum), and every guard is back to its time on main, by
+  interleaved runs of both builds.
+* **Points added to a curved face's mesh started their search far
+  away.** Refinement inserted each new point into the triangulation with
+  no hint, so the library walked to it from the last point inserted,
+  across the face: about √n triangles a point. The new scaling check on
+  a ball found its time growing 14.5 times for 7.8 times the triangles.
+  Each point now starts from a corner of the triangle it splits, and the
+  growth is 11–12 times (n log n). A unit ball's default mesh fell from
+  364–411 ms to 220–249 ms and the revolved ring's from 312–387 ms to
+  204–247 ms; meshes of about a million triangles take a third of the
+  time. The meshes keep their triangle and point counts but are not the
+  same as before: the coarse ball has the same triangles in another
+  order, and finer meshes of the ball and the ring differ. Inferred from
+  that: each round adds its points in the order of the triangulation's
+  faces, which the library numbers differently when it reaches a point
+  from another side, and points on one circle have several equally good
+  triangulations. Each mesh is the same on every run.
 
 ## Known slow spots
 

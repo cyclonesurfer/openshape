@@ -664,10 +664,11 @@ or one track; straight ones join as in step 1. A result whose faces are all flat
 edges gets step 1's exact shell volumes. Otherwise a lone shell is the
 outer shell of the one solid (validation refuses it if it is inside
 out); several shells are ordered by volumes from validation's coarse
-mesh with an error bound (twice the mesh's area times its distance from
-the surfaces), or by the exact mass properties where that bound could
-reach the sign, and each void goes in the smallest solid holding one of
-its own corners.
+mesh with an error bound (twice the area of its curved faces' mesh times
+its distance from the surfaces; a flat face's mesh lies in its plane),
+or by the exact mass properties where that bound could reach the sign,
+and each void goes in the smallest solid holding one of its own corners.
+Validation decides orientation by the same rule (§13).
 
 **Tests.** Golden cases (`crates/kernel/tests/curved.rs`) check volume
 and area to 1e-9 relative, topology and the origins of every face, edge
@@ -763,11 +764,18 @@ apex and the poles, where a face's surface has no normal.
   `λ(q) = 1 + |q|²/(4R²) ≥ 1`, and the distance in space between the
   points at `q₁` and `q₂` is exactly `|q₁ − q₂| / √(λ(q₁) λ(q₂))`
   (the chordal distance; L. Ahlfors, *Complex Analysis*, 3rd ed., ch. 1,
-  §2.4). The centre is the middle of the face's boundary in its
-  surface's own parameters (longitude within `[0, π]` of the surface's
-  frame, ADR 0008, and latitude), so the antipode is outside the face
-  and the projection is one to one on it; the poles are ordinary points
-  of the chart.
+  §2.4). The centre is the middle of the half of the sphere that holds
+  the face: every face of a sphere lies within longitudes `[0, π]` of
+  its surface's frame (ADR 0008), so within a quarter turn of the
+  direction of longitude π/2 on its equator, where the scale is at most
+  2; the antipode is a quarter turn from the face, and the projection is
+  one to one on it. (The middle of the face's own boundary would do as
+  well but must be found from samples, and a lune's boundary, two
+  meridians, has no middle by averaging.) Operands are checked: the
+  least cosine of the angle from the centre along each boundary edge is
+  found in closed form, and a face reaching more than 120° from it
+  (scale 4) is refused; within that the bounds below still hold, since
+  they are local. The poles are ordinary points of the chart.
 * **Lengths.** A chart compares lengths with space in two ways, each a
   bound: `reach(q, d)`, a chart distance from `q` beyond which every
   point is more than `d` from it in space, and `space(q, d)`, a distance
@@ -828,16 +836,36 @@ circles about a common axis, and quartics refused.
   hold a whole circle of a meeting (a ball's face around a hole), which
   §11's test for a closed track that no cut reaches decides.
 * **Singular points.** At the apex and the poles a surface has no
-  normal. The way a track runs across a face, and the side of a surface
-  a face's boundary goes to, are decided at cuts where both surfaces
-  have normals; a face's facing is found at a regular point of it, not
-  at its first corner.
+  normal. A track never passes through the apex: coaxial surfaces that
+  meet on the axis touch there, which is refused, and a plane through
+  the apex is refused until 3b. A face's facing is found where its
+  parameterisation is most regular, at the corner or edge middle where
+  `S_u × S_v` is largest, not at its first corner: at a pole of a
+  revolved sphere the derivative along the parallel is rounding (about
+  1e-17 of the radius) whose cross product points any way, and the
+  surface's own singularity test, relative to the derivatives' sizes,
+  does not see it (found on the first two-ball union: one face of a
+  ball taken as facing inward). A vertex on the axis of a face's
+  surface of revolution stays a vertex (§11, Assemble).
+* **A whole circle in two faces.** A sphere's face can hold a whole
+  circle of a meeting that no edge of either face reaches (a ball's face
+  around a hole in a plate's face). The track is split at two new
+  points, at its parameters 0 and π, into two halves with ends: no edge
+  comes within the tolerance of the track (else a cut would reach it),
+  so the new points are clear of every other, and the split of each face
+  checks it. A track whole in both faces under one rule of zero signs
+  and not under the other has an edge touching it, and is refused.
 * **Classify.** A ray meets a cone's nappe and a sphere at the roots of
   a quadratic, anchored at the cone's reference point (a root on the
   other nappe is not a hit); a hit where the ray is within 1e-3 of
-  tangent to the surface abandons the ray, as on a cylinder. The point
-  of a cone or a sphere nearest a point, for the test that a piece's
-  point is clear of the other body, is in closed form.
+  tangent to the surface abandons the ray, as on a cylinder. Near the
+  apex the cone's quadratic is flat and its roots lose precision: a
+  root that rounding of the coefficients could move by more than a
+  sixteenth of the tolerance (their errors over the quadratic's slope
+  `2 √disc` there) abandons the ray too. The point of a cone or a sphere
+  nearest a point, for the test that a piece's point is clear of the
+  other body, is in closed form (on a cone, the foot on the ruling in
+  the point's half-plane, clamped at the apex).
 * **Boxes.** A face on a sphere is not in the hull of its boundary: its
   box also takes the sphere's extreme points along the axes that lie in
   the face's half of the sphere.
@@ -862,3 +890,73 @@ points sampled where the operands' boxes meet are inside each result
 exactly when the operation's rule says so, decided on fine meshes away
 from every surface: the volume identities hold for a result that takes
 two bodies as apart when they meet, and this check does not.
+
+## 13. As built: item 3a, spheres and coaxial cones (2026-10-13)
+
+Faces on spheres and cones now take part in booleans wherever every
+curve where two faces meet is a circle: a plane with a sphere at any
+angle, two spheres anywhere (their circle is about the line through
+their centres), a plane square to a cone's axis, and coaxial pairs of
+cones, cylinders and spheres centred on the axis. The charts, courses
+and bands are those of §12.1 (a cone unrolled, a sphere projected
+stereographically from the antipode of the middle of its half, with a
+face reaching more than 120° from that middle refused), the imprint,
+classification and operand rules those of §12.3. Everything else is
+refused with its reason: a plane across a cone off its axis (a conic,
+"not supported yet", item 3b; a test checks a hyperbola, an ellipse and
+the two lines through the apex), a sphere or a cone with a cylinder or a
+cone off its axis (quartics, as for two cylinders at an angle), and
+tangent contacts.
+
+Found while building it, each now handled and tested:
+
+* **Pointed cones about a turned axis** were not recognised as cones:
+  the radius at the cone's reference point, on the axis at the apex,
+  came out of rounding slightly negative. A radius below zero by less
+  than 1e-12 times one plus the profile point's distance from the
+  frame's origin is taken as zero.
+* **Tangent planes at the poles.** A sphere's normal at a pole is along
+  the axis, taken from the side of the pole where the surface is
+  regular; a cone has none at its apex, and a face's or an edge's
+  origin check in the tests allows two points without one (its corners).
+* **Thin shells.** Validation decided a shell's orientation from the
+  sign of a coarse mesh's volume alone. The ring a ball keeps outside a
+  cone whose side crosses its sphere twice close together (1 cm thick on
+  a 1 m ball) meshes there to a volume of 1e-17, whose sign is
+  rounding: 5 of 40,000 operations in two fuzz runs at 50 times
+  their size were refused as inside out. Validation now decides as
+  assembly does (§11): by the coarse volume where its bound cannot reach
+  the sign, else by the shell's mass properties. The bound counts only
+  curved faces' area: counting flat faces too made it exceed the volume
+  of thin flat bodies, and validation then measured them exactly (ten
+  times slower; docs/PERFORMANCE.md, fourth pass).
+
+**Tests.** Golden cases (`crates/kernel/tests/curved.rs`), each with all
+four operations, volumes exact to 1e-9, topology, validity and the
+origins of every face, edge and vertex: a ball resting in a plate, a
+ball cut by a box off its centre, a spherical pocket, two balls side by
+side and two along one axis, a countersink, a cone on a rod, a pointed
+cone cut square, and a ball crossed twice by a cone (the thin ring
+above, its volume from the integral of the difference of the two
+radii squared). Unit tests classify points near random balls and cones
+in random frames against their exact signed distances, and measure the
+thin ring's shell exactly. A fuzz of solids about one axis, the world's
+or a turned one (balls; cones point up and down; frustums; rods with a
+round end; tubes; stepped rods), pairs each with another such solid, a
+ball with a box turned any way or another ball anywhere, or a slab
+square to the axis, half of them on a grid. On 5,000 pairs (20,000
+operations) every result is valid with its origins on its operands'
+surfaces, every volume identity holds where the results exist, and
+point membership agrees; 1,122 operations are refused (56 in 1,000):
+1,096 tangent contacts (on the grid, equal balls touching and slabs at
+a pole are common) and 26 non-manifold results where the bodies touch
+along an edge.
+
+The fuzz's membership check now finds a point's side by the parity of a
+ray's crossings with the mesh, walking a tree of boxes over its
+triangles, and falls back to the winding number where every ray passes
+within rounding of an edge or along a triangle; a test checks that both
+agree on thousands of points. With the meshes shared by the origins
+check, the sphere and cone fuzz's own checks fell from about 8 to 2.4
+times the time of its booleans (meshing, at a thousandth of the unit,
+is most of what is left).

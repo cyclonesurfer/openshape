@@ -1439,11 +1439,15 @@ fn tessellate_face(
         let insert = |cdt: &mut Cdt,
                       verts: &mut Vec<(DVec2, Option<DVec3>)>,
                       at: &mut Vec<(DVec3, Option<DVec3>)>,
-                      uv: DVec2|
+                      uv: DVec2,
+                      hint: usize|
          -> Result<(), String> {
             let q = place(uv);
             let h = cdt
-                .insert(Point2::new(q.x, q.y))
+                .insert_with_hint(
+                    Point2::new(q.x, q.y),
+                    spade::handles::FixedVertexHandle::from_index(hint),
+                )
                 .map_err(|e| format!("triangulation insert failed: {e:?}"))?;
             if h.index() == verts.len() {
                 verts.push((uv, None));
@@ -1462,7 +1466,7 @@ fn tessellate_face(
             let mut settled: FxHashSet<[usize; 3]> = FxHashSet::default();
             for _pass in 0..12 {
                 let tris = inside_triangles(&cdt);
-                let mut new_pts: Vec<DVec2> = Vec::new();
+                let mut new_pts: Vec<(DVec2, usize)> = Vec::new();
                 for t in &tris {
                     let mut key = *t;
                     key.sort_unstable();
@@ -1510,7 +1514,7 @@ fn tessellate_face(
                         }
                     }
                     if refine {
-                        new_pts.push(c);
+                        new_pts.push((c, t[0]));
                     } else {
                         settled.insert(key);
                     }
@@ -1521,8 +1525,8 @@ fn tessellate_face(
                 if verts.len() + new_pts.len() > 2_000_000 {
                     return Err("tessellation exceeded the vertex budget".into());
                 }
-                for c in new_pts {
-                    insert(&mut cdt, &mut verts, &mut at, c)?;
+                for (c, hint) in new_pts {
+                    insert(&mut cdt, &mut verts, &mut at, c, hint)?;
                 }
             }
             if cdt.num_constraints() != boundary_constraints {

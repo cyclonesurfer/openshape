@@ -3,11 +3,13 @@
 //! cone or sphere), faces on one surface sharing it, and boxes holding
 //! every edge and face.
 
+use std::f64::consts::{PI, TAU};
+
 use glam::DVec3;
 
 use super::quadric::{self, Quadric};
 use crate::bvh::Bvh;
-use crate::geom::Curve3;
+use crate::geom::{Curve3, Surface};
 use crate::math::Frame;
 use crate::topo::Brep;
 use crate::KernelError;
@@ -30,8 +32,14 @@ pub(super) struct Face {
     pub loops: Vec<Vec<(usize, bool)>>,
     /// Per loop, the vertex each coedge starts at.
     pub verts: Vec<Vec<usize>>,
+    /// For a face on a sphere, the unit direction from the centre to the
+    /// middle of the half of the sphere that holds the face (longitude π/2
+    /// of its surface's frame, on the equator; ADR 0008); zero otherwise.
+    pub middle: DVec3,
     /// A box holding the face: of its edges' boxes (a face on a plane, a
-    /// cylinder or a cone lies in the convex hull of its boundary).
+    /// cylinder or a cone lies in the convex hull of its boundary), and for
+    /// a face on a sphere also the sphere's extreme points along the axes
+    /// that can be in it.
     pub lo: DVec3,
     pub hi: DVec3,
     /// For a face with many edges, its coedges (in loop order, all loops
@@ -174,6 +182,91 @@ impl Shape<'_> {
     }
 }
 
+/// How far past the half of its sphere that holds it (in the cosine of
+/// the angle from that half's middle) a face's boundary may reach before
+/// the face is refused: a face lies in its half by construction (ADR
+/// 0008), and its chart serves it (at a scale of at most 4) anywhere
+/// within 120° of the middle.
+const HALF: f64 = 0.5;
+
+/// The middle of the half of the sphere (centre `center`, radius `radius`)
+/// that holds the face with loops `loops` on the surface `surface`: the
+/// direction of longitude π/2 on the equator of the surface's frame. A
+/// face's points are within longitudes `[0, π]` of that frame (ADR 0008),
+/// so within a quarter turn of it; this is checked on the boundary, where
+/// the least cosine of the angle from it is found in closed form along each
+/// edge (the face does not hold the antipode, so its least is on its
+/// boundary).
+fn sphere_middle(
+    b: &Brep,
+    loops: &[Vec<(usize, bool)>],
+    surface: &Surface,
+    center: DVec3,
+    radius: f64,
+    which: &str,
+) -> Result<DVec3, KernelError> {
+    let refuse = || {
+        unsupported(
+            which,
+            "faces on spheres outside the half of the sphere their surface's frame gives",
+        )
+    };
+    let Surface::Revolution { frame, .. } = surface else {
+        return Err(refuse());
+    };
+    let middle = frame.y.normalize();
+    let least = loops
+        .iter()
+        .flatten()
+        .map(|&(e, _)| {
+            let edge = &b.edges[e];
+            let along = |p: DVec3| (p - center).dot(middle);
+            match &edge.curve {
+                Curve3::Line { .. } => {
+                    along(edge.curve.point(edge.t0)).min(along(edge.curve.point(edge.t1)))
+                }
+                Curve3::Circle {
+                    center: o,
+                    x,
+                    y,
+                    radius: r,
+                } => along(*o) + r * least_of_wave(x.dot(middle), y.dot(middle), edge.t0, edge.t1),
+                // Within the hull of the edge's control points.
+                Curve3::Nurbs(_) => quadric::hull_points(&edge.curve, edge.t0, edge.t1).map_or(
+                    f64::NEG_INFINITY,
+                    |pieces| {
+                        pieces
+                            .iter()
+                            .flatten()
+                            .map(|&p| along(p))
+                            .fold(f64::INFINITY, f64::min)
+                    },
+                ),
+            }
+        })
+        .fold(f64::INFINITY, f64::min);
+    if least >= -HALF * radius {
+        Ok(middle)
+    } else {
+        Err(refuse())
+    }
+}
+
+/// The least of `a cos t + b sin t` for `t` between `t0` and `t1`: at an
+/// end, or at the wave's trough `atan2(b, a) + π` (mod 2π) if that lies
+/// between them.
+pub(super) fn least_of_wave(a: f64, b: f64, t0: f64, t1: f64) -> f64 {
+    let (lo, hi) = if t0 <= t1 { (t0, t1) } else { (t1, t0) };
+    let wave = |t: f64| a * t.cos() + b * t.sin();
+    let low = b.atan2(a) + PI;
+    let k = ((lo - low) / TAU).ceil();
+    if low + k * TAU <= hi {
+        -a.hypot(b)
+    } else {
+        wave(lo).min(wave(hi))
+    }
+}
+
 fn unsupported(which: &str, what: &str) -> KernelError {
     KernelError::Unsupported(format!(
         "booleans of bodies with {what} (the {which} body has some; design note 0012 §10)"
@@ -210,6 +303,7 @@ pub(super) fn shape<'a>(b: &'a Brep, which: &str) -> Result<Shape<'a>, KernelErr
         let mut loops = Vec::with_capacity(f.loops.len());
         let mut verts = Vec::with_capacity(f.loops.len());
         let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+        let mut middle = DVec3::ZERO;
         let mut all_straight = true;
         for l in &f.loops {
             let mut cs = Vec::with_capacity(l.coedges.len());
@@ -259,21 +353,38 @@ pub(super) fn shape<'a>(b: &'a Brep, which: &str) -> Result<Shape<'a>, KernelErr
                 surfaces.push(q);
                 surfaces.len() - 1
             });
-            // Which way the face faces, at its first vertex.
-            let p = loops
-                .first()
-                .and_then(|_| verts[0].first())
-                .map(|&v| points[v])
+            if loops.iter().all(Vec::is_empty) {
+                return Err(KernelError::InvalidInput(format!(
+                    "a face of the {which} body has no edges"
+                )));
+            }
+            // Which way the face faces, at the most regular of its corners
+            // and the middles of its edges: where `S_u × S_v` is largest. A
+            // cone's apex and a sphere's poles, often corners, have no
+            // normal, and the parameterisation's derivatives there are
+            // rounding, whose cross product points any way.
+            let corners = verts.iter().flatten().map(|&v| points[v]);
+            let middles = loops.iter().flatten().map(|&(e, _)| {
+                let edge = &b.edges[e];
+                edge.curve.point(0.5 * (edge.t0 + edge.t1))
+            });
+            let (p, n) = corners
+                .chain(middles)
+                .map(|p| {
+                    let (u, v) = f.surface.project(p);
+                    let (su, sv) = f.surface.derivs(u, v);
+                    (p, su.cross(sv))
+                })
+                .fold(None, |best: Option<(DVec3, DVec3)>, (p, n)| match best {
+                    Some((_, m)) if m.length() >= n.length() => best,
+                    _ => Some((p, n)),
+                })
+                .and_then(|(p, n)| Some((p, n.try_normalize()?)))
                 .ok_or_else(|| {
-                    KernelError::InvalidInput(format!("a face of the {which} body has no edges"))
+                    KernelError::InvalidInput(format!(
+                        "a face of the {which} body has no regular point on its boundary"
+                    ))
                 })?;
-            let (u, v) = f.surface.project(p);
-            let n = f.surface.normal(u, v).ok_or_else(|| {
-                KernelError::Unsupported(format!(
-                    "booleans of bodies with a face whose first corner is a singular point \
-                     (the {which} body; design note 0012 §10)"
-                ))
-            })?;
             let n = if f.forward { n } else { -n };
             let g = surfaces[i].gradient(p);
             let along = n.dot(g);
@@ -281,6 +392,22 @@ pub(super) fn shape<'a>(b: &'a Brep, which: &str) -> Result<Shape<'a>, KernelErr
                 return Err(KernelError::InvalidInput(format!(
                     "a face of the {which} body is not on the surface it records"
                 )));
+            }
+            if let Quadric::Sphere { center, radius } = q {
+                middle = sphere_middle(b, &loops, &f.surface, center, radius, which)?;
+                for e in [
+                    DVec3::X,
+                    DVec3::Y,
+                    DVec3::Z,
+                    -DVec3::X,
+                    -DVec3::Y,
+                    -DVec3::Z,
+                ] {
+                    if e.dot(middle) >= -HALF {
+                        lo = lo.min(center + e * radius);
+                        hi = hi.max(center + e * radius);
+                    }
+                }
             }
             (i, along > 0.0, Frame::WORLD, false)
         };
@@ -304,6 +431,7 @@ pub(super) fn shape<'a>(b: &'a Brep, which: &str) -> Result<Shape<'a>, KernelErr
         });
         faces.push(Face {
             frame,
+            middle,
             surface,
             outward,
             flat: planar && all_straight,

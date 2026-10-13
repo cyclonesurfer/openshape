@@ -331,8 +331,7 @@ fn golden_cases_at_millimetre_and_kilometre_scales() {
 }
 
 #[test]
-fn cones_are_not_supported_yet() {
-    let a = cuboid(DVec3::ZERO, DVec3::ONE);
+fn planes_across_a_cone_off_its_axis_are_not_supported_yet() {
     // A cone: a right triangle revolved about its upright side.
     let cone = k()
         .revolve(
@@ -347,10 +346,38 @@ fn cones_are_not_supported_yet() {
             },
         )
         .unwrap();
-    assert!(matches!(
-        k().boolean(&a, &cone, BooleanOp::Union),
-        Err(KernelError::Unsupported(_))
-    ));
+    // Planes parallel to the axis (a hyperbola), across it at a slant (an
+    // ellipse) and through the apex (two lines).
+    let cuts = [
+        k().make_box(
+            &Frame {
+                origin: DVec3::new(0.1, -1.0, -1.0),
+                ..Frame::WORLD
+            },
+            DVec3::new(1.0, 3.0, 2.0),
+        ),
+        k().make_box(
+            &Frame::from_normal(
+                DVec3::new(-1.0, 0.5, -1.0),
+                DVec3::new(0.3, 1.0, 0.0),
+                DVec3::Z,
+            ),
+            DVec3::new(2.0, 2.0, 2.0),
+        ),
+        k().make_box(
+            &Frame {
+                origin: DVec3::new(0.0, -1.0, -1.0),
+                ..Frame::WORLD
+            },
+            DVec3::new(1.0, 3.0, 2.0),
+        ),
+    ];
+    for cut in cuts {
+        match k().boolean(&cone, &cut.unwrap(), BooleanOp::Union) {
+            Err(KernelError::Unsupported(m)) => assert!(m.contains("conic"), "{m}"),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+    }
 }
 
 #[test]

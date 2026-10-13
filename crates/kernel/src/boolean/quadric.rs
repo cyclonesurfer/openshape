@@ -153,10 +153,13 @@ impl Quadric {
                         } else {
                             (-frame.z, -slope)
                         };
-                        (slope.is_finite() && rho >= 0.0).then_some(Quadric::Cone {
+                        // A profile starting on the axis (a pointed cone's
+                        // apex) has ρ of rounding size, either sign.
+                        let on_axis = -1e-12 * (1.0 + w.length());
+                        (slope.is_finite() && rho >= on_axis).then_some(Quadric::Cone {
                             point: frame.origin + frame.z * h,
                             axis,
-                            radius: rho,
+                            radius: rho.max(0.0),
                             slope,
                         })
                     }
@@ -246,9 +249,10 @@ impl Quadric {
         }
     }
 
-    /// The point of the surface nearest `p`, for a plane or a cylinder
-    /// (`None` for a point on a cylinder's axis, and for the surfaces of
-    /// item 3).
+    /// The point of the surface nearest `p` (`None` where there is no one
+    /// nearest: on a cylinder's or a cone's axis, at a sphere's centre).
+    /// On a cone, the foot on the ruling in `p`'s half-plane, or the apex
+    /// for a point behind it.
     pub fn foot(&self, p: DVec3) -> Option<DVec3> {
         match *self {
             Quadric::Plane { point, normal } => Some(p - normal * (p - point).dot(normal)),
@@ -262,7 +266,26 @@ impl Quadric {
                 let out = (w - axis * h).try_normalize()?;
                 Some(point + axis * h + out * radius)
             }
-            _ => None,
+            Quadric::Sphere { center, radius } => {
+                Some(center + (p - center).try_normalize()? * radius)
+            }
+            Quadric::Cone {
+                point,
+                axis,
+                radius,
+                slope,
+            } => {
+                let w = p - point;
+                let h = w.dot(axis);
+                let across = w - axis * h;
+                let out = across.try_normalize()?;
+                let cos = 1.0 / (1.0 + slope * slope).sqrt();
+                let sin = slope * cos;
+                // Slant position along the ruling from the reference
+                // circle, no further back than the apex.
+                let sigma = ((across.length() - radius) * sin + h * cos).max(-radius / sin);
+                Some(point + out * (radius + sigma * sin) + axis * (sigma * cos))
+            }
         }
     }
 

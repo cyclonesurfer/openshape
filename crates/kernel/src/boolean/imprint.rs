@@ -838,17 +838,14 @@ fn spans_on(
         .collect())
 }
 
-/// The stretches of `track` in both of two spans.
+/// The stretches of `track` in both of two spans, not both the whole
+/// track.
 fn both(track: &Track, x: Span, y: Span, pts: &Points) -> Result<Vec<(End, End)>, KernelError> {
     let eps = pts.eps;
     // A part of a closed track as parameters increasing from its start.
     let unrolled = |lo: End, hi: End| (lo, (hi.0, lo.1 + (hi.1 - lo.1).rem_euclid(TAU)));
     match (x, y) {
-        (Span::Full, Span::Full) => Err(KernelError::Unsupported(format!(
-            "booleans where faces meet along a whole closed curve with no point of either \
-             body's edges on it (design note 0012 §10.3), near {}",
-            show(track.point(0.0))
-        ))),
+        (Span::Full, Span::Full) => unreachable!("a whole track is imprinted whole"),
         (Span::Full, Span::Part { lo, hi }) | (Span::Part { lo, hi }, Span::Full) => {
             Ok(vec![unrolled(lo, hi)])
         }
@@ -897,7 +894,9 @@ fn both(track: &Track, x: Span, y: Span, pts: &Points) -> Result<Vec<(End, End)>
 
 /// The stretches of the tracks where crossing faces `fa` (of the first
 /// operand) and `fb` (of the second) meet, at least one of them on a
-/// curved surface, that lie in both (closed) faces.
+/// curved surface, that lie in both (closed) faces; and the closed tracks
+/// that lie wholly in both, with no edge of either face reaching them (a
+/// ball's face around a hole in a plate).
 pub(super) fn stretches(
     pair: &Pair,
     pts: &Points,
@@ -905,7 +904,7 @@ pub(super) fn stretches(
     contacts: &Contacts,
     fa: usize,
     fb: usize,
-) -> Result<Vec<Stretch>, KernelError> {
+) -> Result<(Vec<Stretch>, Vec<usize>), KernelError> {
     let a = &pair.first.faces[fa];
     let b = &pair.second.faces[fb];
     let ids = contacts.tracks_of(a.surface, b.surface);
@@ -930,10 +929,28 @@ pub(super) fn stretches(
         ids,
     )?;
     let mut out = Vec::new();
+    let mut whole = Vec::new();
     for (k, &id) in ids.iter().enumerate() {
         let track = &contacts.tracks[id];
+        let full = |spans: &[Vec<Vec<Span>>; 2]| {
+            let mut all = spans.iter().flat_map(|rule| &rule[k]).peekable();
+            all.peek().is_some() && all.all(|s| matches!(s, Span::Full))
+        };
+        if full(&fs) && full(&gs) {
+            whole.push(id);
+            continue;
+        }
         for x in fs.iter().flat_map(|rule| &rule[k]) {
             for y in gs.iter().flat_map(|rule| &rule[k]) {
+                if let (Span::Full, Span::Full) = (x, y) {
+                    // Whole in both faces under one rule, not under the
+                    // other: an edge touches the track.
+                    return Err(KernelError::Unsupported(format!(
+                        "booleans where an edge touches a closed curve where faces meet \
+                         (design note 0011 §4.4), near {}",
+                        show(track.point(0.0))
+                    )));
+                }
                 for (lo, hi) in both(track, *x, *y, pts)? {
                     out.push(Stretch { track: id, lo, hi });
                 }
@@ -941,5 +958,5 @@ pub(super) fn stretches(
         }
     }
     refuse_touches(pair, pts, outlines, fa, fb)?;
-    Ok(out)
+    Ok((out, whole))
 }

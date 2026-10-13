@@ -25,13 +25,16 @@
 //! fixed direction. A bounding-volume tree over the triangles keeps each
 //! test to the triangles near the segment.
 //!
-//! Faces that are not flat (on a cylinder, or on a plane with curved
-//! edges) are met in closed form instead (design note 0012 §10.5): the ray
-//! meets a face's surface at the roots of a polynomial of degree one or
-//! two, and a root counts if it lies in the face, decided in the face's
-//! chart against its outline. A ray that grazes such a surface, or meets
-//! it within the tolerance of the face's boundary, is abandoned for the
-//! next direction, as one through a triangle's edge is.
+//! Faces that are not flat (on a cylinder, a cone or a sphere, or on a
+//! plane with curved edges) are met in closed form instead (design note
+//! 0012 §10.5 and §12.3): the ray meets a face's surface at the roots of a
+//! polynomial of degree one or two, and a root counts if it lies in the
+//! face, decided in the face's chart against its outline (a root on a
+//! cone's other nappe is not on its surface). A ray that grazes such a
+//! surface, meets it within the tolerance of the face's boundary, or meets
+//! a cone so near its apex that rounding could move the root by a
+//! sixteenth of the tolerance, is abandoned for the next direction, as one
+//! through a triangle's edge is.
 //!
 //! This replaces the propagation of design note 0012 §4.3 (classify faces
 //! at the intersection edges, then flood fill): each piece is decided by
@@ -126,7 +129,74 @@ impl Curved<'_> {
                 let q = -(b + sq.copysign(b));
                 vec![q / a, c / q]
             }
-            _ => return None,
+            Quadric::Sphere { center, radius } => {
+                // |w + s u|² = r²: the cosine of the ray with the normal at
+                // either root is √disc / r.
+                let w = p - center;
+                let (b, c) = (w.dot(dir), w.dot(w) - radius * radius);
+                let disc = b * b - c;
+                if disc < 0.0 {
+                    return Some(0);
+                }
+                let sq = disc.sqrt();
+                if sq < GRAZE * radius {
+                    return None;
+                }
+                let q = -(b + sq.copysign(b));
+                vec![q, c / q]
+            }
+            Quadric::Cone {
+                point,
+                axis,
+                radius,
+                slope,
+            } => {
+                // |w⊥ + s u⊥|² = (ρ + m s uₕ)² from the cone's reference
+                // point, `ρ = r + m h` the cone's radius at `p`'s height;
+                // roots on the other nappe are dropped.
+                let w = p - point;
+                let (h, du) = (w.dot(axis), dir.dot(axis));
+                let (w, u) = (w - axis * h, dir - axis * du);
+                let rho = radius + slope * h;
+                let a = u.dot(u) - slope * slope * du * du;
+                let b = w.dot(u) - slope * du * rho;
+                let c = w.dot(w) - rho * rho;
+                let disc = b * b - a * c;
+                if disc < 0.0 {
+                    return Some(0);
+                }
+                let sq = disc.sqrt();
+                let q = -(b + sq.copysign(b));
+                // A ray along a ruling (a = 0) meets the nappe once.
+                let mut roots = vec![c / q];
+                if a != 0.0 {
+                    roots.push(q / a);
+                }
+                let mut kept = Vec::with_capacity(2);
+                for s in roots {
+                    if !(s > 0.0 && s < len) {
+                        continue;
+                    }
+                    // How far rounding the coefficients can move the root:
+                    // their errors over the slope `2 √disc` of the
+                    // quadratic there. It grows without bound at the apex,
+                    // where the cone has no normal.
+                    let across = w.length() + u.length() * s;
+                    let along = rho.abs() + slope * du.abs() * s;
+                    let moved = 4.0 * f64::EPSILON * (across * across + along * along) / (2.0 * sq);
+                    if moved.is_nan() || moved > eps / 16.0 {
+                        return None;
+                    }
+                    if rho + slope * du * s < 0.0 {
+                        continue;
+                    }
+                    if self.surface.gradient(p + dir * s).dot(dir).abs() < GRAZE {
+                        return None;
+                    }
+                    kept.push(s);
+                }
+                kept
+            }
         };
         let mut total = 0;
         for s in roots {
@@ -644,7 +714,73 @@ fn closest_on_triangle(p: DVec3, t: &[DVec3; 3]) -> DVec3 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::testing::{ball, cone, Rng};
     use super::*;
+    use crate::math::Frame;
+
+    #[test]
+    fn points_are_classified_against_balls_and_cones() {
+        let mut rng = Rng(0xB411);
+        for case in 0..12 {
+            let origin = rng.point(1.0);
+            let plane = Frame::from_normal(origin, rng.unit(), rng.unit());
+            let (r, h) = (rng.range(0.2, 1.5), rng.range(0.2, 1.5));
+            let is_ball = case % 2 == 0;
+            let body = if is_ball {
+                ball(plane, r)
+            } else {
+                cone(plane, r, h)
+            };
+            let shape = super::super::shape::shape(&body, "first").unwrap();
+            let outlines = super::super::imprint::outlines(&shape).unwrap();
+            let boundary = Boundary::new(&shape, &outlines).unwrap();
+            // A signed distance from the surface, near it (exact for the
+            // ball; for the cone, the least of the distances from the
+            // planes of its base and side, which has its sign).
+            let along = r.hypot(h);
+            let signed = |p: DVec3| {
+                let d = p - origin;
+                if is_ball {
+                    return d.length() - r;
+                }
+                let y = d.dot(plane.y);
+                let rho = (d - plane.y * y).length();
+                (-y).max((rho * h + y * r - r * h) / along)
+            };
+            // About the body's middle, and (half of them) near its surface:
+            // a point of the ball's sphere or of the cone's axis moved out
+            // or in by up to a hundredth.
+            let (middle, size) = if is_ball {
+                (origin, r)
+            } else {
+                (origin + plane.y * (0.5 * h), r.max(0.5 * h))
+            };
+            for k in 0..400 {
+                let p = if k % 2 == 0 {
+                    middle + rng.point(1.3 * size)
+                } else if is_ball {
+                    origin + rng.unit() * (r + rng.range(-1e-2, 1e-2))
+                } else {
+                    let y = rng.range(-0.1, 1.1) * h;
+                    let out = (plane.x * rng.range(-1.0, 1.0) + plane.z * rng.range(-1.0, 1.0))
+                        .normalize();
+                    let rho = (r * (1.0 - y / h)).max(0.0) + rng.range(-1e-2, 1e-2);
+                    origin + plane.y * y + out * rho
+                };
+                let d = signed(p);
+                if d.abs() < 1e-6 {
+                    continue;
+                }
+                let want = if d < 0.0 {
+                    Class::Inside
+                } else {
+                    Class::Outside
+                };
+                let got = boundary.classify(p, 1e-7).unwrap();
+                assert_eq!(got, want, "case {case}: {p} at {d}");
+            }
+        }
+    }
 
     #[test]
     fn closest_points_on_a_triangle() {

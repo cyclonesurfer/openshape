@@ -30,6 +30,8 @@
 //! Anything the stages cannot decide within the tolerance is refused with
 //! a message and a location rather than guessed.
 
+use std::f64::consts::{PI, TAU};
+
 use glam::{DVec2, DVec3};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -338,6 +340,8 @@ fn boolean_within(
             }
         }
     }
+    // Closed tracks wholly in both faces of a pair, no edge reaching them.
+    let mut whole: Vec<(usize, usize, usize)> = Vec::new();
     for &(fa, fb) in &crossing {
         let (a, b) = (&pair.first.faces[fa], &pair.second.faces[fb]);
         let planes = matches!(
@@ -359,7 +363,9 @@ fn boolean_within(
             }
             continue;
         }
-        for st in imprint::stretches(&pair, &pts, &outlines, &contacts, fa, fb)? {
+        let (parts, full) = imprint::stretches(&pair, &pts, &outlines, &contacts, fa, fb)?;
+        whole.extend(full.into_iter().map(|id| (fa, fb, id)));
+        for st in parts {
             let track = contacts.tracks[st.track];
             if !track.closed() {
                 for w in pts.split_segment(st.lo.0, st.hi.0)?.windows(2) {
@@ -381,6 +387,52 @@ fn boolean_within(
                     Source::Meet(fa, fb),
                     eps,
                 ));
+            }
+        }
+    }
+    // Each such track is split at two seams, at its parameters 0 and π,
+    // into halves with ends: new points, clear of every other (no edge of
+    // either face comes within the tolerance of the track, which the split
+    // of each face checks).
+    let mut seams: Vec<(usize, usize)> = Vec::new();
+    for &(_, _, id) in &whole {
+        if !seams.iter().any(|&(t, _)| t == id) {
+            seams.push((id, 0));
+        }
+    }
+    let at: Vec<DVec3> = seams
+        .iter()
+        .flat_map(|&(id, _)| {
+            [
+                contacts.tracks[id].point(0.0),
+                contacts.tracks[id].point(PI),
+            ]
+        })
+        .collect();
+    let first = pts.add_seams(&at);
+    for (k, s) in seams.iter_mut().enumerate() {
+        s.1 = first + 2 * k;
+    }
+    for &(fa, fb, id) in &whole {
+        let track = contacts.tracks[id];
+        let c = seams
+            .iter()
+            .find(|&&(t, _)| t == id)
+            .map(|&(_, c)| c)
+            .expect("every whole track has seams");
+        for (lo, hi) in [((c, 0.0), (c + 1, PI)), ((c + 1, PI), (c, TAU))] {
+            for w in pts.on_track(&track, lo, hi)?.windows(2) {
+                let (ta, tb) = (w[0].1, w[1].1);
+                let s = segs.add_curved(
+                    w[0].0,
+                    w[1].0,
+                    Course::Track { id, ta, tb },
+                    track.point(0.5 * (ta + tb)),
+                    Source::Meet(fa, fb),
+                    eps,
+                );
+                face_segs[0][fa].push(FaceSeg { seg: s, side: None });
+                face_segs[1][fb].push(FaceSeg { seg: s, side: None });
             }
         }
     }
@@ -439,7 +491,8 @@ fn boolean_within(
             let list = face_segs[slot(op)][fi].iter().map(|fs| (fs.seg, fs.side));
             let edges = planar_edges(&pair, &contacts.tracks, &segs, &chart, list)?;
             let pos = |c: usize| chart.map(pts.rep[c]);
-            let regions = planar::regions(&edges, &pos, eps).map_err(|p| match p {
+            let reach = |q: DVec2| chart.reach(q, eps);
+            let regions = planar::regions(&edges, &pos, &reach, eps).map_err(|p| match p {
                 planar::Problem::Close(c) => KernelError::InvalidInput(format!(
                     "a point where the bodies meet lies within the tolerance of an edge \
                      it is not on, near {}",
@@ -548,7 +601,7 @@ const PROBE_ABOVE: usize = 64;
 /// A point inside a region of a face and its distance in space from the
 /// region's boundary at least: inside the polygon of the region's chords,
 /// as far from its sides as can be found, less the chords' bands, as a
-/// distance in space (the chart's lengths are lengths along the surface).
+/// distance in space ([`Chart::space`]).
 /// While that is within the tolerance, chords are halved, until their
 /// sags are within a sixteenth of it.
 fn interior(
@@ -566,14 +619,14 @@ fn interior(
         // more, most of all when its points lie on circles.
         if polygons.iter().map(Vec::len).sum::<usize>() > PROBE_ABOVE {
             if let Some((inner, clearance)) = classify::probe_point(&polygons) {
-                let space = chart.space(clearance - band);
+                let space = chart.space(inner, clearance - band);
                 if space > eps {
                     return Ok((inner, space));
                 }
             }
         }
         let (inner, clearance) = classify::interior_point(&polygons)?;
-        let space = chart.space(clearance - band);
+        let space = chart.space(inner, clearance - band);
         let sag = r.sag();
         if space > eps || sag <= eps / 16.0 {
             return Ok((inner, space));
@@ -593,10 +646,12 @@ fn planar_edges<'a>(
     list: impl Iterator<Item = (usize, Option<bool>)>,
 ) -> Result<Vec<planar::Edge<'a>>, KernelError> {
     let traced = |of: chart::TraceOf<'a>, ta: f64, tb: f64| {
-        Ok::<_, KernelError>(chart::trace(chart, of)?.map(|t| {
-            let ts = t.division(ta, tb);
-            (Box::new(t) as Box<dyn planar::Bend + 'a>, ts)
-        }))
+        chart::trace(chart, of)?
+            .map(|t| {
+                let ts = t.division(ta, tb)?;
+                Ok((Box::new(t) as Box<dyn planar::Bend + 'a>, ts))
+            })
+            .transpose()
     };
     list.map(|(s, side)| {
         let seg = &segs.list[s];
@@ -750,6 +805,49 @@ mod tests {
             .make_box(&frame, DVec3::splat(size))
             .expect("a box");
         (*body.brep).clone()
+    }
+
+    /// A thin shell that a coarse mesh flattens to nothing takes its
+    /// orientation from its mass properties: the ring a ball keeps outside
+    /// a cone whose side crosses its sphere twice close together. (Found
+    /// by the fuzz of balls and cones at 50 times its size: validation
+    /// refused such rings as inside out, by the sign of rounding.)
+    #[test]
+    fn a_thin_ring_is_measured_exactly() {
+        let tol = Tolerance::default();
+        let upright = |z: f64| Frame {
+            origin: DVec3::new(0.0, 0.0, z),
+            x: DVec3::X,
+            y: DVec3::Z,
+            z: -DVec3::Y,
+        };
+        let (apex, slope, base) = (2.0, 0.57, -0.2);
+        let ball = testing::ball(upright(0.0), 1.0);
+        let cone = testing::cone(upright(base), slope * (apex - base), apex - base);
+        let (r, _) = boolean(&ball, &cone, BooleanOp::Subtract, &tol).expect("a difference");
+        assert_eq!(crate::check::validate(&r, &tol), Vec::<String>::new());
+        // The ring's volume: the integral of π((1 − z²) − m²(a − z)²)
+        // between its roots, the circles where the cone crosses the sphere.
+        let (qa, qb, qc) = (
+            -(1.0 + slope * slope),
+            2.0 * slope * slope * apex,
+            1.0 - slope * slope * apex * apex,
+        );
+        let root = (qb * qb - 4.0 * qa * qc).sqrt();
+        let (z1, z2) = ((-qb + root) / (2.0 * qa), (-qb - root) / (2.0 * qa));
+        let integral = |z: f64| PI * (qa * z.powi(3) / 3.0 + 0.5 * qb * z * z + qc * z);
+        let ring = (integral(z2) - integral(z1)).abs();
+        let coarse = crate::check::shell_volumes(&r, &tol).expect("coarse volumes");
+        let signed = crate::check::shell_signed_volumes(&r, &tol).expect("volumes");
+        let thin: Vec<usize> = (0..coarse.len())
+            .filter(|&i| coarse[i].0.abs() <= coarse[i].1)
+            .collect();
+        assert_eq!(thin.len(), 1, "{coarse:?}");
+        assert!(
+            (signed[thin[0]] - ring).abs() <= 1e-6 * ring,
+            "{} vs {ring}",
+            signed[thin[0]]
+        );
     }
 
     #[test]
