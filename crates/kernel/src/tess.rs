@@ -1246,6 +1246,74 @@ pub(crate) fn polygon_cdt(loops: &[Vec<DVec2>]) -> Result<(Cdt, Vec<usize>), Str
     Ok((cdt, index))
 }
 
+/// Whether a closed polygon is convex and counter-clockwise: `Some(true)`
+/// if every turn is strictly to the left, `Some(false)` if some vertices
+/// are straight on (on one line with their neighbours, between them), and
+/// `None` for any other polygon.
+///
+/// Decided exactly: every turn is to the left or straight on (never back),
+/// at least one is to the left, and the edges' directions sweep one full
+/// turn, which they do if their x components change sign at most twice;
+/// more would wind the boundary around more than once (Schorn and Fisher,
+/// "Testing the convexity of a polygon", *Graphics Gems IV*, 1994).
+pub(crate) fn convexity(l: &[DVec2]) -> Option<bool> {
+    let n = l.len();
+    if n < 3 {
+        return None;
+    }
+    let sign = |a: f64, b: f64| (b > a) as i8 - (b < a) as i8;
+    let dir = |k: usize| {
+        let (a, b) = (l[k], l[(k + 1) % n]);
+        (sign(a.x, b.x), sign(a.y, b.y))
+    };
+    // Changes of sign of the edges' x components around the loop: from
+    // the last edge's that is not zero.
+    let mut x_was = (0..n).rev().map(|k| dir(k).0).find(|&x| x != 0)?;
+    let (mut left, mut strict, mut flips) = (false, true, 0);
+    for k in 0..n {
+        let (d0, d1) = (dir(k), dir((k + 1) % n));
+        if d0 == (0, 0) {
+            return None;
+        }
+        let o = orient(l[k], l[(k + 1) % n], l[(k + 2) % n]);
+        if o < 0.0 {
+            return None;
+        }
+        if o > 0.0 {
+            left = true;
+        } else if (d0.0 != 0 && d0.0 == -d1.0) || (d0.1 != 0 && d0.1 == -d1.1) {
+            // Straight back along the same line.
+            return None;
+        } else {
+            strict = false;
+        }
+        if d0.0 != 0 && d0.0 != x_was {
+            flips += 1;
+            x_was = d0.0;
+        }
+    }
+    (left && flips <= 2).then_some(strict)
+}
+
+/// The triangles, by position in the loop, that split a convex polygon of
+/// `n` vertices by halving the boundary's runs level by level: the first
+/// spans the polygon, and each further one a run of the boundary and the
+/// chord across it. Each triangle's box is about the size of its run (the
+/// slivers of a fan all reach across the polygon).
+pub(crate) fn balanced(n: usize) -> Vec<[usize; 3]> {
+    let mut out = vec![[0, n / 3, 2 * n / 3]];
+    let mut runs = vec![(0, n / 3), (n / 3, 2 * n / 3), (2 * n / 3, n)];
+    while let Some((i, j)) = runs.pop() {
+        if j - i >= 2 {
+            let m = (i + j) / 2;
+            out.push([i, m, j % n]);
+            runs.push((m, j));
+            runs.push((i, m));
+        }
+    }
+    out
+}
+
 /// Triangles inside the constrained boundary, found by flood fill from the
 /// outer face, toggling inside/outside each time a constraint edge is
 /// crossed. Purely topological, so robust to nearly collinear boundaries.
@@ -1327,121 +1395,131 @@ fn tessellate_face(
         .iter()
         .map(|l| l.iter().map(|smp| place(smp.uv)).collect())
         .collect();
-    let (mut cdt, index) =
-        polygon_cdt(&placed).map_err(|e| format!("face boundary in parameter space: {e}"))?;
-    // Vertices are numbered by the triangulation; a repeated boundary point
-    // keeps its first sample.
-    let mut filled = vec![false; cdt.num_vertices()];
-    verts.resize(cdt.num_vertices(), (DVec2::ZERO, None));
-    if !is_planar {
-        at.resize(cdt.num_vertices(), (DVec3::ZERO, None));
-    }
-    for (&i, smp) in index.iter().zip(loops.iter().flatten()) {
-        if !filled[i] {
-            filled[i] = true;
-            verts[i] = (smp.uv, Some(smp.p));
-            if !is_planar {
-                at[i] = evaluate(smp.uv, Some(smp.p));
+    // A flat face bounded by one strictly convex loop is split by halving
+    // the boundary's runs: no point is added on a flat face, every
+    // triangulation of a convex polygon on its own vertices is valid (no
+    // three of them are on a line), and this one needs no search.
+    let tris = if is_planar && placed.len() == 1 && convexity(&placed[0]) == Some(true) {
+        verts = loops[0].iter().map(|smp| (smp.uv, Some(smp.p))).collect();
+        balanced(placed[0].len())
+    } else {
+        let (mut cdt, index) =
+            polygon_cdt(&placed).map_err(|e| format!("face boundary in parameter space: {e}"))?;
+        // Vertices are numbered by the triangulation; a repeated boundary point
+        // keeps its first sample.
+        let mut filled = vec![false; cdt.num_vertices()];
+        verts.resize(cdt.num_vertices(), (DVec2::ZERO, None));
+        if !is_planar {
+            at.resize(cdt.num_vertices(), (DVec3::ZERO, None));
+        }
+        for (&i, smp) in index.iter().zip(loops.iter().flatten()) {
+            if !filled[i] {
+                filled[i] = true;
+                verts[i] = (smp.uv, Some(smp.p));
+                if !is_planar {
+                    at[i] = evaluate(smp.uv, Some(smp.p));
+                }
             }
         }
-    }
-    let insert = |cdt: &mut Cdt,
-                  verts: &mut Vec<(DVec2, Option<DVec3>)>,
-                  at: &mut Vec<(DVec3, Option<DVec3>)>,
-                  uv: DVec2|
-     -> Result<(), String> {
-        let q = place(uv);
-        let h = cdt
-            .insert(Point2::new(q.x, q.y))
-            .map_err(|e| format!("triangulation insert failed: {e:?}"))?;
-        if h.index() == verts.len() {
-            verts.push((uv, None));
-            if !is_planar {
-                at.push(evaluate(uv, None));
+        let insert = |cdt: &mut Cdt,
+                      verts: &mut Vec<(DVec2, Option<DVec3>)>,
+                      at: &mut Vec<(DVec3, Option<DVec3>)>,
+                      uv: DVec2|
+         -> Result<(), String> {
+            let q = place(uv);
+            let h = cdt
+                .insert(Point2::new(q.x, q.y))
+                .map_err(|e| format!("triangulation insert failed: {e:?}"))?;
+            if h.index() == verts.len() {
+                verts.push((uv, None));
+                if !is_planar {
+                    at.push(evaluate(uv, None));
+                }
             }
-        }
-        Ok(())
-    };
+            Ok(())
+        };
 
-    let boundary_constraints = cdt.num_constraints();
-    if !is_planar {
-        let min_area = (opts.chord_tolerance * 0.01).powi(2);
-        // Triangles found fine (or too small to refine) in an earlier pass:
-        // the test depends only on their vertices, so it is not repeated.
-        let mut settled: FxHashSet<[usize; 3]> = FxHashSet::default();
-        for _pass in 0..12 {
-            let tris = inside_triangles(&cdt);
-            let mut new_pts: Vec<DVec2> = Vec::new();
-            for t in &tris {
-                let mut key = *t;
-                key.sort_unstable();
-                if settled.contains(&key) {
-                    continue;
-                }
-                let uv = t.map(|i| verts[i].0);
-                let q = uv.map(|x| x * scale);
-                let area = 0.5 * (q[1] - q[0]).perp_dot(q[2] - q[0]).abs();
-                let longest = (q[1] - q[0])
-                    .length_squared()
-                    .max((q[2] - q[1]).length_squared())
-                    .max((q[0] - q[2]).length_squared());
-                // Skip tiny triangles and slivers (whose centroid could land
-                // on a boundary constraint within round-off).
-                if area < min_area || 2.0 * area < 1e-8 * longest {
-                    settled.insert(key);
-                    continue;
-                }
-                let p = t.map(|i| at[i].0);
-                let tri_n = (p[1] - p[0]).cross(p[2] - p[0]);
-                if tri_n.length() <= 0.0 {
-                    settled.insert(key);
-                    continue;
-                }
-                let tri_n = tri_n.normalize();
-                // Chord error: distance of the surface from the triangle's
-                // plane at the centroid and at interior-edge midpoints.
-                let c = (uv[0] + uv[1] + uv[2]) / 3.0;
-                let off = |w: DVec2| (s.point(w.x, w.y) - p[0]).dot(tri_n).abs();
-                let mut refine = off(c) > opts.chord_tolerance
-                    || (0..3).any(|e| {
-                        let (a, b) = (t[e], t[(e + 1) % 3]);
-                        (verts[a].1.is_none() || verts[b].1.is_none())
-                            && off((verts[a].0 + verts[b].0) * 0.5) > opts.chord_tolerance
-                    });
-                if !refine {
-                    if let Some(nc) = s.normal(c.x, c.y) {
-                        refine = t.iter().any(|&i| {
-                            at[i]
-                                .1
-                                .map(|nw| nw.angle_between(nc) > opts.max_angle)
-                                .unwrap_or(false)
+        let boundary_constraints = cdt.num_constraints();
+        if !is_planar {
+            let min_area = (opts.chord_tolerance * 0.01).powi(2);
+            // Triangles found fine (or too small to refine) in an earlier pass:
+            // the test depends only on their vertices, so it is not repeated.
+            let mut settled: FxHashSet<[usize; 3]> = FxHashSet::default();
+            for _pass in 0..12 {
+                let tris = inside_triangles(&cdt);
+                let mut new_pts: Vec<DVec2> = Vec::new();
+                for t in &tris {
+                    let mut key = *t;
+                    key.sort_unstable();
+                    if settled.contains(&key) {
+                        continue;
+                    }
+                    let uv = t.map(|i| verts[i].0);
+                    let q = uv.map(|x| x * scale);
+                    let area = 0.5 * (q[1] - q[0]).perp_dot(q[2] - q[0]).abs();
+                    let longest = (q[1] - q[0])
+                        .length_squared()
+                        .max((q[2] - q[1]).length_squared())
+                        .max((q[0] - q[2]).length_squared());
+                    // Skip tiny triangles and slivers (whose centroid could
+                    // land on a boundary constraint within round-off).
+                    if area < min_area || 2.0 * area < 1e-8 * longest {
+                        settled.insert(key);
+                        continue;
+                    }
+                    let p = t.map(|i| at[i].0);
+                    let tri_n = (p[1] - p[0]).cross(p[2] - p[0]);
+                    if tri_n.length() <= 0.0 {
+                        settled.insert(key);
+                        continue;
+                    }
+                    let tri_n = tri_n.normalize();
+                    // Chord error: distance of the surface from the triangle's
+                    // plane at the centroid and at interior-edge midpoints.
+                    let c = (uv[0] + uv[1] + uv[2]) / 3.0;
+                    let off = |w: DVec2| (s.point(w.x, w.y) - p[0]).dot(tri_n).abs();
+                    let mut refine = off(c) > opts.chord_tolerance
+                        || (0..3).any(|e| {
+                            let (a, b) = (t[e], t[(e + 1) % 3]);
+                            (verts[a].1.is_none() || verts[b].1.is_none())
+                                && off((verts[a].0 + verts[b].0) * 0.5) > opts.chord_tolerance
                         });
+                    if !refine {
+                        if let Some(nc) = s.normal(c.x, c.y) {
+                            refine = t.iter().any(|&i| {
+                                at[i]
+                                    .1
+                                    .map(|nw| nw.angle_between(nc) > opts.max_angle)
+                                    .unwrap_or(false)
+                            });
+                        }
+                    }
+                    if refine {
+                        new_pts.push(c);
+                    } else {
+                        settled.insert(key);
                     }
                 }
-                if refine {
-                    new_pts.push(c);
-                } else {
-                    settled.insert(key);
+                if new_pts.is_empty() {
+                    break;
+                }
+                if verts.len() + new_pts.len() > 2_000_000 {
+                    return Err("tessellation exceeded the vertex budget".into());
+                }
+                for c in new_pts {
+                    insert(&mut cdt, &mut verts, &mut at, c)?;
                 }
             }
-            if new_pts.is_empty() {
-                break;
-            }
-            if verts.len() + new_pts.len() > 2_000_000 {
-                return Err("tessellation exceeded the vertex budget".into());
-            }
-            for c in new_pts {
-                insert(&mut cdt, &mut verts, &mut at, c)?;
+            if cdt.num_constraints() != boundary_constraints {
+                return Err("refinement split a boundary edge".into());
             }
         }
-        if cdt.num_constraints() != boundary_constraints {
-            return Err("refinement split a boundary edge".into());
-        }
-    }
+
+        inside_triangles(&cdt)
+    };
 
     // Emit vertices. Boundary vertices with identical 3D points (split
     // singular points) are welded.
-    let tris = inside_triangles(&cdt);
     let mut out = FaceTess::default();
     let mut index_of: Vec<Option<u32>> = vec![None; verts.len()];
     let mut by_pos: FxHashMap<[u64; 3], u32> = FxHashMap::default();
@@ -1502,4 +1580,90 @@ fn tessellate_face(
         return Err("face produced no triangles".into());
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn poly(pts: &[(f64, f64)]) -> Vec<DVec2> {
+        pts.iter().map(|&(x, y)| DVec2::new(x, y)).collect()
+    }
+
+    #[test]
+    fn convexity_is_decided_exactly() {
+        let square = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        assert_eq!(convexity(&poly(&square)), Some(true));
+        assert_eq!(convexity(&poly(&square[..3])), Some(true));
+        let on_side = [(0.0, 0.0), (0.5, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        assert_eq!(convexity(&poly(&on_side)), Some(false));
+        let pentagram: Vec<DVec2> = (0..5)
+            .map(|k| {
+                let a = std::f64::consts::TAU * (2 * k) as f64 / 5.0;
+                DVec2::new(a.cos(), a.sin())
+            })
+            .collect();
+        let others = [
+            poly(&[(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)]),
+            poly(&[
+                (0.0, 0.0),
+                (2.0, 0.0),
+                (2.0, 1.0),
+                (1.0, 1.0),
+                (1.0, 2.0),
+                (0.0, 2.0),
+            ]),
+            poly(&[(0.0, 0.0), (2.0, 0.0), (3.0, 0.0), (2.0, 0.0), (2.0, 2.0)]),
+            poly(&[(0.0, 0.0), (1.0, 0.0), (1.0, 0.0), (1.0, 1.0)]),
+            poly(&[(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)]),
+            poly(&[(0.0, 0.0), (1.0, 0.0)]),
+            pentagram,
+        ];
+        for l in &others {
+            assert_eq!(convexity(l), None, "{l:?}");
+        }
+    }
+
+    /// The balanced triangles of a convex polygon cover it once: `n − 2`
+    /// counter-clockwise triangles whose areas sum to the polygon's, each
+    /// side of the polygon in one triangle and each chord in two.
+    #[test]
+    fn balanced_triangles_cover_the_polygon() {
+        for n in 3..300 {
+            let l: Vec<DVec2> = (0..n)
+                .map(|k| {
+                    let a = std::f64::consts::TAU * k as f64 / n as f64;
+                    DVec2::new(a.cos(), 0.5 * a.sin())
+                })
+                .collect();
+            let tris = balanced(n);
+            assert_eq!(tris.len(), n - 2);
+            let mut area = 0.0;
+            let mut uses: FxHashMap<(usize, usize), (u32, u32)> = FxHashMap::default();
+            for t in &tris {
+                let [a, b, c] = t.map(|k| l[k]);
+                let twice = (b - a).perp_dot(c - a);
+                assert!(twice > 0.0, "n {n}: {t:?}");
+                area += 0.5 * twice;
+                for (u, v) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                    let e = uses.entry((u.min(v), u.max(v))).or_default();
+                    if u < v {
+                        e.0 += 1;
+                    } else {
+                        e.1 += 1;
+                    }
+                }
+            }
+            let shoelace: f64 = (0..n).map(|k| 0.5 * l[k].perp_dot(l[(k + 1) % n])).sum();
+            assert!((area - shoelace).abs() < 1e-12, "n {n}");
+            for ((u, v), (fw, bw)) in uses {
+                let side = v - u == 1 || (u == 0 && v == n - 1);
+                if side {
+                    assert_eq!(fw + bw, 1, "n {n}: side {u}-{v}");
+                } else {
+                    assert_eq!((fw, bw), (1, 1), "n {n}: chord {u}-{v}");
+                }
+            }
+        }
+    }
 }

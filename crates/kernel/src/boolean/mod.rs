@@ -306,6 +306,14 @@ fn other(op: Operand) -> Operand {
     }
 }
 
+/// The box of an operand: of its faces' boxes, so of its vertices.
+fn extent(poly: &Poly) -> (DVec3, DVec3) {
+    poly.faces.iter().fold(
+        (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+        |(lo, hi), f| (lo.min(f.lo), hi.max(f.hi)),
+    )
+}
+
 fn boxes_overlap(a: (DVec3, DVec3), b: (DVec3, DVec3), eps: f64) -> bool {
     a.0.cmple(b.1 + DVec3::splat(eps)).all() && b.0.cmple(a.1 + DVec3::splat(eps)).all()
 }
@@ -494,11 +502,18 @@ fn boolean_within(
         classify::Boundary::new(&pair.first)?,
         classify::Boundary::new(&pair.second)?,
     ];
+    let boxes = [extent(&pair.first), extent(&pair.second)];
     let mut pieces: Vec<Piece> = Vec::new();
     for op in [Operand::First, Operand::Second] {
         let poly = pair.get(op);
         let them = pair.get(other(op));
         for (fi, f) in poly.faces.iter().enumerate() {
+            // A face farther than the tolerance from the other body's box
+            // is untouched by it (no point where the bodies meet is on its
+            // edges, and no face of the other body is on its plane) and
+            // wholly outside it: its one piece, its own loops, needs no
+            // point inside it and no test.
+            let clear = !boxes_overlap((f.lo, f.hi), boxes[slot(other(op))], eps);
             let list = &face_segs[slot(op)][fi];
             let pos = |c: usize| f.to2(pts.rep[c]);
             let regions = planar::regions(list, &pos, eps).map_err(|p| match p {
@@ -519,6 +534,16 @@ fn boolean_within(
                 )),
             })?;
             for loops in regions {
+                if clear {
+                    pieces.push(Piece {
+                        operand: op,
+                        face: fi,
+                        loops,
+                        class: Class::Outside,
+                        partner: None,
+                    });
+                    continue;
+                }
                 let poly2: Vec<Vec<DVec2>> = loops
                     .iter()
                     .map(|l| l.iter().map(|&c| pos(c)).collect())

@@ -244,8 +244,12 @@ holes of the smallest region of another component around them.
 piece inside a coincident face of the other body is on it, with the same
 or the opposite normal; any other piece is classified at the incentre of
 its triangle with the largest inscribed circle in a constrained Delaunay
-triangulation. Each piece is decided by its own test, so no decision
-depends on another, and the test's margin is measurable: a piece whose
+triangulation (a convex piece, at the better of its centroid, which is
+at least two thirds as far from the boundary as the best point, and the
+incentres of a few of its triangles; a face farther than the tolerance
+from the other body's box is outside it without a test). Each piece is
+decided by its own test, so no decision depends on another, and the
+test's margin is measurable: a piece whose
 inscribed circle is no wider than the tolerance is a sliver, and a point
 within the tolerance of the other body's surface is on it; both are
 refused. Any other point is decided exactly by ray parity: the other

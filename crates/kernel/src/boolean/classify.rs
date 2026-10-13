@@ -4,8 +4,10 @@
 //! plane) is *on* it, with the same or the opposite outward normal. Any
 //! other piece is wholly inside or wholly outside the other body, since
 //! every place where that body's surface crosses the face is a cut between
-//! pieces; it is classified at one point well inside it (the incentre of
-//! the piece's triangle with the largest inscribed circle).
+//! pieces; it is classified at one point well inside it (for a convex
+//! piece, the better of its centroid and the incentres of a few triangles
+//! of it; otherwise the incentre of the triangle with the largest
+//! inscribed circle in a triangulation of it).
 //!
 //! A point within the tolerance of the other body's surface is on it, so a
 //! piece whose point is there without lying on a coincident face has no
@@ -211,21 +213,13 @@ fn triangulate(poly: &Poly, f: &super::PolyFace, out: &mut Vec<[u32; 3]>) -> Res
     // ray meets a few boxes per level; the slivers of a fan all reach
     // across the face, and a ray near it meets most of them.
     if let [vs] = &f.verts[..] {
-        let n = vs.len();
-        let convex = n >= 3
-            && (0..n).all(|k| orient2(q2(vs[k]), q2(vs[(k + 1) % n]), q2(vs[(k + 2) % n])) > 0.0);
-        if convex {
-            let tri = |a: usize, b: usize, c: usize| [vs[a], vs[b], vs[c % n]].map(|v| v as u32);
-            out.push(tri(0, n / 3, 2 * n / 3));
-            let mut runs = vec![(0, n / 3), (n / 3, 2 * n / 3), (2 * n / 3, n)];
-            while let Some((i, j)) = runs.pop() {
-                if j - i >= 2 {
-                    let m = (i + j) / 2;
-                    out.push(tri(i, m, j));
-                    runs.push((m, j));
-                    runs.push((i, m));
-                }
-            }
+        let ring: Vec<DVec2> = vs.iter().map(|&v| q2(v)).collect();
+        if tess::convexity(&ring) == Some(true) {
+            out.extend(
+                tess::balanced(vs.len())
+                    .into_iter()
+                    .map(|t| t.map(|k| vs[k] as u32)),
+            );
             return Ok(());
         }
     }
@@ -274,9 +268,17 @@ fn orient2(a: DVec2, b: DVec2, c: DVec2) -> f64 {
 }
 
 /// A point well inside the polygon `loops` (outer first) and its distance
-/// from the boundary at least: the incentre of the triangle with the
-/// largest inscribed circle in a constrained triangulation of the polygon.
+/// from the boundary at least. For a convex polygon without holes, the
+/// better of its centroid and the incentres of a balanced triangulation of
+/// it ([`convex_interior`]); otherwise the incentre of the triangle with
+/// the largest inscribed circle in a constrained triangulation of the
+/// polygon.
 pub(super) fn interior_point(loops: &[Vec<DVec2>]) -> Result<(DVec2, f64), String> {
+    if let [l] = loops {
+        if let Some(found) = convex_interior(l) {
+            return Ok(found);
+        }
+    }
     let (cdt, index) = tess::polygon_cdt(loops).map_err(|e| format!("a piece's boundary: {e}"))?;
     let mut at = vec![DVec2::ZERO; cdt.num_vertices()];
     for (&i, q) in index.iter().zip(loops.iter().flatten()) {
@@ -284,19 +286,67 @@ pub(super) fn interior_point(loops: &[Vec<DVec2>]) -> Result<(DVec2, f64), Strin
     }
     let mut best: Option<(DVec2, f64)> = None;
     for t in tess::inside_triangles(&cdt) {
-        let [a, b, c] = t.map(|i| at[i]);
-        let (la, lb, lc) = ((b - c).length(), (c - a).length(), (a - b).length());
-        let per = la + lb + lc;
-        let area = 0.5 * (b - a).perp_dot(c - a).abs();
-        if per <= 0.0 {
-            continue;
-        }
-        let r = 2.0 * area / per;
-        if best.is_none_or(|(_, br)| r > br) {
-            best = Some(((a * la + b * lb + c * lc) / per, r));
+        let found = incircle(t.map(|i| at[i]));
+        if found.is_some_and(|(_, r)| best.is_none_or(|(_, br)| r > br)) {
+            best = found;
         }
     }
     best.ok_or_else(|| "a piece with no area".into())
+}
+
+/// The centre and radius of the circle inscribed in a triangle, or `None`
+/// for a triangle with no perimeter.
+fn incircle([a, b, c]: [DVec2; 3]) -> Option<(DVec2, f64)> {
+    let (la, lb, lc) = ((b - c).length(), (c - a).length(), (a - b).length());
+    let per = la + lb + lc;
+    let area = 0.5 * (b - a).perp_dot(c - a).abs();
+    (per > 0.0).then(|| ((a * la + b * lb + c * lc) / per, 2.0 * area / per))
+}
+
+/// For a convex counter-clockwise polygon ([`tess::convexity`]), a point
+/// inside it and its distance from the boundary at least, without a
+/// triangulation; `None` for any other polygon.
+///
+/// The point is the better of two candidates. The centroid of the area is
+/// at least a third of the polygon's width from every side (Minkowski and
+/// Radon), so at least two thirds as far from the boundary as the centre
+/// of the largest inscribed circle; and the incentres of the triangles of
+/// [`tess::balanced`], of which a triangle's own incentre is the best
+/// possible. A point's distance from a convex polygon's boundary is its
+/// least distance from the sides' lines.
+fn convex_interior(l: &[DVec2]) -> Option<(DVec2, f64)> {
+    tess::convexity(l)?;
+    let n = l.len();
+    let o = l[0];
+    let (mut twice_area, mut sum) = (0.0, DVec2::ZERO);
+    for k in 1..n - 1 {
+        let (p, q) = (l[k] - o, l[k + 1] - o);
+        let w = p.perp_dot(q);
+        twice_area += w;
+        sum += (p + q) * w;
+    }
+    if !twice_area.is_finite() || twice_area <= 0.0 {
+        return None;
+    }
+    // Least distance from the sides' lines, positive inside.
+    let clearance = |p: DVec2| {
+        (0..n)
+            .map(|k| {
+                let (a, b) = (l[k], l[(k + 1) % n]);
+                (b - a).perp_dot(p - a) / (b - a).length()
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    let centroid = o + sum / (3.0 * twice_area);
+    let mut best = (centroid, clearance(centroid));
+    for t in tess::balanced(n) {
+        if let Some((c, r)) = incircle(t.map(|k| l[k])) {
+            if r > best.1 {
+                best = (c, r);
+            }
+        }
+    }
+    (best.1 > 0.0).then_some(best)
 }
 
 /// The point of triangle `t` closest to `p` (Ericson, *Real-Time Collision
@@ -369,5 +419,147 @@ mod tests {
         let flat = [DVec3::ZERO, DVec3::X, DVec3::X * 2.0];
         let q = closest_on_triangle(DVec3::new(1.5, 1.0, 0.0), &flat);
         assert!((q - DVec3::new(1.5, 0.0, 0.0)).length() < 1e-15);
+    }
+
+    fn poly(pts: &[(f64, f64)]) -> Vec<DVec2> {
+        pts.iter().map(|&(x, y)| DVec2::new(x, y)).collect()
+    }
+
+    /// The distance from `p` to the polygon's boundary.
+    fn boundary_distance(l: &[DVec2], p: DVec2) -> f64 {
+        (0..l.len())
+            .map(|k| {
+                let (a, b) = (l[k], l[(k + 1) % l.len()]);
+                let t = ((p - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+                (a + (b - a) * t - p).length()
+            })
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// True if `p` is strictly inside the counter-clockwise polygon `l`
+    /// (by winding number).
+    fn strictly_inside(l: &[DVec2], p: DVec2) -> bool {
+        let mut w = 0;
+        for k in 0..l.len() {
+            let (a, b) = (l[k], l[(k + 1) % l.len()]);
+            let o = orient2(a, b, p);
+            if o == 0.0 && (p - a).dot(p - b) <= 0.0 {
+                return false;
+            }
+            if a.y <= p.y && b.y > p.y && o > 0.0 {
+                w += 1;
+            } else if a.y > p.y && b.y <= p.y && o < 0.0 {
+                w -= 1;
+            }
+        }
+        w == 1
+    }
+
+    #[test]
+    fn convex_pieces_get_a_point_without_a_triangulation() {
+        // A square: its centre, half its side from the boundary.
+        let square = poly(&[(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)]);
+        let (p, r) = convex_interior(&square).unwrap();
+        assert!((p - DVec2::ONE).length() < 1e-15 && (r - 1.0).abs() < 1e-15);
+        // With points on its sides (where other faces split them).
+        let split = poly(&[
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 2.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+            (0.0, 1.0),
+        ]);
+        let (p, r) = convex_interior(&split).unwrap();
+        assert!(strictly_inside(&split, p) && r > 0.9 && r <= boundary_distance(&split, p));
+        // A thin triangle: its incentre, half as far again from the long
+        // sides as its centroid.
+        let thin = poly(&[(0.0, 0.0), (10.0, 0.0), (5.0, 0.1)]);
+        let (p, r) = convex_interior(&thin).unwrap();
+        let (c, ri) = incircle([thin[0], thin[1], thin[2]]).unwrap();
+        assert_eq!((p, r), (c, ri));
+        assert!((r - boundary_distance(&thin, p)).abs() < 1e-12);
+        // Anything else is left to the triangulation.
+        let refused = [
+            // Clockwise.
+            poly(&[(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)]),
+            // Not convex.
+            poly(&[(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (1.0, 1.0), (0.0, 2.0)]),
+            // A spike straight back along a side.
+            poly(&[(0.0, 0.0), (2.0, 0.0), (3.0, 0.0), (2.0, 0.0), (2.0, 2.0)]),
+            // A repeated point.
+            poly(&[(0.0, 0.0), (1.0, 0.0), (1.0, 0.0), (1.0, 1.0)]),
+            // All on one line.
+            poly(&[(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)]),
+            // A pentagram: every turn to the left, but around twice.
+            (0..5)
+                .map(|k| {
+                    let a = std::f64::consts::TAU * (2 * k) as f64 / 5.0;
+                    DVec2::new(a.cos(), a.sin())
+                })
+                .collect(),
+        ];
+        for l in &refused {
+            assert_eq!(convex_interior(l), None, "{l:?}");
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(400))]
+
+        /// On random polygons: a convex polygon always gets a point, and
+        /// every point given is inside, its clearance a true lower bound
+        /// and at least half the triangulation's; a polygon that is not
+        /// convex never gets one.
+        #[test]
+        fn convex_interior_points_are_inside(
+            n in 3usize..40,
+            seed in 0u64..u64::MAX,
+            star in proptest::bool::ANY,
+        ) {
+            let mut h = seed;
+            let mut rnd = || {
+                h = h.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (h >> 11) as f64 / (1u64 << 53) as f64
+            };
+            let mut angles: Vec<f64> = (0..n).map(|_| rnd() * std::f64::consts::TAU).collect();
+            angles.sort_by(f64::total_cmp);
+            let (cx, cy, s) = (rnd() * 20.0 - 10.0, rnd() * 20.0 - 10.0, 0.01 + rnd() * 5.0);
+            let l: Vec<DVec2> = angles
+                .iter()
+                .map(|&a| {
+                    let r = if star { s * (0.3 + rnd()) } else { s };
+                    DVec2::new(cx + r * a.cos(), cy + r * a.sin())
+                })
+                .collect();
+            let convex = (0..n).all(|k| {
+                (0..n).all(|j| orient2(l[k], l[(k + 1) % n], l[j]) >= 0.0)
+            }) && (0..n).all(|k| l[k] != l[(k + 1) % n]);
+            match convex_interior(&l) {
+                Some((p, r)) => {
+                    proptest::prop_assert!(convex, "not convex: {l:?}");
+                    proptest::prop_assert!(strictly_inside(&l, p));
+                    let d = boundary_distance(&l, p);
+                    proptest::prop_assert!(r > 0.0 && r <= d * (1.0 + 1e-9) + 1e-15);
+                    let (_, rc) = interior_point(std::slice::from_ref(&l)).unwrap();
+                    let cdt = {
+                        let (cdt, index) = tess::polygon_cdt(std::slice::from_ref(&l)).unwrap();
+                        let mut at = vec![DVec2::ZERO; cdt.num_vertices()];
+                        for (&i, q) in index.iter().zip(&l) {
+                            at[i] = *q;
+                        }
+                        tess::inside_triangles(&cdt)
+                            .into_iter()
+                            .filter_map(|t| incircle(t.map(|i| at[i])))
+                            .map(|(_, r)| r)
+                            .fold(0.0, f64::max)
+                    };
+                    proptest::prop_assert_eq!(rc, r);
+                    proptest::prop_assert!(r >= 0.5 * cdt, "{r} against {cdt}");
+                }
+                None => proptest::prop_assert!(!convex || angles.windows(2).any(|w| w[0] == w[1])),
+            }
+        }
     }
 }

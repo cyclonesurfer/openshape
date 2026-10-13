@@ -66,3 +66,8 @@ The repository carries about 1.8 MB of third-party source (`spade`'s
 available for the next known defect of this kind: the exact incircle
 predicate of the `robust` crate zeroes a 9 KB buffer on every call of its
 fallback (docs/PERFORMANCE.md, known slow spots).
+
+Update, 2026-10-13: measured by wall clock, a patched copy of `robust`
+without that zeroing saved only 3–6% of meshing, so it is not carried
+(docs/PERFORMANCE.md, second pass). A patch is carried for a defect or a
+large measured gain, not for a few percent.

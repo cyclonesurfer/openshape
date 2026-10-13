@@ -587,6 +587,19 @@ name open unchanged.
   passed with every region's mass to 1e-10, no fallback; it refused 313
   unresolvable perturbed inputs, 18 loops below resolution and 44
   pinched profiles (the cases are random per run).
+- Second efficiency pass (docs/PERFORMANCE.md), 2026-10-13, on Mesa
+  lavapipe: fmt, clippy with `-D warnings`, 897 tests and `cargo deny`
+  pass, and the release time guards pass as CI runs them. Faces clear of
+  the other body skip the point-inside and parity test; convex pieces
+  get their point without a triangulation; convex flat faces are meshed
+  without a Delaunay search. Measured by wall clock: piece points over the
+  64 cuts 45 ms to 25 ms, a 256-sided union 48 ms to 43 ms, meshing a
+  1024-sided prism 9 ms to 8 ms. The boolean fuzz at 20 times the
+  default refuses exactly the same 2,191 operations for the same reasons
+  as before. A patched incircle predicate (no buffer zeroing) matched the
+  published crate on 36 million calls but saved only 3–6%, so it is not
+  carried; the earlier note that the zeroing took 60% of meshing came
+  from an instruction count and was wrong.
 - Time guards and the first efficiency pass (docs/PERFORMANCE.md),
   2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   893 tests and `cargo deny` pass. Release-mode time guards for
@@ -856,24 +869,29 @@ name open unchanged.
   cut in two, say), references to its caps fail rather than guess.
   Splits and merges by later operations come with booleans. No
   incremental regeneration: every edit regenerates the whole studio.
-- Known slow spots (docs/PERFORMANCE.md): the exact incircle test's
-  fallback zeroes a 9 KB buffer per call and takes about 60% of meshing a
-  face with holes; each boolean piece pays a full triangulation for its
-  interior point; validation meshes every result. All are within their
-  budgets.
+- Known slow spots (docs/PERFORMANCE.md, measured by wall clock): flat
+  faces are triangulated by constrained Delaunay, whose exact incircle
+  test is slow on points sharing a circle (round holes, rectangles); the
+  flat faces take two thirds of meshing a plate with round holes, mostly
+  in that test. Validation meshes every result; pieces that are not
+  convex get their interior point from a triangulation; every boolean
+  reads both whole bodies, so its time grows with the bodies rather than
+  with where they meet. All are within their budgets.
 - Non-manifold topology deferred to Phase 3.
 - No STEP or other exchange formats beyond STL (Phase 4; see docs/FORMATS.md).
 
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Next efficiency pass (docs/PERFORMANCE.md, known slow spots): the
-   incircle fallback's buffer, the per-piece triangulation in booleans,
-   validation without a full mesh; then lower the budgets to match.
-3. Phase 3, in the order the design notes give: absorb the
+2. Phase 3, in the order the design notes give: absorb the
    near-coincidences of the tolerance test that are refused at half a
    tolerance; booleans with planes, cylinders, cones and spheres in
    closed form (0012 §8 step 2, 0011 §8); naming through booleans
    (design note 0013 §10 step 4); then extrude and revolve that add,
    remove and intersect. The rest of the Phase 2 sketcher (project/convert, intersection
    curves, pierce) needs Phase 3 faces.
+3. Efficiency, alongside Phase 3 (docs/PERFORMANCE.md, known slow spots):
+   flat faces triangulated from orientation tests alone (no incircle
+   test), which speeds meshing and validation; booleans that work near
+   where the bodies meet (validation and classification of untouched
+   faces carried over); then lower the budgets to match.

@@ -11,10 +11,11 @@ is kept true and measured.
    ten times the measured time. Ordinary noise and slower machines pass; an
    accidental quadratic loop, a lost index or a debug path left on fails.
 2. **Scaling is tested on its own.** The same operation is timed at a size
-   and at four times that size; the ratio is bounded (8, where an
-   n log n operation grows about 4.5 times and a quadratic one 16 times).
-   A ratio holds on any machine, so these checks catch a change of
-   complexity even where the budgets are loose.
+   and at eight times that size, the runs interleaved; the ratio is
+   bounded at 24, three times the factor (an n log n operation grows about
+   9 to 10 times, a quadratic one 64 times). A ratio holds on any machine,
+   so these checks catch a change of complexity even where the budgets are
+   loose.
 3. **Hot code uses the standard data structures**: spatial indexes
    (`crates/kernel/src/bvh.rs`, a bounding-volume hierarchy; uniform grids)
    instead of loops over all pairs, bulk-loaded triangulations, exact
@@ -46,15 +47,15 @@ machine. The limit is what the test enforces.
 | Operation | Measured | Limit |
 |---|---|---|
 | Extrude a 1024-sided star prism (build and validate) | 12 ms | 120 ms |
-| Mesh it | 9 ms | 100 ms |
-| Validate it | 9.5 ms | 100 ms |
+| Mesh it | 8 ms | 100 ms |
+| Validate it | 8.6 ms | 100 ms |
 | Its mass properties to 1e-9 | 70 ms | 700 ms |
 | Mesh a revolved ring (115,352 triangles) | 270–340 ms | 3,000 ms |
 | Extrude a plate with 100 round holes | 12.5–23 ms | 150 ms |
-| Mesh it | 135–220 ms | 1,500 ms |
-| Union or subtract two 256-sided star prisms | 40–60 ms | 500 ms |
-| Cut 64 holes into a box, one boolean each | 240–330 ms | 3,000 ms |
-| Sketch regions of 122 curves (a 41 by 41 grid and 40 circles) | 105–115 ms | 1,200 ms |
+| Mesh it | 140–220 ms | 1,500 ms |
+| Union or subtract two 256-sided star prisms | 38.5–44 ms | 500 ms |
+| Cut 64 holes into a box, one boolean each | 225–265 ms | 3,000 ms |
+| Sketch regions of 122 curves (a 41 by 41 grid and 40 circles) | 100–115 ms | 1,200 ms |
 | Regenerate the demo document | 36.5–41 ms | 400 ms |
 
 Scaling, each size against eight times it (bound: 24, three times the
@@ -62,8 +63,8 @@ factor):
 
 | Operation | Measured growth |
 |---|---|
-| Extrude a star prism, 256 to 2048 sides | 9.7–10.3 times |
-| Union of two regular prisms, 128 to 1024 sides | 11.3–11.5 times |
+| Extrude a star prism, 256 to 2048 sides | 9.7–12.2 times |
+| Union of two regular prisms, 128 to 1024 sides | 11.3–12.6 times |
 | Mesh a plate, 16 to 121 holes (7.6 times) | 7.4–7.6 times |
 
 The union is scaled on regular prisms, whose result grows with their
@@ -93,6 +94,8 @@ A limit is a refusal, never a truncated answer: the kernel reports
 shows it.
 
 ## What changed, 2026-10-13
+
+### First pass
 
 Profiling (callgrind on release builds with line tables) found these, now
 fixed; times are on the reference machine.
@@ -141,26 +144,69 @@ fixed; times are on the reference machine.
   them: extruding an 8192-sided polygon went from 315 ms to 92 ms, and a
   plate with 1,600 holes from 1.35 s to 0.21 s.
 
+### Second pass
+
+Each boolean's stages were timed by wall clock (instrumented release
+builds) on the 256-sided unions and the 64 cuts above.
+
+* **Faces clear of the other body need no test.** A face farther than the
+  tolerance from the other body's box is untouched by it and wholly
+  outside it, so its piece needs no point inside it and no parity test.
+  Over the 64 cuts, where all but two faces of the growing body are clear
+  of each pin, finding piece points fell from 45 ms to 25 ms.
+* **Convex pieces get their point without a triangulation.** A piece is
+  classified at a point well inside it, the incentre of the best triangle
+  of a constrained triangulation; a convex piece (decided exactly) now
+  uses the better of its centroid, which is at least two thirds as far
+  from the boundary as the best possible point, and the incentres of its
+  balanced triangles. For the 256-sided unions, finding piece points fell
+  from 11.8 ms to 7.5 ms a boolean, and the union from 48 ms to 43 ms. The
+  boolean fuzz at twenty times the default size refuses exactly the same
+  2,191 operations for the same reasons as before; only the place a
+  sliver refusal names moved, since the point inside the piece moved.
+* **Convex flat faces are meshed without a search.** A flat face bounded
+  by one strictly convex loop is split by halving its boundary's runs (the
+  triangles of the parity test) instead of by a constrained Delaunay
+  triangulation: meshing the 1024-sided prism, whose sides are 2,048
+  rectangles, fell from 9 ms to 8 ms.
+* **Not carried: a patched incircle test.** The `robust` crate's exact
+  incircle test zeroes a 9 KB buffer on every call of its exact stages.
+  An instruction count put that at nearly half of meshing a plate with 100
+  holes, but a patched copy that sizes the buffer to the stage gave the
+  same answers bit for bit (36 million calls against the published crate,
+  16 million of them reaching the exact stages and 300,000 the last of
+  them) and saved only 3–6% of the wall-clock time: zeroing memory costs
+  far less per instruction than the arithmetic around it. Too little to
+  carry a patched copy for (ADR 0022).
+
 ## Known slow spots
 
-Measured, not yet fixed; each is a candidate for the next pass.
+Measured by wall clock, not yet fixed; each is a candidate for a later
+pass.
 
-* **The exact incircle test's fallback.** The triangulation library's
-  Delaunay test (Shewchuk's incircle, from the `robust` crate) falls back
-  to exact arithmetic whenever four points are on one circle, and the
-  fallback zeroes a 9 KB buffer on every call. A cylinder face's points in
-  its parameter plane form rows of rectangles, all such cases, so meshing
-  a plate with 100 holes spends about 60% of its time there, mostly in the
-  zeroing; booleans spend about a tenth. The fix is a smaller buffer in
-  that fallback (in the library, upstream or by a patched copy).
-* **One triangulation per boolean piece.** Each piece of a split face gets
-  a point well inside it from a constrained triangulation, about 100,000
-  instructions a piece, mostly fixed cost; for two 512-sided star prisms
-  that is a quarter of the boolean.
+* **Delaunay tests on points of one circle.** Every triangulation here is
+  a constrained Delaunay triangulation, whose incircle test (Shewchuk's,
+  from the `robust` crate) is exact: when four points lie on one circle,
+  as the samples of a round hole or the corners of a rectangle do, its
+  fast stage cannot decide and it computes in exact arithmetic. Meshing
+  a plate with 100 round holes takes about 150 ms, of which the two flat
+  faces take 96 ms; the same flat faces with their points moved 1e-9 m
+  off their circles triangulate in a third of the time. Meshing grows in
+  proportion to the holes (1,600 holes: 2.4 s, 1.5 ms a hole). Flat faces
+  need no Delaunay property (any triangulation on their boundary points
+  is as good); a triangulation built from orientation tests alone, or a
+  cheaper exact incircle stage, would remove most of it.
 * **Validation meshes the result** to check each shell's orientation by
-  its volume, a quarter of a boolean's time.
-* **Holes mesh one at a time:** a plate with 1,600 holes takes about 2.5 s
-  to mesh, 1.5 ms a hole, most of it the incircle fallback above.
+  its volume, and to check that every face can be meshed: about a fifth
+  of a 256-sided union (8 ms of 43) and a quarter of each of the 64 cuts,
+  most of it the two faces with many holes, for the reason above.
+* **Points inside pieces that are not convex** still come from a
+  triangulation: 7.5 ms of a 256-sided union.
+* **Every boolean reads both whole bodies.** Converting and indexing each
+  operand, triangulating its faces for the parity test, splitting every
+  face and validating the result take time in proportion to the bodies,
+  not to where they meet: each of the 64 cuts takes 3.5–4 ms on a body of
+  up to 262 faces, most of it outside the pin's neighbourhood.
 * **Meshing to a very fine tolerance can hit the vertex limit:** a full
   ring meshed to 1 µm needs more than 2,000,000 vertices on one face and is
   refused.
@@ -175,4 +221,8 @@ callgrind_annotate --inclusive=yes cg.out | head -60
 
 Callgrind counts instructions, so its numbers are stable from run to run
 and compare well between two builds; wall-clock numbers come from the time
-guards.
+guards. An instruction is not a unit of time: zeroing memory runs many
+instructions a cycle, and a mispredicted branch costs many cycles, so a
+hotspot in an instruction count is confirmed by the wall clock (the best
+of several interleaved runs of the two builds, or the stage timed in
+place) before it is acted on or written down.
