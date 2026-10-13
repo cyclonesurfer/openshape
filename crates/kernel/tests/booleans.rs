@@ -638,16 +638,15 @@ fn volume_identities_on_random_pairs() {
     assert!(t.checked * 10 >= t.pairs * 8, "too few pairs fully checked");
 }
 
-#[test]
-fn motions_by_fractions_of_the_tolerance() {
-    let eps = k().tolerance().linear;
-    let mut t = Tally::default();
+/// The motions' fractions of the tolerance, case by case in turn.
+const FRACTIONS: [f64; 7] = [0.25, 0.5, 0.9, 1.1, 1.5, 3.0, 10.0];
+
+/// The motions, case by case: the seed of a random body and the direction
+/// its copy moves in.
+fn motions() -> impl Iterator<Item = (u64, DVec3)> {
     let mut r = Rng(0x7015_E000);
-    let fractions = [0.25, 0.5, 0.9, 1.1, 1.5, 3.0, 10.0];
-    let mut by_shift = [0usize; 7];
-    for case in 0..scale(70) {
+    (0usize..).map(move |case| {
         let seed = r.next();
-        let a = random_body(&mut Rng(seed));
         let dir = match case % 4 {
             0 => DVec3::X,
             1 => DVec3::Y,
@@ -655,15 +654,33 @@ fn motions_by_fractions_of_the_tolerance() {
             _ => DVec3::new(r.range(-1.0, 1.0), r.range(-1.0, 1.0), r.range(-1.0, 1.0))
                 .normalize_or(DVec3::X),
         };
-        let shift = eps * fractions[case % 7];
-        let b = random_body_at(&mut Rng(seed), dir * shift);
-        let slack = 4.0 * area(&a) * (shift + eps);
+        (seed, dir)
+    })
+}
+
+/// Motion `case`: a random body, its copy moved by `FRACTIONS[case % 7]`
+/// tolerances, and the slack the motion allows the volume identities.
+fn motion(case: usize, (seed, dir): (u64, DVec3)) -> (Body, Body, f64) {
+    let eps = k().tolerance().linear;
+    let shift = eps * FRACTIONS[case % 7];
+    let a = random_body(&mut Rng(seed));
+    let b = random_body_at(&mut Rng(seed), dir * shift);
+    let slack = 4.0 * area(&a) * (shift + eps);
+    (a, b, slack)
+}
+
+#[test]
+fn motions_by_fractions_of_the_tolerance() {
+    let mut t = Tally::default();
+    let mut by_shift = [0usize; 7];
+    for (case, m) in motions().take(scale(70)).enumerate() {
+        let (a, b, slack) = motion(case, m);
         let before = t.refused.len();
         identities(&mut t, &a, &b, &format!("shift {case}"), slack);
         by_shift[case % 7] += t.refused.len() - before;
     }
     let ops = 4 * t.pairs / 7;
-    let line: Vec<String> = fractions
+    let line: Vec<String> = FRACTIONS
         .iter()
         .zip(by_shift)
         .map(|(f, n)| format!("{f} tolerance: {n}/{ops}"))
@@ -673,4 +690,68 @@ fn motions_by_fractions_of_the_tolerance() {
         line.join(", ")
     );
     report("motions by the tolerance", &t);
+    // A copy moved by half the tolerance or less is the same body, and
+    // every operation on the two is answered (none of 8,000 refused at a
+    // hundred times this run).
+    assert_eq!(
+        by_shift[0] + by_shift[1],
+        0,
+        "copies moved by at most half a tolerance refused"
+    );
+}
+
+/// Copies of a body with a hole moved by three tolerances (motions 3449
+/// and 6781, found at a hundred times the default run): where the holes'
+/// edges are 2.4 tolerances apart, the strip of one body's face between
+/// them is off the other's face but within the tolerance of a corner of
+/// it, and was taken for a piece on that face, making an inconsistent
+/// result. Every operation must be answered or refused, never
+/// inconsistent (today all four are refused: the strip is within the
+/// tolerance of the other body's surface).
+#[test]
+fn a_strip_between_moved_holes() {
+    for case in [3449, 6781] {
+        let m = motions().nth(case).expect("a motion");
+        let (a, b, slack) = motion(case, m);
+        let mut t = Tally::default();
+        identities(&mut t, &a, &b, &format!("shift {case}"), slack);
+        report(&format!("motion {case}"), &t);
+    }
+}
+
+/// Two sides of a prism meeting at a crease of 5e-6 rad, which a test on
+/// the cosine of the angle between their normals (1 − cos θ = 1.25e-11)
+/// took for one plane, so that a boolean anywhere on the body merged them
+/// into one face with a corner 5 µm off its plane. They stay two faces,
+/// and their edge is a crease, not a seam.
+#[test]
+fn a_slight_crease_stays_a_crease() {
+    let turn = 5e-6;
+    let pts = [
+        DVec2::new(0.0, 0.0),
+        DVec2::new(1.0, 0.0),
+        DVec2::new(2.0, turn),
+        DVec2::new(2.0, 1.0),
+        DVec2::new(0.0, 1.0),
+    ];
+    let a = k()
+        .extrude(
+            &Profile::polygon(Frame::WORLD, &pts),
+            &ExtrudeSpec {
+                distance: 1.0,
+                symmetric: false,
+            },
+        )
+        .expect("a prism");
+    assert_eq!(counts(&a), (7, 15, 10));
+    let mesh = k()
+        .tessellate(&a, &TessellationOptions::default())
+        .expect("a mesh");
+    assert!(mesh.seams.iter().all(|s| !s), "the crease is not a seam");
+    // A box through the far side, away from the crease.
+    let b = cuboid(DVec3::new(1.5, 0.25, 0.25), DVec3::new(2.5, 0.75, 0.75));
+    let u = run(&a, &b, BooleanOp::Union);
+    assert_eq!(counts(&u), (12, 27, 18));
+    let expect = (2.0 - 0.5 * turn) + 0.25 - 0.125;
+    assert!(close(volume(&u), expect), "{} vs {expect}", volume(&u));
 }

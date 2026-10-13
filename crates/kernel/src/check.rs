@@ -3,6 +3,7 @@
 use glam::DVec3;
 use rustc_hash::FxHashMap;
 
+use crate::geom::Surface;
 use crate::tess::{self, BrepTess, TessellationOptions};
 use crate::topo::Brep;
 use crate::{Tolerance, TopologyCounts};
@@ -37,6 +38,13 @@ pub(crate) fn validate(b: &Brep, tol: &Tolerance) -> Vec<String> {
     // Geometry tolerance for "lies on": a generous multiple of the model
     // resolution to absorb projection round-off in iterative inversions.
     let on_tol = tol.linear * 100.0;
+    // A plane needs no iteration (its projection is exact), so its edges
+    // are held to what constructions leave: a boolean puts a vertex at a
+    // cluster of points within twice the tolerance of each other, a few
+    // tolerances at most off a face's plane (1.06 at most in the boolean
+    // fuzz at twenty times its default size). Ten tolerances keeps a margin
+    // and still catches a face built across a crease (design note 0012 §9).
+    let plane_tol = tol.linear * 10.0;
 
     // Index bounds.
     let nv = b.vertices.len();
@@ -99,6 +107,11 @@ pub(crate) fn validate(b: &Brep, tol: &Tolerance) -> Vec<String> {
                     issues.push(format!("face {fi} loop {li}: not closed at coedge {k}"));
                 }
             }
+            let limit = if matches!(f.surface, Surface::Plane(_)) {
+                plane_tol
+            } else {
+                on_tol
+            };
             for c in &l.coedges {
                 let e = b.edge(c.edge);
                 for j in 0..=4 {
@@ -106,7 +119,7 @@ pub(crate) fn validate(b: &Brep, tol: &Tolerance) -> Vec<String> {
                     let p = e.curve.point(t);
                     let (u, v) = f.surface.project(p);
                     let d = (f.surface.point(u, v) - p).length();
-                    if d > on_tol {
+                    if d > limit {
                         issues.push(format!(
                             "face {fi}: edge {} leaves the surface by {d:.3e}",
                             c.edge.0
@@ -203,4 +216,37 @@ fn shell_volume(b: &Brep, t: &BrepTess, shell: usize) -> f64 {
         }
     }
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::math::Frame;
+    use crate::{BrepKernel, Kernel};
+
+    /// A face's plane moved off its edges: within ten tolerances it is
+    /// still valid, beyond them not (the hundred tolerances curved
+    /// surfaces get would pass it).
+    #[test]
+    fn planes_are_held_to_ten_tolerances() {
+        let tol = Tolerance::default();
+        let body = BrepKernel::default()
+            .make_box(&Frame::WORLD, DVec3::ONE)
+            .expect("a box");
+        for (lift, valid) in [(5.0, true), (20.0, false)] {
+            let mut b = (*body.brep).clone();
+            let mut moved = 0;
+            for f in &mut b.faces {
+                if let Surface::Plane(fr) = &mut f.surface {
+                    if fr.z.z.abs() > 0.5 && (fr.origin.z - 1.0).abs() < 1e-12 {
+                        fr.origin += fr.z * lift * tol.linear;
+                        moved += 1;
+                    }
+                }
+            }
+            assert_eq!(moved, 1);
+            let issues = validate(&b, &tol);
+            assert_eq!(issues.is_empty(), valid, "{lift}: {issues:?}");
+        }
+    }
 }

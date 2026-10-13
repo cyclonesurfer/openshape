@@ -204,9 +204,13 @@ fn near(a: DVec3, b: DVec3, scale: f64) -> bool {
     (a - b).length() <= SAME * scale
 }
 
+/// True if `a` and `b` point the same way up to rounding: the sine of the
+/// angle between them at most [`SAME`] (a test on the cosine,
+/// `a · b ≥ 1 − SAME`, would pass angles up to 1.4e-5 rad and hide a slight
+/// crease).
 fn parallel(a: DVec3, b: DVec3) -> bool {
     let (a, b) = (a.normalize_or_zero(), b.normalize_or_zero());
-    a.dot(b) >= 1.0 - SAME
+    a.dot(b) > 0.0 && a.cross(b).length() <= SAME
 }
 
 /// True if two faces are pieces of one surface with one outward side:
@@ -260,7 +264,7 @@ pub(crate) fn same_surface(a: &Face, b: &Face) -> bool {
             let off = *cb - *ca;
             (ra - rb).abs() <= SAME * scale
                 && parallel(*da, *db)
-                && xa.cross(*ya).dot(xb.cross(*yb)).abs() >= 1.0 - SAME
+                && xa.cross(*ya).cross(xb.cross(*yb)).length() <= SAME
                 && (off - axis * off.dot(axis)).length() <= SAME * scale
         }
         (

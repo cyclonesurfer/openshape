@@ -510,6 +510,32 @@ fn revolve_rectangle_on_axis_is_a_cylinder() {
     );
 }
 
+/// A side line 1e-7 rad off the axis makes a cone: a test on the cosine
+/// of the angle (1 − cos θ = 5e-15) called it a cylinder.
+#[test]
+fn a_line_slightly_off_the_axis_revolves_into_a_cone() {
+    let (r, h) = (0.3, 0.8);
+    let b = revolve_z(
+        Profile::polygon(
+            Frame::front(),
+            &[
+                DVec2::ZERO,
+                DVec2::new(r, 0.0),
+                DVec2::new(r + 1e-7 * h, h),
+                DVec2::new(0.0, h),
+            ],
+        ),
+        TAU,
+    );
+    let kinds = k().face_kinds(&b);
+    assert!(!kinds.contains(&SurfaceKind::Cylinder), "{kinds:?}");
+    assert_eq!(
+        kinds.iter().filter(|k| **k == SurfaceKind::Cone).count(),
+        2,
+        "{kinds:?}"
+    );
+}
+
 #[test]
 fn revolve_circle_is_a_torus() {
     let (big, small) = (2.0, 0.5);

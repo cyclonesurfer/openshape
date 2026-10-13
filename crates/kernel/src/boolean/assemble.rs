@@ -9,7 +9,7 @@ use spade::Triangulation;
 
 use super::classify::Class;
 use super::points::{segment_distance, Points};
-use super::{key, planar, show, FaceSeg, Key, Pair, Piece, Segments, Source, SAME_PLANE};
+use super::{key, planar, show, FaceSeg, Key, Pair, Piece, Segments, Source};
 use crate::geom::Curve3;
 use crate::math::Frame;
 use crate::origin::{
@@ -54,6 +54,7 @@ pub(super) fn assemble(
     pts: &Points,
     segs: &Segments,
     pieces: Vec<Piece>,
+    coplanar: &FxHashSet<(usize, usize)>,
     op: BooleanOp,
     tol: &Tolerance,
 ) -> Result<(Brep, Origins), KernelError> {
@@ -89,7 +90,7 @@ pub(super) fn assemble(
         ));
     }
     check_closed(&faces, pts)?;
-    let faces = merge_faces(pair, pts, faces, eps)?;
+    let faces = merge_faces(pair, pts, faces, coplanar, eps)?;
     let mut edge_sources: FxHashMap<Key, BTreeSet<Source>> = segs
         .sources
         .iter()
@@ -181,18 +182,40 @@ fn unite(p: &mut [usize], i: usize, j: usize) {
 /// Joins faces that meet along a segment, lie on one plane and face the
 /// same way (design note 0012 §4.5): pieces of one face cut and kept on
 /// both sides, and coplanar faces of the two operands.
+///
+/// Whether two faces lie on one plane was decided before, and is not
+/// tested again here: faces of one operand do if they are on one of its
+/// planes (built on one plane, up to rounding), and faces of the two
+/// operands if they were found to coincide (`coplanar`, pairs of the first
+/// operand's face and the second's, every vertex of each within the
+/// tolerance of the other's plane). A test on the faces' normals instead
+/// would either join two faces of one body meeting at a slight crease,
+/// moving corners of the joined face off its plane, or refuse to join
+/// small coinciding faces tilted within the tolerance.
 fn merge_faces(
     pair: &Pair,
     pts: &Points,
     faces: Vec<Out>,
+    coplanar: &FxHashSet<(usize, usize)>,
     eps: f64,
 ) -> Result<Vec<Out>, KernelError> {
     let n = faces.len();
     let mut parent: Vec<usize> = (0..n).collect();
     let frames: Vec<Frame> = faces.iter().map(|f| plane_of(pair, f)).collect();
+    let on_one_plane = |x: (Operand, usize), y: (Operand, usize)| match (x.0, y.0) {
+        (Operand::First, Operand::Second) => coplanar.contains(&(x.1, y.1)),
+        (Operand::Second, Operand::First) => coplanar.contains(&(y.1, x.1)),
+        _ => {
+            let poly = pair.get(x.0);
+            poly.faces[x.1].plane == poly.faces[y.1].plane
+        }
+    };
     let same = |i: usize, j: usize| {
-        let (a, b) = (&frames[i], &frames[j]);
-        a.z.dot(b.z) >= 1.0 - SAME_PLANE && a.z.dot(b.origin - a.origin).abs() <= eps
+        frames[i].z.dot(frames[j].z) > 0.0
+            && faces[i]
+                .sources
+                .iter()
+                .any(|&x| faces[j].sources.iter().any(|&y| on_one_plane(x, y)))
     };
     let mut by_seg: BTreeMap<Key, Vec<usize>> = BTreeMap::new();
     for (i, f) in faces.iter().enumerate() {

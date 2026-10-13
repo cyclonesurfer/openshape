@@ -587,6 +587,30 @@ name open unchanged.
   passed with every region's mass to 1e-10, no fallback; it refused 313
   unresolvable perturbed inputs, 18 loops below resolution and 44
   pinched profiles (the cases are random per run).
+- Near-coincidences in booleans, 2026-10-13, on Mesa lavapipe: fmt,
+  clippy with `-D warnings`, 901 tests and `cargo deny` pass. Crossings
+  within the tolerance of each other along an edge (an edge meeting a
+  plane at a shallow angle) are now one point: a copy of a body moved by
+  a quarter or a half of the tolerance is never refused (was 4 and 24 of
+  800 operations), and at 0.9 tolerances 8 are (was 108); the test now
+  requires none at half a tolerance or less. A run at 100 times the
+  default (30,000 random pairs and 7,000 motions, 148,000 operations)
+  found two older faults, both fixed and kept as tests that fail on the
+  old code. Two sides of a prism meeting at a slight crease were taken
+  for one plane, because the test meant to accept only rounding compared
+  the cosine of the angle (1 − cos θ ≤ 1e-10, so angles up to 1.4e-5 rad)
+  instead of its sine; a boolean then merged them into one face with a
+  corner 4 µm off its plane, which the validator allowed, since it held
+  planes to the 100 tolerances curved surfaces get (planes now 10; a
+  result's vertices are at most 1.06 tolerances off their planes in the
+  fuzz). The same mistake hid such a crease as a seam in the display and
+  called a line revolved 1e-7 rad off its axis a cylinder; both fixed.
+  And a strip 2.4 tolerances wide between the holes of a body and of its
+  copy moved by three tolerances was classified on the other's face,
+  because its point was within the tolerance of a corner of that face;
+  that is now decided by parity alone, and the strip is refused. At 100
+  times every result is now valid and consistent; 47 of 120,000
+  operations on random pairs are refused, all non-manifold results.
 - Second efficiency pass (docs/PERFORMANCE.md), 2026-10-13, on Mesa
   lavapipe: fmt, clippy with `-D warnings`, 897 tests and `cargo deny`
   pass, and the release time guards pass as CI runs them. Faces clear of
@@ -848,9 +872,11 @@ name open unchanged.
   face or edge fails as not supported yet (design note 0012 §8 step 2).
   No feature uses booleans yet: each feature still makes its own part.
   Near-coincidences the tolerance cannot decide are refused, not
-  resolved: a copy of a body moved by half a tolerance is refused 3% of
-  the time, and by about a tolerance most of the time (design note 0012
-  §9 gives the rates). The result's vertices sit at the clusters' points,
+  resolved: a copy of a body moved by half a tolerance or less is always
+  combined, but 0.5–1% of operations are refused at 0.9 tolerances (mostly a
+  point within the tolerance of two edges near a sharp corner), and most
+  at about a tolerance or more, where the bodies leave slivers thinner
+  than it (design note 0012 §9 gives the rates). The result's vertices sit at the clusters' points,
   so a vertex can be up to twice the tolerance from where an exact
   construction would put it; the surface-area identity is not tested
   yet.
@@ -883,12 +909,13 @@ name open unchanged.
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Phase 3, in the order the design notes give: absorb the
-   near-coincidences of the tolerance test that are refused at half a
-   tolerance; booleans with planes, cylinders, cones and spheres in
-   closed form (0012 §8 step 2, 0011 §8); naming through booleans
+2. Phase 3, in the order the design notes give: booleans with planes,
+   cylinders, cones and spheres in closed form (0012 §8 step 2, 0011 §8); naming through booleans
    (design note 0013 §10 step 4); then extrude and revolve that add,
-   remove and intersect. The rest of the Phase 2 sketcher (project/convert, intersection
+   remove and intersect. Alongside, absorb the boolean refusals left
+   within the tolerance (0.5–1% of operations at 0.9 tolerances, mostly
+   a point within the tolerance of two edges near a sharp corner). The
+   rest of the Phase 2 sketcher (project/convert, intersection
    curves, pierce) needs Phase 3 faces.
 3. Efficiency, alongside Phase 3 (docs/PERFORMANCE.md, known slow spots):
    flat faces triangulated from orientation tests alone (no incircle

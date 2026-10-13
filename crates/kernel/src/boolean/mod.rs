@@ -28,7 +28,7 @@
 //! a message and a location rather than guessed.
 
 use glam::{DVec2, DVec3};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::bvh::Bvh;
 use crate::geom::Curve3;
@@ -187,8 +187,20 @@ fn too_large(what: &str, limit: usize) -> KernelError {
 }
 
 /// Relative tolerance for recognising faces built on one plane (rounding
-/// only), as the tessellator's seam test does.
+/// only), as the tessellator's seam test does: the sine of the angle
+/// between their normals, and their offset relative to their distance from
+/// the origin.
 const SAME_PLANE: f64 = 1e-10;
+
+/// True if unit normals `n` and `m` are parallel up to rounding, facing
+/// either way. The test is on the sine of the angle between them: one on
+/// the cosine (`|n · m| ≥ 1 − SAME_PLANE`) would pass angles up to
+/// `√(2 · SAME_PLANE)`, 1.4e-5 rad, and so take two faces of a body that
+/// meet at a slight crease for one plane, putting the far corners of the
+/// second microns off the first's plane.
+fn parallel(n: DVec3, m: DVec3) -> bool {
+    n.cross(m).length() <= SAME_PLANE
+}
 
 fn poly<'a>(b: &'a Brep, which: &str) -> Result<Poly<'a>, KernelError> {
     if b.edges
@@ -215,8 +227,7 @@ fn poly<'a>(b: &'a Brep, which: &str) -> Result<Poly<'a>, KernelError> {
         let frame = Frame::from_normal(p, n, n.any_orthonormal_vector());
         let scale = 1.0 + p.length();
         let plane = match planes.iter().position(|q| {
-            q.normal.dot(n).abs() >= 1.0 - SAME_PLANE
-                && q.normal.dot(p - q.point).abs() <= SAME_PLANE * scale
+            parallel(q.normal, n) && q.normal.dot(p - q.point).abs() <= SAME_PLANE * scale
         }) {
             Some(i) => i,
             None => {
@@ -559,9 +570,18 @@ fn boolean_within(
                 }
                 let mut class = None;
                 let mut partner = None;
+                // On a coinciding face of the other body, or off it. Every
+                // edge of that face inside this one bounds pieces, so a
+                // piece is wholly on it or off it, and the point, more than
+                // the tolerance inside the piece, is on the same side of
+                // each of the face's edges as the piece: whether it is in
+                // the face is decided by parity alone. A band of the
+                // tolerance about the face's edges would take a piece off
+                // the face, but within the tolerance of a corner of it, for
+                // one on it.
                 for &g in partners[slot(op)].get(&fi).into_iter().flatten() {
                     let gf = &them.faces[g];
-                    if in_closed_face(them, gf, at, eps) {
+                    if in_face(them, gf, at) {
                         let same = gf.normal().dot(f.normal()) > 0.0;
                         class = Some(if same {
                             Class::OnSame
@@ -586,7 +606,8 @@ fn boolean_within(
             }
         }
     }
-    assemble::assemble(&pair, &pts, &segs, pieces, op, tol)
+    let coplanar: FxHashSet<(usize, usize)> = coplanar.into_iter().collect();
+    assemble::assemble(&pair, &pts, &segs, pieces, &coplanar, op, tol)
 }
 
 fn slot(op: Operand) -> usize {
@@ -843,6 +864,12 @@ fn in_closed_face(poly: &Poly, face: &PolyFace, p: DVec3, eps: f64) -> bool {
             }
         }
     }
+    in_face(poly, face, p)
+}
+
+/// True if `p` (on the face's plane) lies inside the face, by the parity
+/// of the face's edges crossed by a ray from it; for a point off its edges.
+fn in_face(poly: &Poly, face: &PolyFace, p: DVec3) -> bool {
     let q = face.to2(p);
     let mut inside = false;
     for vs in &face.verts {

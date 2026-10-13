@@ -414,8 +414,10 @@ impl Surface {
             },
             Surface::Revolution { frame, profile } => match profile {
                 Curve3::Line { dir, .. } => {
-                    let along = dir.normalize().dot(frame.z).abs();
-                    if along > 1.0 - 1e-12 {
+                    // Sine and cosine of the line's angle to the axis.
+                    let dir = dir.normalize();
+                    let (across, along) = (dir.cross(frame.z).length(), dir.dot(frame.z).abs());
+                    if across < 1e-12 {
                         SurfaceKind::Cylinder
                     } else if along < 1e-12 {
                         SurfaceKind::Plane

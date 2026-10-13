@@ -214,8 +214,14 @@ Bodies with curved faces or edges fail with `KernelError::Unsupported`
 until step 2. The code is `crates/kernel/src/boolean/`, one module per
 stage.
 
-**Points** (`points.rs`). Each vertex of either body gets one sign
-(−1, 0 within the tolerance, +1) per face plane of the other body, once.
+**Points** (`points.rs`). Faces of one body built on one plane share
+it: their normals parallel and their offsets equal up to rounding
+(relative 1e-10, the sine of the angle between the normals; a test on
+the cosine, `|n · m| ≥ 1 − 1e-10`, passed angles up to 1.4e-5 rad and
+took two sides of a prism meeting at a slight crease for one plane,
+leaving the far corners of the second microns off it). Each vertex of
+either body gets one sign (−1, 0 within the tolerance, +1) per plane of
+the other body, once.
 The candidate vertices of the result are the bodies' vertices, the
 points where an edge crosses a plane of the other body (its ends'
 signs strictly opposite) and the points where two non-parallel edges
@@ -223,8 +229,19 @@ come within the tolerance; points within the tolerance of each other
 are joined into clusters (union–find on a grid), each placed at a
 body's vertex if it holds one, else at the mean. A cluster holding two
 vertices of one body, or spreading wider than twice the tolerance, is
-refused. Whether a cluster lies on an edge is then decided once, by its
-distance from the edge, and the edge is split at the clusters on it.
+refused. Two clusters of derived points (crossings and contacts, no
+vertex of either body) on one edge within the tolerance of each other
+along it are then joined, and the joining repeated until none are left:
+where an edge meets a plane at a shallow angle θ, the tolerance across
+the plane is a stretch of ε / sin θ along the edge, so the crossing found
+from each side (one body's edge through the other's plane, and the
+other's edge through the first's) can land just over the tolerance
+apart in space while within it along the edge. Vertices are the bodies'
+own data and are never joined this way: joining copies of vertices moved
+by just over the tolerance made an inconsistent result (caught by the
+validator) where a refusal is right. Whether a cluster lies on an edge
+is then decided once, by its distance from the edge, and the edge is
+split at the clusters on it.
 
 **Imprint** (`mod.rs`). Faces on two planes meet along the stretch of
 the planes' common line inside both closed faces, found from the
@@ -242,7 +259,16 @@ holes of the smallest region of another component around them.
 
 **Classify** (`classify.rs`). This replaces the propagation of §4.3. A
 piece inside a coincident face of the other body is on it, with the same
-or the opposite normal; any other piece is classified at the incentre of
+or the opposite normal. Every edge of that face inside the piece's face
+bounds pieces, so a piece is wholly on it or wholly off it, and the
+piece's test point, more than the tolerance inside it, is on the piece's
+side of each of the face's edges: parity alone decides. (A band of the
+tolerance about the face's edges took a strip 2.4 tolerances wide
+between the holes of a body and of its copy moved by three tolerances,
+off the face but within the tolerance of a corner of it, for a piece on
+it, and made an inconsistent result; the strip is now classified
+against the other body, which refuses it as within the tolerance of its
+surface.) Any other piece is classified at the incentre of
 its triangle with the largest inscribed circle in a constrained Delaunay
 triangulation (a convex piece, at the better of its centroid, which is
 at least two thirds as far from the boundary as the best point, and the
@@ -282,8 +308,10 @@ the union of two 1,024-sided prisms (about 4,000 result faces) went from
 **Select, sew, merge** (`assemble.rs`). Pieces are kept by the table of
 §4.4. Every segment must then be used exactly once in each direction (a
 segment used more often is a non-manifold result, refused; fewer is a
-kernel error), adjacent coplanar faces with the same orientation are
-merged by re-running the split on their joint boundary, collinear edges
+kernel error), adjacent faces on one plane facing the same way are
+merged by re-running the split on their joint boundary (faces of one
+body on one of its planes, or of the two bodies found to coincide in
+the imprint: the decision already made, not a new test on the normals), collinear edges
 meeting at a point no third edge reaches are joined, and a vertex whose
 faces form more than one fan is refused as non-manifold. Shells are the
 connected components; outer shells have positive volume, and each void
@@ -329,12 +357,26 @@ test moves a copy of a random body by 0.25 to 10 tolerances and checks
 the same identities with a slack of the area times the motion; it is the
 adversarial case (every face against its own copy). On 1,400 pairs no
 result is invalid or inconsistent. Refusals per shift (of 800
-operations each): 4 at a quarter of the tolerance and 24 at a half (for
-points closer than the tolerance: these are coincidences the stage
-should absorb, the first robustness target), 108 at 0.9, 564 at 1.1,
-all 800 at 1.5, 524 at 3 and 156 at 10 tolerances, where faces nearly
-parallel to the motion move by about a tolerance and edges nearly
-parallel to it leave slivers thinner than the tolerance. CI prints
-these rates on every run. The surface-area identity waits for step 2's
+operations each): none at a quarter or a half of the tolerance (4 and
+24 before crossings close along an edge were joined, above; the test
+now requires none), 8 at 0.9, 548 at 1.1, all 800 at 1.5, 524 at 3 and
+156 at 10 tolerances, where faces nearly parallel to the motion move by
+about a tolerance and edges nearly parallel to it leave slivers thinner
+than the tolerance. CI prints these rates on every run.
+
+A run at a hundred times the default size (30,000 random pairs, 7,000
+motions) found two faults the smaller runs had not, both now fixed and
+kept as tests. Two sides of a prism at a slight crease were taken for
+one plane (Points, above) and merged into one face with a corner 4 µm
+off its plane; the validator let it through, because it held planes to
+the hundred tolerances it allows curved surfaces for their iterative
+projections, and planes are now held to ten (a result's vertices are
+at most 1.06 tolerances off their faces' planes over the fuzz at twenty
+times its default size).
+And a strip between moved holes was classified on a face it only
+touched (Classify, above), an inconsistent result the kernel caught.
+At that size every result is now valid, 47 of 120,000 operations on
+random pairs are refused, each a non-manifold result, and the motions'
+refusals per shift are 0, 0, 20, 2,828, 4,000, 2,476 and 680 of 4,000. The surface-area identity waits for step 2's
 tests.
 
