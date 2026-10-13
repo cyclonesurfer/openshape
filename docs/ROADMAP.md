@@ -53,6 +53,7 @@ item is delivered in the phase noted.
 - [ ] Native format file I/O and open spec (docs/NATIVE_FORMAT.md)
 - [ ] Versions, branches, history restore UI, compare
 - [ ] Autosave and crash recovery from the op log; solo-app polish
+- [ ] Agent interface, first slice (ADR 0021): any AI agent the user chooses drives the app through an MCP server (headless on stdio, or the running app over a local socket) and a CLI with JSON output, over one command layer: read queries (features, parameters, names, measurements, mass properties), feature and sketch creation and editing as ordinary undoable ops, rendered views, export
 
 ## Phase 6 — Assemblies
 - [ ] Mate solver, mates and relations, limits; standard content; interference
@@ -65,6 +66,7 @@ item is delivered in the phase noted.
 
 ## Phase 9 — Custom features, API, plugins
 - [ ] `script` language with stdlib over the kernel; API; WASM plugins
+- [ ] Agent interface, full command set: everything the UI can do, on the automation API's command layer (ADR 0021)
 
 ## Phase 10 — Server/client
 - [ ] Sync, real-time collaboration, merge UI, PDM/release
@@ -199,6 +201,7 @@ Inspection and appearance
 ### 11. Extensibility
 - [ ] Custom-feature language editor (highlighting, diagnostics, debug output), shareable library
 - [ ] Automation API (queries, feature create/edit, exports, webhooks)
+- [ ] Agent interface over MCP and a JSON CLI, vendor-neutral, every change an undoable op (ADR 0021)
 - [ ] WASM plugins: features, panels, importers
 
 ### 12. UX baseline

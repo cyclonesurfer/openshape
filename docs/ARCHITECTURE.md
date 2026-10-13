@@ -41,6 +41,7 @@ from it by deterministic replay and regeneration.
 | Path tracer | `render-studio` | Phase 13 |
 | Collaboration | `server`, `client-sync` | Phase 10 |
 | Automation API | `api` | Phase 9 |
+| Agent interface (MCP server, JSON CLI) | `api` | Phase 5 first slice, Phase 9 full (ADR 0021) |
 | Plugins | `plugins` (wasmtime) | Phase 9 |
 
 ## Key decisions
