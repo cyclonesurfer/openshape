@@ -187,6 +187,33 @@ fn rational_derivatives(aders: &[DVec4]) -> CurveDerivatives {
     ck
 }
 
+/// One piece of a curve in rational Bézier form: see
+/// [`NurbsCurve::bezier_segments`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct BezierSegment {
+    /// Parameter of the piece's start in the curve's parametrization.
+    pub a: f64,
+    /// Parameter of the piece's end.
+    pub b: f64,
+    /// Homogeneous control points `(w x, w y, w z, w)`, degree + 1 of them.
+    pub points: Vec<DVec4>,
+}
+
+impl BezierSegment {
+    /// The point at local parameter `s ∈ [0, 1]`, by de Casteljau's
+    /// algorithm in homogeneous space.
+    pub fn point(&self, s: f64) -> DVec3 {
+        let mut b = self.points.clone();
+        let n = b.len();
+        for r in 1..n {
+            for i in 0..n - r {
+                b[i] = b[i] * (1.0 - s) + b[i + 1] * s;
+            }
+        }
+        dehomogenize(b[0])
+    }
+}
+
 impl NurbsCurve {
     /// Builds a curve from Cartesian control points and optional weights
     /// (all weights default to 1, giving a non-rational B-spline).
@@ -526,6 +553,56 @@ impl NurbsCurve {
             .collect();
         let points = self.points.iter().rev().copied().collect();
         Self::from_parts(self.degree, knots, points)
+    }
+
+    /// The curve's pieces in Bézier form, one per knot span of non-zero
+    /// length in the domain, in order: on the span `[a, b]` the curve is
+    /// the rational Bézier curve with homogeneous control points `points`
+    /// in the local parameter `s = (t − a)/(b − a)`.
+    ///
+    /// Each control point is the curve's blossom (polar form) at `p − j`
+    /// copies of `a` and `j` of `b` (L. Ramshaw, "Blossoms are polar
+    /// forms", *CAGD* 6, 1989; P&T §5.3 obtains the same points by knot
+    /// insertion), evaluated by de Boor's recursion with a different
+    /// argument at each level. Works for clamped and unclamped knot
+    /// vectors alike.
+    pub fn bezier_segments(&self) -> Vec<BezierSegment> {
+        let p = self.degree;
+        let u = self.knots.as_slice();
+        let (lo, hi) = self.domain();
+        let mut out = Vec::new();
+        for k in p..self.points.len() {
+            let (a, b) = (u[k], u[k + 1]);
+            if b <= a || b <= lo || a >= hi {
+                continue;
+            }
+            let points = (0..=p)
+                .map(|j| {
+                    let mut args = vec![a; p - j];
+                    args.extend(std::iter::repeat_n(b, j));
+                    self.blossom(k, &args)
+                })
+                .collect();
+            out.push(BezierSegment { a, b, points });
+        }
+        out
+    }
+
+    /// The blossom of the homogeneous curve on the span `[u_k, u_{k+1})`
+    /// at the `p` arguments `args`.
+    fn blossom(&self, k: usize, args: &[f64]) -> DVec4 {
+        let p = self.degree;
+        let u = self.knots.as_slice();
+        let mut d: SmallVec<[DVec4; 8]> = self.points[k - p..=k].iter().copied().collect();
+        for (r, &x) in args.iter().enumerate() {
+            let r = r + 1;
+            for j in (r..=p).rev() {
+                let i = k - p + j;
+                let alpha = (x - u[i]) / (u[i + p + 1 - r] - u[i]);
+                d[j] = d[j - 1] * (1.0 - alpha) + d[j] * alpha;
+            }
+        }
+        d[p]
     }
 
     /// Applies the affine transformation `m` (its projective row is ignored).
@@ -972,6 +1049,53 @@ mod tests {
         assert_eq!(c.point(0.0), DVec3::X);
         assert!((c.point(1.0) - DVec3::Y).length() < 1e-15);
         assert!(c.is_rational());
+    }
+
+    #[test]
+    fn bezier_segments_reproduce_the_curve() {
+        let clamped = NurbsCurve::new(
+            3,
+            vec![0., 0., 0., 0., 1., 2., 2., 3., 3., 3., 3.],
+            vec![
+                DVec3::new(0., 0., 0.),
+                DVec3::new(1., 2., 0.),
+                DVec3::new(3., 3., 1.),
+                DVec3::new(4., 0., 2.),
+                DVec3::new(6., 1., 0.),
+                DVec3::new(7., 3., 1.),
+                DVec3::new(8., 0., 1.),
+            ],
+            Some(vec![1.0, 2.0, 0.5, 1.0, 3.0, 1.0, 0.7]),
+        )
+        .unwrap();
+        let unclamped = NurbsCurve::new(
+            2,
+            vec![0., 1., 2., 3., 4., 5., 6.],
+            vec![
+                DVec3::new(0., 0., 0.),
+                DVec3::new(1., 2., 0.),
+                DVec3::new(3., 3., 1.),
+                DVec3::new(4., 0., 2.),
+            ],
+            Some(vec![1.0, 1.5, 0.5, 2.0]),
+        )
+        .unwrap();
+        for (c, spans) in [(&clamped, 3), (&unclamped, 2), (&quarter_circle(), 1)] {
+            let segs = c.bezier_segments();
+            assert_eq!(segs.len(), spans);
+            let (lo, hi) = c.domain();
+            assert_eq!(segs[0].a, lo);
+            assert_eq!(segs[spans - 1].b, hi);
+            for seg in &segs {
+                assert_eq!(seg.points.len(), c.degree() + 1);
+                for i in 0..=10 {
+                    let s = i as f64 / 10.0;
+                    let t = seg.a + (seg.b - seg.a) * s;
+                    let d = (seg.point(s) - c.point(t)).length();
+                    assert!(d < 1e-12, "{d} at {t}");
+                }
+            }
+        }
     }
 
     #[test]

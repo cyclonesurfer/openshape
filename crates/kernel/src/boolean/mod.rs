@@ -38,9 +38,19 @@ use crate::topo::Brep;
 use crate::{BooleanOp, KernelError, Tolerance};
 
 mod assemble;
+// The geometry layer of step 2 (design note 0012 §10.7, item 1), tested on
+// its own; the pipeline uses it as it gains curved faces.
+#[allow(dead_code)]
+mod bernstein;
 mod classify;
+#[allow(dead_code)]
+mod meet;
 mod planar;
 mod points;
+#[allow(dead_code)]
+mod quadric;
+#[cfg(test)]
+mod testing;
 
 use classify::Class;
 use points::Points;

@@ -29,7 +29,7 @@ mod knots;
 mod surface;
 mod util;
 
-pub use curve::NurbsCurve;
+pub use curve::{BezierSegment, NurbsCurve};
 pub use error::NurbsError;
 pub use knots::KnotVector;
 pub use surface::NurbsSurface;

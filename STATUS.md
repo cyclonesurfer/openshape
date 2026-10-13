@@ -587,6 +587,40 @@ name open unchanged.
   passed with every region's mass to 1e-10, no fallback; it refused 313
   unresolvable perturbed inputs, 18 loops below resolution and 44
   pinched profiles (the cases are random per run).
+- Geometry for booleans of curved solids (design note 0012 §10.7, item
+  1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
+  915 tests and `cargo deny` pass. Tested on its own; the boolean stages
+  do not use it yet, so curved bodies are still refused. Planes,
+  cylinders, cones and spheres are recognised exactly from the surfaces
+  extrudes and revolves make (tori, NURBS and elliptic cylinders are
+  not), with signed distances checked at 2,000 random points at known
+  offsets (1e-13). An edge (line, arc, elliptical arc, conic, cubic
+  spline) is split where a surface's implicit function turns, found as
+  the roots, in Bernstein form, of its derivative along the edge's
+  rational Bézier pieces (the NURBS crate now extracts them by
+  blossoming), and at the pieces' joints. Against 3,000-point sampling of
+  3,000 random edge–surface pairs: no crossing is missed, the implicit
+  function is monotone between splits and turns at each, and every
+  crossing is on the surface to 1e-12; edges lying on a surface (circles
+  of cylinders, cones and spheres, an ellipse on a cylinder) have no
+  spurious turns. Where two surfaces meet, in closed form: two planes, a
+  plane and a cylinder (two lines or an ellipse), cylinders with
+  parallel axes, and any two surfaces of revolution about one axis
+  (circles where their meridians meet: a plane square to the axis,
+  cylinders, cones, spheres centred on it). Over 4,800 random pairs every
+  curve is on both surfaces to 1e-12 and every crossing found by
+  sampling one surface is on a curve; touching, coincident and separate
+  pairs are decided within the tolerance, and configurations within a
+  sixteenth of the tolerance of a special one snap to it and stay within
+  that sixteenth of both surfaces. The tests were checked against ten
+  deliberately injected faults (dropped joints, no rounding floor, a
+  dropped derivative term, a cone's slope off by 10%, a lost shift of a
+  cone's reference point, a reversed bisection, a stretched ellipse,
+  wrong circle heights, a shifted line, a wrong separation band); each
+  fails a test. The cone's slope first passed, so the tests were
+  strengthened: the implicit function is now checked directly, not only
+  through the distance. A plane across a cone off its
+  axis (conics) and pairs meeting in quartics are refused as unsupported.
 - Near-coincidences in booleans, 2026-10-13, on Mesa lavapipe: fmt,
   clippy with `-D warnings`, 901 tests and `cargo deny` pass. Crossings
   within the tolerance of each other along an edge (an edge meeting a
@@ -910,7 +944,11 @@ name open unchanged.
 
 1. Check the new title bar on GNOME (on Pat's desktop).
 2. Phase 3, in the order the design notes give: booleans with planes,
-   cylinders, cones and spheres in closed form (0012 §8 step 2, 0011 §8); naming through booleans
+   cylinders, cones and spheres in closed form (0012 §8 step 2, 0011 §8;
+   the geometry of §10.7 item 1 is done; next the stages for planes and
+   cylinders, item 2, generalising step 1's in place so its tests and
+   fuzz guard every change; then cones and spheres, item 3, with the
+   conics of a plane across a cone); naming through booleans
    (design note 0013 §10 step 4); then extrude and revolve that add,
    remove and intersect. Alongside, absorb the boolean refusals left
    within the tolerance (0.5–1% of operations at 0.9 tolerances, mostly
