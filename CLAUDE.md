@@ -56,6 +56,9 @@ Planned crates (not yet created; see docs/ARCHITECTURE.md): `regen`,
 
 ## Rules (from the project brief — non-negotiable)
 
+- Linux only, by design (project decision, 2026-10-13): no Windows or
+  macOS ports, CI or platform work. Others may port it under the GPL, so
+  the cross-platform crates (wgpu, winit) stay, but no effort goes there.
 - Rust stable, edition 2021, f64 throughout. No C/C++ geometry dependencies;
   kernel, solvers and file formats are pure Rust. FFI only for GPU drivers
   (wgpu), windowing, and `spacenavd`.
