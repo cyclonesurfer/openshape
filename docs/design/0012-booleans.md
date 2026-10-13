@@ -377,6 +377,175 @@ And a strip between moved holes was classified on a face it only
 touched (Classify, above), an inconsistent result the kernel caught.
 At that size every result is now valid, 47 of 120,000 operations on
 random pairs are refused, each a non-manifold result, and the motions'
-refusals per shift are 0, 0, 20, 2,828, 4,000, 2,476 and 680 of 4,000. The surface-area identity waits for step 2's
-tests.
+refusals per shift are 0, 0, 20, 2,828, 4,000, 2,476 and 680 of
+4,000. The surface-area identity waits for step 2's tests.
 
+
+## 10. Step 2: cylinders, cones and spheres (design, 2026-10-13)
+
+Step 2 adds faces on circular cylinders, cones and spheres (what extrudes
+and revolves of lines and arcs make) and edges on circles and conics, with
+closed forms wherever two such surfaces meet in curves of degree two or
+less. It keeps step 1's architecture rather than the per-face
+parameter-space arrangements of §4.2: every fact about the two bodies'
+contact is decided once, in space, and every later stage reads it
+(Hoffmann, §2). A per-face arrangement would decide again, in each face's
+own coordinates, where curves cross, and two faces could disagree about
+the same point; step 1's fuzzing found exactly such disagreements between
+a face's plane and space (§9), which its 3D-first stages now rule out.
+
+### 10.1 Surfaces and curves
+
+* **Surfaces.** Each operand face's surface is recognised as a plane
+  (point, unit normal), a cylinder (a point of its axis, unit axis,
+  radius), a cone (apex, unit axis, half-angle) or a sphere (centre,
+  radius), exactly from the kernel's surface records (an extrusion of a
+  circle is a cylinder; a revolution of a line or of an arc centred on
+  the axis is a cylinder, cone, plane or sphere), else the boolean is
+  `Unsupported` (tori and NURBS: step 3). Faces of one body on one
+  surface share it, recognised up to rounding as planes are in step 1
+  (the sine of angles, offsets relative to 1e-10): the two halves of a
+  cylinder (ADR 0008) are one surface. Each surface has an implicit
+  form G (degree one for a plane, two for the others: for a cylinder
+  `|p − a|² − ((p − a)·u)² − r²`, for a sphere `|p − c|² − r²`, for a
+  cone `((p − a)·u)² sin²α − (|p − a|² − ((p − a)·u)²) cos²α` on its
+  nappe) and a signed distance, positive outside (away from the axis or
+  centre; the side the plane's normal points to).
+* **Curves.** Edges and the curves where faces meet are lines, circles,
+  and conics (ellipses from a plane across a cylinder or a cone,
+  parabolas and hyperbolas from a plane across a cone), the conics as
+  rational quadratic B-splines, exact (Piegl & Tiller, *The NURBS Book*,
+  2nd ed., ch. 7). For the root finding below every curve is split into
+  rational Bézier pieces of at most a quarter turn (a circle exactly,
+  with weights cos(θ/2); Piegl & Tiller §7.5).
+
+### 10.2 Points
+
+The candidate vertices are found as in step 1, with the decisions
+generalised from planes to surfaces:
+
+* **Signs.** Each vertex gets one sign (−1, 0 within the tolerance, +1)
+  per surface of the other body, from its signed distance, once.
+* **Crossings of an edge with a surface.** On a straight edge and a
+  plane the signed distance is monotone, so the ends' signs decide, as
+  in step 1. Otherwise it is not (a line passes into and out of a
+  cylinder; an arc crosses a plane twice with both ends on one side).
+  Composing G with a rational Bézier piece gives a polynomial (degree at
+  most four over the square of the weight), and the roots of its
+  derivative split the edge into pieces on which the distance is
+  monotone. Each piece end that is not a vertex (a turning point of the
+  distance) gets a sign from its distance, decided once like a vertex's;
+  a crossing is where a piece's end signs are strictly opposite, found
+  by bisection of the monotone piece, and recorded by (edge, surface,
+  piece). A turning point within the tolerance of the surface is a
+  tangent contact: the edge touches the surface there. It is a
+  candidate point too, and step 2 refuses tangent contacts between an
+  edge and the interior of a face (a cylinder resting on a plane) with
+  that message until tangency is handled (design note 0011 §4.4).
+* **Roots** of these polynomials are isolated in Bernstein form by
+  subdivision, the number of sign changes of the coefficients bounding
+  the number of roots in an interval (the variation-diminishing
+  property; J. M. Lane & R. F. Riesenfeld, "Bounds on a polynomial",
+  *BIT* 21, 1981; Farin, ch. 5), to a fixed depth; an interval still
+  undecided at that depth holds a near-double root, a near-tangency,
+  which the distance at its middle decides like any turning point.
+* **Contacts of two edges** (crossings within a face both bodies lie
+  on, such as two coplanar arcs) in closed form for lines and circles,
+  and by subdivision of rational Bézier pieces with the distance
+  minimised on the exact curves for conics (design note 0011 §6).
+* Clustering, the joining of derived points along an edge, and the
+  points' incidences with edges are step 1's, with distances to circles
+  and conics exact (closed form for circles, Newton on the exact curve
+  for conics, from the Bézier piece's nearest chord point).
+
+### 10.3 Imprint
+
+Two faces on crossing surfaces meet along the surfaces' intersection,
+which within step 2 is one of: a line (two planes), up to two lines (a
+plane along a cylinder's axis, or along a cone's apex; two cylinders with
+parallel axes), a circle (a plane across the axis of a cylinder, cone or
+sphere; two coaxial surfaces of revolution; two spheres), or a conic (a
+plane obliquely across a cylinder or cone). Other pairs (two cylinders
+at an angle: a quartic) are `Unsupported` until step 3's general path.
+Surfaces that coincide (one plane, one cylinder: equal axis and radius
+within the tolerance at every vertex) are coincident faces as in step 1.
+Two surfaces tangent along a curve or at a point (a cylinder on a plane,
+two cylinders touching side by side) are refused as tangent contacts.
+
+The stretch of an intersection curve inside a face is found exactly as
+step 1 finds a line's: the curve enters and leaves the face only where
+the face's boundary crosses the other surface, so the cuts along it are
+the boundary's crossings with that surface (§10.2) and its vertices on
+it, paired by the two half-open parity rules; a closed curve (a circle)
+that no boundary crosses is wholly inside or outside the face, decided
+at one of its points. Positions along a curve are its length from a
+cut (a circle's angle times its radius), so the comparisons within the
+tolerance are in space, as in step 1.
+
+### 10.4 Split
+
+A face's segments now include arcs. Segments are identified by an index
+rather than by their two clusters (two arcs, or an arc and a line, can
+join the same two points); two segments between the same clusters
+whose midpoints are within the tolerance are the same segment, with both
+sources. The face's planar graph is walked in a chart of its surface in
+which lengths are lengths in space (a plane's frame, a cylinder or a
+cone unrolled; the sphere, which has no such chart, in its angles with
+the tolerance scaled by the metric's bounds over the face), so the
+tolerance means the same everywhere. At each point the segments are
+ordered by their exact tangent directions in the chart, then by their
+curvature where tangents agree; two segments leaving a point in one
+direction with one curvature are refused. Areas (orientation of
+cycles), containment of holes and the checks that segments neither cross
+nor pass within the tolerance of a point they do not end use the exact
+curves where closed forms exist (lines and arcs in a plane, rulings and
+circles on a cylinder or a cone, which unroll to lines) and otherwise
+polylines within a sixteenth of the tolerance of the curve, so a
+decision made on a polyline can be off only within that band (a refusal
+for points within 1.06 rather than 1 tolerances, never a wrong region).
+
+### 10.5 Classify
+
+A piece's test point is the incentre of the largest triangle of a
+triangulation of its boundary in the chart (polylines for curved
+segments), with its clearance measured in the chart (a lower bound on
+the distance in space up to the polyline band). Ray parity stays exact
+in the sense that matters: the ray meets each face of the other body at
+the roots of a polynomial of degree at most two (closed forms), each hit
+is counted with the sign of the face's outward normal along the ray if
+it lies inside the face (decided in the face's chart against its
+boundary, with the hit farther than the tolerance from every boundary
+curve, measured exactly), and a ray that passes within the tolerance of
+an edge, or grazes a surface (a double root), is abandoned for the next
+direction, as one through a triangle's edge is in step 1. Planar faces
+with straight edges keep step 1's exact triangles. Pieces on coincident
+faces are decided by parity in the coincident face's chart (§9).
+
+### 10.6 Assemble
+
+Pieces are kept by the table of §4.4 and sewn along segment indices;
+edges carry their curves (a line, an arc of the circle, a piece of the
+conic), and faces their operand's surface. Pieces of one face are merged
+again; pieces of coincident faces of the two operands are merged on a
+plane, but on a curved surface only when the merged face spans no more
+than π about the axis (ADR 0008); otherwise the edge between them stays,
+and displays hide it as a seam (both faces are pieces of one surface).
+Collinear segments are joined as in step 1, and arcs of one circle or
+pieces of one conic likewise. Shells' volumes, for orienting shells and
+nesting voids, come from the kernel's exact mass properties.
+
+### 10.7 Order and tests
+
+1. The geometry layer, unit- and property-tested against sampling: the
+   surfaces and their recognition, Bernstein root isolation, crossings of
+   lines, arcs and conics with planes, cylinders, cones and spheres, and
+   the closed-form intersection curves.
+2. The pipeline for planes and cylinders (holes, bosses, slots, rounded
+   blocks, counterbores, at any orientation), with golden cases (a plate
+   with a round hole, a boss, a D-cut shaft, two parallel cylinders, a
+   counterbore) checked for volume, area, topology and origins, and the
+   fuzz of §7 on random extrudes of profiles with arcs and their motions.
+3. Cones and spheres (revolves), with the same tests.
+
+Volumes in the identities come from the exact mass properties, so the
+identities hold to 1e-9 for curved results as for flat ones.
