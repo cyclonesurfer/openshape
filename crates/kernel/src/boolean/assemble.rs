@@ -9,7 +9,7 @@ use spade::Triangulation;
 
 use super::classify::Class;
 use super::points::{segment_distance, Points};
-use super::{key, planar, show, FaceSeg, Key, Pair, Piece, Segments, Source};
+use super::{corners, key, planar, show, Course, Key, Pair, Piece, Segments, Source};
 use crate::geom::Curve3;
 use crate::math::Frame;
 use crate::origin::{
@@ -27,9 +27,9 @@ struct Out {
     face: usize,
     /// True if its outward normal is the opposite of that face's.
     reversed: bool,
-    /// Cycles of clusters, outer first, counter-clockwise about the
-    /// outward normal.
-    loops: Vec<Vec<usize>>,
+    /// Cycles of segments, outer first, counter-clockwise about the
+    /// outward normal, each segment with whether it is run from its `a`.
+    loops: Vec<Vec<(usize, bool)>>,
     /// Every operand face it is made of or coincides with.
     sources: BTreeSet<(Operand, usize)>,
 }
@@ -52,7 +52,7 @@ fn kept(op: BooleanOp, p: &Piece) -> Option<bool> {
 pub(super) fn assemble(
     pair: &Pair,
     pts: &Points,
-    segs: &Segments,
+    mut segs: Segments,
     pieces: Vec<Piece>,
     coplanar: &FxHashSet<(usize, usize)>,
     op: BooleanOp,
@@ -72,8 +72,14 @@ pub(super) fn assemble(
         }
         let mut loops = p.loops;
         if reversed {
+            // Run the other way, from the same cluster as the cycle's last
+            // segment started at.
             for l in &mut loops {
                 l.reverse();
+                for e in l.iter_mut() {
+                    e.1 = !e.1;
+                }
+                l.rotate_left(1);
             }
         }
         faces.push(Out {
@@ -89,43 +95,38 @@ pub(super) fn assemble(
             "the result would be empty".into(),
         ));
     }
-    check_closed(&faces, pts)?;
-    let faces = merge_faces(pair, pts, faces, coplanar, eps)?;
-    let mut edge_sources: FxHashMap<Key, BTreeSet<Source>> = segs
-        .sources
-        .iter()
-        .map(|(k, v)| (*k, v.iter().copied().collect()))
-        .collect();
-    let faces = merge_edges(faces, pts, &mut edge_sources, eps);
-    check_closed(&faces, pts)?;
-    check_vertices(&faces, pts)?;
+    check_closed(&faces, pts, &segs)?;
+    let faces = merge_faces(pair, pts, &segs, faces, coplanar, eps)?;
+    let faces = merge_edges(faces, pts, &mut segs, eps);
+    check_closed(&faces, pts, &segs)?;
+    check_vertices(&faces, pts, &segs)?;
     let shells = shells(&faces);
-    let solids = solids(pair, pts, &faces, &shells)?;
-    build(pair, pts, &faces, &shells, &solids, &edge_sources)
+    let solids = solids(pair, pts, &segs, &faces, &shells)?;
+    build(pair, pts, &segs, &faces, &shells, &solids)
 }
 
-/// The directed segments of a face's loops.
-fn directed(f: &Out) -> impl Iterator<Item = (usize, usize)> + '_ {
-    f.loops
-        .iter()
-        .flat_map(|l| (0..l.len()).map(move |i| (l[i], l[(i + 1) % l.len()])))
+/// The segments of a face's loops, each with the way it is run.
+fn directed(f: &Out) -> impl Iterator<Item = (usize, bool)> + '_ {
+    f.loops.iter().flatten().copied()
 }
 
 /// Every segment must be used once in each direction: more uses are a
-/// non-manifold result, fewer an inconsistency.
-fn check_closed(faces: &[Out], pts: &Points) -> Result<(), KernelError> {
-    let mut uses: BTreeMap<Key, (usize, usize)> = BTreeMap::new();
+/// non-manifold result, fewer an inconsistency. Problems are reported in
+/// order of the segments' ends.
+fn check_closed(faces: &[Out], pts: &Points, segs: &Segments) -> Result<(), KernelError> {
+    let mut uses: BTreeMap<(Key, usize), (usize, usize)> = BTreeMap::new();
     for f in faces {
-        for (u, v) in directed(f) {
-            let e = uses.entry(key(u, v)).or_default();
-            if u < v {
+        for (s, fw) in directed(f) {
+            let seg = &segs.list[s];
+            let e = uses.entry((key(seg.a, seg.b), s)).or_default();
+            if fw {
                 e.0 += 1;
             } else {
                 e.1 += 1;
             }
         }
     }
-    for (k, (fw, bw)) in uses {
+    for ((k, _), (fw, bw)) in uses {
         let at = (pts.rep[k.0] + pts.rep[k.1]) * 0.5;
         if fw + bw > 2 {
             return Err(KernelError::InvalidInput(format!(
@@ -195,6 +196,7 @@ fn unite(p: &mut [usize], i: usize, j: usize) {
 fn merge_faces(
     pair: &Pair,
     pts: &Points,
+    segs: &Segments,
     faces: Vec<Out>,
     coplanar: &FxHashSet<(usize, usize)>,
     eps: f64,
@@ -206,8 +208,8 @@ fn merge_faces(
         (Operand::First, Operand::Second) => coplanar.contains(&(x.1, y.1)),
         (Operand::Second, Operand::First) => coplanar.contains(&(y.1, x.1)),
         _ => {
-            let poly = pair.get(x.0);
-            poly.faces[x.1].plane == poly.faces[y.1].plane
+            let shape = pair.get(x.0);
+            shape.faces[x.1].surface == shape.faces[y.1].surface
         }
     };
     let same = |i: usize, j: usize| {
@@ -217,10 +219,10 @@ fn merge_faces(
                 .iter()
                 .any(|&x| faces[j].sources.iter().any(|&y| on_one_plane(x, y)))
     };
-    let mut by_seg: BTreeMap<Key, Vec<usize>> = BTreeMap::new();
+    let mut by_seg: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (i, f) in faces.iter().enumerate() {
-        for (u, v) in directed(f) {
-            by_seg.entry(key(u, v)).or_default().push(i);
+        for (s, _) in directed(f) {
+            by_seg.entry(s).or_default().push(i);
         }
     }
     for fs in by_seg.values() {
@@ -257,31 +259,41 @@ fn merge_faces(
             .iter()
             .flat_map(|f| f.sources.iter().copied())
             .collect();
-        let mut all: BTreeSet<(usize, usize)> = BTreeSet::new();
+        let mut all: BTreeSet<(usize, bool)> = BTreeSet::new();
         for f in &parts {
             all.extend(directed(f));
         }
-        let boundary: Vec<FaceSeg> = all
+        // The uses not cancelled by a use the other way, in order of their
+        // ends as run.
+        let mut boundary: Vec<(Key, usize, bool)> = all
             .iter()
-            .filter(|(u, v)| !all.contains(&(*v, *u)))
-            .map(|&(u, v)| FaceSeg {
-                key: key(u, v),
-                side: Some(u < v),
+            .filter(|(s, fw)| !all.contains(&(*s, !*fw)))
+            .map(|&(s, fw)| ((segs.start(s, fw), segs.end(s, fw)), s, fw))
+            .collect();
+        boundary.sort_unstable_by_key(|x| (x.0, x.1));
+        let edges: Vec<planar::Edge> = boundary
+            .iter()
+            .map(|&(_, s, fw)| planar::Edge {
+                seg: s,
+                a: segs.list[s].a,
+                b: segs.list[s].b,
+                side: Some(fw),
+                bend: None,
             })
             .collect();
-        let regions = planar::regions(&boundary, &|c| to2(&fr, pts.rep[c]), eps).map_err(|p| {
+        let regions = planar::regions(&edges, &|c| to2(&fr, pts.rep[c]), eps).map_err(|p| {
             let (m, c) = p.describe();
             KernelError::InvalidResult(format!(
                 "boolean: merging faces: {m} near {}",
                 super::show(pts.rep[c])
             ))
         })?;
-        for loops in regions {
+        for region in regions {
             out.push(Out {
                 operand,
                 face,
                 reversed,
-                loops,
+                loops: region.loops,
                 sources: sources.clone(),
             });
         }
@@ -299,39 +311,39 @@ fn merge_faces(
 /// segments changed or that an earlier join of the last round touched, so
 /// a long run of collinear segments costs time in proportion to its length
 /// rather than to the whole result for every round.
-fn merge_edges(
-    mut faces: Vec<Out>,
-    pts: &Points,
-    sources: &mut FxHashMap<Key, BTreeSet<Source>>,
-    eps: f64,
-) -> Vec<Out> {
-    let mut at: FxHashMap<usize, BTreeSet<Key>> = FxHashMap::default();
-    let mut seg_faces: FxHashMap<Key, BTreeSet<usize>> = FxHashMap::default();
+fn merge_edges(mut faces: Vec<Out>, pts: &Points, segs: &mut Segments, eps: f64) -> Vec<Out> {
+    let mut at: FxHashMap<usize, BTreeSet<usize>> = FxHashMap::default();
+    let mut seg_faces: FxHashMap<usize, BTreeSet<usize>> = FxHashMap::default();
     for (i, f) in faces.iter().enumerate() {
-        for (u, v) in directed(f) {
-            let k = key(u, v);
-            at.entry(u).or_default().insert(k);
-            at.entry(v).or_default().insert(k);
-            seg_faces.entry(k).or_default().insert(i);
+        for (s, _) in directed(f) {
+            let seg = &segs.list[s];
+            at.entry(seg.a).or_default().insert(s);
+            at.entry(seg.b).or_default().insert(s);
+            seg_faces.entry(s).or_default().insert(i);
         }
     }
     let mut look: BTreeSet<usize> = at.keys().copied().collect();
     let mut gone: FxHashSet<usize> = FxHashSet::default();
+    // Segments joined into another, and the one they joined.
+    let mut joined: FxHashMap<usize, usize> = FxHashMap::default();
     loop {
         let mut touched: FxHashSet<usize> = FxHashSet::default();
-        let mut joins: Vec<(usize, usize, usize)> = Vec::new();
+        let mut joins: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
         let mut again: BTreeSet<usize> = BTreeSet::new();
         for &v in &look {
-            let Some(ks) = at.get(&v) else {
+            let Some(ss) = at.get(&v) else {
                 continue;
             };
-            let [k0, k1] = ks.iter().copied().collect::<Vec<Key>>()[..] else {
+            let [s0, s1] = ss.iter().copied().collect::<Vec<usize>>()[..] else {
                 continue;
             };
-            let u = if k0.0 == v { k0.1 } else { k0.0 };
-            let w = if k1.0 == v { k1.1 } else { k1.0 };
+            let (g0, g1) = (&segs.list[s0], &segs.list[s1]);
+            let u = if g0.a == v { g0.b } else { g0.a };
+            let w = if g1.a == v { g1.b } else { g1.a };
             if u == w
-                || seg_faces[&k0] != seg_faces[&k1]
+                || g0.course != Course::Straight
+                || g1.course != Course::Straight
+                || seg_faces[&s0] != seg_faces[&s1]
                 || segment_distance(pts.rep[v], pts.rep[u], pts.rep[w]) > eps
             {
                 continue;
@@ -341,35 +353,55 @@ fn merge_edges(
                 continue;
             }
             touched.extend([u, v, w]);
-            joins.push((u, v, w));
+            joins.push((u, v, w, s0, s1));
         }
         if joins.is_empty() {
             break;
         }
-        for (u, v, w) in joins {
-            let (k0, k1, k) = (key(u, v), key(v, w), key(u, w));
-            let fs = seg_faces.remove(&k0).unwrap_or_default();
-            seg_faces.remove(&k1);
-            seg_faces.entry(k).or_default().extend(fs);
+        for (u, v, w, s0, s1) in joins {
+            let mut sources: BTreeSet<Source> = segs.list[s0].sources.iter().copied().collect();
+            sources.extend(segs.list[s1].sources.iter().copied());
+            let mut sources = sources.into_iter();
+            let first = sources.next().expect("a segment has a source");
+            let s = segs.add(u, w, Course::Straight, first);
+            for x in sources {
+                segs.add(u, w, Course::Straight, x);
+            }
+            let fs = seg_faces.remove(&s0).unwrap_or_default();
+            seg_faces.remove(&s1);
+            seg_faces.entry(s).or_default().extend(fs);
             at.remove(&v);
-            for (x, old) in [(u, k0), (w, k1)] {
-                if let Some(ks) = at.get_mut(&x) {
-                    ks.remove(&old);
-                    ks.insert(k);
+            for (x, old) in [(u, s0), (w, s1)] {
+                if let Some(ss) = at.get_mut(&x) {
+                    ss.remove(&old);
+                    ss.insert(s);
                 }
             }
+            joined.insert(s0, s);
+            joined.insert(s1, s);
             gone.insert(v);
             again.extend([u, w]);
-            let mut s = sources.remove(&k0).unwrap_or_default();
-            s.extend(sources.remove(&k1).unwrap_or_default());
-            sources.entry(k).or_default().extend(s);
         }
         look = again;
     }
     if !gone.is_empty() {
+        let resolve = |mut s: usize| {
+            while let Some(&t) = joined.get(&s) {
+                s = t;
+            }
+            s
+        };
         for f in &mut faces {
             for l in &mut f.loops {
-                l.retain(|c| !gone.contains(c));
+                let old = std::mem::take(l);
+                for (s, fw) in old {
+                    let start = segs.start(s, fw);
+                    if gone.contains(&start) {
+                        continue;
+                    }
+                    let t = resolve(s);
+                    l.push((t, segs.list[t].a == start));
+                }
             }
         }
     }
@@ -378,20 +410,21 @@ fn merge_edges(
 
 /// Around every vertex the faces must form one fan: two fans are bodies
 /// touching at a point, which is non-manifold.
-fn check_vertices(faces: &[Out], pts: &Points) -> Result<(), KernelError> {
-    // Corners: (vertex, incoming segment, outgoing segment).
-    type Corner = (usize, (usize, usize), (usize, usize));
+fn check_vertices(faces: &[Out], pts: &Points, segs: &Segments) -> Result<(), KernelError> {
+    // Corners: (vertex, incoming segment, outgoing segment), each segment
+    // with the way it is run.
+    type Corner = (usize, (usize, bool), (usize, bool));
     let mut corners: Vec<Corner> = Vec::new();
     for f in faces {
         for l in &f.loops {
             let n = l.len();
             for i in 0..n {
-                let (p, v, q) = (l[(i + n - 1) % n], l[i], l[(i + 1) % n]);
-                corners.push((v, (p, v), (v, q)));
+                let (p, q) = (l[(i + n - 1) % n], l[i]);
+                corners.push((segs.start(q.0, q.1), p, q));
             }
         }
     }
-    let by_in: FxHashMap<(usize, usize), usize> =
+    let by_in: FxHashMap<(usize, bool), usize> =
         corners.iter().enumerate().map(|(i, c)| (c.1, i)).collect();
     let mut seen = vec![false; corners.len()];
     let mut fans: BTreeMap<usize, usize> = BTreeMap::new();
@@ -403,8 +436,8 @@ fn check_vertices(faces: &[Out], pts: &Points) -> Result<(), KernelError> {
         let mut c = i;
         while !seen[c] {
             seen[c] = true;
-            let (v, _, (_, q)) = corners[c];
-            match by_in.get(&(q, v)) {
+            let (v, _, (s, fw)) = corners[c];
+            match by_in.get(&(s, !fw)) {
                 Some(&d) => c = d,
                 None => {
                     return Err(KernelError::InvalidResult(format!(
@@ -429,13 +462,13 @@ fn check_vertices(faces: &[Out], pts: &Points) -> Result<(), KernelError> {
 /// Connected sets of faces, in order of their least face.
 fn shells(faces: &[Out]) -> Vec<Vec<usize>> {
     let mut parent: Vec<usize> = (0..faces.len()).collect();
-    let mut first: FxHashMap<Key, usize> = FxHashMap::default();
+    let mut first: FxHashMap<usize, usize> = FxHashMap::default();
     for (i, f) in faces.iter().enumerate() {
-        for (u, v) in directed(f) {
-            match first.get(&key(u, v)) {
+        for (s, _) in directed(f) {
+            match first.get(&s) {
                 Some(&j) => unite(&mut parent, i, j),
                 None => {
-                    first.insert(key(u, v), i);
+                    first.insert(s, i);
                 }
             }
         }
@@ -451,7 +484,7 @@ fn shells(faces: &[Out]) -> Vec<Vec<usize>> {
 /// The enclosed volume of a shell of planar faces: a third of the sum of
 /// each face's area times its plane's distance from the origin along its
 /// outward normal.
-fn shell_volume(pair: &Pair, pts: &Points, faces: &[Out], shell: &[usize]) -> f64 {
+fn shell_volume(pair: &Pair, pts: &Points, segs: &Segments, faces: &[Out], shell: &[usize]) -> f64 {
     let mut v = 0.0;
     for &i in shell {
         let f = &faces[i];
@@ -460,7 +493,10 @@ fn shell_volume(pair: &Pair, pts: &Points, faces: &[Out], shell: &[usize]) -> f6
             .loops
             .iter()
             .map(|l| {
-                let q: Vec<DVec2> = l.iter().map(|&c| to2(&fr, pts.rep[c])).collect();
+                let q: Vec<DVec2> = corners(segs, l)
+                    .into_iter()
+                    .map(|c| to2(&fr, pts.rep[c]))
+                    .collect();
                 (0..q.len())
                     .map(|k| q[k].perp_dot(q[(k + 1) % q.len()]))
                     .sum::<f64>()
@@ -477,12 +513,13 @@ fn shell_volume(pair: &Pair, pts: &Points, faces: &[Out], shell: &[usize]) -> f6
 fn solids(
     pair: &Pair,
     pts: &Points,
+    segs: &Segments,
     faces: &[Out],
     shells: &[Vec<usize>],
 ) -> Result<Vec<(usize, Vec<usize>)>, KernelError> {
     let vols: Vec<f64> = shells
         .iter()
-        .map(|s| shell_volume(pair, pts, faces, s))
+        .map(|s| shell_volume(pair, pts, segs, faces, s))
         .collect();
     let mut solids: Vec<(usize, Vec<usize>)> = Vec::new();
     for (i, v) in vols.iter().enumerate() {
@@ -500,10 +537,11 @@ fn solids(
     }
     let meshes: Vec<Vec<[DVec3; 3]>> = solids
         .iter()
-        .map(|(s, _)| shell_triangles(pair, pts, faces, &shells[*s]))
+        .map(|(s, _)| shell_triangles(pair, pts, segs, faces, &shells[*s]))
         .collect::<Result<_, _>>()?;
     for v in voids {
-        let q = pts.rep[faces[shells[v][0]].loops[0][0]];
+        let (s, fw) = faces[shells[v][0]].loops[0][0];
+        let q = pts.rep[segs.start(s, fw)];
         let mut best: Option<usize> = None;
         for (k, (s, _)) in solids.iter().enumerate() {
             if winding(&meshes[k], q) > 0.5 && best.is_none_or(|b| vols[*s] < vols[solids[b].0]) {
@@ -526,6 +564,7 @@ fn solids(
 fn shell_triangles(
     pair: &Pair,
     pts: &Points,
+    segs: &Segments,
     faces: &[Out],
     shell: &[usize],
 ) -> Result<Vec<[DVec3; 3]>, KernelError> {
@@ -533,8 +572,8 @@ fn shell_triangles(
     for &i in shell {
         let f = &faces[i];
         let fr = plane_of(pair, f);
-        let loops: Vec<Vec<DVec2>> = f
-            .loops
+        let cycles: Vec<Vec<usize>> = f.loops.iter().map(|l| corners(segs, l)).collect();
+        let loops: Vec<Vec<DVec2>> = cycles
             .iter()
             .map(|l| l.iter().map(|&c| to2(&fr, pts.rep[c])).collect())
             .collect();
@@ -542,7 +581,7 @@ fn shell_triangles(
             .map_err(|e| KernelError::InvalidResult(format!("boolean: triangulation: {e}")))?;
         // Each vertex's first cluster.
         let mut at = vec![usize::MAX; cdt.num_vertices()];
-        for (&i, &c) in index.iter().zip(f.loops.iter().flatten()) {
+        for (&i, &c) in index.iter().zip(cycles.iter().flatten()) {
             if at[i] == usize::MAX {
                 at[i] = c;
             }
@@ -590,25 +629,24 @@ fn edge_origin(s: Source) -> EdgeOrigin {
 fn build(
     pair: &Pair,
     pts: &Points,
+    segs: &Segments,
     faces: &[Out],
     shells: &[Vec<usize>],
     solids: &[(usize, Vec<usize>)],
-    edge_sources: &FxHashMap<Key, BTreeSet<Source>>,
 ) -> Result<(Brep, Origins), KernelError> {
     let mut brep = Brep::default();
     let mut org = Origins::default();
     let mut merged: Vec<Merged> = Vec::new();
     let mut vertex_of: FxHashMap<usize, VertexId> = FxHashMap::default();
-    let mut edge_of: FxHashMap<Key, EdgeId> = FxHashMap::default();
+    let mut edge_of: FxHashMap<usize, EdgeId> = FxHashMap::default();
     let mut face_ids = Vec::with_capacity(faces.len());
     for f in faces {
         let mut loops = Vec::with_capacity(f.loops.len());
         for l in &f.loops {
             let mut coedges = Vec::with_capacity(l.len());
-            for i in 0..l.len() {
-                let (u, v) = (l[i], l[(i + 1) % l.len()]);
-                let k = key(u, v);
-                for c in [k.0, k.1] {
+            for &(s, fw) in l {
+                let seg = &segs.list[s];
+                for c in [seg.a, seg.b] {
                     if let std::collections::hash_map::Entry::Vacant(e) = vertex_of.entry(c) {
                         let id = brep.add_vertex(pts.rep[c]);
                         e.insert(id);
@@ -630,22 +668,28 @@ fn build(
                         }
                     }
                 }
-                let edge = match edge_of.get(&k) {
+                let edge = match edge_of.get(&s) {
                     Some(&e) => e,
                     None => {
-                        let (a, b) = (pts.rep[k.0], pts.rep[k.1]);
-                        let id = brep.add_edge(
-                            Curve3::Line {
-                                origin: a,
-                                dir: b - a,
-                            },
-                            0.0,
-                            1.0,
-                            vertex_of[&k.0],
-                            vertex_of[&k.1],
-                        );
-                        edge_of.insert(k, id);
-                        let mut src = edge_sources.get(&k).into_iter().flatten().copied();
+                        let (a, b) = (pts.rep[seg.a], pts.rep[seg.b]);
+                        let (curve, t0, t1) = match seg.course {
+                            Course::Straight => (
+                                Curve3::Line {
+                                    origin: a,
+                                    dir: b - a,
+                                },
+                                0.0,
+                                1.0,
+                            ),
+                        };
+                        let id = brep.add_edge(curve, t0, t1, vertex_of[&seg.a], vertex_of[&seg.b]);
+                        edge_of.insert(s, id);
+                        let mut src = seg
+                            .sources
+                            .iter()
+                            .copied()
+                            .collect::<BTreeSet<_>>()
+                            .into_iter();
                         let primary = src.next().ok_or_else(|| {
                             KernelError::InvalidResult(format!(
                                 "boolean: an edge with no origin near {}",
@@ -659,10 +703,7 @@ fn build(
                         id
                     }
                 };
-                coedges.push(Coedge {
-                    edge,
-                    forward: u == k.0,
-                });
+                coedges.push(Coedge { edge, forward: fw });
             }
             loops.push(Loop { coedges });
         }

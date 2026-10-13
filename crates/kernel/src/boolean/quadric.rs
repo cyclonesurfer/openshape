@@ -214,6 +214,38 @@ impl Quadric {
         }
     }
 
+    /// The unit direction in which the signed distance grows at `p`: the
+    /// normal of a plane, away from the axis or the centre, and behind a
+    /// cone's apex away from the apex. Zero on an axis or at a centre.
+    pub fn gradient(&self, p: DVec3) -> DVec3 {
+        match *self {
+            Quadric::Plane { normal, .. } => normal,
+            Quadric::Cylinder { point, axis, .. } => {
+                let w = p - point;
+                (w - axis * w.dot(axis)).normalize_or_zero()
+            }
+            Quadric::Sphere { center, .. } => (p - center).normalize_or_zero(),
+            Quadric::Cone {
+                point,
+                axis,
+                radius,
+                slope,
+            } => {
+                let w = p - point;
+                let h = w.dot(axis);
+                let across = w - axis * h;
+                let cos = 1.0 / (1.0 + slope * slope).sqrt();
+                let sin = slope * cos;
+                let z = h + radius / slope;
+                if across.length() * sin + z * cos >= 0.0 {
+                    across.normalize_or_zero() * cos - axis * sin
+                } else {
+                    (w + axis * (radius / slope)).normalize_or_zero()
+                }
+            }
+        }
+    }
+
     /// Size of the coordinates the surface is given by, for its rounding.
     pub fn magnitude(&self) -> f64 {
         match *self {
@@ -487,6 +519,22 @@ impl Quadric {
             tb
         }
     }
+}
+
+/// A box holding the edge `curve` on `[t0, t1]` (either order): the box of
+/// its rational Bézier pieces' control points, whose convex hull holds each
+/// piece (the weights are positive). `None` for a NURBS curve of degree
+/// above five.
+pub(super) fn curve_box(curve: &Curve3, t0: f64, t1: f64) -> Option<(DVec3, DVec3)> {
+    let (lo, hi) = if t0 <= t1 { (t0, t1) } else { (t1, t0) };
+    let mut b = (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY));
+    for piece in pieces(curve, lo, hi)? {
+        for q in &piece.pw {
+            let x = q.truncate() / q.w;
+            b = (b.0.min(x), b.1.max(x));
+        }
+    }
+    Some(b)
 }
 
 /// The rational Bézier pieces of `curve` on `[t0, t1]` (`t0 ≤ t1`), in

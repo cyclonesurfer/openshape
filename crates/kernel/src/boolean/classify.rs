@@ -32,7 +32,8 @@
 use glam::{DVec2, DVec3};
 use spade::Triangulation;
 
-use super::{show, Poly};
+use super::shape::{Face, Shape};
+use super::show;
 use crate::bvh::{self, Bvh};
 use crate::tess;
 use crate::KernelError;
@@ -77,11 +78,11 @@ pub(super) struct Boundary<'a> {
 }
 
 impl<'a> Boundary<'a> {
-    pub fn new(poly: &'a Poly) -> Result<Boundary<'a>, KernelError> {
-        let points = &poly.points[..];
+    pub fn new(shape: &'a Shape) -> Result<Boundary<'a>, KernelError> {
+        let points = &shape.points[..];
         let mut tris: Vec<[u32; 3]> = Vec::new();
-        for (fi, f) in poly.faces.iter().enumerate() {
-            triangulate(poly, f, &mut tris).map_err(|m| {
+        for (fi, f) in shape.faces.iter().enumerate() {
+            triangulate(shape, f, &mut tris).map_err(|m| {
                 KernelError::InvalidResult(format!("boolean: face {fi} of an operand: {m}"))
             })?;
         }
@@ -205,8 +206,8 @@ impl<'a> Boundary<'a> {
 
 /// Appends the triangles of face `f` on its operand's vertices, facing
 /// along its outward normal.
-fn triangulate(poly: &Poly, f: &super::PolyFace, out: &mut Vec<[u32; 3]>) -> Result<(), String> {
-    let q2 = |v: usize| f.to2(poly.points[v]);
+fn triangulate(shape: &Shape, f: &Face, out: &mut Vec<[u32; 3]>) -> Result<(), String> {
+    let q2 = |v: usize| f.to2(shape.points[v]);
     // A strictly convex face without holes, counter-clockwise: triangles
     // that halve the boundary's runs level by level. Each triangle spans a
     // run of the boundary and its box is about the size of that run, so a
