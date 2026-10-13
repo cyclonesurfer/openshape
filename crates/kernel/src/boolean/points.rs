@@ -9,11 +9,11 @@
 //! decided once, by its distance from the edge, and every later stage asks
 //! this module rather than testing again.
 
-use std::collections::HashMap;
-
 use glam::DVec3;
+use rustc_hash::FxHashMap;
 
 use super::{show, slot, Pair};
+use crate::bvh::Bvh;
 use crate::origin::Operand;
 use crate::KernelError;
 
@@ -30,17 +30,16 @@ enum Raw {
 
 pub(super) struct Points {
     pub eps: f64,
-    /// Per operand, per vertex, per plane of the other operand: the side
-    /// of the plane the vertex is on (−1, 0 within the tolerance, +1).
-    signs: [Vec<i8>; 2],
-    /// The number of planes of the other operand, per operand.
-    stride: [usize; 2],
+    /// Per operand, its vertices and the other operand's planes (point and
+    /// unit normal), for the sides of the planes the vertices are on.
+    verts: [Vec<DVec3>; 2],
+    planes: [Vec<(DVec3, DVec3)>; 2],
     pos: Vec<DVec3>,
     raw: Vec<Raw>,
     /// Raw index of each operand's first vertex.
     offset: [usize; 2],
     /// (operand, edge, plane of the other operand) → raw crossing point.
-    crossings: HashMap<(Operand, usize, usize), usize>,
+    crossings: FxHashMap<(Operand, usize, usize), usize>,
     /// Raw point → cluster.
     cluster: Vec<usize>,
     /// Per cluster, its position: an operand vertex if it has one (the
@@ -53,26 +52,21 @@ pub(super) struct Points {
     has_vertex: Vec<[bool; 2]>,
     /// Per operand, per edge: the clusters on it from its start to its end.
     on_edges: [Vec<Vec<usize>>; 2],
+    /// The clusters' positions, indexed.
+    index: Bvh,
 }
 
 impl Points {
     pub fn new(pair: &Pair, eps: f64) -> Points {
-        let mut signs = [Vec::new(), Vec::new()];
-        let mut stride = [0, 0];
-        for op in [Operand::First, Operand::Second] {
-            let me = pair.get(op);
-            let them = pair.get(super::other(op));
-            let n = them.planes.len();
-            stride[slot(op)] = n;
-            let mut s = Vec::with_capacity(me.points.len() * n);
-            for p in &me.points {
-                for q in &them.planes {
-                    let d = (*p - q.point).dot(q.normal);
-                    s.push(if d.abs() <= eps { 0 } else { d.signum() as i8 });
-                }
-            }
-            signs[slot(op)] = s;
-        }
+        let verts = [pair.first.points.clone(), pair.second.points.clone()];
+        let planes_of = |op: Operand| -> Vec<(DVec3, DVec3)> {
+            pair.get(op)
+                .planes
+                .iter()
+                .map(|q| (q.point, q.normal))
+                .collect()
+        };
+        let planes = [planes_of(Operand::Second), planes_of(Operand::First)];
         let mut pos = Vec::new();
         let mut raw = Vec::new();
         let mut offset = [0, 0];
@@ -85,55 +79,72 @@ impl Points {
         }
         Points {
             eps,
-            signs,
-            stride,
+            verts,
+            planes,
             pos,
             raw,
             offset,
-            crossings: HashMap::new(),
+            crossings: FxHashMap::default(),
             cluster: Vec::new(),
             rep: Vec::new(),
             members: Vec::new(),
             has_vertex: Vec::new(),
             on_edges: [Vec::new(), Vec::new()],
+            index: Bvh::new(Vec::new()),
         }
     }
 
+    /// The number of raw points so far.
+    pub fn raw_count(&self) -> usize {
+        self.pos.len()
+    }
+
     /// The side of `plane` (of the other operand) that vertex `v` of `op`
-    /// is on: −1, 0 (within the tolerance) or +1.
+    /// is on: −1, 0 (within the tolerance) or +1. A function of the vertex
+    /// and the plane alone, computed the same way every time it is asked,
+    /// so every stage sees one answer (the decision is made once in effect,
+    /// without a table of every vertex against every plane).
     pub fn sign(&self, op: Operand, v: usize, plane: usize) -> i8 {
-        self.signs[slot(op)][v * self.stride[slot(op)] + plane]
+        let (q, n) = self.planes[slot(op)][plane];
+        let d = (self.verts[slot(op)][v] - q).dot(n);
+        if d.abs() <= self.eps {
+            0
+        } else {
+            d.signum() as i8
+        }
     }
 
     /// Records where the edges of face `f` of `op` cross `plane` of the
     /// other operand (their ends strictly on opposite sides).
     pub fn add_crossings(&mut self, pair: &Pair, op: Operand, f: usize, plane: usize) {
         let poly = pair.get(op);
+        let face = &poly.faces[f];
         let q = &pair.get(super::other(op)).planes[plane];
-        for l in &poly.faces[f].loops {
-            for &(e, _) in l {
-                if self.crossings.contains_key(&(op, e, plane)) {
-                    continue;
-                }
-                let (va, vb) = poly.edges[e];
-                let (sa, sb) = (self.sign(op, va, plane), self.sign(op, vb, plane));
-                if sa * sb >= 0 {
-                    continue;
-                }
-                let (a, b) = (poly.points[va], poly.points[vb]);
-                let (da, db) = ((a - q.point).dot(q.normal), (b - q.point).dot(q.normal));
-                let p = a + (b - a) * (da / (da - db));
-                self.crossings.insert((op, e, plane), self.pos.len());
-                self.pos.push(p);
-                self.raw.push(Raw::Crossing);
+        let mut near = Vec::new();
+        face.near_plane(q, self.eps, &mut near);
+        for k in near {
+            let (li, i) = face.coedge_at(k);
+            let e = face.loops[li][i].0;
+            let (va, vb) = poly.edges[e];
+            let (sa, sb) = (self.sign(op, va, plane), self.sign(op, vb, plane));
+            if sa * sb >= 0 || self.crossings.contains_key(&(op, e, plane)) {
+                continue;
             }
+            let (a, b) = (poly.points[va], poly.points[vb]);
+            let (da, db) = ((a - q.point).dot(q.normal), (b - q.point).dot(q.normal));
+            let p = a + (b - a) * (da / (da - db));
+            self.crossings.insert((op, e, plane), self.pos.len());
+            self.pos.push(p);
+            self.raw.push(Raw::Crossing);
         }
     }
 
     /// Records where an edge of one operand touches an edge of the other
     /// (closer than the tolerance, not parallel): crossings within a common
-    /// plane that no edge/plane crossing finds, such as two seams.
-    pub fn add_edge_contacts(&mut self, pair: &Pair) {
+    /// plane that no edge/plane crossing finds, such as two seams. Fails if
+    /// more than `limit` pairs of edges come within the tolerance's reach of
+    /// each other.
+    pub fn add_edge_contacts(&mut self, pair: &Pair, limit: usize) -> Result<(), usize> {
         let eps = self.eps;
         let boxes = |op: Operand| -> Vec<(DVec3, DVec3)> {
             let poly = pair.get(op);
@@ -144,9 +155,20 @@ impl Points {
                 })
                 .collect()
         };
-        let (ba, bb) = (boxes(Operand::First), boxes(Operand::Second));
+        let ba = boxes(Operand::First);
+        let bb = boxes(Operand::Second);
+        let tree = Bvh::new(bb.clone());
+        let pad = super::pad(eps);
+        let mut near = Vec::new();
+        let mut examined = 0;
         for (ea, xa) in ba.iter().enumerate() {
-            for (eb, xb) in bb.iter().enumerate() {
+            tree.overlapping(xa.0 - pad, xa.1 + pad, &mut near);
+            examined += near.len();
+            if examined > limit {
+                return Err(limit);
+            }
+            for &eb in &near {
+                let xb = &bb[eb];
                 if !super::boxes_overlap(*xa, *xb, eps) {
                     continue;
                 }
@@ -164,6 +186,7 @@ impl Points {
                 }
             }
         }
+        Ok(())
     }
 
     /// Clusters the raw points (union–find within the tolerance) and checks
@@ -188,7 +211,7 @@ impl Points {
                 (p.z / h).floor() as i64,
             )
         };
-        let mut grid: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+        let mut grid: FxHashMap<(i64, i64, i64), Vec<usize>> = FxHashMap::default();
         for i in 0..n {
             let c = cell(self.pos[i]);
             for dx in -1..=1 {
@@ -251,6 +274,7 @@ impl Points {
             self.rep.push(rep);
             self.has_vertex.push([count[0] > 0, count[1] > 0]);
         }
+        self.index = Bvh::of_points(&self.rep);
         Ok(())
     }
 
@@ -290,7 +314,7 @@ impl Points {
             // A point on two edges of one body away from its vertices (near
             // a corner, within the tolerance of both edges) belongs to
             // neither more than the other: refused rather than guessed.
-            let mut edge_of: HashMap<usize, usize> = HashMap::new();
+            let mut edge_of: FxHashMap<usize, usize> = FxHashMap::default();
             for (e, &(va, vb)) in poly.edges.iter().enumerate() {
                 let (c0, c1) = (self.vertex_cluster(op, va), self.vertex_cluster(op, vb));
                 let (a, b) = poly.edge_points(e);
@@ -327,8 +351,11 @@ impl Points {
         let len2 = d.length_squared();
         let (lo, hi) = (a.min(b) - DVec3::splat(eps), a.max(b) + DVec3::splat(eps));
         let mut found: Vec<(f64, usize)> = Vec::new();
-        for (c, p) in self.rep.iter().enumerate() {
-            if c == c0 || c == c1 || p.cmplt(lo).any() || p.cmpgt(hi).any() {
+        let mut near = Vec::new();
+        self.index.overlapping(lo, hi, &mut near);
+        for c in near {
+            let p = &self.rep[c];
+            if c == c0 || c == c1 {
                 continue;
             }
             if let Some(op) = skip {

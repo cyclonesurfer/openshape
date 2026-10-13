@@ -2,14 +2,14 @@
 //! validity. Every model is also checked for a watertight, consistently
 //! oriented tessellation.
 
-use std::collections::HashMap;
 use std::f64::consts::{PI, TAU};
 
 use opendatum_kernel::{
-    BodyMesh, BrepKernel, DVec2, DVec3, ExtrudeSpec, Frame, Kernel, Profile, ProfileCurve,
-    RevolveSpec, SurfaceKind, TessellationOptions,
+    BodyMesh, BooleanOp, BrepKernel, DVec2, DVec3, ExtrudeSpec, Frame, Kernel, Profile,
+    ProfileCurve, RevolveSpec, SurfaceKind, TessellationOptions,
 };
 use proptest::prelude::*;
+use rustc_hash::FxHashMap;
 
 fn k() -> BrepKernel {
     BrepKernel::default()
@@ -19,7 +19,7 @@ fn k() -> BrepKernel {
 /// directed edge appears exactly once and its reverse exactly once.
 fn assert_watertight(mesh: &BodyMesh) {
     let (pos, tris) = mesh.welded();
-    let mut directed: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut directed: FxHashMap<(u32, u32), u32> = FxHashMap::default();
     for t in &tris {
         for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
             assert_ne!(a, b, "degenerate triangle");
@@ -1181,4 +1181,107 @@ fn a_sliver_between_large_arcs_has_its_mass() {
             rel: 1e-7,
         },
     );
+}
+
+/// Meshing and booleans give the same result on every run, to the bit:
+/// output may never depend on the iteration order of a randomly seeded hash
+/// table. Each call here builds fresh tables with fresh seeds. Faces whose
+/// boundary points lie on common circles (annuli, plates with holes) are the
+/// sensitive case: their Delaunay triangulation is not unique.
+#[test]
+fn meshes_and_booleans_are_the_same_every_time() {
+    let ring = revolve_z(
+        Profile {
+            plane: Frame::WORLD,
+            curves: vec![
+                ProfileCurve::Line {
+                    start: DVec2::new(0.5, 0.0),
+                    end: DVec2::new(1.0, 0.0),
+                },
+                ProfileCurve::Arc {
+                    center: DVec2::new(1.0, 0.25),
+                    radius: 0.25,
+                    start_angle: -TAU / 4.0,
+                    sweep_angle: TAU / 2.0,
+                },
+                ProfileCurve::Line {
+                    start: DVec2::new(1.0, 0.5),
+                    end: DVec2::new(0.5, 0.5),
+                },
+                ProfileCurve::Line {
+                    start: DVec2::new(0.5, 0.5),
+                    end: DVec2::new(0.5, 0.0),
+                },
+            ],
+        },
+        TAU,
+    );
+    let mut plate = Profile::rectangle(Frame::WORLD, DVec2::ZERO, DVec2::splat(3.0));
+    for i in 0..3 {
+        for j in 0..3 {
+            plate = plate.with(Profile::circle(
+                Frame::WORLD,
+                DVec2::new(i as f64 + 0.5, j as f64 + 0.5),
+                0.3,
+            ));
+        }
+    }
+    let plate = k()
+        .extrude(
+            &plate,
+            &ExtrudeSpec {
+                distance: 0.2,
+                symmetric: false,
+            },
+        )
+        .unwrap();
+    let star: Vec<DVec2> = (0..64)
+        .map(|i| {
+            let a = i as f64 * TAU / 64.0;
+            DVec2::new(a.cos(), a.sin()) * if i % 2 == 0 { 1.0 } else { 0.9 }
+        })
+        .collect();
+    let prism = |frame: Frame| {
+        k().extrude(
+            &Profile::polygon(frame, &star),
+            &ExtrudeSpec {
+                distance: 1.0,
+                symmetric: false,
+            },
+        )
+        .unwrap()
+    };
+    let tilted = Frame::from_normal(
+        DVec3::new(0.3, 0.1, 0.5),
+        DVec3::new(0.2, 0.1, 1.0),
+        DVec3::X,
+    );
+    let (a, b) = (prism(Frame::WORLD), prism(tilted));
+    let opts = TessellationOptions::default();
+    let mesh = |body: &opendatum_kernel::Body| {
+        let m = k().tessellate(body, &opts).unwrap();
+        let faces: Vec<_> = m
+            .faces
+            .iter()
+            .map(|f| (f.positions.clone(), f.normals.clone(), f.triangles.clone()))
+            .collect();
+        (faces, m.edges)
+    };
+    let first = [
+        mesh(&ring),
+        mesh(&plate),
+        mesh(&k().boolean(&a, &b, BooleanOp::Union).unwrap()),
+        mesh(&k().boolean(&a, &b, BooleanOp::Subtract).unwrap()),
+    ];
+    for _ in 0..3 {
+        let again = [
+            mesh(&ring),
+            mesh(&plate),
+            mesh(&k().boolean(&a, &b, BooleanOp::Union).unwrap()),
+            mesh(&k().boolean(&a, &b, BooleanOp::Subtract).unwrap()),
+        ];
+        for (i, (x, y)) in first.iter().zip(&again).enumerate() {
+            assert!(x == y, "model {i} meshed differently on a second run");
+        }
+    }
 }

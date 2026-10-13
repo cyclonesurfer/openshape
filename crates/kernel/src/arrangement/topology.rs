@@ -28,10 +28,11 @@
 //!    region's interior point inside another region. Any failure is an
 //!    error, never a silently wrong region.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::f64::consts::{PI, TAU};
 
 use glam::DVec2;
+use rustc_hash::FxHashMap;
 
 use super::curve::{Crv, Geom};
 use super::intersect::{self, Ctx};
@@ -351,7 +352,7 @@ impl Builder<'_> {
     fn cluster(&mut self) {
         let cell = 0.5 * self.tol;
         let key = |p: DVec2| ((p.x / cell).floor() as i64, (p.y / cell).floor() as i64);
-        let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+        let mut grid: FxHashMap<(i64, i64), Vec<usize>> = FxHashMap::default();
         for (k, inc) in self.incs.iter().enumerate() {
             grid.entry(key(inc.p)).or_default().push(k);
         }
@@ -1227,7 +1228,7 @@ impl Builder<'_> {
         for e in &edges {
             uf.union(e.v0, e.v1);
         }
-        let mut comp_v: HashMap<usize, (usize, usize, usize, usize)> = HashMap::new();
+        let mut comp_v: FxHashMap<usize, (usize, usize, usize, usize)> = FxHashMap::default();
         for (v, hes) in out_he.iter().enumerate() {
             if !hes.is_empty() {
                 comp_v.entry(uf.find(v)).or_default().0 += 1;

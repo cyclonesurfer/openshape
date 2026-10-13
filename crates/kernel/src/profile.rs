@@ -5,6 +5,7 @@ use std::f64::consts::PI;
 
 use glam::{DVec2, DVec3};
 use opendatum_nurbs::NurbsCurve;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::geom::Curve3;
@@ -511,19 +512,37 @@ pub(crate) fn regions(profile: &Profile, tol: &Tolerance) -> Result<Vec<Region>,
         return Err(KernelError::InvalidInput("profile is empty".into()));
     }
     // Cluster end points into vertices.
+    // Each end point joins the first vertex within `snap` of it, found
+    // through a grid of cells twice that size: a vertex within `snap` is in
+    // the point's cell or a neighbouring one.
     let snap = tol.linear * 10.0;
     let mut verts: Vec<DVec2> = Vec::new();
-    let vid = |p: DVec2, verts: &mut Vec<DVec2>| -> usize {
-        if let Some(i) = verts.iter().position(|v| (*v - p).length() <= snap) {
-            i
-        } else {
-            verts.push(p);
-            verts.len() - 1
+    let mut grid: FxHashMap<(i64, i64), Vec<usize>> = FxHashMap::default();
+    let cell = |p: DVec2| {
+        let q = (p / (2.0 * snap)).floor();
+        (q.x as i64, q.y as i64)
+    };
+    let mut vid = |p: DVec2| -> usize {
+        let (cx, cy) = cell(p);
+        let mut found: Option<usize> = None;
+        for x in cx.saturating_sub(1)..=cx.saturating_add(1) {
+            for y in cy.saturating_sub(1)..=cy.saturating_add(1) {
+                for &i in grid.get(&(x, y)).into_iter().flatten() {
+                    if (verts[i] - p).length() <= snap && found.is_none_or(|f| i < f) {
+                        found = Some(i);
+                    }
+                }
+            }
         }
+        found.unwrap_or_else(|| {
+            verts.push(p);
+            grid.entry((cx, cy)).or_default().push(verts.len() - 1);
+            verts.len() - 1
+        })
     };
     let ends: Vec<(usize, usize)> = segs
         .iter()
-        .map(|s| (vid(s.start(), &mut verts), vid(s.end(), &mut verts)))
+        .map(|s| (vid(s.start()), vid(s.end())))
         .collect();
     let mut incident: Vec<Vec<usize>> = vec![Vec::new(); verts.len()];
     for (i, (a, b)) in ends.iter().enumerate() {
@@ -612,12 +631,10 @@ pub(crate) fn regions(profile: &Profile, tol: &Tolerance) -> Result<Vec<Region>,
     let mut depth = vec![0usize; n];
     for i in 0..n {
         let mut best: Option<usize> = None;
-        for j in 0..n {
-            if facts.inside[i][j] {
-                depth[i] += 1;
-                if best.is_none_or(|b| areas[j].abs() < areas[b].abs()) {
-                    best = Some(j);
-                }
+        for &j in &facts.containers[i] {
+            depth[i] += 1;
+            if best.is_none_or(|b| areas[j].abs() < areas[b].abs()) {
+                best = Some(j);
             }
         }
         parent[i] = best;

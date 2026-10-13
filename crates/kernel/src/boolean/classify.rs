@@ -4,29 +4,36 @@
 //! plane) is *on* it, with the same or the opposite outward normal. Any
 //! other piece is wholly inside or wholly outside the other body, since
 //! every place where that body's surface crosses the face is a cut between
-//! pieces; it is classified by the generalised winding number of the other
-//! body's (exact, planar) triangulation at a point well inside the piece:
-//! the incentre of the piece's triangle with the largest inscribed circle.
-//! The winding number is an integer (0 or 1) up to rounding at any point
-//! not on the surface; a value far from both is an error, never a guess.
+//! pieces; it is classified at one point well inside it (the incentre of
+//! the piece's triangle with the largest inscribed circle).
+//!
 //! A point within the tolerance of the other body's surface is on it, so a
 //! piece whose point is there without lying on a coincident face has no
-//! side the tolerance can decide, and the boolean is refused.
+//! side the tolerance can decide, and the boolean is refused. Any other
+//! point is decided exactly, by ray parity: the other body's faces are
+//! triangulated on its own vertices (so the triangles close up exactly,
+//! edge to edge), and a segment from the point to beyond the body counts
+//! the triangles it passes through, +1 leaving the body and −1 entering
+//! it. Every test is an exact orientation predicate (Shewchuk, "Adaptive
+//! precision floating-point arithmetic and fast robust geometric
+//! predicates", 1997), so the count is the winding number of the
+//! triangulated surface about the point: 1 inside, 0 outside, and anything
+//! else an error. A segment that passes exactly through an edge or a
+//! corner of a triangle is not counted; the test is repeated along another
+//! fixed direction. A bounding-volume tree over the triangles keeps each
+//! test to the triangles near the segment.
 //!
 //! This replaces the propagation of design note 0012 §4.3 (classify faces
 //! at the intersection edges, then flood fill): each piece is decided by
-//! one test whose robustness is measured by its distance from the surface,
-//! and no decision depends on another.
-
-use std::f64::consts::PI;
+//! one exact test, and no decision depends on another.
 
 use glam::{DVec2, DVec3};
-use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
+use spade::Triangulation;
 
-use super::show;
-use crate::tess::{self, TessellationOptions};
-use crate::topo::Brep;
-use crate::{KernelError, Tolerance};
+use super::{show, Poly};
+use crate::bvh::{self, Bvh};
+use crate::tess;
+use crate::KernelError;
 
 /// Where a piece lies with respect to the other body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,101 +46,241 @@ pub(super) enum Class {
     OnOpposite,
 }
 
-/// A body's boundary as triangles, for winding numbers.
-pub(super) struct Winding {
-    tris: Vec<[DVec3; 3]>,
+/// Directions of the parity test, tried in turn until one passes through
+/// no triangle's edge or corner: fixed, so the result is reproducible, and
+/// generic (none along an axis, a face diagonal or a body diagonal, so not
+/// along the edges and faces models are usually built from), so that the
+/// first one nearly always serves.
+const DIRECTIONS: [[f64; 3]; 8] = [
+    [0.538, 0.632, 0.557],
+    [-0.707, 0.309, 0.636],
+    [0.224, -0.866, 0.447],
+    [-0.412, -0.520, -0.748],
+    [0.831, 0.173, -0.529],
+    [-0.141, 0.917, -0.374],
+    [0.616, -0.436, -0.656],
+    [-0.911, -0.265, 0.316],
+];
+
+/// A body's boundary as triangles on its own vertices, outward facing.
+pub(super) struct Boundary<'a> {
+    points: &'a [DVec3],
+    tris: Vec<[u32; 3]>,
+    tree: Bvh,
+    /// The centre and half the diagonal of the body's box.
+    centre: DVec3,
+    reach: f64,
+    /// Padding of the boxes in the segment test, against rounding.
+    pad: f64,
 }
 
-impl Winding {
-    pub fn new(b: &Brep, tol: &Tolerance) -> Result<Winding, KernelError> {
-        // Planar faces with straight edges: the triangulation is exact and
-        // needs no refinement, whatever the tolerances.
-        let size = crate::check::bounding_size(b).max(tol.linear);
-        let opts = TessellationOptions {
-            chord_tolerance: size,
-            max_angle: PI,
-        };
-        let t = tess::tessellate(b, &opts, tol)?;
-        let mut tris = Vec::new();
-        for f in &t.faces {
-            for tri in &f.triangles {
-                tris.push(tri.map(|i| f.positions[i as usize]));
-            }
+impl<'a> Boundary<'a> {
+    pub fn new(poly: &'a Poly) -> Result<Boundary<'a>, KernelError> {
+        let points = &poly.points[..];
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for (fi, f) in poly.faces.iter().enumerate() {
+            triangulate(poly, f, &mut tris).map_err(|m| {
+                KernelError::InvalidResult(format!("boolean: face {fi} of an operand: {m}"))
+            })?;
         }
-        Ok(Winding { tris })
-    }
-
-    /// The winding number of the boundary about `p`.
-    fn number(&self, p: DVec3) -> f64 {
-        let mut total = 0.0;
-        for t in &self.tris {
-            let (a, b, c) = (t[0] - p, t[1] - p, t[2] - p);
-            let (la, lb, lc) = (a.length(), b.length(), c.length());
-            let num = a.dot(b.cross(c));
-            let den = la * lb * lc + a.dot(b) * lc + a.dot(c) * lb + b.dot(c) * la;
-            total += 2.0 * num.atan2(den);
-        }
-        total / (4.0 * PI)
-    }
-
-    /// The distance from `p` to the boundary.
-    fn distance(&self, p: DVec3) -> f64 {
-        self.tris
+        // A triangle on three collinear points (a face with collinear
+        // vertices, triangulated in its rounded plane) covers no area: a
+        // segment through it passes through its neighbours' shared edges,
+        // which the test sees, so it is dropped rather than tested.
+        tris.retain(|t| !collinear(t.map(|i| points[i as usize])));
+        let boxes: Vec<(DVec3, DVec3)> = tris
             .iter()
-            .map(|t| (closest_on_triangle(p, t) - p).length())
-            .fold(f64::INFINITY, f64::min)
+            .map(|t| {
+                let [a, b, c] = t.map(|i| points[i as usize]);
+                (a.min(b).min(c), a.max(b).max(c))
+            })
+            .collect();
+        let tree = Bvh::new(boxes);
+        let (lo, hi) = tree.bounds().unwrap_or((DVec3::ZERO, DVec3::ZERO));
+        let centre = (lo + hi) * 0.5;
+        let reach = (hi - lo).length() * 0.5;
+        let pad = 1e-9 * (reach + centre.abs().max_element()) + f64::MIN_POSITIVE;
+        Ok(Boundary {
+            points,
+            tris,
+            tree,
+            centre,
+            reach,
+            pad,
+        })
+    }
+
+    fn triangle(&self, t: usize) -> [DVec3; 3] {
+        self.tris[t].map(|i| self.points[i as usize])
+    }
+
+    /// True if `p` is within `eps` of the boundary.
+    fn near(&self, p: DVec3, eps: f64) -> bool {
+        let r = eps * (1.0 + 1e-9) + self.pad;
+        !self.tree.visit(
+            |lo, hi| bvh::near_box(p, lo, hi, r),
+            |t| (closest_on_triangle(p, &self.triangle(t)) - p).length() > eps,
+        )
+    }
+
+    /// The signed number of triangles the segment `p`–`q` passes through
+    /// (+1 leaving the body, −1 entering it), or `None` if it passes
+    /// through an edge or a corner of one, or lies in a triangle's plane
+    /// across it. `p` is off the boundary; `q` is outside the body's box.
+    fn crossings(&self, p: DVec3, q: DVec3) -> Option<i64> {
+        let mut total = 0i64;
+        let mut clean = true;
+        let pad = self.pad + 1e-9 * (p - self.centre).length();
+        self.tree.visit(
+            |lo, hi| bvh::segment_meets_box(p, q, lo, hi, pad),
+            |t| {
+                let [a, b, c] = self.triangle(t);
+                let (sp, sq) = (orient(a, b, c, p), orient(a, b, c, q));
+                if sp == 0.0 && sq == 0.0 {
+                    // In the triangle's plane: whether it runs across the
+                    // triangle is not worth deciding; try another
+                    // direction.
+                    clean = false;
+                    return false;
+                }
+                // An end on the plane is off the triangle (p is off the
+                // boundary, q outside the box), so only a strict change of
+                // side can cross it.
+                if sp == 0.0 || sq == 0.0 || (sp > 0.0) == (sq > 0.0) {
+                    return true;
+                }
+                let e = [orient(p, q, a, b), orient(p, q, b, c), orient(p, q, c, a)];
+                if e.iter().all(|&x| x > 0.0) || e.iter().all(|&x| x < 0.0) {
+                    // `p` behind the outward-facing triangle: leaving.
+                    total += if sp > 0.0 { 1 } else { -1 };
+                    true
+                } else if e.iter().all(|&x| x >= 0.0) || e.iter().all(|&x| x <= 0.0) {
+                    // Through an edge or a corner.
+                    clean = false;
+                    false
+                } else {
+                    true
+                }
+            },
+        );
+        clean.then_some(total)
     }
 
     /// Inside or outside, at a point farther than `eps` from the boundary;
     /// a point within it is on the boundary, and a piece of a face that is
     /// on it without coinciding with a face is refused.
     pub fn classify(&self, p: DVec3, eps: f64) -> Result<Class, KernelError> {
-        if self.distance(p) <= eps {
+        if self.near(p, eps) {
             return Err(KernelError::InvalidInput(format!(
                 "a face of one body runs within the tolerance of the other's surface \
                  without lying on one of its faces, near {}",
                 show(p)
             )));
         }
-        let w = self.number(p);
-        if w.abs() < 0.25 {
-            Ok(Class::Outside)
-        } else if (w - 1.0).abs() < 0.25 {
-            Ok(Class::Inside)
-        } else {
-            Err(KernelError::InvalidInput(format!(
-                "cannot tell whether a piece near {} is inside the other body \
-                 (winding number {w:.3})",
-                show(p)
-            )))
+        let length = 2.0 * ((p - self.centre).length() + self.reach) + 1.0;
+        for d in DIRECTIONS {
+            let q = p + DVec3::from_array(d).normalize() * length;
+            match self.crossings(p, q) {
+                None => continue,
+                Some(1) => return Ok(Class::Inside),
+                Some(0) => return Ok(Class::Outside),
+                Some(w) => {
+                    return Err(KernelError::InvalidResult(format!(
+                        "boolean: the other body's surface winds {w} times around a point \
+                         near {}",
+                        show(p)
+                    )))
+                }
+            }
+        }
+        Err(KernelError::InvalidResult(format!(
+            "boolean: every test ray from a point near {} passes through an edge or a \
+             corner of the other body",
+            show(p)
+        )))
+    }
+}
+
+/// Appends the triangles of face `f` on its operand's vertices, facing
+/// along its outward normal.
+fn triangulate(poly: &Poly, f: &super::PolyFace, out: &mut Vec<[u32; 3]>) -> Result<(), String> {
+    let q2 = |v: usize| f.to2(poly.points[v]);
+    // A strictly convex face without holes, counter-clockwise: triangles
+    // that halve the boundary's runs level by level. Each triangle spans a
+    // run of the boundary and its box is about the size of that run, so a
+    // ray meets a few boxes per level; the slivers of a fan all reach
+    // across the face, and a ray near it meets most of them.
+    if let [vs] = &f.verts[..] {
+        let n = vs.len();
+        let convex = n >= 3
+            && (0..n).all(|k| orient2(q2(vs[k]), q2(vs[(k + 1) % n]), q2(vs[(k + 2) % n])) > 0.0);
+        if convex {
+            let tri = |a: usize, b: usize, c: usize| [vs[a], vs[b], vs[c % n]].map(|v| v as u32);
+            out.push(tri(0, n / 3, 2 * n / 3));
+            let mut runs = vec![(0, n / 3), (n / 3, 2 * n / 3), (2 * n / 3, n)];
+            while let Some((i, j)) = runs.pop() {
+                if j - i >= 2 {
+                    let m = (i + j) / 2;
+                    out.push(tri(i, m, j));
+                    runs.push((m, j));
+                    runs.push((i, m));
+                }
+            }
+            return Ok(());
         }
     }
+    let loops: Vec<Vec<DVec2>> = f
+        .verts
+        .iter()
+        .map(|l| l.iter().map(|&v| q2(v)).collect())
+        .collect();
+    let (cdt, index) = tess::polygon_cdt(&loops)?;
+    if cdt.num_vertices() != index.len() {
+        return Err("two vertices at one point of the face's plane".into());
+    }
+    let mut at = vec![0; index.len()];
+    for (&i, &v) in index.iter().zip(f.verts.iter().flatten()) {
+        at[i] = v;
+    }
+    for t in tess::inside_triangles(&cdt) {
+        out.push(t.map(|k| at[k] as u32));
+    }
+    Ok(())
+}
+
+fn orient(a: DVec3, b: DVec3, c: DVec3, d: DVec3) -> f64 {
+    let k = |p: DVec3| robust::Coord3D {
+        x: p.x,
+        y: p.y,
+        z: p.z,
+    };
+    robust::orient3d(k(a), k(b), k(c), k(d))
+}
+
+/// True if the three points are exactly on one line: collinear in every
+/// coordinate plane.
+fn collinear([a, b, c]: [DVec3; 3]) -> bool {
+    let xy = |p: DVec3| DVec2::new(p.x, p.y);
+    let yz = |p: DVec3| DVec2::new(p.y, p.z);
+    let zx = |p: DVec3| DVec2::new(p.z, p.x);
+    orient2(xy(a), xy(b), xy(c)) == 0.0
+        && orient2(yz(a), yz(b), yz(c)) == 0.0
+        && orient2(zx(a), zx(b), zx(c)) == 0.0
+}
+
+fn orient2(a: DVec2, b: DVec2, c: DVec2) -> f64 {
+    let k = |p: DVec2| robust::Coord { x: p.x, y: p.y };
+    robust::orient2d(k(a), k(b), k(c))
 }
 
 /// A point well inside the polygon `loops` (outer first) and its distance
 /// from the boundary at least: the incentre of the triangle with the
 /// largest inscribed circle in a constrained triangulation of the polygon.
 pub(super) fn interior_point(loops: &[Vec<DVec2>]) -> Result<(DVec2, f64), String> {
-    let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> =
-        ConstrainedDelaunayTriangulation::new();
-    let mut at: Vec<DVec2> = Vec::new();
-    for l in loops {
-        let mut hs = Vec::with_capacity(l.len());
-        for q in l {
-            let h = cdt
-                .insert(Point2::new(q.x, q.y))
-                .map_err(|e| format!("triangulation insert failed: {e:?}"))?;
-            if h.index() == at.len() {
-                at.push(*q);
-            }
-            hs.push(h);
-        }
-        for i in 0..hs.len() {
-            let (a, b) = (hs[i], hs[(i + 1) % hs.len()]);
-            if a != b && cdt.try_add_constraint(a, b).is_empty() && !cdt.exists_constraint(a, b) {
-                return Err("a piece's boundary crosses itself".into());
-            }
-        }
+    let (cdt, index) = tess::polygon_cdt(loops).map_err(|e| format!("a piece's boundary: {e}"))?;
+    let mut at = vec![DVec2::ZERO; cdt.num_vertices()];
+    for (&i, q) in index.iter().zip(loops.iter().flatten()) {
+        at[i] = *q;
     }
     let mut best: Option<(DVec2, f64)> = None;
     for t in tess::inside_triangles(&cdt) {

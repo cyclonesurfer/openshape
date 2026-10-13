@@ -1,8 +1,7 @@
 //! B-rep validation, topology statistics and mass properties.
 
-use std::collections::HashMap;
-
 use glam::DVec3;
+use rustc_hash::FxHashMap;
 
 use crate::tess::{self, BrepTess, TessellationOptions};
 use crate::topo::Brep;
@@ -121,7 +120,7 @@ pub(crate) fn validate(b: &Brep, tol: &Tolerance) -> Vec<String> {
 
     // Shells: each edge used exactly twice, in opposite directions.
     for (si, s) in b.shells.iter().enumerate() {
-        let mut uses: HashMap<u32, (u32, u32)> = HashMap::new();
+        let mut uses: FxHashMap<u32, (u32, u32)> = FxHashMap::default();
         for f in &s.faces {
             for l in &b.faces[f.idx()].loops {
                 for c in &l.coedges {

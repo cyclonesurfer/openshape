@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 35093af30206dd1526a2ddaa80abbc9d9d515b7db5bc7b2a374329c2b8446ff1 # shrinks to curve = NurbsCurve { degree: 5, knots: KnotVector { knots: [3.6499853339937522, 3.6499853339937522, 3.6499853339937522, 3.6499853339937522, 3.6499853339937522, 3.6499853339937522, 3.725300056310911, 3.80061477862807, 3.8759295009452286, 3.9512442232623872, 4.27602576476192, 4.351340487079079, 4.351340487079079, 4.351340487079079, 4.351340487079079, 4.351340487079079, 4.351340487079079] }, points: [DVec4(0.0, 1.7337843699400524, 0.0, 0.2), DVec4(0.0, -14.12557177783371, 24.575245844193088, 2.6510043569118125), DVec4(0.0, 0.0, 0.0, 0.2), DVec4(0.0, 0.0, 0.0, 0.2), DVec4(0.0, 0.0, 0.0, 0.2), DVec4(0.0, 0.0, 0.0, 0.2), DVec4(0.0, 0.0, 0.0, 0.2), DVec4(0.0, 0.0, 0.0, 0.2), DVec4(0.0, 0.0, 0.0, 0.2), DVec4(0.0, 0.0, 0.0, 0.2), DVec4(0.0, 0.0, 0.0, 0.2)] }

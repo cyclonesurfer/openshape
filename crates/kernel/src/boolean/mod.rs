@@ -18,7 +18,7 @@
 //!    are its pieces.
 //! 4. **Classify** (`classify`): each piece is on a coincident face of the
 //!    other body (with the same or the opposite outward normal), or inside
-//!    or outside it by the winding number at a point well inside the piece.
+//!    or outside it by exact ray parity at a point well inside the piece.
 //! 5. **Select, sew, merge** (`assemble`): pieces are kept by the table of
 //!    §4.4, sewn along their segments, coplanar neighbours and collinear
 //!    edges joined, shells and solids rebuilt, and the origins of ADR 0020
@@ -27,10 +27,10 @@
 //! Anything the stages cannot decide within the tolerance is refused with
 //! a message and a location rather than guessed.
 
-use std::collections::HashMap;
-
 use glam::{DVec2, DVec3};
+use rustc_hash::FxHashMap;
 
+use crate::bvh::Bvh;
 use crate::geom::Curve3;
 use crate::math::Frame;
 use crate::origin::{Operand, Origins};
@@ -58,9 +58,66 @@ struct PolyFace {
     /// Bounding box of the face's vertices.
     lo: DVec3,
     hi: DVec3,
+    /// For a face with many edges, its coedges (in loop order, all loops
+    /// in turn) indexed by their boxes.
+    index: Option<Bvh>,
+    /// The position in loop order of each loop's first coedge.
+    starts: Vec<usize>,
 }
 
+/// Faces with more coedges than this get an index of them.
+const INDEXED_FACE: usize = 32;
+
 impl PolyFace {
+    /// The loop and position in it of the `k`-th coedge in loop order.
+    fn coedge_at(&self, k: usize) -> (usize, usize) {
+        let li = self.starts.partition_point(|&s| s <= k) - 1;
+        (li, k - self.starts[li])
+    }
+
+    /// The coedges (by position in loop order, increasing) whose two ends
+    /// are not both farther than `eps` on one side of `plane`: the only
+    /// ones that can meet it or change side across it. Also whether some
+    /// coedge left out starts above the plane, and whether some starts
+    /// below it.
+    fn near_plane(&self, plane: &Plane, eps: f64, out: &mut Vec<usize>) -> (bool, bool) {
+        out.clear();
+        let Some(index) = &self.index else {
+            out.extend(0..self.loops.iter().map(Vec::len).sum());
+            return (false, false);
+        };
+        let (mut above, mut below) = (false, false);
+        // A margin far above the rounding of the vertices' signed
+        // distances, so no vertex within `eps` is left out.
+        let scale =
+            plane.point.abs().max_element() + self.lo.abs().max(self.hi.abs()).max_element();
+        let reach = eps + 1e-9 * (1.0 + scale);
+        let n = plane.normal;
+        index.visit(
+            |lo, hi| {
+                let centre = (lo + hi) * 0.5;
+                let half = (hi - lo) * 0.5;
+                let d = (centre - plane.point).dot(n);
+                let r = half.dot(n.abs());
+                if d - r > reach {
+                    above = true;
+                    false
+                } else if d + r < -reach {
+                    below = true;
+                    false
+                } else {
+                    true
+                }
+            },
+            |k| {
+                out.push(k);
+                true
+            },
+        );
+        out.sort_unstable();
+        (above, below)
+    }
+
     fn normal(&self) -> DVec3 {
         self.frame.z
     }
@@ -98,6 +155,35 @@ impl Poly<'_> {
         let (a, b) = self.edges[e];
         (self.points[a], self.points[b])
     }
+}
+
+/// Work limits (docs/PERFORMANCE.md): pairs of faces that meet, pairs of
+/// edges near each other, candidate points, and segments of the result's
+/// edges. Every stage takes time in proportion to these (times a
+/// logarithm), so the limits bound a boolean's time and memory whatever its
+/// input. The defaults are far above any part a person models (a result of
+/// a million faces); a boolean past one is refused rather than left to run
+/// for minutes.
+#[derive(Clone, Copy, Debug)]
+struct Limits {
+    face_pairs: usize,
+    edge_pairs: usize,
+    points: usize,
+    segments: usize,
+}
+
+const LIMITS: Limits = Limits {
+    face_pairs: 2_000_000,
+    edge_pairs: 8_000_000,
+    points: 4_000_000,
+    segments: 8_000_000,
+};
+
+fn too_large(what: &str, limit: usize) -> KernelError {
+    KernelError::TooLarge(format!(
+        "the boolean would need more than {limit} {what}; it is refused rather than left \
+         to run for minutes"
+    ))
 }
 
 /// Relative tolerance for recognising faces built on one plane (rounding
@@ -157,6 +243,27 @@ fn poly<'a>(b: &'a Brep, which: &str) -> Result<Poly<'a>, KernelError> {
             loops.push(cs);
             verts.push(vs);
         }
+        let starts: Vec<usize> = loops
+            .iter()
+            .scan(0, |at, l| {
+                let s = *at;
+                *at += l.len();
+                Some(s)
+            })
+            .collect();
+        let count: usize = loops.iter().map(Vec::len).sum();
+        let index = (count > INDEXED_FACE).then(|| {
+            Bvh::new(
+                loops
+                    .iter()
+                    .flatten()
+                    .map(|&(e, _)| {
+                        let (a, b) = (points[edges[e].0], points[edges[e].1]);
+                        (a.min(b), a.max(b))
+                    })
+                    .collect(),
+            )
+        });
         faces.push(PolyFace {
             frame,
             plane,
@@ -164,6 +271,8 @@ fn poly<'a>(b: &'a Brep, which: &str) -> Result<Poly<'a>, KernelError> {
             verts,
             lo,
             hi,
+            index,
+            starts,
         });
     }
     Ok(Poly {
@@ -199,6 +308,14 @@ fn other(op: Operand) -> Operand {
 
 fn boxes_overlap(a: (DVec3, DVec3), b: (DVec3, DVec3), eps: f64) -> bool {
     a.0.cmple(b.1 + DVec3::splat(eps)).all() && b.0.cmple(a.1 + DVec3::splat(eps)).all()
+}
+
+/// A box grown by this finds, in a tree, every box that `boxes_overlap`
+/// accepts at `eps`: twice the tolerance, so the rounding of the two tests
+/// (far below the tolerance wherever coordinates are below `eps · 2⁵¹`,
+/// hundreds of kilometres at the default) cannot drop one.
+fn pad(eps: f64) -> DVec3 {
+    DVec3::splat(2.0 * eps)
 }
 
 /// How two faces of different operands lie.
@@ -255,6 +372,16 @@ pub(crate) fn boolean(
     op: BooleanOp,
     tol: &Tolerance,
 ) -> Result<(Brep, Origins), KernelError> {
+    boolean_within(a, b, op, tol, &LIMITS)
+}
+
+fn boolean_within(
+    a: &Brep,
+    b: &Brep,
+    op: BooleanOp,
+    tol: &Tolerance,
+    limits: &Limits,
+) -> Result<(Brep, Origins), KernelError> {
     let pair = Pair {
         first: poly(a, "first")?,
         second: poly(b, "second")?,
@@ -265,10 +392,17 @@ pub(crate) fn boolean(
     // Face pairs that can meet, and how.
     let mut crossing: Vec<(usize, usize)> = Vec::new();
     let mut coplanar: Vec<(usize, usize)> = Vec::new();
+    let tree = Bvh::new(pair.second.faces.iter().map(|f| (f.lo, f.hi)).collect());
+    let mut near = Vec::new();
     for (fa, a) in pair.first.faces.iter().enumerate() {
-        for (fb, b) in pair.second.faces.iter().enumerate() {
+        tree.overlapping(a.lo - pad(eps), a.hi + pad(eps), &mut near);
+        for &fb in &near {
+            let b = &pair.second.faces[fb];
             if !boxes_overlap((a.lo, a.hi), (b.lo, b.hi), eps) {
                 continue;
+            }
+            if crossing.len() + coplanar.len() >= limits.face_pairs {
+                return Err(too_large("pairs of faces that meet", limits.face_pairs));
             }
             match relation(&pair, &pts, fa, fb)? {
                 Relation::Apart => {}
@@ -276,12 +410,19 @@ pub(crate) fn boolean(
                 Relation::Crossing => {
                     pts.add_crossings(&pair, Operand::First, fa, b.plane);
                     pts.add_crossings(&pair, Operand::Second, fb, a.plane);
+                    if pts.raw_count() > limits.points {
+                        return Err(too_large("candidate points", limits.points));
+                    }
                     crossing.push((fa, fb));
                 }
             }
         }
     }
-    pts.add_edge_contacts(&pair);
+    pts.add_edge_contacts(&pair, limits.edge_pairs)
+        .map_err(|limit| too_large("pairs of edges near each other", limit))?;
+    if pts.raw_count() > limits.points {
+        return Err(too_large("candidate points", limits.points));
+    }
     pts.cluster()?;
     pts.incidences(&pair)?;
 
@@ -338,15 +479,20 @@ pub(crate) fn boolean(
         }
     }
 
+    if segs.sources.len() > limits.segments {
+        return Err(too_large("edge segments", limits.segments));
+    }
+
     // Split every face into pieces and classify them.
-    let mut partners: [HashMap<usize, Vec<usize>>; 2] = [HashMap::new(), HashMap::new()];
+    let mut partners: [FxHashMap<usize, Vec<usize>>; 2] =
+        [FxHashMap::default(), FxHashMap::default()];
     for &(fa, fb) in &coplanar {
         partners[0].entry(fa).or_default().push(fb);
         partners[1].entry(fb).or_default().push(fa);
     }
-    let windings = [
-        classify::Winding::new(pair.first.brep, tol)?,
-        classify::Winding::new(pair.second.brep, tol)?,
+    let boundaries = [
+        classify::Boundary::new(&pair.first)?,
+        classify::Boundary::new(&pair.second)?,
     ];
     let mut pieces: Vec<Piece> = Vec::new();
     for op in [Operand::First, Operand::Second] {
@@ -403,7 +549,7 @@ pub(crate) fn boolean(
                 }
                 let class = match class {
                     Some(c) => c,
-                    None => windings[slot(other(op))].classify(at, eps)?,
+                    None => boundaries[slot(other(op))].classify(at, eps)?,
                 };
                 pieces.push(Piece {
                     operand: op,
@@ -439,7 +585,7 @@ fn show(p: DVec3) -> String {
 /// The segments of the result's candidate edges, with their sources.
 #[derive(Default)]
 struct Segments {
-    sources: HashMap<Key, Vec<Source>>,
+    sources: FxHashMap<Key, Vec<Source>>,
 }
 
 impl Segments {
@@ -456,10 +602,16 @@ impl Segments {
 fn relation(pair: &Pair, pts: &Points, fa: usize, fb: usize) -> Result<Relation, KernelError> {
     let a = &pair.first.faces[fa];
     let b = &pair.second.faces[fb];
+    // Which sides of the plane the face's vertices are on: those of the
+    // coedges near the plane one by one, the others by their boxes.
     let signs = |op: Operand, f: &PolyFace, plane: usize| -> (bool, bool, bool) {
-        let (mut pos, mut neg, mut zero) = (false, false, false);
-        for &v in f.verts.iter().flatten() {
-            match pts.sign(op, v, plane) {
+        let mut near = Vec::new();
+        let q = &pair.get(other(op)).planes[plane];
+        let (mut pos, mut neg) = f.near_plane(q, pts.eps, &mut near);
+        let mut zero = false;
+        for k in near {
+            let (li, i) = f.coedge_at(k);
+            match pts.sign(op, f.verts[li][i], plane) {
                 1 => pos = true,
                 -1 => neg = true,
                 _ => zero = true,
@@ -591,30 +743,33 @@ fn face_line(
     let face = &poly.faces[f];
     let eps = pts.eps;
     let mut spans: Vec<Span> = Vec::new();
+    // Only coedges near the plane can cross it under either rule.
+    let mut near = Vec::new();
+    face.near_plane(&pair.get(other(op)).planes[plane], eps, &mut near);
     for zero_positive in [true, false] {
         let side = |s: i8| if zero_positive { s >= 0 } else { s > 0 };
         let mut cuts: Vec<(f64, usize)> = Vec::new();
-        for (l, vs) in face.loops.iter().zip(&face.verts) {
-            for (k, &(e, _)) in l.iter().enumerate() {
-                let (va, vb) = (vs[k], vs[(k + 1) % vs.len()]);
-                let (sa, sb) = (pts.sign(op, va, plane), pts.sign(op, vb, plane));
-                if side(sa) == side(sb) {
-                    continue;
-                }
-                let c = if sa == 0 {
-                    pts.vertex_cluster(op, va)
-                } else if sb == 0 {
-                    pts.vertex_cluster(op, vb)
-                } else {
-                    pts.crossing_cluster(op, e, plane).ok_or_else(|| {
-                        KernelError::InvalidResult(format!(
-                            "boolean: no crossing recorded for edge {e} of the {} body",
-                            name(op)
-                        ))
-                    })?
-                };
-                cuts.push((pts.rep[c].dot(dir), c));
+        for &c in &near {
+            let (li, k) = face.coedge_at(c);
+            let (vs, e) = (&face.verts[li], face.loops[li][k].0);
+            let (va, vb) = (vs[k], vs[(k + 1) % vs.len()]);
+            let (sa, sb) = (pts.sign(op, va, plane), pts.sign(op, vb, plane));
+            if side(sa) == side(sb) {
+                continue;
             }
+            let c = if sa == 0 {
+                pts.vertex_cluster(op, va)
+            } else if sb == 0 {
+                pts.vertex_cluster(op, vb)
+            } else {
+                pts.crossing_cluster(op, e, plane).ok_or_else(|| {
+                    KernelError::InvalidResult(format!(
+                        "boolean: no crossing recorded for edge {e} of the {} body",
+                        name(op)
+                    ))
+                })?
+            };
+            cuts.push((pts.rep[c].dot(dir), c));
         }
         cuts.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
         for w in cuts.windows(2) {
@@ -678,4 +833,53 @@ fn in_closed_face(poly: &Poly, face: &PolyFace, p: DVec3, eps: f64) -> bool {
         }
     }
     inside
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BrepKernel, Kernel};
+
+    fn cube(at: DVec3, size: f64) -> Brep {
+        let frame = Frame {
+            origin: at,
+            ..Frame::WORLD
+        };
+        let body = BrepKernel::default()
+            .make_box(&frame, DVec3::splat(size))
+            .expect("a box");
+        (*body.brep).clone()
+    }
+
+    #[test]
+    fn work_limits_refuse_rather_than_run_on() {
+        let tol = Tolerance::default();
+        // Flush top and bottom faces, so edges of the two cross in those planes.
+        let (a, b) = (cube(DVec3::ZERO, 1.0), cube(DVec3::new(0.5, 0.5, 0.0), 1.0));
+        assert!(boolean_within(&a, &b, BooleanOp::Union, &tol, &LIMITS).is_ok());
+        let tight = [
+            Limits {
+                face_pairs: 3,
+                ..LIMITS
+            },
+            Limits {
+                edge_pairs: 0,
+                ..LIMITS
+            },
+            Limits {
+                points: 20,
+                ..LIMITS
+            },
+            Limits {
+                segments: 10,
+                ..LIMITS
+            },
+        ];
+        for limits in tight {
+            match boolean_within(&a, &b, BooleanOp::Union, &tol, &limits) {
+                Err(KernelError::TooLarge(m)) => assert!(m.contains("refused"), "{m}"),
+                other => panic!("{limits:?}: {:?}", other.map(|_| ())),
+            }
+        }
+    }
 }

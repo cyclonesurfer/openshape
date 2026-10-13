@@ -10,6 +10,7 @@ use super::curve::Crv;
 use super::intersect::{self, Ctx};
 use super::measure::{self, Side};
 use super::topology::BUDGET;
+use crate::bvh::Bvh;
 use crate::{KernelError, ProfileCurve};
 
 /// What profile normalization needs to know about its loops.
@@ -17,8 +18,8 @@ use crate::{KernelError, ProfileCurve};
 pub(crate) struct LoopFacts {
     /// Signed area of each loop (positive when counter-clockwise).
     pub areas: Vec<f64>,
-    /// `inside[i][j]`: loop `i` lies inside loop `j` (never for `i == j`).
-    pub inside: Vec<Vec<bool>>,
+    /// Per loop, the loops it lies inside, in increasing order.
+    pub containers: Vec<Vec<usize>>,
 }
 
 /// The profile's curves, their vertices and loops.
@@ -70,13 +71,28 @@ impl ProfileLoops<'_> {
             ))
         };
         let tol = self.tol;
+        // Candidate pairs come from a tree of the curves' boxes, padded by
+        // twice the tolerance so rounding cannot lose a pair the exact test
+        // below keeps; pairs are taken in the order of a full scan.
+        let pad = DVec2::splat(2.0 * tol);
+        let tree = Bvh::new(
+            crvs.iter()
+                .map(|c| ((c.bmin - pad).extend(0.0), (c.bmax + pad).extend(0.0)))
+                .collect(),
+        );
+        let mut near = Vec::new();
         for i in 0..crvs.len() {
             for (s, t) in intersect::self_contacts(&crvs[i], &mut ctx)? {
                 if !self.allowed(&crvs, i, s, i, t) {
                     return Err(touching(crvs[i].point(s)));
                 }
             }
-            for j in i + 1..crvs.len() {
+            tree.overlapping(
+                crvs[i].bmin.extend(0.0),
+                crvs[i].bmax.extend(0.0),
+                &mut near,
+            );
+            for &j in near.iter().filter(|&&j| j > i) {
                 let (a, b) = (&crvs[i], &crvs[j]);
                 if a.bmin.x > b.bmax.x + tol
                     || b.bmin.x > a.bmax.x + tol
@@ -117,17 +133,29 @@ impl ProfileLoops<'_> {
                 c.point(0.5 * (c.lo + c.hi))
             })
             .collect();
-        let mut inside = vec![vec![false; sides.len()]; sides.len()];
+        // Only loops whose boxes hold the probe can wind around it, or have
+        // it on their boundary (a curve lies in the hull of its Bézier
+        // control points, which the box bounds).
+        let tree = Bvh::new(
+            sides
+                .iter()
+                .map(|s| {
+                    let (lo, hi) = measure::loop_bounds(&crvs, s);
+                    ((lo - pad).extend(0.0), (hi + pad).extend(0.0))
+                })
+                .collect(),
+        );
+        let mut containers = vec![Vec::new(); sides.len()];
         for (i, &p) in probes.iter().enumerate() {
-            for (j, s) in sides.iter().enumerate() {
-                if i == j {
-                    continue;
+            tree.overlapping(p.extend(0.0), p.extend(0.0), &mut near);
+            for &j in near.iter().filter(|&&j| j != i) {
+                let w = measure::winding(&crvs, &sides[j], p).ok_or_else(|| touching(p))?;
+                if w != 0 {
+                    containers[i].push(j);
                 }
-                let w = measure::winding(&crvs, s, p).ok_or_else(|| touching(p))?;
-                inside[i][j] = w != 0;
             }
         }
-        Ok(LoopFacts { areas, inside })
+        Ok(LoopFacts { areas, containers })
     }
 
     /// True if the contact of curve `i` at `s` with curve `j` at `t` is

@@ -12,6 +12,7 @@
 
 pub mod arrangement;
 mod boolean;
+mod bvh;
 mod check;
 mod geom;
 mod mass;
@@ -61,6 +62,11 @@ pub enum KernelError {
     /// yet (ADR 0020).
     #[error("not supported yet: {0}")]
     Unsupported(String),
+    /// The operation would pass one of the kernel's work limits
+    /// (docs/PERFORMANCE.md), which keep any input from running for minutes
+    /// or exhausting memory. Nothing is produced.
+    #[error("too large: {0}")]
+    TooLarge(String),
 }
 
 /// A boolean operation (design note 0012).
@@ -162,7 +168,7 @@ impl BodyMesh {
     /// vertices that are bit-identical (shared boundary samples). Returns
     /// positions and triangles; useful for export and watertightness checks.
     pub fn welded(&self) -> (Vec<DVec3>, Vec<[u32; 3]>) {
-        let mut map = std::collections::HashMap::new();
+        let mut map = rustc_hash::FxHashMap::default();
         let mut pos = Vec::new();
         let mut tris = Vec::new();
         for f in &self.faces {

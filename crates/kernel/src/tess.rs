@@ -14,9 +14,8 @@
 //!    the surface deviates from every triangle by less than the chord
 //!    tolerance and the normal varies by less than the angle tolerance.
 
-use std::collections::{HashMap, HashSet};
-
 use glam::{DVec2, DVec3};
+use rustc_hash::{FxHashMap, FxHashSet};
 use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
 
 use crate::geom::{Curve3, Surface};
@@ -383,6 +382,17 @@ pub(crate) fn tessellate(
     // chasing something bisection cannot resolve (the triangulation then
     // reports it).
     let budget = 8 * params.iter().map(Vec::len).sum::<usize>() + 100_000;
+    // The cusps of each face, and the cusps beside each edge, by index.
+    let mut cusps_of_face: Vec<Vec<usize>> = vec![Vec::new(); brep.faces.len()];
+    let mut cusps_of_edge: Vec<Vec<usize>> = vec![Vec::new(); brep.edges.len()];
+    for (k, c) in cusps.iter().enumerate() {
+        cusps_of_face[c.face].push(k);
+        for (e, _) in c.sides {
+            if cusps_of_edge[e].last() != Some(&k) {
+                cusps_of_edge[e].push(k);
+            }
+        }
+    }
     for _ in 0..REFINE_ROUNDS {
         if params.iter().map(Vec::len).sum::<usize>() > budget {
             break;
@@ -393,12 +403,7 @@ pub(crate) fn tessellate(
             .collect();
         let mut split: Vec<Vec<usize>> = vec![Vec::new(); brep.edges.len()];
         for (fi, (face, l)) in brep.faces.iter().zip(&loops).enumerate() {
-            let matched: Vec<&CuspRuns> = cusps
-                .iter()
-                .zip(&runs)
-                .filter(|(c, _)| c.face == fi)
-                .map(|(_, r)| r)
-                .collect();
+            let matched: Vec<&CuspRuns> = cusps_of_face[fi].iter().map(|&k| &runs[k]).collect();
             for (e, i) in boundary_conflicts(brep, face, l, &params, &matched) {
                 split[e].push(i);
             }
@@ -422,10 +427,9 @@ pub(crate) fn tessellate(
                     // In a cusp's matched run, halve the distance along its
                     // direction instead, so that both sides split at the
                     // same abscissa and stay matched.
-                    let cusp = cusps
+                    let cusp = cusps_of_edge[e]
                         .iter()
-                        .zip(&runs)
-                        .find_map(|(c, r)| r.has((e, i)).then_some(c));
+                        .find_map(|&k| runs[k].has((e, i)).then_some(&cusps[k]));
                     let mid = cusp
                         .and_then(|c| {
                             let d = 0.5 * (pts[i] - c.v + pts[i + 1] - c.v).dot(c.dir);
@@ -850,6 +854,16 @@ fn boundary_conflicts(
             out.push(sy);
         }
     };
+    // The matched runs beside each edge.
+    let mut runs_of_edge: FxHashMap<usize, Vec<&CuspRuns>> = FxHashMap::default();
+    for &c in cusps {
+        for (e, _, _) in c.sides {
+            let list = runs_of_edge.entry(e).or_default();
+            if !list.iter().any(|r| std::ptr::eq(*r, c)) {
+                list.push(c);
+            }
+        }
+    }
     segs.sort_by(|x, y| x.lo.x.total_cmp(&y.lo.x));
     for i in 0..segs.len() {
         let x = &segs[i];
@@ -866,7 +880,9 @@ fn boundary_conflicts(
                 .into_iter()
                 .find(|(p, q)| p == q);
             let matched = match (x.seg, y.seg) {
-                (Some(sx), Some(sy)) => cusps.iter().any(|c| c.pairs(sx, sy)),
+                (Some(sx), Some(sy)) => runs_of_edge
+                    .get(&sx.0)
+                    .is_some_and(|rs| rs.iter().any(|c| c.pairs(sx, sy))),
                 _ => false,
             };
             if matched {
@@ -1174,6 +1190,62 @@ fn param_scale(s: &Surface, loops: &[Vec<Sample>]) -> Result<DVec2, String> {
     Ok(DVec2::new(su, sv))
 }
 
+/// The constrained Delaunay triangulation the kernel uses.
+pub(crate) type Cdt = ConstrainedDelaunayTriangulation<Point2<f64>>;
+
+/// The constrained Delaunay triangulation of a polygon: constraint edges
+/// around each of `loops` (closed cycles of points), and, per point in loop
+/// order (the first loop's points, then the second's, …), its vertex index
+/// in the triangulation. Exactly equal points are one vertex, numbered in
+/// order of first appearance; an error if two boundary edges cross.
+///
+/// The triangulation is bulk loaded, which costs O(n log n) Delaunay tests
+/// whatever the input. Inserting a polygon's vertices one at a time around
+/// its boundary puts each one outside the hull of the earlier ones, and for
+/// vertices on a circle (any regular polygon) that costs a number of tests
+/// growing with the square of their count.
+///
+/// The result is the same on every run: the bulk load of the published
+/// triangulation library inserts the vertices it defers in the iteration
+/// order of a hash set seeded at random, which changes the triangulation
+/// of points on a common circle, and the workspace uses a copy patched to
+/// defer them in order (vendor/README.md).
+pub(crate) fn polygon_cdt(loops: &[Vec<DVec2>]) -> Result<(Cdt, Vec<usize>), String> {
+    let n: usize = loops.iter().map(Vec::len).sum();
+    let mut first: FxHashMap<[u64; 2], usize> =
+        FxHashMap::with_capacity_and_hasher(n, Default::default());
+    let mut verts: Vec<Point2<f64>> = Vec::with_capacity(n);
+    let mut index = Vec::with_capacity(n);
+    for q in loops.iter().flatten() {
+        // `+ 0.0` makes a negative zero positive, so equal points share a key.
+        let key = [(q.x + 0.0).to_bits(), (q.y + 0.0).to_bits()];
+        let i = *first.entry(key).or_insert_with(|| {
+            verts.push(Point2::new(q.x, q.y));
+            verts.len() - 1
+        });
+        index.push(i);
+    }
+    let mut seen: FxHashSet<[usize; 2]> = FxHashSet::default();
+    let mut edges: Vec<[usize; 2]> = Vec::new();
+    let mut start = 0;
+    for l in loops {
+        for k in 0..l.len() {
+            let (a, b) = (index[start + k], index[start + (k + 1) % l.len()]);
+            if a != b && seen.insert([a.min(b), a.max(b)]) {
+                edges.push([a, b]);
+            }
+        }
+        start += l.len();
+    }
+    let mut crossing = false;
+    let cdt = Cdt::try_bulk_load_cdt(verts, edges, |_| crossing = true)
+        .map_err(|e| format!("triangulation failed: {e:?}"))?;
+    if crossing {
+        return Err("a boundary intersects itself".into());
+    }
+    Ok((cdt, index))
+}
+
 /// Triangles inside the constrained boundary, found by flood fill from the
 /// outer face, toggling inside/outside each time a constraint edge is
 /// crossed. Purely topological, so robust to nearly collinear boundaries.
@@ -1235,57 +1307,68 @@ fn tessellate_face(
     let scale = param_scale(s, &loops)?;
 
     let is_planar = matches!(s, Surface::Plane(_));
-    let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> =
-        ConstrainedDelaunayTriangulation::new();
+    // Spade rejects non-zero coordinates below ~1e-42; such values are
+    // round-off (e.g. an angle of 1e-60 rad) and are flushed to zero.
+    let flush = |x: f64| if x.abs() < 1e-30 { 0.0 } else { x };
+    let place = |uv: DVec2| {
+        let q = uv * scale;
+        DVec2::new(flush(q.x), flush(q.y))
+    };
     // Per CDT vertex: parameter value and, for boundary vertices, the exact 3D point.
     let mut verts: Vec<(DVec2, Option<DVec3>)> = Vec::new();
     // Per CDT vertex of a curved face: its surface point and normal,
     // evaluated once.
     let mut at: Vec<(DVec3, Option<DVec3>)> = Vec::new();
-    type At = Vec<(DVec3, Option<DVec3>)>;
-    let insert = |cdt: &mut ConstrainedDelaunayTriangulation<Point2<f64>>,
+    let evaluate = |uv: DVec2, p: Option<DVec3>| {
+        let sp = p.unwrap_or_else(|| s.point(uv.x, uv.y));
+        (sp, s.normal(uv.x, uv.y))
+    };
+    let placed: Vec<Vec<DVec2>> = loops
+        .iter()
+        .map(|l| l.iter().map(|smp| place(smp.uv)).collect())
+        .collect();
+    let (mut cdt, index) =
+        polygon_cdt(&placed).map_err(|e| format!("face boundary in parameter space: {e}"))?;
+    // Vertices are numbered by the triangulation; a repeated boundary point
+    // keeps its first sample.
+    let mut filled = vec![false; cdt.num_vertices()];
+    verts.resize(cdt.num_vertices(), (DVec2::ZERO, None));
+    if !is_planar {
+        at.resize(cdt.num_vertices(), (DVec3::ZERO, None));
+    }
+    for (&i, smp) in index.iter().zip(loops.iter().flatten()) {
+        if !filled[i] {
+            filled[i] = true;
+            verts[i] = (smp.uv, Some(smp.p));
+            if !is_planar {
+                at[i] = evaluate(smp.uv, Some(smp.p));
+            }
+        }
+    }
+    let insert = |cdt: &mut Cdt,
                   verts: &mut Vec<(DVec2, Option<DVec3>)>,
-                  at: &mut At,
-                  uv: DVec2,
-                  p: Option<DVec3>|
-     -> Result<spade::handles::FixedVertexHandle, String> {
-        // Spade rejects non-zero coordinates below ~1e-42; such values are
-        // round-off (e.g. an angle of 1e-60 rad) and are flushed to zero.
-        let flush = |x: f64| if x.abs() < 1e-30 { 0.0 } else { x };
-        let q = uv * scale;
-        let q = DVec2::new(flush(q.x), flush(q.y));
+                  at: &mut Vec<(DVec3, Option<DVec3>)>,
+                  uv: DVec2|
+     -> Result<(), String> {
+        let q = place(uv);
         let h = cdt
             .insert(Point2::new(q.x, q.y))
             .map_err(|e| format!("triangulation insert failed: {e:?}"))?;
         if h.index() == verts.len() {
-            verts.push((uv, p));
+            verts.push((uv, None));
             if !is_planar {
-                let sp = p.unwrap_or_else(|| s.point(uv.x, uv.y));
-                at.push((sp, s.normal(uv.x, uv.y)));
+                at.push(evaluate(uv, None));
             }
         }
-        Ok(h)
+        Ok(())
     };
-    for l in &loops {
-        let mut handles = Vec::with_capacity(l.len());
-        for smp in l {
-            handles.push(insert(&mut cdt, &mut verts, &mut at, smp.uv, Some(smp.p))?);
-        }
-        for i in 0..handles.len() {
-            let a = handles[i];
-            let b = handles[(i + 1) % handles.len()];
-            if a != b && cdt.try_add_constraint(a, b).is_empty() && !cdt.exists_constraint(a, b) {
-                return Err("face boundary intersects itself in parameter space".into());
-            }
-        }
-    }
 
     let boundary_constraints = cdt.num_constraints();
     if !is_planar {
         let min_area = (opts.chord_tolerance * 0.01).powi(2);
         // Triangles found fine (or too small to refine) in an earlier pass:
         // the test depends only on their vertices, so it is not repeated.
-        let mut settled: HashSet<[usize; 3]> = HashSet::new();
+        let mut settled: FxHashSet<[usize; 3]> = FxHashSet::default();
         for _pass in 0..12 {
             let tris = inside_triangles(&cdt);
             let mut new_pts: Vec<DVec2> = Vec::new();
@@ -1348,7 +1431,7 @@ fn tessellate_face(
                 return Err("tessellation exceeded the vertex budget".into());
             }
             for c in new_pts {
-                insert(&mut cdt, &mut verts, &mut at, c, None)?;
+                insert(&mut cdt, &mut verts, &mut at, c)?;
             }
         }
         if cdt.num_constraints() != boundary_constraints {
@@ -1361,7 +1444,7 @@ fn tessellate_face(
     let tris = inside_triangles(&cdt);
     let mut out = FaceTess::default();
     let mut index_of: Vec<Option<u32>> = vec![None; verts.len()];
-    let mut by_pos: HashMap<[u64; 3], u32> = HashMap::new();
+    let mut by_pos: FxHashMap<[u64; 3], u32> = FxHashMap::default();
     let center = (lo + hi) * 0.5;
     let sign = if face.forward { 1.0 } else { -1.0 };
     for t in &tris {

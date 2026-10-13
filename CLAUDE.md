@@ -23,6 +23,7 @@ cargo run -p opendatum -- --headless-demo out/   # offscreen proof, writes PNGs
 cargo run -p opendatum -- --screenshots out/     # screenshots of the whole app
 cargo run --release -p opendatum -- --bench out/ 600   # offscreen frame times
 scripts/gpu-check.sh        # build, tests, demo, bench on a real GPU (docs/RUNNING.md)
+cargo test --release -p opendatum-kernel --test timing -- --nocapture   # time guards
 ```
 
 All four checks must pass before every commit. `main` is never broken.
@@ -66,6 +67,18 @@ Planned crates (not yet created; see docs/ARCHITECTURE.md): `regen`,
 - No kernel internals outside the `Kernel` trait. Bodies are opaque.
 - Correctness over breadth: every kernel operation validates its output or
   fails with a clear error. Never silently corrupt a model.
+- Efficiency is part of the bar (docs/PERFORMANCE.md): every user-facing
+  operation has a written time budget enforced by a release-mode test
+  (`tests/timing.rs`, failing at about ten times the measured time) and a
+  scaling check; hot code uses standard structures (the kernel's BVH,
+  grids, bulk loading, incremental updates), never loops over all pairs;
+  work that grows with the input has a limit that refuses with a message;
+  profile (callgrind) before recording numbers.
+- Same input, same output, on every run and machine: no result may depend
+  on a hash seed or on hash-table iteration order. The kernel uses
+  `FxHashMap`/`FxHashSet` (`crates/kernel/clippy.toml` forbids the std
+  tables there). A dependency with such a defect is used as a patched copy
+  in `vendor/` (ADR 0022, `vendor/README.md`).
 - Never stub a feature and report it done. ROADMAP items are ticked only when
   implemented **and tested**. If something can't be done (e.g. a proprietary
   format without a public spec) say so in STATUS.md / docs/FORMATS.md and

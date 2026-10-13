@@ -19,9 +19,8 @@
 //! the duplicated piece between them is removed later, when pieces joining
 //! the same two vertices are found to lie within the tolerance of each other.
 
-use std::collections::HashMap;
-
 use glam::DVec2;
+use rustc_hash::FxHashMap;
 
 use super::bezier;
 use super::curve::{BPiece, Crv, Geom};
@@ -309,7 +308,7 @@ fn bez_pair(a: &Crv, b: &Crv, ctx: &mut Ctx, out: &mut Vec<(f64, f64)>) -> Resul
 /// are found in constant time; along an overlap there are many contacts.
 struct Found {
     list: Vec<(f64, f64, DVec2, DVec2)>,
-    grid: HashMap<(i64, i64), Vec<usize>>,
+    grid: FxHashMap<(i64, i64), Vec<usize>>,
     cell: f64,
 }
 
@@ -317,7 +316,7 @@ impl Found {
     fn new(tol: f64) -> Found {
         Found {
             list: Vec::new(),
-            grid: HashMap::new(),
+            grid: FxHashMap::default(),
             cell: 0.25 * tol,
         }
     }

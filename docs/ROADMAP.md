@@ -9,6 +9,7 @@ item is delivered in the phase noted.
 - [x] ADRs: kernel (0001), UI toolkit (0002), persistent naming (0003), op-log & sync (0004), native format (0005), units & tolerance (0006), rendering (0007), periodic face splitting (0008), dependency licensing (0009); later: solver linear algebra (0010), sketch document model (0011), UI look (0012), rollback bar (0013)
 - [x] Cargo workspace, CLAUDE.md, ARCHITECTURE, ROADMAP, STATUS
 - [x] CI: fmt, clippy `-D warnings`, tests, `cargo-deny` (licenses/advisories/bans/sources)
+- [x] Time guards (docs/PERFORMANCE.md): release-mode budgets and scaling checks for user-facing operations, run in CI; job and step timeouts; work limits that refuse rather than run on
 - [x] Op-log skeleton: stable IDs, causal ordering, deterministic replay, undo/redo as ops, history-at-heads, CBOR container, convergence property test
 - [x] Document model with a Part Studio feature list and a reducer over the op log
 - [x] wgpu viewport (Vulkan/RADV primary, GL fallback), verified offscreen on lavapipe

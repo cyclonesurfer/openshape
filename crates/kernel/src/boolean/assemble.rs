@@ -1,10 +1,11 @@
 //! Selecting, sewing and simplifying the pieces into the result (design
 //! note 0012 §4.4 and §4.5), and its origins (ADR 0020).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use glam::{DVec2, DVec3};
-use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
+use rustc_hash::{FxHashMap, FxHashSet};
+use spade::Triangulation;
 
 use super::classify::Class;
 use super::points::{segment_distance, Points};
@@ -89,7 +90,7 @@ pub(super) fn assemble(
     }
     check_closed(&faces, pts)?;
     let faces = merge_faces(pair, pts, faces, eps)?;
-    let mut edge_sources: HashMap<Key, BTreeSet<Source>> = segs
+    let mut edge_sources: FxHashMap<Key, BTreeSet<Source>> = segs
         .sources
         .iter()
         .map(|(k, v)| (*k, v.iter().copied().collect()))
@@ -267,26 +268,40 @@ fn merge_faces(
 
 /// Joins two segments end to end where they meet at a point no other
 /// segment reaches, lie on one line and bound the same two faces.
+///
+/// Joins are made in rounds: each round takes, in order of their points,
+/// the joins whose three points no earlier join of the round touches. The
+/// segments at each point and the faces along each segment are kept up to
+/// date as joins are made, and a round looks again only at the points whose
+/// segments changed or that an earlier join of the last round touched, so
+/// a long run of collinear segments costs time in proportion to its length
+/// rather than to the whole result for every round.
 fn merge_edges(
     mut faces: Vec<Out>,
     pts: &Points,
-    sources: &mut HashMap<Key, BTreeSet<Source>>,
+    sources: &mut FxHashMap<Key, BTreeSet<Source>>,
     eps: f64,
 ) -> Vec<Out> {
-    loop {
-        let mut at: BTreeMap<usize, BTreeSet<Key>> = BTreeMap::new();
-        let mut seg_faces: HashMap<Key, BTreeSet<usize>> = HashMap::new();
-        for (i, f) in faces.iter().enumerate() {
-            for (u, v) in directed(f) {
-                let k = key(u, v);
-                at.entry(u).or_default().insert(k);
-                at.entry(v).or_default().insert(k);
-                seg_faces.entry(k).or_default().insert(i);
-            }
+    let mut at: FxHashMap<usize, BTreeSet<Key>> = FxHashMap::default();
+    let mut seg_faces: FxHashMap<Key, BTreeSet<usize>> = FxHashMap::default();
+    for (i, f) in faces.iter().enumerate() {
+        for (u, v) in directed(f) {
+            let k = key(u, v);
+            at.entry(u).or_default().insert(k);
+            at.entry(v).or_default().insert(k);
+            seg_faces.entry(k).or_default().insert(i);
         }
-        let mut touched: BTreeSet<usize> = BTreeSet::new();
+    }
+    let mut look: BTreeSet<usize> = at.keys().copied().collect();
+    let mut gone: FxHashSet<usize> = FxHashSet::default();
+    loop {
+        let mut touched: FxHashSet<usize> = FxHashSet::default();
         let mut joins: Vec<(usize, usize, usize)> = Vec::new();
-        for (&v, ks) in &at {
+        let mut again: BTreeSet<usize> = BTreeSet::new();
+        for &v in &look {
+            let Some(ks) = at.get(&v) else {
+                continue;
+            };
             let [k0, k1] = ks.iter().copied().collect::<Vec<Key>>()[..] else {
                 continue;
             };
@@ -295,27 +310,47 @@ fn merge_edges(
             if u == w
                 || seg_faces[&k0] != seg_faces[&k1]
                 || segment_distance(pts.rep[v], pts.rep[u], pts.rep[w]) > eps
-                || [u, v, w].iter().any(|c| touched.contains(c))
             {
+                continue;
+            }
+            if [u, v, w].iter().any(|c| touched.contains(c)) {
+                again.insert(v);
                 continue;
             }
             touched.extend([u, v, w]);
             joins.push((u, v, w));
         }
         if joins.is_empty() {
-            return faces;
+            break;
         }
         for (u, v, w) in joins {
-            for f in &mut faces {
-                for l in &mut f.loops {
-                    l.retain(|&c| c != v);
+            let (k0, k1, k) = (key(u, v), key(v, w), key(u, w));
+            let fs = seg_faces.remove(&k0).unwrap_or_default();
+            seg_faces.remove(&k1);
+            seg_faces.entry(k).or_default().extend(fs);
+            at.remove(&v);
+            for (x, old) in [(u, k0), (w, k1)] {
+                if let Some(ks) = at.get_mut(&x) {
+                    ks.remove(&old);
+                    ks.insert(k);
                 }
             }
-            let mut s = sources.remove(&key(u, v)).unwrap_or_default();
-            s.extend(sources.remove(&key(v, w)).unwrap_or_default());
-            sources.entry(key(u, w)).or_default().extend(s);
+            gone.insert(v);
+            again.extend([u, w]);
+            let mut s = sources.remove(&k0).unwrap_or_default();
+            s.extend(sources.remove(&k1).unwrap_or_default());
+            sources.entry(k).or_default().extend(s);
+        }
+        look = again;
+    }
+    if !gone.is_empty() {
+        for f in &mut faces {
+            for l in &mut f.loops {
+                l.retain(|c| !gone.contains(c));
+            }
         }
     }
+    faces
 }
 
 /// Around every vertex the faces must form one fan: two fans are bodies
@@ -333,7 +368,7 @@ fn check_vertices(faces: &[Out], pts: &Points) -> Result<(), KernelError> {
             }
         }
     }
-    let by_in: HashMap<(usize, usize), usize> =
+    let by_in: FxHashMap<(usize, usize), usize> =
         corners.iter().enumerate().map(|(i, c)| (c.1, i)).collect();
     let mut seen = vec![false; corners.len()];
     let mut fans: BTreeMap<usize, usize> = BTreeMap::new();
@@ -371,7 +406,7 @@ fn check_vertices(faces: &[Out], pts: &Points) -> Result<(), KernelError> {
 /// Connected sets of faces, in order of their least face.
 fn shells(faces: &[Out]) -> Vec<Vec<usize>> {
     let mut parent: Vec<usize> = (0..faces.len()).collect();
-    let mut first: HashMap<Key, usize> = HashMap::new();
+    let mut first: FxHashMap<Key, usize> = FxHashMap::default();
     for (i, f) in faces.iter().enumerate() {
         for (u, v) in directed(f) {
             match first.get(&key(u, v)) {
@@ -475,26 +510,18 @@ fn shell_triangles(
     for &i in shell {
         let f = &faces[i];
         let fr = plane_of(pair, f);
-        let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> =
-            ConstrainedDelaunayTriangulation::new();
-        let mut at: Vec<usize> = Vec::new();
-        for l in &f.loops {
-            let mut hs = Vec::with_capacity(l.len());
-            for &c in l {
-                let q = to2(&fr, pts.rep[c]);
-                let h = cdt.insert(Point2::new(q.x, q.y)).map_err(|e| {
-                    KernelError::InvalidResult(format!("boolean: triangulation: {e:?}"))
-                })?;
-                if h.index() == at.len() {
-                    at.push(c);
-                }
-                hs.push(h);
-            }
-            for k in 0..hs.len() {
-                let (a, b) = (hs[k], hs[(k + 1) % hs.len()]);
-                if a != b {
-                    cdt.add_constraint(a, b);
-                }
+        let loops: Vec<Vec<DVec2>> = f
+            .loops
+            .iter()
+            .map(|l| l.iter().map(|&c| to2(&fr, pts.rep[c])).collect())
+            .collect();
+        let (cdt, index) = tess::polygon_cdt(&loops)
+            .map_err(|e| KernelError::InvalidResult(format!("boolean: triangulation: {e}")))?;
+        // Each vertex's first cluster.
+        let mut at = vec![usize::MAX; cdt.num_vertices()];
+        for (&i, &c) in index.iter().zip(f.loops.iter().flatten()) {
+            if at[i] == usize::MAX {
+                at[i] = c;
             }
         }
         for t in tess::inside_triangles(&cdt) {
@@ -543,13 +570,13 @@ fn build(
     faces: &[Out],
     shells: &[Vec<usize>],
     solids: &[(usize, Vec<usize>)],
-    edge_sources: &HashMap<Key, BTreeSet<Source>>,
+    edge_sources: &FxHashMap<Key, BTreeSet<Source>>,
 ) -> Result<(Brep, Origins), KernelError> {
     let mut brep = Brep::default();
     let mut org = Origins::default();
     let mut merged: Vec<Merged> = Vec::new();
-    let mut vertex_of: HashMap<usize, VertexId> = HashMap::new();
-    let mut edge_of: HashMap<Key, EdgeId> = HashMap::new();
+    let mut vertex_of: FxHashMap<usize, VertexId> = FxHashMap::default();
+    let mut edge_of: FxHashMap<Key, EdgeId> = FxHashMap::default();
     let mut face_ids = Vec::with_capacity(faces.len());
     for f in faces {
         let mut loops = Vec::with_capacity(f.loops.len());

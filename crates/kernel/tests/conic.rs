@@ -241,7 +241,7 @@ fn a_quarter_ellipse_as_a_conic_bounds_a_quarter_of_pi_a_b() {
 
 fn assert_watertight(mesh: &BodyMesh) {
     let (_, tris) = mesh.welded();
-    let mut directed = std::collections::HashMap::new();
+    let mut directed = rustc_hash::FxHashMap::default();
     for t in &tris {
         for (p, q) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
             assert_ne!(p, q, "degenerate triangle");

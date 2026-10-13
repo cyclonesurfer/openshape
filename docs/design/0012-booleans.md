@@ -51,10 +51,16 @@ each of these, and around refusing loudly where it cannot.
   *IEEE Trans. Biomedical Engineering* BME-30(2), 1983, and A. Jacobson,
   L. Kavan & O. Sorkine-Hornung, "Robust inside-outside segmentation
   using generalized winding numbers", *ACM TOG* 32(4), 2013: the winding
-  number of a closed triangulated surface as a sum of solid angles,
-  used for classification in §9.
-* C. Ericson, *Real-Time Collision Detection*, Morgan Kaufmann, 2005,
-  §5.1.5: the closest point of a triangle.
+  number of a closed triangulated surface as a sum of solid angles, the
+  first classification of §9 (replaced by exact ray parity, below).
+* E. Haines, "Point in polygon strategies", *Graphics Gems IV*, 1994, and
+  J. O'Rourke, *Computational Geometry in C*, 2nd ed., Cambridge, 1998,
+  §7.5: inside/outside by the parity of a ray's crossings, with crossings
+  decided by orientation predicates (§9).
+* C. Ericson, *Real-Time Collision Detection*, Morgan Kaufmann, 2005:
+  the closest point of a triangle (§5.1.5), the slab test of a segment
+  against a box (§5.3.3) and bounding-volume hierarchies built top down
+  by median splits (§6.1–6.2), used to index every search in §9.
 * Our design notes 0006 (the tolerant 2D arrangement, reused in §4.2),
   0008 (periodic faces split at π) and 0011 (intersections).
 
@@ -236,15 +242,38 @@ holes of the smallest region of another component around them.
 
 **Classify** (`classify.rs`). This replaces the propagation of §4.3. A
 piece inside a coincident face of the other body is on it, with the same
-or the opposite normal; any other piece is classified by the winding
-number of the other body's boundary (van Oosterom & Strackee; Jacobson
-et al.) at the incentre of its triangle with the largest inscribed
-circle in a constrained Delaunay triangulation. Each piece is decided by
-its own test, so no decision depends on another, and the test's margin
-is measurable: a piece whose inscribed circle is no wider than the
-tolerance is a sliver, and a point within the tolerance of the other
-body's surface is on it; both are refused. A winding number more than a
-quarter from 0 and 1 is refused too.
+or the opposite normal; any other piece is classified at the incentre of
+its triangle with the largest inscribed circle in a constrained Delaunay
+triangulation. Each piece is decided by its own test, so no decision
+depends on another, and the test's margin is measurable: a piece whose
+inscribed circle is no wider than the tolerance is a sliver, and a point
+within the tolerance of the other body's surface is on it; both are
+refused. Any other point is decided exactly by ray parity: the other
+body's faces are triangulated on its own vertices, so the triangles
+close up edge to edge, and a segment from the point to beyond the body
+counts the triangles it passes through, +1 leaving and −1 entering, each
+decided by orientation predicates (Shewchuk). The count is the winding
+number of the triangulated surface: 1 inside, 0 outside, anything else
+an error. A segment through a triangle's edge or corner is not counted;
+the test is repeated along the next of eight fixed directions. (The
+first version summed solid angles, van Oosterom & Strackee, Jacobson et
+al.: right, but approximate and linear in the other body's size for each
+piece.)
+
+**Indexes.** Every search is indexed (`crates/kernel/src/bvh.rs`, a
+bounding-volume hierarchy built by median splits, deterministic): the
+face pairs whose boxes meet, the edge pairs that may touch, the clusters
+near an edge, the ray and distance tests of classification, and, for
+faces with more than 24 segments, the split's crossing and closeness
+checks and the hole-to-region search. The index only prunes; every
+candidate is decided by the same exact test as before, so the results
+are unchanged (the fuzzing below gave identical counts before and after).
+Triangulations are bulk loaded (with the triangulation library patched so
+the same input triangulates the same way on every run, ADR 0022), joins of
+collinear edges are made incrementally, and the stage's work is capped
+(docs/PERFORMANCE.md):
+the union of two 1,024-sided prisms (about 4,000 result faces) went from
+5.4 s to 0.6 s.
 
 **Select, sew, merge** (`assemble.rs`). Pieces are kept by the table of
 §4.4. Every segment must then be used exactly once in each direction (a

@@ -78,12 +78,19 @@ proptest! {
         let (a, b) = curve.domain();
         prop_assert_eq!(rev.domain(), (a, b));
         let tol = 1e-12 * scale(&curve);
+        // The mirrored parameter a + b - u, and the mirrored knots, are
+        // rounded by up to two units in the last place of a + b; a steep
+        // curve moves by its speed times that.
+        let du = 2.0 * f64::EPSILON * (a + b).abs();
         for u in samples(&curve, 100) {
-            prop_assert!((curve.point(u) - rev.point(a + b - u)).length() <= tol);
+            let v = a + b - u;
+            let slack = rev.derivatives(v, 1)[1].length() * du;
+            prop_assert!((curve.point(u) - rev.point(v)).length() <= tol + slack);
         }
         let back = rev.reversed();
         for u in samples(&curve, 50) {
-            prop_assert!((curve.point(u) - back.point(u)).length() <= tol);
+            let slack = curve.derivatives(u, 1)[1].length() * du;
+            prop_assert!((curve.point(u) - back.point(u)).length() <= tol + slack);
         }
     }
 

@@ -13,6 +13,10 @@ jobs:
   check:
     name: fmt, clippy, test
     runs-on: ubuntu-24.04
+    # A whole run takes about twenty minutes (less with a warm cache); a
+    # hang fails here, not after GitHub's six-hour default
+    # (docs/PERFORMANCE.md).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -27,14 +31,31 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+        timeout-minutes: 20
+      - name: Build the time guards in release
+        timeout-minutes: 30
+        run: |
+          cargo test --release -p opendatum-kernel -p opendatum-sketch-solver -p opendatum \
+            --test timing --no-run
+      - name: Time guards in release (docs/PERFORMANCE.md)
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          cargo test --release -p opendatum-kernel -p opendatum-sketch-solver -p opendatum \
+            --test timing -- --nocapture --test-threads 1 2>&1 | tee timing.txt
+          { echo '### Time guards (release)'; echo; grep -E ' ms' timing.txt | sed 's/^/- /'; } \
+            >> "$GITHUB_STEP_SUMMARY"
       - name: Boolean fuzzing at ten times the default size, with refusal rates (design note 0012 §7)
         shell: bash
+        timeout-minutes: 15
         run: |
           BOOLEAN_SCALE=10 cargo test --release -p opendatum-kernel --test booleans -- \
             --nocapture volume_identities motions | tee booleans.txt
           { echo '### Booleans'; echo; grep -E '^(random|motions)' booleans.txt | sed 's/^/- /'; } \
             >> "$GITHUB_STEP_SUMMARY"
       - name: Headless end-to-end demo (op log -> kernel -> wgpu on lavapipe)
+        timeout-minutes: 10
         run: cargo run -p opendatum -- --headless-demo demo-out
       - uses: actions/upload-artifact@v4
         with:
@@ -44,6 +65,7 @@ jobs:
   deny:
     name: cargo-deny (licenses, advisories, bans, sources)
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2

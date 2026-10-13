@@ -2,7 +2,7 @@
 //! consistent with the body's topology, and right by an independent
 //! geometric check, for boxes, extrudes and revolves.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use opendatum_kernel::{
@@ -10,6 +10,7 @@ use opendatum_kernel::{
     Origins, PieceEnd, Profile, ProfileCurve, ProfilePiece, ProfileVertex, RevolveSpec,
     SurfaceKind, TessellationOptions, VertexOrigin,
 };
+use rustc_hash::FxHashSet;
 
 fn k() -> BrepKernel {
     BrepKernel::default()
@@ -197,10 +198,16 @@ fn check(p: &Profile, sweep: Sweep, b: &Body) {
         (t.faces, t.edges, t.vertices),
         "one origin per entity"
     );
-    assert_eq!(o.faces.iter().collect::<HashSet<_>>().len(), o.faces.len());
-    assert_eq!(o.edges.iter().collect::<HashSet<_>>().len(), o.edges.len());
     assert_eq!(
-        o.vertices.iter().collect::<HashSet<_>>().len(),
+        o.faces.iter().collect::<FxHashSet<_>>().len(),
+        o.faces.len()
+    );
+    assert_eq!(
+        o.edges.iter().collect::<FxHashSet<_>>().len(),
+        o.edges.len()
+    );
+    assert_eq!(
+        o.vertices.iter().collect::<FxHashSet<_>>().len(),
         o.vertices.len()
     );
     let mut all_pieces: Vec<ProfilePiece> = o.regions.iter().flatten().flatten().copied().collect();

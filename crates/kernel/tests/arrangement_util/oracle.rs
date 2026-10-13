@@ -12,10 +12,11 @@
 //!   their arrangement is a union of unit cells, so flooding cells across
 //!   cell sides not covered by a segment gives the faces exactly.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::f64::consts::TAU;
 
 use opendatum_kernel::{DVec2, ProfileCurve};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{circle, line};
 
@@ -366,8 +367,8 @@ pub struct CellGrid {
 impl CellGrid {
     /// Bounded faces as lists of cells `(i, j)` = `[i, i+1] × [j, j+1]`.
     pub fn faces(&self) -> Vec<Vec<(i64, i64)>> {
-        let mut vblock: HashSet<(i64, i64)> = HashSet::new(); // x = i, y ∈ [j, j+1]
-        let mut hblock: HashSet<(i64, i64)> = HashSet::new(); // y = j, x ∈ [i, i+1]
+        let mut vblock: FxHashSet<(i64, i64)> = FxHashSet::default(); // x = i, y ∈ [j, j+1]
+        let mut hblock: FxHashSet<(i64, i64)> = FxHashSet::default(); // y = j, x ∈ [i, i+1]
         for &(x0, y0, x1, y1) in &self.segs {
             if x0 == x1 {
                 for j in y0.min(y1)..y0.max(y1) {
@@ -381,7 +382,7 @@ impl CellGrid {
         }
         let lo = -1;
         let hi = self.n;
-        let mut comp: std::collections::HashMap<(i64, i64), usize> = Default::default();
+        let mut comp: FxHashMap<(i64, i64), usize> = Default::default();
         let mut faces = Vec::new();
         let mut outside = usize::MAX;
         for i in lo..=hi {

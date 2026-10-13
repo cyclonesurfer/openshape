@@ -4,7 +4,6 @@
 
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub mod oracle;
@@ -15,6 +14,7 @@ use opendatum_kernel::{
     Body, BrepKernel, DVec2, ExtrudeSpec, Frame, Kernel, KernelError, Profile, ProfileCurve,
     SketchArrangement, Tolerance,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub fn k() -> BrepKernel {
     BrepKernel::default()
@@ -197,7 +197,7 @@ pub fn loop_polygon(
 /// more than once (a non-manifold profile, which extrude rejects). Bridges
 /// (edges with selected regions on both sides) are not boundary.
 pub fn pinched_union(a: &SketchArrangement, sel: &[usize]) -> bool {
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
     for &r in sel {
         let reg = &a.regions[r];
         for l in std::iter::once(&reg.outer).chain(&reg.holes) {
@@ -270,7 +270,7 @@ pub fn check_invariants(curves: &[ProfileCurve], a: &SketchArrangement) {
         // An edge with the same face on both sides is a bridge (for
         // example a segment joining two islands); it bounds nothing.
     }
-    let mut seen: HashMap<(usize, bool), usize> = HashMap::new();
+    let mut seen: FxHashMap<(usize, bool), usize> = FxHashMap::default();
     for (r, reg) in a.regions.iter().enumerate() {
         assert!(reg.area > 0.0);
         // Polygon areas with 2048 and 4096 samples per piece: their error
@@ -408,14 +408,14 @@ pub fn region_profile_checked(
         }
         (t, p) => panic!("one profile failed: {:?} vs {:?}", t.err(), p.err()),
     };
-    let chosen: HashSet<usize> = sel.iter().copied().collect();
+    let chosen: FxHashSet<usize> = sel.iter().copied().collect();
     let is_sel = |r: Option<usize>| r.is_some_and(|r| chosen.contains(&r));
     let close = |p: DVec2, q: DVec2| (p - q).length() <= 1e-9 * (1.0 + p.length());
     let ends = |c: &ProfileCurve| {
         let (t0, t1) = domain(c);
         (curve_point(c, t0), curve_point(c, t1))
     };
-    let mut seen: HashMap<usize, usize> = HashMap::new();
+    let mut seen: FxHashMap<usize, usize> = FxHashMap::default();
     let mut i = 0;
     while i < tagged.len() {
         let (c, pe) = &tagged[i];

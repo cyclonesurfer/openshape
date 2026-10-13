@@ -13,11 +13,11 @@
 //! their direction (material on the left); regions bounded only by
 //! segments imprinted inside the face are inside it too.
 
-use std::collections::HashMap;
-
-use glam::DVec2;
+use glam::{DVec2, DVec3};
+use rustc_hash::FxHashMap;
 
 use super::{FaceSeg, Key};
+use crate::bvh::Bvh;
 
 /// Why a face could not be split, at a point (a cluster).
 #[derive(Debug)]
@@ -53,7 +53,7 @@ pub(super) fn regions(
 ) -> Result<Vec<Vec<Vec<usize>>>, Problem> {
     // Unique segments, in order of first appearance, with their sides.
     let mut keys: Vec<Key> = Vec::new();
-    let mut side: HashMap<Key, Option<bool>> = HashMap::new();
+    let mut side: FxHashMap<Key, Option<bool>> = FxHashMap::default();
     for s in segs {
         match side.get_mut(&s.key) {
             None => {
@@ -77,7 +77,7 @@ pub(super) fn regions(
         return Ok(Vec::new());
     }
     // Nodes.
-    let mut node_of: HashMap<usize, usize> = HashMap::new();
+    let mut node_of: FxHashMap<usize, usize> = FxHashMap::default();
     let mut nodes: Vec<usize> = Vec::new();
     for k in &keys {
         for c in [k.0, k.1] {
@@ -93,26 +93,7 @@ pub(super) fn regions(
         .map(|k| (node_of[&k.0], node_of[&k.1]))
         .collect();
 
-    // Consistency: no crossings, no point on a segment it does not end.
-    for (i, &(a, b)) in ends.iter().enumerate() {
-        for &(c, d) in ends.iter().skip(i + 1) {
-            if a == c || a == d || b == c || b == d {
-                continue;
-            }
-            let o1 = orient(p[a], p[b], p[c]);
-            let o2 = orient(p[a], p[b], p[d]);
-            let o3 = orient(p[c], p[d], p[a]);
-            let o4 = orient(p[c], p[d], p[b]);
-            if o1 * o2 < 0.0 && o3 * o4 < 0.0 {
-                return Err(Problem::Cross(nodes[a]));
-            }
-        }
-        for (n, q) in p.iter().enumerate() {
-            if n != a && n != b && point_segment(*q, p[a], p[b]) <= eps {
-                return Err(Problem::Close(nodes[n]));
-            }
-        }
-    }
+    consistent(&ends, &p, &nodes, eps)?;
 
     // Half-edges: 2s runs a → b, 2s + 1 runs b → a.
     let nh = 2 * ends.len();
@@ -257,11 +238,34 @@ pub(super) fn regions(
             ));
         }
     }
+    // The regions around a point are among those whose boxes hold it
+    // (padded against the rounding of the containment test).
+    let pad = 1e-9 * scale(&p);
+    let tree = (!outsides.is_empty()).then(|| {
+        Bvh::new(
+            regions
+                .iter()
+                .map(|r| {
+                    let (lo, hi) = r.cycle.iter().fold(
+                        (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+                        |(lo, hi), &h| (lo.min(p[from(h)]), hi.max(p[from(h)])),
+                    );
+                    (lo.extend(0.0), hi.extend(0.0))
+                })
+                .collect(),
+        )
+    });
+    let mut near: Vec<usize> = Vec::new();
     for (c, _) in outsides {
         let k = find(&mut comp, from(c[0]));
         let q = p[from(c[0])];
         let mut best: Option<usize> = None;
-        for (i, r) in regions.iter().enumerate() {
+        if let Some(t) = &tree {
+            let q3 = q.extend(0.0);
+            t.overlapping(q3 - DVec3::splat(pad), q3 + DVec3::splat(pad), &mut near);
+        }
+        for &i in &near {
+            let r = &regions[i];
             if r.comp == k || !contains(&r.cycle, q, &p, &from) {
                 continue;
             }
@@ -300,6 +304,76 @@ pub(super) fn regions(
                 .collect()
         })
         .collect())
+}
+
+/// Segments below this count are checked pair by pair; above it, through
+/// bounding-volume trees. Both find the same first problem.
+const SMALL: usize = 24;
+
+/// The largest coordinate magnitude, for padding boxes against rounding.
+fn scale(p: &[DVec2]) -> f64 {
+    p.iter()
+        .fold(0.0f64, |m, q| m.max(q.x.abs()).max(q.y.abs()))
+}
+
+/// No two segments cross, and no point lies within `eps` of a segment it
+/// does not end. Problems are reported in the order of a full pairwise
+/// scan (by segment, then crossings before close points, each by index),
+/// whether the candidates come from the scan or from the trees.
+fn consistent(
+    ends: &[(usize, usize)],
+    p: &[DVec2],
+    nodes: &[usize],
+    eps: f64,
+) -> Result<(), Problem> {
+    let boxes: Vec<(DVec3, DVec3)> = ends
+        .iter()
+        .map(|&(a, b)| (p[a].min(p[b]).extend(0.0), p[a].max(p[b]).extend(0.0)))
+        .collect();
+    // A computed distance within `eps` puts the point within `eps` of the
+    // segment's box, up to rounding.
+    let r = eps + 1e-9 * (eps + scale(p));
+    let trees = (ends.len() > SMALL).then(|| {
+        let points: Vec<DVec3> = p.iter().map(|q| q.extend(0.0)).collect();
+        (Bvh::new(boxes.clone()), Bvh::of_points(&points))
+    });
+    let mut segs: Vec<usize> = Vec::new();
+    let mut points: Vec<usize> = Vec::new();
+    for (i, &(a, b)) in ends.iter().enumerate() {
+        let (lo, hi) = boxes[i];
+        match &trees {
+            Some((st, pt)) => {
+                // Segments that cross share a point, so their boxes meet.
+                st.overlapping(lo, hi, &mut segs);
+                pt.overlapping(lo - DVec3::splat(r), hi + DVec3::splat(r), &mut points);
+            }
+            None => {
+                segs.clear();
+                segs.extend(0..ends.len());
+                points.clear();
+                points.extend(0..p.len());
+            }
+        }
+        for &j in &segs {
+            let (c, d) = ends[j];
+            if j <= i || a == c || a == d || b == c || b == d {
+                continue;
+            }
+            let o1 = orient(p[a], p[b], p[c]);
+            let o2 = orient(p[a], p[b], p[d]);
+            let o3 = orient(p[c], p[d], p[a]);
+            let o4 = orient(p[c], p[d], p[b]);
+            if o1 * o2 < 0.0 && o3 * o4 < 0.0 {
+                return Err(Problem::Cross(nodes[a]));
+            }
+        }
+        for &n in &points {
+            if n != a && n != b && point_segment(p[n], p[a], p[b]) <= eps {
+                return Err(Problem::Close(nodes[n]));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Removes antennas: a half-edge followed by its twin.

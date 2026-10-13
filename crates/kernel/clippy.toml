@@ -1,0 +1,8 @@
+# The kernel's hash tables use the Fx hasher (rustc-hash): it is several
+# times faster than the standard library's SipHash for the small integer
+# keys the kernel uses, and it is not seeded at random, so no result can
+# depend on a seed that changes from run to run (docs/PERFORMANCE.md).
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "use rustc_hash::FxHashMap: faster, and the same on every run" },
+    { path = "std::collections::HashSet", reason = "use rustc_hash::FxHashSet: faster, and the same on every run" },
+]

@@ -90,8 +90,12 @@ name open unchanged.
     faces, edges and vertices, voids and several solids. Numerical
     decisions are made once (a sign per vertex and plane, clusters of
     points within the tolerance, one incidence decision per point and
-    edge) and each piece of a face is classified by the winding number of
-    the other body at a point well inside it. Coplanar neighbours and
+    edge) and each piece of a face is classified by exact ray parity
+    against the other body (Shewchuk's orientation predicate) at a point
+    well inside it. Spatial indexes (a bounding-volume hierarchy) find the
+    faces that meet and the edges and points near each other, and a work
+    limit refuses a boolean too large to finish in reasonable time
+    (`TooLarge`). Coplanar neighbours and
     collinear edges are merged; origins record which operand faces,
     edges and vertices each result entity comes from, and where faces
     meet. What the tolerance cannot decide is refused with a message and
@@ -583,6 +587,25 @@ name open unchanged.
   passed with every region's mass to 1e-10, no fallback; it refused 313
   unresolvable perturbed inputs, 18 loops below resolution and 44
   pinched profiles (the cases are random per run).
+- Time guards and the first efficiency pass (docs/PERFORMANCE.md),
+  2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
+  893 tests and `cargo deny` pass. Release-mode time guards for
+  extrude, mesh, validate, mass properties, booleans, sketch regions and
+  regenerating a document (each failing at about ten times its measured
+  time) and three scaling checks (eight times the size; growth bounded at
+  24) pass; CI now runs them in release, and every job and long step has
+  a timeout. The boolean fuzz at 20 times the default gives exactly the
+  outcomes it gave before the indexes (6,000 pairs, 11 refusals; 1,400
+  motions, 2,180 refusals). Meshes and boolean results are the same on
+  every run: the triangulation library is used as a copy patched to
+  insert deferred points in order (ADR 0022), and a new golden test
+  repeats meshes and booleans with fresh hash seeds (it fails with the
+  published library). Union of two 1024-sided prisms
+  5.4 s to under 0.6 s; extruding an 8192-gon 315 ms to 92 ms; a plate
+  with 1,600 holes 1.35 s to 0.21 s. The full run also caught a flaw in
+  a NURBS property test (not in the code): mirroring a parameter as
+  a + b − u rounds by an ulp, which a steep random curve turns into
+  1e-11 of distance; the test now allows its speed times that rounding.
 - Booleans of polyhedral solids (design note 0012 §9), 2026-10-13, on
   Mesa lavapipe: fmt, clippy with `-D warnings`, 881 tests and
   `cargo deny` pass. Golden cases check volume, area, topology counts,
@@ -833,13 +856,21 @@ name open unchanged.
   cut in two, say), references to its caps fail rather than guess.
   Splits and merges by later operations come with booleans. No
   incremental regeneration: every edit regenerates the whole studio.
+- Known slow spots (docs/PERFORMANCE.md): the exact incircle test's
+  fallback zeroes a 9 KB buffer per call and takes about 60% of meshing a
+  face with holes; each boolean piece pays a full triangulation for its
+  interior point; validation meshes every result. All are within their
+  budgets.
 - Non-manifold topology deferred to Phase 3.
 - No STEP or other exchange formats beyond STL (Phase 4; see docs/FORMATS.md).
 
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Phase 3, in the order the design notes give: absorb the
+2. Next efficiency pass (docs/PERFORMANCE.md, known slow spots): the
+   incircle fallback's buffer, the per-piece triangulation in booleans,
+   validation without a full mesh; then lower the budgets to match.
+3. Phase 3, in the order the design notes give: absorb the
    near-coincidences of the tolerance test that are refused at half a
    tolerance; booleans with planes, cylinders, cones and spheres in
    closed form (0012 §8 step 2, 0011 §8); naming through booleans

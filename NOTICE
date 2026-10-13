@@ -26,6 +26,11 @@ exact versions in Cargo.lock. Each is under a licence compatible with
 GPL-3.0-or-later, checked on every build by cargo-deny (deny.toml); their
 licence texts are in the crates' own source distributions.
 
+One crate is used as a patched copy kept in this repository (ADR 0022):
+vendor/spade, the spade 2.15.1 Delaunay triangulation crate by Stefan
+Altmayer and contributors, MIT OR Apache-2.0 (licence files in that
+directory). vendor/README.md lists the changes.
+
 The user interface draws text with the fonts bundled by the egui toolkit
 (crate epaint_default_fonts):
   - Ubuntu Light: Ubuntu Font Licence 1.0

@@ -3,9 +3,10 @@
 
 mod arrangement_util;
 
-use std::collections::HashMap;
 use std::f64::consts::{FRAC_PI_2, TAU};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rustc_hash::FxHashMap;
 
 use arrangement_util::oracle::{in_polygon, polyline_distance, CellGrid, Shape, Shapes};
 use arrangement_util::raster::Raster;
@@ -466,7 +467,7 @@ fn check_lattice(
     };
     check_invariants(&curves, &a);
     let raster = Raster::new(&exact, v(-5.0, -5.0), v(9.0, 9.0), 1.0 / 64.0);
-    let mut owner: HashMap<usize, usize> = HashMap::new();
+    let mut owner: FxHashMap<usize, usize> = FxHashMap::default();
     for (id, pts) in raster.samples(6).iter().enumerate() {
         if pts.is_empty() {
             continue;

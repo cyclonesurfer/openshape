@@ -15,6 +15,9 @@ members = [
     "crates/sketch-solver",
     "crates/text",
 ]
+# Patched copies of crates.io packages (vendor/README.md); they are
+# dependencies, not members.
+exclude = ["vendor/spade"]
 
 [workspace.package]
 version = "0.1.0"
@@ -45,6 +48,7 @@ ciborium = "0.2"
 thiserror = "2"
 robust = "1.2"
 spade = "2.15"
+rustc-hash = "2.1"
 smallvec = "1.13"
 bytemuck = { version = "1", features = ["derive"] }
 wgpu = "30"
@@ -72,3 +76,8 @@ opt-level = 2
 
 [profile.test]
 opt-level = 1
+
+# Patched copies of crates.io packages, each with its reason and its
+# changes in vendor/README.md.
+[patch.crates-io]
+spade = { path = "vendor/spade" }
