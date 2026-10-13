@@ -193,6 +193,10 @@ fn is_plane(q: &Quadric) -> bool {
     matches!(q, Quadric::Plane { .. })
 }
 
+fn is_sphere(q: &Quadric) -> bool {
+    matches!(q, Quadric::Sphere { .. })
+}
+
 /// Which sides of `surface` (of the other operand) the boundary of face
 /// `f` of `op` reaches: above it, below it, on it (within the tolerance).
 /// The coedges near the surface by their stations (a straight edge against
@@ -267,21 +271,35 @@ pub(super) fn relation(
         return Ok(Relation::Crossing);
     }
     // A boundary strictly on one side of the other surface keeps the face
-    // there if the face cannot reach across without its boundary doing so:
-    // a face on a cylinder (at most half a turn, ADR 0008) holds no closed
-    // curve of the surfaces' meeting, and the lines it meets run out
-    // through its boundary; a plane face inside a cylinder stays inside, as
-    // the inside is convex. A plane face outside one can still hold a
-    // circle of their meeting (a plate around a hole).
-    let off = |own: &Quadric, theirs: &Quadric, p: bool, n: bool, z: bool| {
-        !z && p != n && (!is_plane(own) || (n && !is_plane(theirs)))
+    // there if the face cannot reach across without its boundary doing so.
+    // A face on a plane, a cylinder or a cone lies in the convex hull of its
+    // boundary (through each of its points runs a line of the surface that
+    // leaves the face through its boundary both ways), so a boundary on one
+    // side of a plane, or inside a cylinder, cone or sphere (whose insides
+    // are convex), keeps the face there. A face on a sphere bulges out of
+    // its boundary's hull, and a face outside a curved surface can still
+    // hold a closed curve of their meeting (a plate around a hole), so
+    // those are decided by how the surfaces meet.
+    let hull = |own: &Quadric, theirs: &Quadric, p: bool, n: bool, z: bool| {
+        !z && p != n && !is_sphere(own) && (is_plane(theirs) || n)
     };
-    if off(qa, qb, ap, an, az) || off(qb, qa, bp, bn, bz) {
+    if hull(qa, qb, ap, an, az) || hull(qb, qa, bp, bn, bz) {
         return Ok(Relation::Apart);
     }
+    // A face on a cylinder or a cone (at most half a turn, ADR 0008) holds
+    // no closed curve of a meeting found in closed form with a curved
+    // surface: those are lines along its axis, which run out through its
+    // boundary, and circles about its axis, which go around it. Curves of
+    // higher degree (two cylinders at an angle) can close inside the face,
+    // so an unsupported meeting is refused even then.
+    let wraps = |own: &Quadric, p: bool, n: bool, z: bool| {
+        !z && p != n && matches!(own, Quadric::Cylinder { .. } | Quadric::Cone { .. })
+    };
+    let wrapped = wraps(qa, ap, an, az) || wraps(qb, bp, bn, bz);
     match contacts.get(pair, a.surface, b.surface, pts.eps) {
         Contact::Apart => Ok(Relation::Apart),
         Contact::Same => Ok(Relation::Coplanar),
+        Contact::Touch | Contact::Tracks(_) if wrapped => Ok(Relation::Apart),
         Contact::Touch => Err(KernelError::Unsupported(format!(
             "booleans of bodies whose faces touch without crossing (a tangent contact; \
              design note 0011 §4.4) near {}",

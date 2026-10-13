@@ -503,6 +503,19 @@ fn random_pair(r: &mut Rng) -> (Body, Body) {
     (random_curved(r, axis), random_curved(r, axis))
 }
 
+/// A random pair of prisms along different axes: their cylinders meet at
+/// an angle (a quartic curve, refused) or not at all, and their planes
+/// meet the other's cylinders in ellipses.
+fn random_pair_at_an_angle(r: &mut Rng) -> (Body, Body) {
+    let first = if r.chance(0.5) {
+        Frame::WORLD
+    } else {
+        turned(r, DVec3::ZERO)
+    };
+    let second = turned(r, DVec3::ZERO);
+    (random_curved(r, first), random_curved(r, second))
+}
+
 #[derive(Default)]
 struct Tally {
     pairs: usize,
@@ -512,9 +525,12 @@ struct Tally {
     bugs: Vec<String>,
 }
 
-/// The volume of a boolean's result, `Some(0)` for an empty result, `None`
-/// for a refusal (recorded); kernel bugs are recorded too.
-fn measured(t: &mut Tally, a: &Body, b: &Body, op: BooleanOp, case: &str) -> Option<f64> {
+/// A boolean's outcome: `None` for a refusal, `Some(None)` for an empty
+/// result, else the result and its volume.
+type Outcome = Option<Option<(Body, f64)>>;
+
+/// A boolean's outcome; refusals and kernel bugs are recorded.
+fn measured(t: &mut Tally, a: &Body, b: &Body, op: BooleanOp, case: &str) -> Outcome {
     match k().boolean(a, b, op) {
         Ok(r) => {
             let issues = k().validate(&r);
@@ -528,14 +544,14 @@ fn measured(t: &mut Tally, a: &Body, b: &Body, op: BooleanOp, case: &str) -> Opt
                 return None;
             }
             match k().mass_properties(&r, 1e-12) {
-                Ok(m) => Some(m.volume),
+                Ok(m) => Some(Some((r, m.volume))),
                 Err(e) => {
                     t.bugs.push(format!("{case} {op:?}: {e}"));
                     None
                 }
             }
         }
-        Err(KernelError::InvalidInput(m)) if m.contains("empty") => Some(0.0),
+        Err(KernelError::InvalidInput(m)) if m.contains("empty") => Some(None),
         Err(KernelError::InvalidInput(m) | KernelError::Unsupported(m)) => {
             t.refused.push(format!("{case} {op:?}: {m}"));
             None
@@ -547,13 +563,163 @@ fn measured(t: &mut Tally, a: &Body, b: &Body, op: BooleanOp, case: &str) -> Opt
     }
 }
 
-fn identities(t: &mut Tally, a: &Body, b: &Body, case: &str, slack: f64) {
+/// A body's surface as triangles within `chord` of it, for deciding
+/// whether points well away from it are inside: a check of the booleans
+/// that shares none of their code (the volume identities hold for a result
+/// that misses where the bodies meet altogether, as if they were apart).
+struct Mesh {
+    tris: Vec<[DVec3; 3]>,
+    chord: f64,
+}
+
+impl Mesh {
+    fn of(b: &Body, chord: f64) -> Result<Mesh, String> {
+        let opts = TessellationOptions {
+            chord_tolerance: chord,
+            max_angle: 0.5,
+        };
+        let (pos, tris) = k()
+            .tessellate(b, &opts)
+            .map_err(|e| e.to_string())?
+            .welded();
+        Ok(Mesh {
+            tris: tris.iter().map(|t| t.map(|i| pos[i as usize])).collect(),
+            chord,
+        })
+    }
+
+    /// Whether `p` is inside, if it is farther than `margin` from the
+    /// mesh (so the mesh and the exact surface agree there): by the winding
+    /// number, the sum of the triangles' solid angles about `p` (A. van
+    /// Oosterom and J. Strackee, "The solid angle of a plane triangle",
+    /// IEEE Trans. Biomed. Eng. 30, 1983).
+    fn inside(&self, p: DVec3, margin: f64) -> Option<bool> {
+        let mut total = 0.0;
+        for t in &self.tris {
+            if triangle_distance(p, t) <= margin + self.chord {
+                return None;
+            }
+            let [a, b, c] = t.map(|q| q - p);
+            let (la, lb, lc) = (a.length(), b.length(), c.length());
+            let num = a.dot(b.cross(c));
+            let den = la * lb * lc + a.dot(b) * lc + b.dot(c) * la + c.dot(a) * lb;
+            total += 2.0 * num.atan2(den);
+        }
+        Some(total / (4.0 * PI) > 0.5)
+    }
+}
+
+/// The distance from `p` to the triangle `t`.
+fn triangle_distance(p: DVec3, t: &[DVec3; 3]) -> f64 {
+    let [a, b, c] = *t;
+    let n = (b - a).cross(c - a);
+    if n.length_squared() > 0.0 {
+        // Inside the triangle's prism: the distance to its plane.
+        let side = |u: DVec3, v: DVec3| (v - u).cross(p - u).dot(n);
+        if side(a, b) >= 0.0 && side(b, c) >= 0.0 && side(c, a) >= 0.0 {
+            return (p - a).dot(n).abs() / n.length();
+        }
+    }
+    let seg = |u: DVec3, v: DVec3| {
+        let d = v - u;
+        let s = if d.length_squared() > 0.0 {
+            ((p - u).dot(d) / d.length_squared()).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (p - (u + d * s)).length()
+    };
+    seg(a, b).min(seg(b, c)).min(seg(c, a))
+}
+
+/// Points sampled where the bodies' boxes meet (or anywhere in their
+/// boxes if they do not) must be inside each result exactly when the
+/// operation's rule on the operands says so.
+fn membership(
+    t: &mut Tally,
+    a: &Body,
+    b: &Body,
+    results: &[(BooleanOp, bool, &Outcome)],
+    case: &str,
+    rng: &mut Rng,
+) {
+    const CHORD: f64 = 1e-3;
+    const MARGIN: f64 = 1e-3;
+    let mesh = |x: &Body| Mesh::of(x, CHORD);
+    let (ma, mb) = match (mesh(a), mesh(b)) {
+        (Ok(x), Ok(y)) => (x, y),
+        (Err(e), _) | (_, Err(e)) => {
+            t.bugs.push(format!("{case}: meshing an operand: {e}"));
+            return;
+        }
+    };
+    let bounds = |m: &Mesh| {
+        m.tris.iter().flatten().fold(
+            (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+            |(lo, hi), q| (lo.min(*q), hi.max(*q)),
+        )
+    };
+    let ((la, ha), (lb, hb)) = (bounds(&ma), bounds(&mb));
+    let (lo, hi) = if la.cmple(hb).all() && lb.cmple(ha).all() {
+        (la.max(lb), ha.min(hb))
+    } else {
+        (la.min(lb), ha.max(hb))
+    };
+    let mut meshes = Vec::new();
+    for &(op, swapped, r) in results {
+        match r {
+            None => {}
+            Some(None) => meshes.push((op, swapped, None)),
+            Some(Some((body, _))) => match mesh(body) {
+                Ok(m) => meshes.push((op, swapped, Some(m))),
+                Err(e) => t
+                    .bugs
+                    .push(format!("{case} {op:?}: meshing the result: {e}")),
+            },
+        }
+    }
+    for _ in 0..24 {
+        let p = DVec3::new(
+            rng.range(lo.x, hi.x),
+            rng.range(lo.y, hi.y),
+            rng.range(lo.z, hi.z),
+        );
+        let (Some(ia), Some(ib)) = (ma.inside(p, MARGIN), mb.inside(p, MARGIN)) else {
+            continue;
+        };
+        for (op, swapped, m) in &meshes {
+            let (x, y) = if *swapped { (ib, ia) } else { (ia, ib) };
+            let want = match op {
+                BooleanOp::Union => x || y,
+                BooleanOp::Intersect => x && y,
+                BooleanOp::Subtract => x && !y,
+            };
+            let got = match m {
+                None => Some(false),
+                Some(m) => m.inside(p, MARGIN),
+            };
+            if got.is_some_and(|g| g != want) {
+                t.bugs.push(format!(
+                    "{case} {op:?}{}: the result is {} at {p:?}, which the operands put {}",
+                    if *swapped { " (B − A)" } else { "" },
+                    if want { "outside" } else { "inside" },
+                    if want { "inside" } else { "outside" },
+                ));
+                return;
+            }
+        }
+    }
+}
+
+fn identities(t: &mut Tally, a: &Body, b: &Body, case: &str, slack: f64, rng: &mut Rng) {
     t.pairs += 1;
     let (va, vb) = (volume(a), volume(b));
-    let u = measured(t, a, b, BooleanOp::Union, case);
-    let i = measured(t, a, b, BooleanOp::Intersect, case);
-    let ab = measured(t, a, b, BooleanOp::Subtract, case);
-    let ba = measured(t, b, a, BooleanOp::Subtract, case);
+    let ru = measured(t, a, b, BooleanOp::Union, case);
+    let ri = measured(t, a, b, BooleanOp::Intersect, case);
+    let rab = measured(t, a, b, BooleanOp::Subtract, case);
+    let rba = measured(t, b, a, BooleanOp::Subtract, case);
+    let vol = |r: &Outcome| r.as_ref().map(|x| x.as_ref().map_or(0.0, |y| y.1));
+    let (u, i, ab, ba) = (vol(&ru), vol(&ri), vol(&rab), vol(&rba));
     let tol = 1e-9 * va.max(vb) + slack;
     let mut check = |name: &str, lhs: f64, rhs: f64| {
         if (lhs - rhs).abs() > tol {
@@ -579,6 +745,19 @@ fn identities(t: &mut Tally, a: &Body, b: &Body, case: &str, slack: f64) {
             t.checked += 1;
         }
     }
+    membership(
+        t,
+        a,
+        b,
+        &[
+            (BooleanOp::Union, false, &ru),
+            (BooleanOp::Intersect, false, &ri),
+            (BooleanOp::Subtract, false, &rab),
+            (BooleanOp::Subtract, true, &rba),
+        ],
+        case,
+        rng,
+    );
 }
 
 fn report(name: &str, t: &Tally) {
@@ -620,9 +799,35 @@ fn scale(n: usize) -> usize {
 fn volume_identities_on_random_curved_pairs() {
     let mut t = Tally::default();
     let mut r = Rng(0x0DA7_0C11);
+    let mut points = Rng(0x5A3F_0E11);
     for case in 0..scale(200) {
         let (a, b) = random_pair(&mut r);
-        identities(&mut t, &a, &b, &format!("pair {case}"), 0.0);
+        identities(&mut t, &a, &b, &format!("pair {case}"), 0.0, &mut points);
     }
     report("random solids of planes and cylinders", &t);
+}
+
+#[test]
+fn volume_identities_on_random_pairs_at_an_angle() {
+    let mut t = Tally::default();
+    let mut r = Rng(0x0A76_1E55);
+    let mut points = Rng(0x5A3F_0E12);
+    for case in 0..scale(100) {
+        let (a, b) = random_pair_at_an_angle(&mut r);
+        identities(&mut t, &a, &b, &format!("pair {case}"), 0.0, &mut points);
+    }
+    report("random solids of planes and cylinders at an angle", &t);
+}
+
+#[test]
+fn zz_oracle_on_the_rod() {
+    let big = cylinder(at_z(-5.0), DVec2::ZERO, 10.0, 10.0);
+    let f = Frame::from_normal(DVec3::new(-4.0, 10.5, 3.0), DVec3::X, DVec3::Z);
+    let rod = cylinder(f, DVec2::ZERO, 1.0, 24.0);
+    let mut t = Tally::default();
+    let mut points = Rng(1);
+    for _ in 0..20 {
+        identities(&mut t, &big, &rod, "rod", 0.0, &mut points);
+    }
+    report("rod", &t);
 }

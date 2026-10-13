@@ -609,6 +609,24 @@ name open unchanged.
   times its default size refuses exactly the same operations as before.
   Drilling a round hole into a plate with 99 fell from 211 ms to 40 ms
   (docs/PERFORMANCE.md, third pass); CI now runs the curved fuzz too.
+- A missed contact in the planes-and-cylinders booleans, found and fixed
+  the same day (2026-10-13): a face on a cylinder whose boundary stayed
+  outside another cylinder was taken to be apart from it, so a rod
+  dipping into a pipe's wall between the pipe's seams (no edge of either
+  crossing the other's surface) came back as two bodies that do not
+  meet: a union of two overlapping solids, a difference that removed
+  nothing, an empty intersection. The validator passed it and the volume
+  identities hold for it. The rule now keeps a face apart only where the
+  convex hull of its boundary does, or where the surfaces meet in closed
+  form (lines along the axis, circles about it); the rod case is
+  refused as a quartic (`a_rod_dipping_into_a_pipe_wall_is_refused`).
+  The curved fuzz now also checks point membership on meshes that share
+  no code with the booleans (24 points a pair where the operands' boxes
+  meet, each inside a result exactly when the operation's rule says so),
+  which catches the old rule, and has a second run of prisms along two
+  different axes: 2,000 such pairs, every result correct, 383 refusals
+  in 1,000 operations, all quartics. The parallel fuzz at 10 times its
+  default size refuses exactly the same operations as before the fix.
 - Geometry for booleans of curved solids (design note 0012 §10.7, item
   1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   915 tests and `cargo deny` pass. Tested on its own; the boolean stages

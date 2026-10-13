@@ -568,9 +568,18 @@ padded by the tolerance): apart, the same surface, touching (refused as
 a tangent contact), unsupported, or tracks, the curves of §10.3 (lines,
 circles, ellipses), each with an id that every later stage uses. A face
 whose boundary lies strictly on one side of the other surface is apart
-from it when the face is curved, or when it is flat and lies inside a
-convex surface (a cylinder): its edges cannot reach the track, and its
-interior cannot either.
+from it when the face lies in the convex hull of its boundary (a face on
+a plane or a cylinder) and that side is one side of a plane or the
+inside of a cylinder (convex); and when the face is on a cylinder and
+the surfaces meet in curves found in closed form, which are lines along
+its axis and circles about it, so they would cross its boundary to reach
+it. (As first committed, any curved face with its boundary on one side
+was taken to be apart, which misses a closed quartic curve inside a
+face: a rod dipping into a pipe's wall between its seams, where no edge
+of either crosses the other, was returned as two bodies that do not
+meet. Found the same day, before cones and spheres, and fixed: such a
+pair is refused as a quartic; `a_rod_dipping_into_a_pipe_wall_is_refused`
+and the membership check below keep it so.)
 
 **Points** (`points.rs`). Along each edge and surface of the other body,
 the *stations* are the edge's ends (with their vertices' signs) and the
@@ -667,3 +676,156 @@ it. The run found one fault, now fixed and kept as a golden case: a
 void inside a curved body was placed by a corner of the outer shell
 instead of its own, so cutting a body from inside another was
 refused (88 operations of the first run).
+
+Each pair is also checked by point membership: 24 points sampled where
+the operands' boxes meet, each decided on meshes within 1e-3 of the
+operands and of every result (by the winding number, with points within
+2e-3 of any mesh skipped), must be inside a result exactly when the
+operation's rule on the operands says so. This shares no code with the
+booleans and catches what the identities cannot: the missed contact of
+the corrected rule above gave a union, a difference and an intersection
+that satisfy all three identities. A second run takes prisms along two
+different axes: on 2,000 pairs every result is correct and every
+refusal (383 in 1,000 operations) is a quartic of two cylinders at an
+angle.
+
+## 12. Step 2, item 3: cones and spheres (design, 2026-10-13)
+
+Item 3 adds faces on cones and spheres (revolves of lines and arcs) to
+§11's pipeline. Their surfaces are already recognised, and the
+geometry layer already finds crossings of edges with them and their
+circles with coaxial surfaces (§10.7, item 1). What item 3 adds is a
+chart of each such face, the curves where a plane crosses a cone off
+its axis, the closed-form ray hits of classification, and care at the
+apex and the poles, where a face's surface has no normal.
+
+### 12.1 Charts
+
+* **Cone.** A cone is developable: cut along a ruling and unrolled, it
+  is a sector of the plane, an isometry (M. do Carmo, *Differential
+  Geometry of Curves and Surfaces*, 1976, §4-2). A point at slant
+  distance `s` from the apex and angle θ about the axis goes to polar
+  coordinates `(s, θ sin α)`, α the half-angle: rulings go to lines
+  through the apex's image, circles about the axis to circles about it.
+  As for a cylinder the cut is opposite the face's middle (faces span at
+  most half a turn, ADR 0008). The chart is anchored at the face: in
+  coordinates relative to the point of the middle ruling at the cone's
+  reference height, `(σ cos ψ − 2 s₀ sin²(ψ/2), (s₀ + σ) sin ψ)` with
+  `ψ = θ sin α`, `σ = s − s₀`, `s₀` the slant distance of the anchor, so
+  a slight taper (its apex kilometres away) costs no precision and the
+  chart tends to the cylinder's as α goes to 0. Outer loops run
+  counter-clockwise about the outward normal, as for the other charts.
+  Lengths in the chart are lengths along the surface; a chord in space
+  is shorter, by at most the factor `sin α / sin(π sin α / 2) ≥ 2/π`
+  between two points of a face (their angles about the axis differ by
+  at most π).
+* **Sphere.** A sphere has no isometric chart (its curvature is not
+  zero; Gauss's *theorema egregium*). Its chart is the stereographic
+  projection from the antipode of a centre `c` of the face onto the
+  tangent plane at `c`: a point at angle φ from `c` goes to distance
+  `2R tan(φ/2)` from `c`'s image. It is conformal, and takes circles of
+  the sphere to circles or lines of the chart (T. Needham, *Visual
+  Complex Analysis*, 1997, ch. 3; D. Hilbert and S. Cohn-Vossen,
+  *Geometry and the Imagination*, §36). Its scale at chart point `q` is
+  `λ(q) = 1 + |q|²/(4R²) ≥ 1`, and the distance in space between the
+  points at `q₁` and `q₂` is exactly `|q₁ − q₂| / √(λ(q₁) λ(q₂))`
+  (the chordal distance; L. Ahlfors, *Complex Analysis*, 3rd ed., ch. 1,
+  §2.4). The centre is the middle of the face's boundary in its
+  surface's own parameters (longitude within `[0, π]` of the surface's
+  frame, ADR 0008, and latitude), so the antipode is outside the face
+  and the projection is one to one on it; the poles are ordinary points
+  of the chart.
+* **Lengths.** A chart compares lengths with space in two ways, each a
+  bound: `reach(q, d)`, a chart distance from `q` beyond which every
+  point is more than `d` from it in space, and `space(q, d)`, a distance
+  in space within which no point `d` or more from `q` in the chart lies.
+  A plane's are `d` and `d`. A cylinder's are the arc and the chord of
+  `d` about its radius. A cone's are `d` over and times the factor above,
+  with `reach` taken nearer to `d` away from the apex, where two points
+  near in the chart differ little in angle. A sphere's follow from the
+  chordal distance at `q`. Every test of the split and of point location
+  that was "within the tolerance in the chart" becomes "within `reach(q,
+  eps)`", so the tolerance means distance in space on every surface;
+  bands (a course's distance from its chords) are measured in the chart
+  and bound the distance in space, since no chart lengthens a chord.
+* **Courses and bands.** On a cone (isometric) a course's band is the
+  bound of §11 from its acceleration: for a circle about the axis, of
+  radius `r`, exactly `r sin α` per unit angle squared; for an ellipse its
+  greater semi-axis; for a parabola `2a`; for a hyperbola branch
+  `√((a cosh T)² + (b sinh T)²)`, `T` the larger parameter of the stretch.
+  On a sphere every course is a circle, whose image is a circle of
+  curvature `|n · (C − S)| / (2 R r)` (`n` the circle's normal, `C` its
+  centre, `r` its radius, `S` the projection's point): the band of a
+  chord of length `L` is the sagitta `(L/2)² κ / (1 + √(1 − (κL/2)²))`
+  of an arc turning less than a half turn, which the first division
+  ensures from a bound on the turning (the curvature times the arc's
+  length in the chart, at most `λ` times its length in space, with `λ`
+  bounded over the stretch in closed form).
+
+### 12.2 Curves
+
+A plane across a cone meets its nappe in a conic. In the plane's frame
+`(x, y)` with `x` along the axis's direction in the plane, `y` square to
+the axis, and the origin at the foot of the cone's reference point, the
+cone's implicit function is `A x² + y² − 2 B x + C` with
+`A = 1 − g² / cos² α`, `g` the sine of the angle between the plane's
+normal and the axis: an ellipse where `A > 0` (the plane steeper than
+the rulings), a parabola where `A = 0`, one branch of a hyperbola where
+`A < 0` (Apollonius, *Conics*, book I). Each is a track: the ellipse
+closed, the parabola `vertex + a t² x + 2 a t y` and the branch
+`centre + a cosh t x + b sinh t y` open and curved, imprinted along
+their courses (not as chords) and stored as exact rational quadratic
+B-splines (Piegl & Tiller §7.5). A configuration within a sixteenth of
+the tolerance of a parabola over the region is taken as one, so no
+ellipse or hyperbola is computed with a far centre. A plane through the
+apex meets the cone in up to two rulings, half-lines from the apex: that
+case is refused at first ("a plane through a cone's apex") and then
+handled with the apex as an end of both half-lines, which a face holding
+the apex enters at it. Every other pair of surfaces is as in §10.3:
+circles about a common axis, and quartics refused.
+
+### 12.3 Imprint, classify, operands
+
+* **Faces apart.** The rule of §11 as corrected: a face on a plane, a
+  cylinder or a cone lies in the convex hull of its boundary, so a
+  boundary on one side of a plane, or inside a cylinder, cone or sphere
+  (convex insides), keeps the face there; a face on a cylinder or a cone
+  holds no closed curve of a meeting in closed form with a curved
+  surface. A face on a sphere bulges out of its boundary's hull and can
+  hold a whole circle of a meeting (a ball's face around a hole), which
+  §11's test for a closed track that no cut reaches decides.
+* **Singular points.** At the apex and the poles a surface has no
+  normal. The way a track runs across a face, and the side of a surface
+  a face's boundary goes to, are decided at cuts where both surfaces
+  have normals; a face's facing is found at a regular point of it, not
+  at its first corner.
+* **Classify.** A ray meets a cone's nappe and a sphere at the roots of
+  a quadratic, anchored at the cone's reference point (a root on the
+  other nappe is not a hit); a hit where the ray is within 1e-3 of
+  tangent to the surface abandons the ray, as on a cylinder. The point
+  of a cone or a sphere nearest a point, for the test that a piece's
+  point is clear of the other body, is in closed form.
+* **Boxes.** A face on a sphere is not in the hull of its boundary: its
+  box also takes the sphere's extreme points along the axes that lie in
+  the face's half of the sphere.
+
+### 12.4 Order and tests
+
+1. Charts, lengths and bands, unit-tested against sampling (map and
+   unmap, orientation, `reach` and `space` against distances in space
+   over random pairs of points of random faces, bands against dense
+   samples of courses); ray roots and feet for cones and spheres.
+2. Spheres and coaxial cones end to end: golden cases (a ball on a
+   plate, a ball cut by a box, a spherical pocket, two balls, a
+   countersink, a cone on a cylinder, a pointed cone cut square to its
+   axis) checked as in §11, and a fuzz of revolves about one axis with
+   boxes and prisms.
+3. Planes across cones off their axis (the three conics), then planes
+   through the apex, with golden cases for each conic and the fuzz with
+   revolves and boxes at any angle.
+
+Every fuzz checks, besides validity and the volume identities, that
+points sampled where the operands' boxes meet are inside each result
+exactly when the operation's rule says so, decided on fine meshes away
+from every surface: the volume identities hold for a result that takes
+two bodies as apart when they meet, and this check does not.
