@@ -1094,7 +1094,27 @@ name open unchanged.
 1. Check the new title bar on GNOME (on Pat's desktop).
 2. Phase 3, in the order the design notes give: the conics of a plane
    across a cone, then planes through its apex (0012 §12.4 item 3; balls
-   and coaxial cones, item 3a, are done, §13); then tangent contacts
+   and coaxial cones, item 3a, are done, §13). **Item 3b is in progress
+   on branch `wip/item-3b` (paused 2026-10-13 at Pat's request; not
+   gated, not on main).** There: the design (0012 §14: one vertex-form
+   conic track for parabolas, hyperbola branches and far halves of
+   ellipses, closed ellipses near the region, apex rules, exact stable
+   edge weights), `Track::Conic` with its parameters, feet, exact
+   stretch boxes and rational quadratic edges, `plane_cone` and
+   `through_apex` in `meet.rs`, the conic band and first division in
+   `chart.rs`, open curved tracks through `on_track`. Unit tests in
+   `meet.rs`: 6 of 8 pass (meetings on both surfaces and none missed,
+   edges and boxes exact). Left: `planes_near_an_apex_beyond_the_region`
+   gets a tangent contact where two rulings are expected at the snapped
+   apex (case 0; debug `through_apex`'s tilt test), and
+   `conics_near_a_parabola_are_exact` passes its precision checks but
+   draws too few half ellipses for its count (relax or draw more); then
+   `booleans.rs`'s `planes_across_a_cone_off_its_axis_are_not_supported_yet`
+   (keep only the plane through the apex, now "a plane through a cone's
+   apex"), golden cases for each conic (volumes as `(1/3) Σ hᵢ Aᵢ`,
+   §14), a fuzz of turned solids with boxes at any angle and planes
+   along a ruling's direction (membership check, at scale), the time
+   guards, and §14's as-built notes. Then tangent contacts
    (the largest share of the curved refusals) and the elliptical edges
    oblique cuts leave on cylinders; naming through booleans
    (design note 0013 §10 step 4); then extrude and revolve that add,

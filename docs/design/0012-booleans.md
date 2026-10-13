@@ -960,3 +960,119 @@ agree on thousands of points. With the meshes shared by the origins
 check, the sphere and cone fuzz's own checks fell from about 8 to 2.4
 times the time of its booleans (meshing, at a thousandth of the unit,
 is most of what is left).
+
+## 14. Item 3b: planes across cones (design, 2026-10-13)
+
+§12.2 named the conics' tracks by their centres: the parabola
+`vertex + a t² x + 2 a t y` and the hyperbola's branch `centre + a cosh t
+x + b sinh t y`, with a configuration near a parabola snapped to one so
+that no centre is far. Worked through before building, that leaves two
+faults. Near the parabola the snap's boundary still allows centres up to
+`R² / (eps/16)` away (`R` the region's radius): at a metre, a centre
+1.6 × 10⁸ m off, whose rounding (about 2 × 10⁻⁸ m) is a fifth of the
+tolerance. And the hyperbola's band grows with `cosh T` while the curve
+straightens: the bound is loose exactly where the branch is followed
+furthest. This revision replaces them; the rest of §12 stands.
+
+**Literature.** The vertex equation of a conic, `η² = 2pξ − (1 − e²)ξ²`
+(`ξ` along its axis from a vertex, `p` the semi-latus rectum, `e` the
+eccentricity), one equation for the ellipse, the parabola and the
+hyperbola, continuous through `e = 1` (G. Salmon, *A Treatise on Conic
+Sections*, 6th ed., 1879; any text on conics). The rational
+parametrisation of a conic by the lines through one of its points
+(here the vertex), which is the rational quadratic Bézier form of
+Piegl & Tiller, *The NURBS Book*, 2nd ed., §7.2–7.3, and E. T. Y. Lee,
+"The rational Bézier representation for conics", 1987 (cited in design
+note 0009). Apollonius for the section of the cone (§12.2).
+
+**The conic in the plane.** In the plane's frame of §12.2 (`x` along
+the axis's direction in the plane, `y` square to the axis, origin `O`
+the foot of the cone's reference point `P`, which is kept near the
+faces), with `γ = n · u`, `g = |u − γ n|`, `d = (P − Q) · n` (`Q` on the
+plane), `r` the cone's radius at `P` and `k = tan α`, the nappe's
+section is `A ξ² + η² − 2Bξ + C = 0` with
+
+  A = γ² − g² k²,  B = g (r k − (1 + k²) γ d),
+  C = (d g)² − (r − k γ d)²,
+
+each a product or difference of numbers of the size of the faces, so
+none loses precision to a far apex. Its discriminant is exact:
+`B² − AC = σ²` with `σ = d k − γ r = k δ`, `δ` the apex's distance from
+the plane. So `σ = 0` is the plane through the apex; else the semi-latus
+rectum is `p = |σ|` and, for `A ≠ 0`, the centre is at `ξ = B/A` with
+semi-axes `|σ|/|A|` along `x` and `|σ|/√|A|` along `y`. The plane
+meets the nappe (not its mirror) when `A < 0` (the branch at larger
+`ξ`, where the radius `r + k h` grows, `h = gξ − γd`), and when `A ≥ 0`
+exactly when `σγ < 0` (the axis, from the apex along `u`, reaches the
+plane).
+
+**Tracks.** An ellipse whose centre lies within 16 radii of the region's
+disk (the plane's section of the region) is the closed track of §10.3,
+`centre + a cos t x + b sin t y`; there no coordinate is large and the
+whole curve may lie in one face (a cone through a plate at an angle).
+Every other section is an open *conic* track in the vertex form
+
+  vertex + x · p t² / (1 + w) + y · p t,  w = √(1 − c t²),  c = A,
+
+with `x` the way it opens from the vertex: the branch of a hyperbola or
+a parabola (opening along `+x`), or the half of an ellipse at the vertex
+nearer the region (an ellipse much larger than the region, or one near
+a parabola). The vertex is the root of `A ξ² − 2Bξ + C` at that end,
+taken as `C / (B + |σ|)` or `(B − |σ|)/A`, whichever has no
+cancellation, so it is exact to rounding through `A = 0`, where it is
+the parabola's vertex: no snap to a parabola is needed. `t = η / p`, so
+the parameter resolves positions to the rounding of `η`; its first and
+second derivatives are `p (t/w, 1)` and `p (1/w³, 0)`, so `|C''| = p/w³`:
+at most `p` on a parabola or a hyperbola, the greatest at the stretch's
+`|t|` nearest zero (where `w` is least for `c > 0` it is the greatest
+`|t|`). That is the band's bound on a plane's chart and on a cone's
+(an isometry, §12.1), now per stretch, tight where the branch straightens.
+The first division of a stretch is by equal turning of its tangent,
+`φ = atan2(t, w)`, at most an eighth of a half turn each: a conic turns
+less than a half turn on a branch or a half ellipse, so at most eight.
+A stretch's box is exact: each coordinate is convex or concave in `t`,
+its one turning point where `t/w` is a ratio of the frame's components.
+
+**Edges.** With `s = t / (1 + w)` the conic is
+`vertex + 2p (s² x + s y) / (1 + c s²)`, a rational quadratic in `s`
+(lines through the vertex), so a stretch is exactly a rational quadratic
+B-spline: per piece `[s₀, s₁]` the weights `1 + c s₀², 1 + c s₀ s₁,
+1 + c s₁²` and control points `vertex + 2p (X x + Y y)/W` with
+`X = s₀², s₀ s₁, s₁²` and `Y = s₀, (s₀ + s₁)/2, s₁`. Pieces turn at
+most a quarter turn, which keeps the middle weight positive (it is
+`1 + c s₀ s₁`, positive on a hyperbola or a parabola always). Far along
+a branch `1 + c s²` cancels (`s` nears `1/√|c|`; found by the edge test,
+2000 times the rounding), so the weights are computed in `t`:
+`1 + c s² = 2/(1 + w)` exactly, and the middle weight is
+`N / ((1 + w₀)(1 + w₁))` with `N = 1 + w₀ + w₁ + (w₀w₁ + c t₀t₁)`, the
+bracket taken as `(1 − c t₀² − c t₁²)/(w₀w₁ − c t₀t₁)` on a hyperbola
+where its terms have opposite signs; the ends are the track's own
+points.
+
+**The apex.** A plane within the tolerance of the apex where the apex is
+in the region is refused: "a plane through a cone's apex" where it
+crosses the cone in two rulings (`A < 0`), and as a tangent contact
+otherwise (only the apex, or along a ruling). A plane within `eps/16`
+of the apex otherwise (the apex outside the region, as for a frustum
+far from its apex) is taken as through it: two rulings (lines, exact on
+the cone at the region's height, within `eps/16` of the plane), or a
+tangent contact along the ruling `ξ`-ward when the plane is within the
+tolerance of the tangent plane there over the region, or apart. Rulings
+from an apex in a face, with the apex as an end of both, remain to do.
+
+**Precision.** A conic track's points are found from its vertex, which
+for a long branch (a slight taper cut nearly along its axis) can lie
+far from the region; rounding is then about `ε` times the vertex's
+distance. A track whose rounding could exceed a sixty-fourth of the
+tolerance (a vertex some 10⁶ m away at the default tolerance) is
+refused rather than computed loosely.
+
+**Tests.** As §12.4 item 3: the meeting's curves on both surfaces to
+rounding and none missed (random cones and planes, planes near a ruling's
+direction, near the apex, nearly along the axis), parameters and edges
+exact, golden cases for each conic with volumes in closed form (a solid
+cone cut by a plane is `(1/3) Σ hᵢ Aᵢ` over its flat faces, `hᵢ` their
+distances from the apex, since the conical face's tangent planes pass
+through it: the areas of elliptical, parabolic (Archimedes) and
+hyperbolic segments are closed forms), and a fuzz of turned solids with
+boxes at any angle, with planes set along a ruling's direction.

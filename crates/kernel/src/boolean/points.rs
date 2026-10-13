@@ -659,9 +659,9 @@ impl Points {
         &self.on_params[slot(op)][e]
     }
 
-    /// The clusters on the closed track `track` strictly between parameters
+    /// The clusters on the curved track `track` strictly between parameters
     /// `ta` (cluster `lo`) and `tb > ta` (cluster `hi`), less than a turn
-    /// apart: those within the tolerance of it there, in order, each with
+    /// apart on a closed track: those within the tolerance of it there, in order, each with
     /// its parameter (unrolled from `ta`), both ends included. Two within
     /// the tolerance of each other along it are refused.
     pub fn on_track(
@@ -671,21 +671,8 @@ impl Points {
         (hi, tb): (usize, f64),
     ) -> Result<Vec<(usize, f64)>, KernelError> {
         let eps = self.eps;
-        // A box holding the track: its stretch for a line, the whole curve
-        // for a closed one.
-        let (box_lo, box_hi) = match *track {
-            Track::Line { .. } => {
-                let (p, q) = (track.point(ta), track.point(tb));
-                (p.min(q), p.max(q))
-            }
-            Track::Circle { center, radius, .. } => {
-                (center - DVec3::splat(radius), center + DVec3::splat(radius))
-            }
-            Track::Ellipse { center, a, b, .. } => (
-                center - DVec3::splat(a.max(b)),
-                center + DVec3::splat(a.max(b)),
-            ),
-        };
+        // A box holding the track's stretch.
+        let (box_lo, box_hi) = track.bounds(ta, tb);
         let mut near = Vec::new();
         self.index.overlapping(
             box_lo - DVec3::splat(eps),

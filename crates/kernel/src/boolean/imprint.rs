@@ -9,8 +9,9 @@
 //! a face only where the face's boundary crosses the other surface, so the
 //! cuts along it are those crossings and the boundary's stations on that
 //! surface (decided once, in `points`), taken by step 1's two half-open
-//! rules. On a line the cuts of one rule pair up in order; on a closed
-//! track (a circle or an ellipse) each cut says whether the track enters or
+//! rules. On an open track (a line or a conic, whose parameter runs along
+//! it one way) the cuts of one rule pair up in order; on a closed track (a
+//! circle or an ellipse) each cut says whether the track enters or
 //! leaves the face there, from the side of the other surface the boundary
 //! goes to and the way the track runs across the face. A closed track that
 //! no cut reaches lies wholly in the face or wholly out of it, decided at
@@ -632,7 +633,7 @@ enum Span {
     /// The whole closed track.
     Full,
     /// From cluster `lo.0` at parameter `lo.1` to `hi.0` at `hi.1`, along
-    /// the track's direction (on a line `lo.1 < hi.1`; on a closed track
+    /// the track's direction (on an open track `lo.1 < hi.1`; on a closed track
     /// the parameters as the track gives them, the span running from `lo`
     /// the way the parameter grows).
     Part { lo: End, hi: End },

@@ -37,7 +37,7 @@ use std::f64::consts::{FRAC_PI_2, FRAC_PI_8, PI};
 
 use glam::{DVec2, DVec3};
 
-use super::meet::Track;
+use super::meet::{self, Track};
 use super::planar::{point_segment, Bend};
 use super::quadric::{self, Quadric};
 use super::shape::{self, Face, Shape};
@@ -434,13 +434,17 @@ enum Bound {
     /// a stretch of a first chord turns less than a quarter turn: a chord's
     /// band is the sagitta of its arc.
     Arc(f64),
+    /// A conic track (design note 0012 §14), in a chart that keeps lengths:
+    /// the image's second derivative is at most `p / w³`, `w = √(1 − c t²)`
+    /// least over each stretch.
+    Conic { p: f64, c: f64 },
 }
 
 /// How a course is followed.
 #[derive(Clone, Copy)]
 enum Path<'a> {
-    /// A track (a circle or an ellipse, by angle), with a bound on its
-    /// image.
+    /// A track (a circle or an ellipse, by angle, or a conic), with a
+    /// bound on its image.
     Track(Track, Bound),
     /// A NURBS curve in a plane's chart.
     Nurbs(&'a Curve3),
@@ -464,16 +468,24 @@ impl Trace<'_> {
 
     /// Parameters dividing `[t0, t1]` into first chords: at most an
     /// eighth of a half turn each along a track (on a sphere, few enough
-    /// that each chord's image turns at most a quarter turn), two per
-    /// Bézier piece of a NURBS curve.
+    /// that each chord's image turns at most a quarter turn; on a conic, of
+    /// the turning of its tangent), two per Bézier piece of a NURBS curve.
     pub fn division(&self, t0: f64, t1: f64) -> Result<Vec<f64>, KernelError> {
         let mut out = vec![t0];
         match self.path {
+            Path::Track(_, Bound::Conic { c, .. }) => {
+                // A conic turns less than a half turn: at most eight.
+                let (f0, f1) = (meet::conic_turn(c, t0), meet::conic_turn(c, t1));
+                let n = ((f1 - f0).abs() / FRAC_PI_8).ceil().clamp(1.0, 8.0) as usize;
+                for k in 1..n {
+                    out.push(meet::conic_at_turn(c, f0 + (f1 - f0) * k as f64 / n as f64));
+                }
+            }
             Path::Track(track, bound) => {
                 let span = (t1 - t0).abs();
                 let n = match bound {
                     Bound::Steady(0.0) => 1.0,
-                    Bound::Steady(_) => (span / FRAC_PI_8).ceil(),
+                    Bound::Steady(_) | Bound::Conic { .. } => (span / FRAC_PI_8).ceil(),
                     Bound::Arc(kappa) => (span / FRAC_PI_8)
                         .ceil()
                         .max((kappa * self.chart_length(&track, t0, t1) / FRAC_PI_2).ceil()),
@@ -558,6 +570,24 @@ impl Bend for Trace<'_> {
     fn band(&self, t0: f64, t1: f64) -> f64 {
         let b = match self.path {
             Path::Track(_, Bound::Steady(m)) => m * (t1 - t0) * (t1 - t0) / 8.0,
+            Path::Track(track, Bound::Conic { p, c }) => {
+                // w is least at the greatest |t| on half an ellipse, else at
+                // the |t| nearest zero; the rounding of chart points grows
+                // with the stretch's reach from the vertex.
+                let (lo, hi) = (t0.min(t1), t0.max(t1));
+                let t = if c > 0.0 {
+                    lo.abs().max(hi.abs())
+                } else if lo <= 0.0 && hi >= 0.0 {
+                    0.0
+                } else {
+                    lo.abs().min(hi.abs())
+                };
+                let w = meet::conic_w(c, t);
+                let reach = (track.point(t0) - track.point(0.0))
+                    .length()
+                    .max((track.point(t1) - track.point(0.0)).length());
+                p / (w * w * w) * (t1 - t0) * (t1 - t0) / 8.0 + 1e-13 * reach
+            }
             Path::Track(_, Bound::Arc(kappa)) => {
                 // The sagitta of an arc of curvature κ less than a half turn
                 // over a chord of length 2h: h² κ / (1 + √(1 − (κ h)²)).
@@ -702,6 +732,14 @@ pub(super) fn trace<'a>(
             (Bound::Arc(kappa), o.abs().max_element() + 4.0 * big)
         }
         (Chart::Sphere { .. }, Track::Ellipse { .. }) => return Err(off_surface()),
+        (Chart::Plane(_) | Chart::Cone { .. }, Track::Conic { vertex, p, c, .. }) => {
+            (Bound::Conic { p, c }, vertex.abs().max_element())
+        }
+        (Chart::Cylinder { .. } | Chart::Sphere { .. }, Track::Conic { .. }) => {
+            return Err(KernelError::InvalidResult(
+                "boolean: a conic was traced on a surface it cannot lie on".into(),
+            ))
+        }
     };
     Ok(Some(Trace {
         chart: *chart,
