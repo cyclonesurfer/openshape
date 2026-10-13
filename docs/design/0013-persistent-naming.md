@@ -258,7 +258,7 @@ its face"), never a failure, since moving with the model is the point.
 4. Origins through booleans (design note 0012) and the split/merge
    qualifiers, then the bracket suite and the property tests.
 
-## 11. As built (steps 1 and 2, 2026-10-12)
+## 11. As built (steps 1 to 3, 2026-10-12 and 13)
 
 Steps 1 and 2 are done: ADR 0018 settles the origin tables and handles,
 and the `naming` crate names box, extrude and revolve bodies and
@@ -294,3 +294,13 @@ resolves references against them. Where building it refined this note:
   on the order of the profile's curves. Only where those also collide is
   the weak ordinal used.
 * `Split` qualifiers and `Kept` wrappers come with booleans (step 4).
+
+Step 3 (ADR 0019), model side, 2026-10-13: every part carries its names;
+a sketch can sit on a planar face and an extrude can end on a planar face
+parallel to its sketch, both carrier references resolved against the
+parts made before the feature. The region profile reports the sketch
+edge behind each curve, so side and cap names come from the same keys
+the regions are named by; inline profiles get made-up keys from the
+feature and the curve index. Hints are checked against a fine mesh
+within 0.1 mm until the kernel can classify points against trimmed
+faces (ADR 0019 §6). Picking in the viewport is the rest of step 3.

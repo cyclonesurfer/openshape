@@ -7,7 +7,7 @@ use opendatum_nurbs::NurbsCurve;
 
 use super::curve::Crv;
 use super::measure::{RegionShape, Side};
-use super::{RegionLoop, SketchArrangement};
+use super::{ProfileEdge, RegionLoop, SketchArrangement};
 use crate::{KernelError, ProfileCurve, Tolerance};
 
 fn bad(m: impl std::fmt::Display) -> KernelError {
@@ -148,13 +148,14 @@ fn trimmed(c: &ProfileCurve, t0: f64, t1: f64, fwd: bool) -> Result<ProfileCurve
 const PROFILE_SNAP: f64 = 10.0;
 
 /// The boundary of the union of `regions` as trimmed profile curves (outer
-/// loops counter-clockwise, holes clockwise, each loop in order).
+/// loops counter-clockwise, holes clockwise, each loop in order), each with
+/// the arrangement edge it is a piece of.
 pub(super) fn region_profile(
     a: &SketchArrangement,
     curves: &[ProfileCurve],
     regions: &[usize],
     tol: &Tolerance,
-) -> Result<Vec<ProfileCurve>, KernelError> {
+) -> Result<Vec<(ProfileCurve, ProfileEdge)>, KernelError> {
     if regions.is_empty() {
         return Err(bad("no region selected"));
     }
@@ -247,20 +248,25 @@ pub(super) fn region_profile(
             }
             h = n;
         }
-        let sides: Vec<Side> = lp
+        let sides: Vec<(Side, ProfileEdge)> = lp
             .iter()
             .map(|&h| {
                 let e = &a.edges[h / 2];
-                Side {
+                let side = Side {
                     curve: e.curve,
                     t0: e.t0,
                     t1: e.t1,
                     fwd: h % 2 == 0,
-                }
+                };
+                let edge = ProfileEdge {
+                    edge: h / 2,
+                    forward: h % 2 == 0,
+                };
+                (side, edge)
             })
             .collect();
-        for sd in resolve_loop(&crvs, sides, snap)? {
-            out.push(trimmed(&curves[sd.curve], sd.t0, sd.t1, sd.fwd)?);
+        for (sd, edge) in resolve_loop(&crvs, sides, snap)? {
+            out.push((trimmed(&curves[sd.curve], sd.t0, sd.t1, sd.fwd)?, edge));
         }
     }
     if out.is_empty() {
@@ -325,15 +331,19 @@ fn split_point(crvs: &[Crv], sd: &Side) -> (f64, f64) {
 /// are left out, or a longer chain of tiny pieces) is
 /// [`KernelError::InvalidInput`]: leaving it out could change the region
 /// by more than the resolution.
-fn resolve_loop(crvs: &[Crv], lp: Vec<Side>, snap: f64) -> Result<Vec<Side>, KernelError> {
+fn resolve_loop<T: Copy>(
+    crvs: &[Crv],
+    lp: Vec<(Side, T)>,
+    snap: f64,
+) -> Result<Vec<(Side, T)>, KernelError> {
     let n = lp.len();
     let tiny: Vec<bool> = lp
         .iter()
-        .map(|sd| reach(crvs, sd, sd.start(crvs)) <= snap)
+        .map(|(sd, _)| reach(crvs, sd, sd.start(crvs)) <= snap)
         .collect();
     let near = |p: DVec2| format!("({:.9}, {:.9})", p.x, p.y);
     if tiny.iter().all(|&t| t) {
-        let p = lp[0].start(crvs);
+        let p = lp[0].0.start(crvs);
         return Err(bad(format!(
             "a boundary loop of the selected regions near {} is smaller than the profile \
              resolution ({snap:e})",
@@ -354,9 +364,9 @@ fn resolve_loop(crvs: &[Crv], lp: Vec<Side>, snap: f64) -> Result<Vec<Side>, Ker
         while len < n && tiny[(k + len) % n] {
             len += 1;
         }
-        let p = lp[k].start(crvs);
-        let last = &lp[(k + len - 1) % n];
-        let within = (0..len).all(|j| reach(crvs, &lp[(k + j) % n], p) <= 2.0 * snap);
+        let p = lp[k].0.start(crvs);
+        let last = &lp[(k + len - 1) % n].0;
+        let within = (0..len).all(|j| reach(crvs, &lp[(k + j) % n].0, p) <= 2.0 * snap);
         if !within || (last.end(crvs) - p).length() > snap {
             return Err(bad(format!(
                 "boundary edges of the selected regions near {} are shorter than the profile \
@@ -373,10 +383,10 @@ fn resolve_loop(crvs: &[Crv], lp: Vec<Side>, snap: f64) -> Result<Vec<Side>, Ker
     // starts (two arcs a little longer than the resolution crossing at a
     // narrow angle, once a short third side is left out): too small for the
     // builder as a whole.
-    let p = lp[first].start(crvs);
+    let p = lp[first].0.start(crvs);
     if (0..n)
         .filter(|&i| keep[i])
-        .all(|i| reach(crvs, &lp[i], p) <= 2.0 * snap)
+        .all(|i| reach(crvs, &lp[i].0, p) <= 2.0 * snap)
     {
         return Err(bad(format!(
             "a boundary loop of the selected regions near {} is smaller than the profile \
@@ -385,7 +395,7 @@ fn resolve_loop(crvs: &[Crv], lp: Vec<Side>, snap: f64) -> Result<Vec<Side>, Ker
         )));
     }
     let mut out = Vec::with_capacity(n + 1);
-    for (sd, kept) in lp.into_iter().zip(keep) {
+    for ((sd, t), kept) in lp.into_iter().zip(keep) {
         if !kept {
             continue;
         }
@@ -401,12 +411,12 @@ fn resolve_loop(crvs: &[Crv], lp: Vec<Side>, snap: f64) -> Result<Vec<Side>, Ker
             }
             let (a, b) = (Side { t1: m, ..sd }, Side { t0: m, ..sd });
             if sd.fwd {
-                out.extend([a, b]);
+                out.extend([(a, t), (b, t)]);
             } else {
-                out.extend([b, a]);
+                out.extend([(b, t), (a, t)]);
             }
         } else {
-            out.push(sd);
+            out.push((sd, t));
         }
     }
     Ok(out)

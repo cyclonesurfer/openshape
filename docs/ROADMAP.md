@@ -40,7 +40,7 @@ item is delivered in the phase noted.
 - [ ] Curve/curve, curve/surface, surface/surface intersection (design note 0011 written)
 - [ ] Robust booleans; fuzzing; `|A∪B| = |A|+|B|−|A∩B|` property test; failure-rate metric in CI (design note 0012 written)
 - [ ] Incremental regeneration engine (`regen`): dependency graph, caching, cancellation, error propagation
-- [ ] Persistent naming (`naming`) with reorder/suppress/pattern-count tests (design note 0013; kernel origin tables (ADR 0018) and the `naming` crate for box, extrude and revolve done; references from features, split/merge through booleans and the reorder/suppress/pattern tests to come)
+- [ ] Persistent naming (`naming`) with reorder/suppress/pattern-count tests (design note 0013; kernel origin tables (ADR 0018), the `naming` crate for box, extrude and revolve, and the first references from features (sketch on a planar face, extrude up to a parallel face; ADR 0019) done; viewport picking, split/merge through booleans and the reorder/suppress/pattern tests to come)
 - [ ] Hole, patterns, mirror, construction planes
 - [ ] Milestone: a real bracket survives upstream edits with no broken references
 
@@ -93,6 +93,7 @@ item is delivered in the phase noted.
 Sketch tools
 - [ ] Lines ✔, arcs (3-point ✔, tangent ✔, center ✔), circles ✔, ellipses and elliptical arcs ✔ (with trim/extend/split ✔), splines (through-point ✔, control-point ✔, smooth closed ✔), conics ✔ (with trim/extend/split ✔), rectangles (corner ✔, center ✔, aligned ✔), polygons ✔, slots ✔, points ✔
 - [ ] Construction geometry ✔, text ✔ (one line, six bundled faces), curvature combs ✔, image tracing
+- [ ] Sketch planes: standard planes ✔, planar faces of parts (in the model ✔; picking in the viewport to come), construction planes
 - [ ] Use/project/convert, offset ✔, trim ✔, extend ✔, split ✔, sketch fillet ✔, mirror ✔, linear/circular sketch patterns ✔, transform (move/rotate/scale, copy) ✔, intersection curves
 
 Sketch constraints
@@ -101,7 +102,7 @@ Sketch constraints
 - [x] Inference while drawing (horizontal/vertical, parallel, perpendicular, tangent; point, curve and origin snaps); colour-coded DOF state
 
 Features
-- [ ] Extrude: blind ✔, symmetric ✔, from picked sketch regions ✔, up-to, through-all, draft, second direction, thin
+- [ ] Extrude: blind ✔, symmetric ✔, from picked sketch regions ✔, up-to (a parallel planar face in the model ✔; the dialog, and other faces with surface intersection, to come), through-all, draft, second direction, thin
 - [ ] Revolve (full/partial ✔, about a sketch line ✔; up-to and two-direction pending)
 - [ ] Sweep: guides, twist, profile control
 - [ ] Loft: guides, end conditions, connections

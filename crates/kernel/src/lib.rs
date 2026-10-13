@@ -24,8 +24,8 @@ mod topo;
 use std::sync::Arc;
 
 pub use arrangement::{
-    ArrangementEdge, ArrangementVertex, CurvatureSample, CurveContact, Region, RegionLoop,
-    SketchArrangement,
+    ArrangementEdge, ArrangementVertex, CurvatureSample, CurveContact, ProfileEdge, Region,
+    RegionLoop, SketchArrangement,
 };
 pub use geom::SurfaceKind;
 pub use glam::{DMat4, DVec2, DVec3};
@@ -99,6 +99,15 @@ pub struct FaceMesh {
     pub normals: Vec<DVec3>,
     /// Counter-clockwise (outward) triangles.
     pub triangles: Vec<[u32; 3]>,
+}
+
+/// The plane a planar face lies in, see [`Kernel::face_plane`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FacePlane {
+    /// A point of the plane (not necessarily of the face).
+    pub point: DVec3,
+    /// The face's outward unit normal.
+    pub normal: DVec3,
 }
 
 /// Display/export mesh of a body: one mesh per face plus edge polylines.
@@ -237,6 +246,11 @@ pub trait Kernel: Send + Sync {
     /// which edges are seams.
     fn adjacency(&self, body: &Self::Body) -> Adjacency;
 
+    /// The plane of a face whose surface is a plane (see
+    /// [`Kernel::face_kinds`]), with the face's outward normal; `None` for
+    /// a face of any other kind or an index past the body's faces.
+    fn face_plane(&self, body: &Self::Body, face: FaceIx) -> Option<FacePlane>;
+
     /// The planar arrangement of sketch curves: vertices, edges and bounded
     /// regions (design note 0006).
     fn sketch_regions(&self, curves: &[ProfileCurve]) -> Result<SketchArrangement, KernelError>;
@@ -249,6 +263,17 @@ pub trait Kernel: Send + Sync {
         curves: &[ProfileCurve],
         regions: &[usize],
     ) -> Result<Vec<ProfileCurve>, KernelError>;
+
+    /// [`Kernel::region_profile`] with, beside each curve, the arrangement
+    /// edge it is a piece of and the direction the profile runs along it
+    /// (an edge cut in two gives two consecutive curves of one edge): how
+    /// features name the faces swept from the profile.
+    fn region_profile_edges(
+        &self,
+        arrangement: &SketchArrangement,
+        curves: &[ProfileCurve],
+        regions: &[usize],
+    ) -> Result<Vec<(ProfileCurve, ProfileEdge)>, KernelError>;
 
     /// The region of `arrangement` containing `point` (at least the model
     /// tolerance inside it), if any: for picking regions and for re-finding
@@ -425,6 +450,13 @@ impl Kernel for BrepKernel {
         }
     }
 
+    fn face_plane(&self, body: &Body, face: FaceIx) -> Option<FacePlane> {
+        let f = body.brep.faces.get(face.0 as usize)?;
+        let (point, n) = f.surface.plane()?;
+        let normal = if f.forward { n } else { -n };
+        Some(FacePlane { point, normal })
+    }
+
     fn sketch_regions(&self, curves: &[ProfileCurve]) -> Result<SketchArrangement, KernelError> {
         arrangement::arrange(curves, &self.tol)
     }
@@ -436,6 +468,15 @@ impl Kernel for BrepKernel {
         regions: &[usize],
     ) -> Result<Vec<ProfileCurve>, KernelError> {
         arrangement::region_profile_with_tolerance(arrangement, curves, regions, &self.tol)
+    }
+
+    fn region_profile_edges(
+        &self,
+        arrangement: &SketchArrangement,
+        curves: &[ProfileCurve],
+        regions: &[usize],
+    ) -> Result<Vec<(ProfileCurve, ProfileEdge)>, KernelError> {
+        arrangement::region_profile_edges_with_tolerance(arrangement, curves, regions, &self.tol)
     }
 
     fn region_containing(

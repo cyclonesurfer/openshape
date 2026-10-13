@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use egui::Pos2;
+use opendatum_core_model::naming::Reference;
 use opendatum_core_model::units::{LengthUnit, Quantity};
 use opendatum_core_model::{
     DVec2, Feature, FeatureEntry, FeatureId, ProfileSource, RegionKey, RevolveAxis, SketchId,
@@ -48,6 +49,9 @@ pub struct ProfilePick {
     pub distance: String,
     /// Extrude to both sides.
     pub symmetric: bool,
+    /// End the extrude at the plane of this face instead of the distance
+    /// (ADR 0019).
+    pub up_to: Option<Box<Reference>>,
     /// Revolve angle as typed (bare numbers are degrees).
     pub angle: String,
     /// Why the last OK failed.
@@ -70,6 +74,7 @@ impl ProfilePick {
             picking_axis: false,
             distance: "10".into(),
             symmetric: false,
+            up_to: None,
             angle: "360".into(),
             error: None,
             hover: None,
@@ -87,11 +92,13 @@ impl ProfilePick {
                 profile: ProfileSource::Sketch { sketch, regions },
                 distance,
                 symmetric,
+                up_to,
             } => ProfilePick {
                 sketch: Some(*sketch),
                 regions: regions.clone(),
                 distance: mm(*distance),
                 symmetric: *symmetric,
+                up_to: up_to.clone(),
                 ..ProfilePick::new(SweepKind::Extrude)
             },
             Feature::Revolve {
@@ -233,6 +240,7 @@ impl ProfilePick {
                     profile,
                     distance,
                     symmetric: self.symmetric,
+                    up_to: self.up_to.clone(),
                 })
             }
             SweepKind::Revolve => {

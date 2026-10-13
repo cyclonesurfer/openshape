@@ -8,7 +8,7 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use opendatum_kernel::{
     Body, BrepKernel, DVec2, DVec3, EdgeOrigin, ExtrudeSpec, FaceIx, FaceOrigin, Frame, Kernel,
     Origins, PieceEnd, Profile, ProfileCurve, ProfilePiece, ProfileVertex, RevolveSpec,
-    TessellationOptions, VertexOrigin,
+    SurfaceKind, TessellationOptions, VertexOrigin,
 };
 
 fn k() -> BrepKernel {
@@ -150,7 +150,41 @@ fn region_of(o: &Origins, piece: ProfilePiece) -> u32 {
 }
 
 /// Every check of ADR 0018's consequences on one body.
+/// Every planar face has a plane (and no other face has one) that its
+/// mesh lies on, with the normal of its outward-wound triangles.
+fn check_planes(b: &Body) {
+    let kern = k();
+    let mesh = kern.tessellate(b, &TessellationOptions::default()).unwrap();
+    let kinds = kern.face_kinds(b);
+    for (i, fm) in mesh.faces.iter().enumerate() {
+        let plane = kern.face_plane(b, FaceIx(i as u32));
+        let Some(plane) = plane else {
+            assert_ne!(kinds[i], SurfaceKind::Plane, "face {i} has no plane");
+            continue;
+        };
+        assert_eq!(kinds[i], SurfaceKind::Plane, "face {i}");
+        assert!((plane.normal.length() - 1.0).abs() < 1e-12);
+        let mut area = DVec3::ZERO;
+        for t in &fm.triangles {
+            let [a, b, c] = t.map(|j| fm.positions[j as usize]);
+            area += (b - a).cross(c - a);
+        }
+        for q in &fm.positions {
+            let off = (*q - plane.point).dot(plane.normal).abs();
+            assert!(off < 1e-9, "face {i}: a mesh point is {off} off its plane");
+        }
+        let area_n = area.normalize();
+        assert!(
+            (area_n - plane.normal).length() < 1e-9,
+            "face {i}: outward {area_n} vs plane normal {}",
+            plane.normal
+        );
+    }
+    assert_eq!(kern.face_plane(b, FaceIx(mesh.faces.len() as u32)), None);
+}
+
 fn check(p: &Profile, sweep: Sweep, b: &Body) {
+    check_planes(b);
     let kern = k();
     let o = kern.origins(b);
     let t = kern.topology(b);

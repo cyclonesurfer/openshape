@@ -373,6 +373,36 @@ impl Surface {
         }
     }
 
+    /// For a surface of kind [`SurfaceKind::Plane`], a point of the plane
+    /// and the unit direction of `S_u × S_v` (the same at every regular
+    /// point); `None` for every other kind.
+    pub fn plane(&self) -> Option<(DVec3, DVec3)> {
+        if self.kind() != SurfaceKind::Plane {
+            return None;
+        }
+        match self {
+            Surface::Plane(f) => Some((f.origin, f.x.cross(f.y).normalize())),
+            Surface::Extrusion {
+                curve: Curve3::Line { origin, dir: along },
+                dir,
+                ..
+            } => {
+                let n = along.cross(*dir);
+                (n.length() > 0.0).then(|| (*origin, n.normalize()))
+            }
+            // The profile is a line perpendicular to the axis in the x/z
+            // half-plane (ρ ≥ 0): S_u × S_v = −ρ ρ' z, with ρ' = dir · x.
+            Surface::Revolution {
+                frame,
+                profile: Curve3::Line { origin, dir },
+            } => {
+                let drho = dir.dot(frame.x);
+                (drho != 0.0).then(|| (*origin, -frame.z * drho.signum()))
+            }
+            _ => None,
+        }
+    }
+
     /// The analytic kind of this surface.
     pub fn kind(&self) -> SurfaceKind {
         match self {
@@ -426,6 +456,61 @@ mod tests {
         let p = s.point(u, v);
         let (pu, pv) = s.project(p);
         assert!((s.point(pu, pv) - p).length() < 1e-9);
+    }
+
+    #[test]
+    fn planes_have_the_normal_of_their_derivatives() {
+        let check = |s: &Surface, samples: &[(f64, f64)]| {
+            let (o, n) = s.plane().expect("planar");
+            for &(u, v) in samples {
+                let p = s.point(u, v);
+                assert!((p - o).dot(n).abs() < 1e-12, "{p} off the plane");
+                let m = s.normal(u, v).unwrap();
+                assert!((m - n).length() < 1e-12, "{m} vs {n}");
+            }
+        };
+        let frame = Frame::from_normal(
+            DVec3::new(1.0, -2.0, 0.5),
+            DVec3::new(1.0, 2.0, 3.0),
+            DVec3::X,
+        );
+        check(&Surface::Plane(frame), &[(0.0, 0.0), (1.5, -2.0)]);
+        let flipped = Frame {
+            y: -frame.y,
+            ..frame
+        };
+        check(&Surface::Plane(flipped), &[(0.3, 0.7)]);
+        for along in [DVec3::new(1.0, 1.0, 0.0), DVec3::new(-2.0, 0.5, 0.0)] {
+            let s = Surface::Extrusion {
+                curve: Curve3::Line {
+                    origin: DVec3::new(0.5, 0.0, 0.0),
+                    dir: along,
+                },
+                dir: DVec3::new(0.0, 0.0, 2.0),
+                base_origin: DVec3::ZERO,
+                base_normal: DVec3::Z,
+            };
+            check(&s, &[(0.0, 0.0), (0.4, 1.0), (1.0, -0.5)]);
+        }
+        // Discs and annuli of a revolve, profile running out or in.
+        for (start, dir) in [(0.0, 2.0), (3.0, -1.5), (1.0, 1.0)] {
+            let s = Surface::Revolution {
+                frame,
+                profile: Curve3::Line {
+                    origin: frame.origin + frame.x * start + frame.z * 0.75,
+                    dir: frame.x * dir,
+                },
+            };
+            check(&s, &[(0.2, 0.5), (2.5, 0.9), (5.0, 0.1)]);
+        }
+        let cylinder = Surface::Revolution {
+            frame,
+            profile: Curve3::Line {
+                origin: frame.origin + frame.x,
+                dir: frame.z,
+            },
+        };
+        assert_eq!(cylinder.plane(), None);
     }
 
     #[test]

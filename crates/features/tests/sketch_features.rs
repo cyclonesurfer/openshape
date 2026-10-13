@@ -165,6 +165,7 @@ fn extrude(s: &mut Session, sketch: FeatureId, regions: Vec<RegionKey>, d: f64) 
             profile: ProfileSource::Sketch { sketch, regions },
             distance: d * MM,
             symmetric: false,
+            up_to: None,
         },
     )
 }

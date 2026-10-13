@@ -1,15 +1,17 @@
 # OpenDatum status
 
-Updated 2026-10-12. Phase 2 (sketcher) is done but for the tools that
+Updated 2026-10-13. Phase 2 (sketcher) is done but for the tools that
 need model faces (project/convert, intersection curves, pierce). Phase 3
 has begun: the design notes for intersections (0011), booleans (0012)
 and persistent naming (0013) are written; every region of the random
 sketch tests extrudes, slivers included, with mass properties exact to
-rounding; and the first two steps of persistent naming are built: the
-kernel's origin tables (ADR 0018) and the `opendatum-naming` crate,
+rounding; and persistent naming is built through its first references:
+the kernel's origin tables (ADR 0018), the `opendatum-naming` crate,
 which names the faces, edges and vertices of boxes, extrudes and
-revolves as the user sees them and resolves stored references. Next:
-sketch on a face and extrude up to a face with picking, then booleans.
+revolves as the user sees them and resolves stored references, and in
+the model a sketch on a planar face and an extrude up to a parallel
+face (ADR 0019). Next: picking faces, edges and vertices in the
+viewport for those, then booleans.
 The product is now named OpenDatum (ADR 0017): packages `opendatum-*`,
 binary `opendatum`, documents `.odatum`; documents saved under the old
 name open unchanged.
@@ -85,6 +87,15 @@ name open unchanged.
   solved and their regions computed during regeneration; extrude and revolve
   take their profile from picked sketch regions, which are named
   topologically and re-found after sketch edits (design note 0006 §5).
+  Every part carries the names of its faces, edges and vertices, and
+  features refer to earlier parts through them (ADR 0019): a sketch on a
+  planar face gets a frame from the plane alone (seen from outside, the
+  standard planes' frames on faces parallel to them, upright on faces
+  that face sideways) and follows the face through upstream edits; an
+  extrude ends on a planar face parallel to its sketch. A reference to a
+  part that is gone, suppressed or later, to a face that no longer
+  exists, is curved, or is not parallel, fails the feature with a
+  message saying which; a body that cannot be named gets a warning.
 - **Persistent names** (`opendatum-naming`, design note 0013 §11): names
   for the faces, edges and vertices of box, extrude and revolve bodies as
   the user sees them, made from the origin tables and the sketch keys of
@@ -103,7 +114,8 @@ name open unchanged.
   oracle (which faces an edge or vertex touches, which curve a side lies
   on, which end a cap is at and which region it covers), names unchanged
   by dimensions, curve order and revolve angles across π, and each
-  resolution rule. Nothing references model geometry through them yet.
+  resolution rule. Sketches on faces and extrudes up to faces resolve
+  through them (see Features).
 - **Sketch solver** (`opendatum-sketch-solver`, on the deterministic
   `opendatum-linalg`): points, lines, circles, arcs, through-point and
   control-point splines, open or smooth closed (ADR 0016: the periodic
@@ -546,6 +558,18 @@ name open unchanged.
   passed with every region's mass to 1e-10, no fallback; it refused 313
   unresolvable perturbed inputs, 18 loops below resolution and 44
   pinched profiles (the cases are random per run).
+- References from features (ADR 0019), model side, 2026-10-13, on Mesa
+  lavapipe: fmt, clippy with `-D warnings`, 863 tests and `cargo deny`
+  pass. Every arrangement test region's profile now also checks the
+  sketch edge reported for each curve (each curve spans its edge, runs
+  with the selection on its left, every boundary edge reported once);
+  every origin test body checks its face planes against its
+  outward-wound mesh; the reference tests (10) cover box faces, caps and
+  sides of sketch extrudes and inline cylinders, a face in two pieces,
+  edits that move, redraw or remove the referenced face, suppression,
+  reordering and deletion, and a document saved before the change. The
+  text and sketch tests, which now name every part they make, all named
+  without a warning.
 - Origin tables and persistent names, 2026-10-12, on Mesa lavapipe:
   fmt, clippy with `-D warnings`, 851 tests and `cargo deny` pass. The
   origin tables pass
@@ -728,10 +752,15 @@ name open unchanged.
   can call a sketch conflicting although another branch would satisfy it.
 - No booleans: each feature makes its own part (Phase 3; design notes
   0011 and 0012 are the plan).
-- No feature references model geometry yet: names and resolution exist
-  for box, extrude and revolve bodies (design note 0013 §11), but sketch
-  on a face and extrude up to a face, the first references, come next,
-  so nothing can break on upstream edits today. A cap reference survives
+- References to model geometry (ADR 0019) exist in the model but not
+  yet in the application: a sketch on a planar face and an extrude up to
+  a face can be stored and regenerate, but the viewport cannot pick
+  faces yet (next). Up to a face works only for a planar face parallel
+  to the sketch; others fail with a message until surface intersection
+  exists. A sketch on a face that tilts through 45° between facing up
+  and facing sideways turns with the frame rule (ADR 0019 §2). Hints are
+  checked against a mesh within 0.1 mm, so ties between pieces of an
+  entity finer than that fail as ambiguous. A cap reference survives
   sketch edits while the feature's stored region key finds its region;
   once a region is selected anew with other boundary curves (a region
   cut in two, say), references to its caps fail rather than guess.
@@ -743,12 +772,12 @@ name open unchanged.
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Phase 3, in the order the design notes give: sketch on a face and
-   extrude up to a face, with picking of faces, edges and vertices in the
-   viewport (design note 0013 §10 step 3): the features crate maps each
-   profile curve to its sketch edge (the region profile reporting each
-   curve's arrangement edge) and keeps every body's names for the UI.
-   Then the boolean pipeline end to end on polyhedral solids with
+2. Phase 3, in the order the design notes give: the rest of design note
+   0013 §10 step 3, picking faces, edges and vertices in the viewport
+   (ADR 0019 consequences: vertex, then edge, then face within a few
+   pixels, with hover), a sketch started on a picked face, and "Up to
+   face" in the extrude dialog, with UI tests and screenshots. Then the
+   boolean pipeline end to end on polyhedral solids with
    plane/plane intersections and the volume identities (0012 §8, 0011
    §8). The rest of the Phase 2 sketcher (project/convert, intersection
    curves, pierce) needs Phase 3 faces.

@@ -43,6 +43,7 @@ fn failed_feature_does_not_stop_later_features() {
             }),
             distance: 0.01,
             symmetric: false,
+            up_to: None,
         },
     );
     let c = insert(

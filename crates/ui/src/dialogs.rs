@@ -153,6 +153,7 @@ impl FeatureDialog {
                 profile: ProfileSource::Inline(profile),
                 distance,
                 symmetric,
+                up_to: None,
             } => match profile.curves.as_slice() {
                 [CurveDef::Circle { center, radius }] => {
                     let mut d = Self::new(Template::Cylinder);
@@ -232,6 +233,7 @@ impl FeatureDialog {
                 }),
                 distance: self.length(1)?,
                 symmetric: self.flag(4),
+                up_to: None,
             },
             Template::Plate => {
                 let (w, d) = (self.length(0)? / 2.0, self.length(1)? / 2.0);
@@ -258,6 +260,7 @@ impl FeatureDialog {
                     }),
                     distance: self.length(2)?,
                     symmetric: false,
+                    up_to: None,
                 }
             }
             Template::Ring => Feature::Revolve {

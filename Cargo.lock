@@ -2382,6 +2382,7 @@ version = "0.1.0"
 dependencies = [
  "opendatum-core-model",
  "opendatum-kernel",
+ "opendatum-naming",
  "opendatum-oplog",
  "opendatum-sketch-solver",
  "opendatum-text",

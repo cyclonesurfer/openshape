@@ -10,6 +10,7 @@ authors.workspace = true
 [dependencies]
 opendatum-core-model.workspace = true
 opendatum-kernel.workspace = true
+opendatum-naming.workspace = true
 opendatum-sketch-solver.workspace = true
 
 [dev-dependencies]

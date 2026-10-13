@@ -14,6 +14,7 @@ pub mod sketch;
 pub mod units;
 
 pub use glam::{DVec2, DVec3};
+use naming::Reference;
 pub use opendatum_oplog::{Op, OpId, OpKind, OpLog, OpLogError, ReplicaId};
 use serde::{Deserialize, Serialize};
 pub use sketch::{RegionKey, SketchData, SketchDef, SketchEdit, SketchId};
@@ -27,7 +28,7 @@ pub struct ElementId(pub OpId);
 pub struct FeatureId(pub OpId);
 
 /// A sketch/profile plane.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PlaneRef {
     /// World XY (normal +Z).
     Top,
@@ -44,6 +45,9 @@ pub enum PlaneRef {
         /// In-plane x direction hint.
         x_dir: DVec3,
     },
+    /// The plane of a planar face of an earlier feature's body, seen from
+    /// outside the body (ADR 0019): a [`naming::Use::Carrier`] reference.
+    Face(Box<Reference>),
 }
 
 /// One curve of a feature profile, in plane coordinates (metres/radians).
@@ -139,10 +143,15 @@ pub enum Feature {
     Extrude {
         /// Profile.
         profile: ProfileSource,
-        /// Signed distance along the plane normal.
+        /// Signed distance along the plane normal; not used while
+        /// `up_to` is set (the face gives the distance).
         distance: f64,
-        /// Extrude half to each side.
+        /// Extrude half to each side (never with `up_to`).
         symmetric: bool,
+        /// End at the plane of this face of an earlier feature's body
+        /// instead (ADR 0019): a [`naming::Use::Carrier`] reference.
+        #[serde(default)]
+        up_to: Option<Box<Reference>>,
     },
     /// Rotational sweep of a profile about an in-plane axis.
     Revolve {

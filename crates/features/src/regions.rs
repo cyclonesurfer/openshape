@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use opendatum_core_model::sketch::{EdgeKey, VertexKey};
 use opendatum_core_model::{RegionKey, SketchId};
-use opendatum_kernel::{Kernel, RegionLoop, SketchArrangement};
+use opendatum_kernel::{Kernel, ProfileEdge, RegionLoop, SketchArrangement};
 
 use crate::SketchRegions;
 
@@ -114,6 +114,46 @@ fn vertex_keys(
         .collect()
 }
 
+/// The key of each arrangement edge of a region profile (in the direction
+/// the profile runs along it), as [`region_keys`] names the same edge in
+/// the loops of the regions it bounds: the sketch edge behind each curve
+/// of [`Kernel::region_profile_edges`].
+pub fn edge_keys(
+    arrangement: &SketchArrangement,
+    owners: &[SketchId],
+    edges: &[ProfileEdge],
+) -> Vec<EdgeKey> {
+    let parts = parts_of(owners);
+    let vertices = vertex_keys(arrangement, owners, &parts);
+    edges
+        .iter()
+        .map(|e| edge_key(arrangement, owners, &parts, &vertices, e.edge, e.forward))
+        .collect()
+}
+
+fn edge_key(
+    arrangement: &SketchArrangement,
+    owners: &[SketchId],
+    parts: &[u32],
+    vertices: &[VertexKey],
+    e: usize,
+    forward: bool,
+) -> EdgeKey {
+    let edge = &arrangement.edges[e];
+    let (from, to) = if forward {
+        (edge.start, edge.end)
+    } else {
+        (edge.end, edge.start)
+    };
+    EdgeKey {
+        entity: owners[edge.curve],
+        forward,
+        from: vertices[from].clone(),
+        to: vertices[to].clone(),
+        part: parts[edge.curve],
+    }
+}
+
 fn loop_key(
     l: &RegionLoop,
     arrangement: &SketchArrangement,
@@ -124,21 +164,7 @@ fn loop_key(
     let mut keys: Vec<EdgeKey> = l
         .edges
         .iter()
-        .map(|&(e, forward)| {
-            let edge = &arrangement.edges[e];
-            let (from, to) = if forward {
-                (edge.start, edge.end)
-            } else {
-                (edge.end, edge.start)
-            };
-            EdgeKey {
-                entity: owners[edge.curve],
-                forward,
-                from: vertices[from].clone(),
-                to: vertices[to].clone(),
-                part: parts[edge.curve],
-            }
-        })
+        .map(|&(e, forward)| edge_key(arrangement, owners, parts, vertices, e, forward))
         .collect();
     // Canonical rotation: start at the smallest key.
     if let Some(start) = (0..keys.len()).min_by(|&a, &b| keys[a].cmp(&keys[b])) {

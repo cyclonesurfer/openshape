@@ -303,6 +303,7 @@ fn setup(content: &str, font: Font, h: f64) -> (Session, FeatureId, Placed, Feat
             },
             distance: 2.0 * MM,
             symmetric: false,
+            up_to: None,
         },
     );
     let area = ink_area(&lay_out(content, font).unwrap()) * (h * MM).powi(2);

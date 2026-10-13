@@ -381,9 +381,99 @@ pub fn volume(b: &Body) -> f64 {
     k().mass_properties(b, 1e-10).unwrap().volume
 }
 
+/// The profile of the union of `sel` from [`Kernel::region_profile_edges`],
+/// checked against [`Kernel::region_profile`] and the arrangement: every
+/// curve is the piece of its reported edge between the edge's own ends
+/// (or one of two consecutive halves of it), runs with the union on its
+/// left, and every boundary edge is reported once, unless it stays within
+/// twice the profile builder's resolution of its start (such runs may be
+/// left out).
+pub fn region_profile_checked(
+    curves: &[ProfileCurve],
+    a: &SketchArrangement,
+    sel: &[usize],
+) -> Result<Vec<ProfileCurve>, KernelError> {
+    let kern = k();
+    let tagged = kern.region_profile_edges(a, curves, sel);
+    let plain = kern.region_profile(a, curves, sel);
+    let tagged = match (tagged, plain) {
+        (Ok(t), Ok(p)) => {
+            let curves_of: Vec<ProfileCurve> = t.iter().map(|(c, _)| c.clone()).collect();
+            assert_eq!(curves_of, p, "the two profiles differ");
+            t
+        }
+        (Err(a), Err(b)) => {
+            assert_eq!(a, b, "the two profiles fail differently");
+            return Err(a);
+        }
+        (t, p) => panic!("one profile failed: {:?} vs {:?}", t.err(), p.err()),
+    };
+    let chosen: HashSet<usize> = sel.iter().copied().collect();
+    let is_sel = |r: Option<usize>| r.is_some_and(|r| chosen.contains(&r));
+    let close = |p: DVec2, q: DVec2| (p - q).length() <= 1e-9 * (1.0 + p.length());
+    let ends = |c: &ProfileCurve| {
+        let (t0, t1) = domain(c);
+        (curve_point(c, t0), curve_point(c, t1))
+    };
+    let mut seen: HashMap<usize, usize> = HashMap::new();
+    let mut i = 0;
+    while i < tagged.len() {
+        let (c, pe) = &tagged[i];
+        let e = &a.edges[pe.edge];
+        let (left, right) = if pe.forward {
+            (e.left, e.right)
+        } else {
+            (e.right, e.left)
+        };
+        assert!(
+            is_sel(left) && !is_sel(right),
+            "edge {} is not a boundary edge run with the union on its left",
+            pe.edge
+        );
+        let src = &curves[e.curve];
+        let (from, to) = if pe.forward {
+            (curve_point(src, e.t0), curve_point(src, e.t1))
+        } else {
+            (curve_point(src, e.t1), curve_point(src, e.t0))
+        };
+        let halves = i + 1 < tagged.len() && tagged[i + 1].1 == *pe;
+        let (s, mut t) = ends(c);
+        if halves {
+            let (s2, t2) = ends(&tagged[i + 1].0);
+            assert!(close(t, s2), "the halves of edge {} do not meet", pe.edge);
+            t = t2;
+        }
+        assert!(
+            close(s, from) && close(t, to),
+            "curve {i} does not span edge {} ({s:?}..{t:?} vs {from:?}..{to:?})",
+            pe.edge
+        );
+        *seen.entry(pe.edge).or_default() += 1;
+        i += if halves { 2 } else { 1 };
+    }
+    let snap = 10.0 * tol();
+    for (ix, e) in a.edges.iter().enumerate() {
+        let boundary = is_sel(e.left) != is_sel(e.right);
+        let n = seen.get(&ix).copied().unwrap_or(0);
+        if !boundary {
+            assert_eq!(n, 0, "edge {ix} is not a boundary edge but was reported");
+            continue;
+        }
+        let samples = piece_samples(&curves[e.curve], e.t0, e.t1, true, 64);
+        let tiny = samples
+            .iter()
+            .all(|p| (*p - samples[0]).length() <= 2.0 * snap);
+        assert!(
+            n == 1 || (n == 0 && tiny),
+            "boundary edge {ix} was reported {n} times"
+        );
+    }
+    Ok(tagged.into_iter().map(|(c, _)| c).collect())
+}
+
 /// Extrudes the union of `sel` and checks volume = area × height.
 pub fn extrude_region(curves: &[ProfileCurve], a: &SketchArrangement, sel: &[usize]) {
-    let prof = k().region_profile(a, curves, sel).unwrap();
+    let prof = region_profile_checked(curves, a, sel).unwrap();
     let area: f64 = sel.iter().map(|&r| a.regions[r].area).sum();
     let h = area.sqrt().max(1e-6);
     let body = extrude_profile(&prof, h);
@@ -519,7 +609,7 @@ pub fn extrude_all(curves: &[ProfileCurve], a: &SketchArrangement) -> usize {
 pub fn extrude_all_within(curves: &[ProfileCurve], a: &SketchArrangement, gap: f64) -> usize {
     let mut n = 0;
     for r in 0..a.regions.len() {
-        let prof = match k().region_profile(a, curves, &[r]) {
+        let prof = match region_profile_checked(curves, a, &[r]) {
             Ok(prof) => prof,
             // Curves that miss each other can leave loops and edges
             // between the tolerance and the profile builder's resolution

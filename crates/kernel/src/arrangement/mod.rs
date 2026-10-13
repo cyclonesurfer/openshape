@@ -71,6 +71,16 @@ pub struct ArrangementEdge {
     pub right: Option<usize>,
 }
 
+/// Which arrangement edge a curve of a region profile is a piece of, see
+/// [`region_profile_edges`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProfileEdge {
+    /// Index into [`SketchArrangement::edges`].
+    pub edge: usize,
+    /// `true` when the profile runs along the edge from `t0` to `t1`.
+    pub forward: bool,
+}
+
 /// A closed loop of edges.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RegionLoop {
@@ -340,6 +350,34 @@ pub fn region_profile_with_tolerance(
     regions: &[usize],
     tol: &Tolerance,
 ) -> Result<Vec<ProfileCurve>, KernelError> {
+    Ok(
+        region_profile_edges_with_tolerance(arrangement, curves, regions, tol)?
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect(),
+    )
+}
+
+/// [`region_profile`] with, beside each curve, the arrangement edge it is
+/// a piece of and the direction the profile runs along it. Every curve
+/// comes from exactly one edge; an edge cut in two (see
+/// [`region_profile_with_tolerance`]) gives two consecutive curves with the
+/// same [`ProfileEdge`]; edges left out give none.
+pub fn region_profile_edges(
+    arrangement: &SketchArrangement,
+    curves: &[ProfileCurve],
+    regions: &[usize],
+) -> Result<Vec<(ProfileCurve, ProfileEdge)>, KernelError> {
+    region_profile_edges_with_tolerance(arrangement, curves, regions, &Tolerance::default())
+}
+
+/// [`region_profile_edges`] for an arrangement built with tolerance `tol`.
+pub fn region_profile_edges_with_tolerance(
+    arrangement: &SketchArrangement,
+    curves: &[ProfileCurve],
+    regions: &[usize],
+    tol: &Tolerance,
+) -> Result<Vec<(ProfileCurve, ProfileEdge)>, KernelError> {
     output::region_profile(arrangement, curves, regions, tol)
 }
 

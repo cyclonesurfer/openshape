@@ -457,6 +457,37 @@ fn region_profile_rejects_bad_selections() {
     assert_eq!(prof.len(), 4);
 }
 
+#[test]
+fn region_profiles_report_their_edges() {
+    // A square cut by a vertical line, with a circular hole in the left
+    // half: the union of both halves leaves the cut out, and the hole's
+    // single closed edge comes back as two halves of one edge.
+    let mut c = polygon(&[v(0.0, 0.0), v(2.0, 0.0), v(2.0, 1.0), v(0.0, 1.0)]);
+    c.push(line(v(1.0, 0.0), v(1.0, 1.0)));
+    c.push(circle(v(0.5, 0.5), 0.25));
+    let a = arrange_checked(&c);
+    let all: Vec<usize> = (0..a.regions.len()).collect();
+    let left = region_containing(&a, &c, v(0.1, 0.5), &Tolerance::default()).unwrap();
+    let hole = region_containing(&a, &c, v(0.5, 0.5), &Tolerance::default()).unwrap();
+    for sel in [vec![left], all.clone(), vec![hole]] {
+        region_profile_checked(&c, &a, &sel).unwrap();
+    }
+    let tagged = k().region_profile_edges(&a, &c, &[left]).unwrap();
+    let circle_edge = a.edges.iter().position(|e| e.curve == 5).unwrap();
+    let on_circle: Vec<_> = tagged
+        .iter()
+        .filter(|(_, pe)| pe.edge == circle_edge)
+        .map(|(_, pe)| *pe)
+        .collect();
+    // The hole runs clockwise around the left half: against the circle's
+    // own (counter-clockwise) direction.
+    assert_eq!(on_circle.len(), 2);
+    assert!(on_circle.iter().all(|pe| !pe.forward));
+    let both = k().region_profile_edges(&a, &c, &all).unwrap();
+    let cut = a.edges.iter().position(|e| e.curve == 4).unwrap();
+    assert!(both.iter().all(|(_, pe)| pe.edge != cut));
+}
+
 /// Signed area of a profile loop sequence, from fine samples.
 fn profile_area(prof: &[ProfileCurve]) -> f64 {
     let pts: Vec<DVec2> = prof

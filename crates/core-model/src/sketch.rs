@@ -403,7 +403,7 @@ impl SketchDef {
                 }
             }
             SketchEdit::SetPlane(plane) => {
-                self.plane = *plane;
+                self.plane = plane.clone();
                 Ok(())
             }
             SketchEdit::PlaceLabel { dimension, offset } => {
