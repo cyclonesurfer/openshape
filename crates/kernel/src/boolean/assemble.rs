@@ -7,9 +7,15 @@ use glam::{DVec2, DVec3};
 use rustc_hash::{FxHashMap, FxHashSet};
 use spade::Triangulation;
 
-use super::classify::Class;
+use super::chart::Chart;
+use super::classify::{self, Class};
+use super::meet::Track;
 use super::points::{segment_distance, Points};
-use super::{corners, key, planar, show, Course, Key, Pair, Piece, Segments, Source};
+use super::quadric::Quadric;
+use super::{
+    corners, imprint, key, planar, planar_edges, shape, show, slot, Course, Key, Pair, Piece,
+    Segments, Source,
+};
 use crate::geom::Curve3;
 use crate::math::Frame;
 use crate::origin::{
@@ -18,6 +24,45 @@ use crate::origin::{
 use crate::tess;
 use crate::topo::{Brep, Coedge, EdgeId, Loop, ShellId, VertexId};
 use crate::{BooleanOp, KernelError, Tolerance};
+
+/// The geometry the assembly reads: the operands, the curves where their
+/// surfaces meet, and their faces' charts.
+pub(super) struct Geometry<'a> {
+    pub pair: &'a Pair<'a>,
+    pub tracks: &'a [Track],
+    pub charts: &'a [Vec<Chart>; 2],
+}
+
+impl Geometry<'_> {
+    /// True if the operand face `f` of `op` is on a plane.
+    fn planar(&self, op: Operand, f: usize) -> bool {
+        let shape = self.pair.get(op);
+        matches!(
+            shape.surfaces[shape.faces[f].surface],
+            Quadric::Plane { .. }
+        )
+    }
+
+    /// The chart of a face of the result, in which its loops run
+    /// counter-clockwise.
+    fn chart(&self, f: &Out) -> Chart {
+        let c = self.charts[slot(f.operand)][f.face];
+        if f.reversed {
+            c.reversed()
+        } else {
+            c
+        }
+    }
+
+    /// The point of `course` at parameter `t`.
+    fn point(&self, course: Course, t: f64) -> DVec3 {
+        match course {
+            Course::Straight => unreachable!("a straight segment has no parameter"),
+            Course::Edge { op, e, .. } => self.pair.get(op).curve(e).0.point(t),
+            Course::Track { id, .. } => self.tracks[id].point(t),
+        }
+    }
+}
 
 /// A face of the result being assembled.
 struct Out {
@@ -50,7 +95,7 @@ fn kept(op: BooleanOp, p: &Piece) -> Option<bool> {
 }
 
 pub(super) fn assemble(
-    pair: &Pair,
+    geometry: &Geometry,
     pts: &Points,
     mut segs: Segments,
     pieces: Vec<Piece>,
@@ -96,13 +141,34 @@ pub(super) fn assemble(
         ));
     }
     check_closed(&faces, pts, &segs)?;
-    let faces = merge_faces(pair, pts, &segs, faces, coplanar, eps)?;
-    let faces = merge_edges(faces, pts, &mut segs, eps);
+    let faces = merge_faces(geometry, pts, &segs, faces, coplanar, eps)?;
+    let faces = merge_edges(geometry, faces, pts, &mut segs, eps);
     check_closed(&faces, pts, &segs)?;
     check_vertices(&faces, pts, &segs)?;
     let shells = shells(&faces);
-    let solids = solids(pair, pts, &segs, &faces, &shells)?;
-    build(pair, pts, &segs, &faces, &shells, &solids)
+    let pair = geometry.pair;
+    // Faces on planes bounded by straight segments: the shells' volumes
+    // and the voids' places are exact on the clusters' places.
+    let flat = faces.iter().all(|f| {
+        geometry.planar(f.operand, f.face)
+            && directed(f).all(|(s, _)| segs.list[s].course == Course::Straight)
+    });
+    let solids = if flat {
+        Some(solids(pair, pts, &segs, &faces, &shells)?)
+    } else {
+        None
+    };
+    let (mut brep, org, shell_ids) = build(geometry, pts, &segs, &faces, &shells)?;
+    let solids = match solids {
+        Some(s) => s,
+        None => curved_solids(&brep, &shell_ids, tol)?,
+    };
+    for (outer, voids) in solids {
+        let mut list = vec![shell_ids[outer]];
+        list.extend(voids.iter().map(|&v| shell_ids[v]));
+        brep.add_solid(list);
+    }
+    Ok((brep, org))
 }
 
 /// The segments of a face's loops, each with the way it is run.
@@ -194,16 +260,25 @@ fn unite(p: &mut [usize], i: usize, j: usize) {
 /// moving corners of the joined face off its plane, or refuse to join
 /// small coinciding faces tilted within the tolerance.
 fn merge_faces(
-    pair: &Pair,
+    geometry: &Geometry,
     pts: &Points,
     segs: &Segments,
     faces: Vec<Out>,
     coplanar: &FxHashSet<(usize, usize)>,
     eps: f64,
 ) -> Result<Vec<Out>, KernelError> {
+    let pair = geometry.pair;
     let n = faces.len();
     let mut parent: Vec<usize> = (0..n).collect();
-    let frames: Vec<Frame> = faces.iter().map(|f| plane_of(pair, f)).collect();
+    let planar: Vec<bool> = faces
+        .iter()
+        .map(|f| geometry.planar(f.operand, f.face))
+        .collect();
+    let frames: Vec<Frame> = faces
+        .iter()
+        .zip(&planar)
+        .map(|(f, &p)| if p { plane_of(pair, f) } else { Frame::WORLD })
+        .collect();
     let on_one_plane = |x: (Operand, usize), y: (Operand, usize)| match (x.0, y.0) {
         (Operand::First, Operand::Second) => coplanar.contains(&(x.1, y.1)),
         (Operand::Second, Operand::First) => coplanar.contains(&(y.1, x.1)),
@@ -212,7 +287,16 @@ fn merge_faces(
             shape.faces[x.1].surface == shape.faces[y.1].surface
         }
     };
+    // Faces on a curved surface are joined only with pieces of the same
+    // operand face facing the same way: those span no more than the face,
+    // at most half a turn (ADR 0008).
     let same = |i: usize, j: usize| {
+        if !planar[i] || !planar[j] {
+            let (x, y) = (&faces[i], &faces[j]);
+            return !planar[i]
+                && !planar[j]
+                && (x.operand, x.face, x.reversed) == (y.operand, y.face, y.reversed);
+        }
         frames[i].z.dot(frames[j].z) > 0.0
             && faces[i]
                 .sources
@@ -253,7 +337,7 @@ fn merge_faces(
             .iter()
             .min_by_key(|f| (f.operand, f.face))
             .expect("a group has members");
-        let fr = plane_of(pair, primary);
+        let chart = geometry.chart(primary);
         let (operand, face, reversed) = (primary.operand, primary.face, primary.reversed);
         let sources: BTreeSet<(Operand, usize)> = parts
             .iter()
@@ -271,17 +355,14 @@ fn merge_faces(
             .map(|&(s, fw)| ((segs.start(s, fw), segs.end(s, fw)), s, fw))
             .collect();
         boundary.sort_unstable_by_key(|x| (x.0, x.1));
-        let edges: Vec<planar::Edge> = boundary
-            .iter()
-            .map(|&(_, s, fw)| planar::Edge {
-                seg: s,
-                a: segs.list[s].a,
-                b: segs.list[s].b,
-                side: Some(fw),
-                bend: None,
-            })
-            .collect();
-        let regions = planar::regions(&edges, &|c| to2(&fr, pts.rep[c]), eps).map_err(|p| {
+        let edges = planar_edges(
+            pair,
+            geometry.tracks,
+            segs,
+            &chart,
+            boundary.iter().map(|&(_, s, fw)| (s, Some(fw))),
+        )?;
+        let regions = planar::regions(&edges, &|c| chart.map(pts.rep[c]), eps).map_err(|p| {
             let (m, c) = p.describe();
             KernelError::InvalidResult(format!(
                 "boolean: merging faces: {m} near {}",
@@ -311,7 +392,13 @@ fn merge_faces(
 /// segments changed or that an earlier join of the last round touched, so
 /// a long run of collinear segments costs time in proportion to its length
 /// rather than to the whole result for every round.
-fn merge_edges(mut faces: Vec<Out>, pts: &Points, segs: &mut Segments, eps: f64) -> Vec<Out> {
+fn merge_edges(
+    geometry: &Geometry,
+    mut faces: Vec<Out>,
+    pts: &Points,
+    segs: &mut Segments,
+    eps: f64,
+) -> Vec<Out> {
     let mut at: FxHashMap<usize, BTreeSet<usize>> = FxHashMap::default();
     let mut seg_faces: FxHashMap<usize, BTreeSet<usize>> = FxHashMap::default();
     for (i, f) in faces.iter().enumerate() {
@@ -328,7 +415,7 @@ fn merge_edges(mut faces: Vec<Out>, pts: &Points, segs: &mut Segments, eps: f64)
     let mut joined: FxHashMap<usize, usize> = FxHashMap::default();
     loop {
         let mut touched: FxHashSet<usize> = FxHashSet::default();
-        let mut joins: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
+        let mut joins: Vec<(usize, usize, usize, usize, usize, Course)> = Vec::new();
         let mut again: BTreeSet<usize> = BTreeSet::new();
         for &v in &look {
             let Some(ss) = at.get(&v) else {
@@ -340,32 +427,85 @@ fn merge_edges(mut faces: Vec<Out>, pts: &Points, segs: &mut Segments, eps: f64)
             let (g0, g1) = (&segs.list[s0], &segs.list[s1]);
             let u = if g0.a == v { g0.b } else { g0.a };
             let w = if g1.a == v { g1.b } else { g1.a };
-            if u == w
-                || g0.course != Course::Straight
-                || g1.course != Course::Straight
-                || seg_faces[&s0] != seg_faces[&s1]
-                || segment_distance(pts.rep[v], pts.rep[u], pts.rep[w]) > eps
-            {
+            if u == w || seg_faces[&s0] != seg_faces[&s1] {
                 continue;
             }
+            // The courses from u to v and from v to w.
+            let c0 = if g0.a == u {
+                g0.course
+            } else {
+                g0.course.reversed()
+            };
+            let c1 = if g1.a == v {
+                g1.course
+            } else {
+                g1.course.reversed()
+            };
+            let joined = match (c0, c1) {
+                (Course::Straight, Course::Straight) => {
+                    if segment_distance(pts.rep[v], pts.rep[u], pts.rep[w]) > eps {
+                        continue;
+                    }
+                    Course::Straight
+                }
+                // Pieces of one curve: its parameters at v agree (an
+                // operand's edge), or differ by whole turns (a track).
+                (
+                    Course::Edge { op, e, ta, tb },
+                    Course::Edge {
+                        op: op1,
+                        e: e1,
+                        ta: tv,
+                        tb: tw,
+                    },
+                ) if (op, e) == (op1, e1) => Course::Edge {
+                    op,
+                    e,
+                    ta,
+                    tb: tw + (tb - tv),
+                },
+                (
+                    Course::Track { id, ta, tb },
+                    Course::Track {
+                        id: id1,
+                        ta: tv,
+                        tb: tw,
+                    },
+                ) if id == id1 => Course::Track {
+                    id,
+                    ta,
+                    tb: tw + (tb - tv),
+                },
+                _ => continue,
+            };
             if [u, v, w].iter().any(|c| touched.contains(c)) {
                 again.insert(v);
                 continue;
             }
             touched.extend([u, v, w]);
-            joins.push((u, v, w, s0, s1));
+            joins.push((u, v, w, s0, s1, joined));
         }
         if joins.is_empty() {
             break;
         }
-        for (u, v, w, s0, s1) in joins {
+        for (u, v, w, s0, s1, course) in joins {
             let mut sources: BTreeSet<Source> = segs.list[s0].sources.iter().copied().collect();
             sources.extend(segs.list[s1].sources.iter().copied());
+            let mid = match course {
+                Course::Straight => None,
+                Course::Edge { ta, tb, .. } | Course::Track { ta, tb, .. } => {
+                    Some(geometry.point(course, 0.5 * (ta + tb)))
+                }
+            };
+            let mut add = |x: Source| match mid {
+                None => segs.add(u, w, Course::Straight, x),
+                Some(m) => segs.add_curved(u, w, course, m, x, eps),
+            };
             let mut sources = sources.into_iter();
             let first = sources.next().expect("a segment has a source");
-            let s = segs.add(u, w, Course::Straight, first);
+            let s = add(first);
             for x in sources {
-                segs.add(u, w, Course::Straight, x);
+                add(x);
             }
             let fs = seg_faces.remove(&s0).unwrap_or_default();
             seg_faces.remove(&s1);
@@ -626,19 +766,76 @@ fn edge_origin(s: Source) -> EdgeOrigin {
 }
 
 /// The B-rep and its origin table.
+/// The edge geometry of segment `seg`: its curve, its parameter range,
+/// and whether the curve runs from the segment's `b` to its `a`.
+fn edge_curve(
+    geometry: &Geometry,
+    pts: &Points,
+    seg: &super::Seg,
+) -> Result<(Curve3, f64, f64, bool), KernelError> {
+    let (a, b) = (pts.rep[seg.a], pts.rep[seg.b]);
+    Ok(match seg.course {
+        Course::Straight => (
+            Curve3::Line {
+                origin: a,
+                dir: b - a,
+            },
+            0.0,
+            1.0,
+            false,
+        ),
+        Course::Edge { op, e, ta, tb } => {
+            let curve = geometry.pair.get(op).curve(e).0.clone();
+            (curve, ta.min(tb), ta.max(tb), ta > tb)
+        }
+        Course::Track { id, ta, tb } => {
+            let (lo, hi) = (ta.min(tb), ta.max(tb));
+            let (curve, t0, t1) = match geometry.tracks[id] {
+                // A circle's frame turned so that the arc's middle is at a
+                // quarter turn: its parameters are then within the kernel's
+                // range for circles, [−π/2, 3π/2).
+                Track::Circle {
+                    center,
+                    x,
+                    y,
+                    radius,
+                } => {
+                    let shift = 0.5 * (lo + hi) - std::f64::consts::FRAC_PI_2;
+                    let (sn, cs) = shift.sin_cos();
+                    (
+                        Curve3::Circle {
+                            center,
+                            x: x * cs + y * sn,
+                            y: y * cs - x * sn,
+                            radius,
+                        },
+                        lo - shift,
+                        hi - shift,
+                    )
+                }
+                track => track.edge(lo, hi)?,
+            };
+            (curve, t0, t1, ta > tb)
+        }
+    })
+}
+
+/// The B-rep's vertices, edges, faces and shells, its origin table, and
+/// its shells' ids (in the order of `shells`).
 fn build(
-    pair: &Pair,
+    geometry: &Geometry,
     pts: &Points,
     segs: &Segments,
     faces: &[Out],
     shells: &[Vec<usize>],
-    solids: &[(usize, Vec<usize>)],
-) -> Result<(Brep, Origins), KernelError> {
+) -> Result<(Brep, Origins, Vec<ShellId>), KernelError> {
+    let pair = geometry.pair;
     let mut brep = Brep::default();
     let mut org = Origins::default();
     let mut merged: Vec<Merged> = Vec::new();
     let mut vertex_of: FxHashMap<usize, VertexId> = FxHashMap::default();
-    let mut edge_of: FxHashMap<usize, EdgeId> = FxHashMap::default();
+    // Per segment, its edge and whether the edge runs from its `b`.
+    let mut edge_of: FxHashMap<usize, (EdgeId, bool)> = FxHashMap::default();
     let mut face_ids = Vec::with_capacity(faces.len());
     for f in faces {
         let mut loops = Vec::with_capacity(f.loops.len());
@@ -668,22 +865,18 @@ fn build(
                         }
                     }
                 }
-                let edge = match edge_of.get(&s) {
+                let (edge, flipped) = match edge_of.get(&s) {
                     Some(&e) => e,
                     None => {
                         let (a, b) = (pts.rep[seg.a], pts.rep[seg.b]);
-                        let (curve, t0, t1) = match seg.course {
-                            Course::Straight => (
-                                Curve3::Line {
-                                    origin: a,
-                                    dir: b - a,
-                                },
-                                0.0,
-                                1.0,
-                            ),
+                        let (curve, t0, t1, flipped) = edge_curve(geometry, pts, seg)?;
+                        let (v0, v1) = if flipped {
+                            (vertex_of[&seg.b], vertex_of[&seg.a])
+                        } else {
+                            (vertex_of[&seg.a], vertex_of[&seg.b])
                         };
-                        let id = brep.add_edge(curve, t0, t1, vertex_of[&seg.a], vertex_of[&seg.b]);
-                        edge_of.insert(s, id);
+                        let id = brep.add_edge(curve, t0, t1, v0, v1);
+                        edge_of.insert(s, (id, flipped));
                         let mut src = seg
                             .sources
                             .iter()
@@ -700,10 +893,13 @@ fn build(
                         for s in src {
                             merged.push(Merged::Edge(EdgeIx(id.0), edge_origin(s)));
                         }
-                        id
+                        (id, flipped)
                     }
                 };
-                coedges.push(Coedge { edge, forward: fw });
+                coedges.push(Coedge {
+                    edge,
+                    forward: fw != flipped,
+                });
             }
             loops.push(Loop { coedges });
         }
@@ -730,12 +926,101 @@ fn build(
         .iter()
         .map(|s| brep.add_shell(s.iter().map(|&i| face_ids[i]).collect()))
         .collect();
-    for (outer, voids) in solids {
-        let mut list = vec![shell_ids[*outer]];
-        list.extend(voids.iter().map(|&v| shell_ids[v]));
-        brep.add_solid(list);
-    }
     merged.sort();
     org.merged = merged;
-    Ok((brep, org))
+    Ok((brep, org, shell_ids))
+}
+
+/// The shell `shell` of `b` alone, as a body.
+fn shell_brep(b: &Brep, shell: ShellId) -> Brep {
+    let mut out = Brep {
+        vertices: b.vertices.clone(),
+        edges: b.edges.clone(),
+        ..Brep::default()
+    };
+    let ids = b.shells[shell.idx()]
+        .faces
+        .iter()
+        .map(|f| {
+            let face = &b.faces[f.idx()];
+            out.add_face(face.surface.clone(), face.forward, face.loops.clone())
+        })
+        .collect();
+    out.add_shell(ids);
+    out
+}
+
+/// Outer shells (enclosing positive volume) of a result with curved faces
+/// or edges, each with the void shells inside it, as [`solids`] finds them
+/// for flat ones. A lone shell is the outer shell of the one solid (were it
+/// inside out, validation would refuse the body). With several, a shell's
+/// volume is taken from a coarse mesh, as validation measures orientation
+/// ([`crate::check::shell_volumes`]), or from the kernel's mass properties
+/// (exact on the surfaces) where the mesh's error could reach its sign;
+/// each void goes in the smallest outer shell holding one of its vertices
+/// (by ray parity on the shell's own faces).
+fn curved_solids(
+    b: &Brep,
+    shells: &[ShellId],
+    tol: &Tolerance,
+) -> Result<Vec<(usize, Vec<usize>)>, KernelError> {
+    if shells.len() == 1 {
+        return Ok(vec![(0, Vec::new())]);
+    }
+    let eps = tol.linear;
+    let size = crate::check::bounding_size(b).max(eps);
+    let coarse = crate::check::shell_volumes(b, tol)
+        .map_err(|e| KernelError::InvalidResult(format!("boolean: the shells' volumes: {e}")))?;
+    let bodies: Vec<Brep> = shells.iter().map(|&s| shell_brep(b, s)).collect();
+    let body = |i: usize| &bodies[i];
+    let mut vols = Vec::with_capacity(shells.len());
+    for (i, s) in shells.iter().enumerate() {
+        let (v, bound) = coarse[s.idx()];
+        if v.abs() > bound {
+            vols.push(v);
+            continue;
+        }
+        let m = crate::mass::mass_properties(body(i), size, 1e-6)
+            .map_err(|e| KernelError::InvalidResult(format!("boolean: a shell's volume: {e}")))?;
+        vols.push(m.volume);
+    }
+    let mut solids: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (i, v) in vols.iter().enumerate() {
+        if *v > 0.0 {
+            solids.push((i, Vec::new()));
+        } else if *v == 0.0 {
+            return Err(KernelError::InvalidResult(
+                "boolean: a shell encloses no volume".into(),
+            ));
+        }
+    }
+    for v in (0..shells.len()).filter(|&i| vols[i] < 0.0) {
+        // A corner of the void shell itself (its body shares the whole
+        // result's vertices and edges).
+        let shell = &b.shells[shells[v].idx()];
+        let first = b.faces[shell.faces[0].idx()].loops[0].coedges[0].edge;
+        let q = b.vertices[b.edges[first.idx()].v0.idx()].point;
+        let mut best: Option<usize> = None;
+        for (k, (s, _)) in solids.iter().enumerate() {
+            let outer = body(*s);
+            let shape = shape::shape(outer, "result")?;
+            let outlines = imprint::outlines(&shape)?;
+            let boundary = classify::Boundary::new(&shape, &outlines)?;
+            if boundary.classify(q, eps)? == Class::Inside
+                && best.is_none_or(|b| vols[*s] < vols[solids[b].0])
+            {
+                best = Some(k);
+            }
+        }
+        match best {
+            Some(k) => solids[k].1.push(v),
+            None => {
+                return Err(KernelError::InvalidResult(format!(
+                    "boolean: a void near {} is inside no solid",
+                    show(q)
+                )))
+            }
+        }
+    }
+    Ok(solids)
 }

@@ -52,6 +52,8 @@ jobs:
         run: |
           BOOLEAN_SCALE=10 cargo test --release -p opendatum-kernel --test booleans -- \
             --nocapture volume_identities motions | tee booleans.txt
+          BOOLEAN_SCALE=10 cargo test --release -p opendatum-kernel --test curved -- \
+            --nocapture volume_identities | tee -a booleans.txt
           { echo '### Booleans'; echo; grep -E '^(random|motions)' booleans.txt | sed 's/^/- /'; } \
             >> "$GITHUB_STEP_SUMMARY"
       - name: Headless end-to-end demo (op log -> kernel -> wgpu on lavapipe)

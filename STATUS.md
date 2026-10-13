@@ -10,11 +10,11 @@ the kernel's origin tables (ADR 0018), the `opendatum-naming` crate,
 which names the faces, edges and vertices of boxes, extrudes and
 revolves as the user sees them and resolves stored references, and a
 sketch on a picked planar face and an extrude up to a picked parallel
-face, from the viewport through the model (ADR 0019). Booleans have
-begun: union, intersection and difference of solids bounded by planes
-(design note 0012 §9, ADR 0020), checked by the volume identities on
-thousands of random pairs. Next: curved faces in booleans, then the
-features that use them.
+face, from the viewport through the model (ADR 0019). Booleans combine
+solids bounded by planes and cylinders (design note 0012 §9 and §11, ADR
+0020): union, intersection and difference, checked by the volume
+identities on tens of thousands of random pairs. Next: cones and
+spheres in booleans, then the features that use them.
 The product is now named OpenDatum (ADR 0017): packages `opendatum-*`,
 binary `opendatum`, documents `.odatum`; documents saved under the old
 name open unchanged.
@@ -84,10 +84,14 @@ name open unchanged.
     the topology and right by an independent geometric check, on tilted
     planes, symmetric extrudes, and partial and full revolves either way
     round, and that they follow the curves, not their order.
-  - Booleans (`Kernel::boolean`, design note 0012 §9, ADR 0020): union,
-    intersection and difference of solids bounded by planes with straight
-    edges (boxes, extrudes of polygons, holes included), with coincident
-    faces, edges and vertices, voids and several solids. Numerical
+  - Booleans (`Kernel::boolean`, design note 0012 §9 and §11, ADR 0020):
+    union, intersection and difference of solids bounded by planes and
+    circular cylinders (boxes, extrudes of profiles with lines, arcs and
+    circles, holes included, at any orientation), with coincident
+    faces, edges and vertices, voids and several solids. Where a plane
+    or a cylinder meets another surface the curve is found in closed form
+    (lines, circles, ellipses), once per pair of surfaces, and faces are
+    split in charts in which lengths are lengths in space. Numerical
     decisions are made once (a sign per vertex and plane, clusters of
     points within the tolerance, one incidence decision per point and
     edge) and each piece of a face is classified by exact ray parity
@@ -101,7 +105,8 @@ name open unchanged.
     meet. What the tolerance cannot decide is refused with a message and
     a place (non-manifold results, points or edges closer than the
     tolerance, slivers, faces running within the tolerance of the other
-    surface); curved bodies fail as not supported yet.
+    surface); cones, spheres, cylinders at an angle to each other and
+    tangent contacts fail as not supported yet.
 - **Features** (`opendatum-features`): regenerates a Part Studio through the
   kernel with per-feature status (ok, warning, suppressed, failed with
   message). A failing feature never blocks the others. Sketch features are
@@ -587,6 +592,23 @@ name open unchanged.
   passed with every region's mass to 1e-10, no fallback; it refused 313
   unresolvable perturbed inputs, 18 loops below resolution and 44
   pinched profiles (the cases are random per run).
+- Booleans of planes and cylinders (design note 0012 §11), 2026-10-13,
+  on Mesa lavapipe: fmt, clippy with `-D warnings`, 925 tests and
+  `cargo deny` pass, and the release time guards pass as CI runs them.
+  Golden cases exact to 1e-9 in volume and area, with topology and
+  origins: a plate with a round hole, a boss through and on a plate, a
+  D-cut shaft, two parallel cylinders (all three operations), a
+  counterbore, voids with flat and curved faces, and a slab cut across
+  a cylinder (two solids). 10,000 random pairs of boxes at any angle and
+  prisms with arcs (40,000 operations): every result valid with its
+  origins on the operands' surfaces, every volume identity holding where
+  the results exist, 13 refusals in 1,000, nearly all tangent contacts.
+  The run found one fault, fixed and kept as a golden case: a void
+  inside a curved body was placed by a corner of the outer shell, so a
+  body cut from inside another was refused. The polyhedral fuzz at 100
+  times its default size refuses exactly the same operations as before.
+  Drilling a round hole into a plate with 99 fell from 211 ms to 40 ms
+  (docs/PERFORMANCE.md, third pass); CI now runs the curved fuzz too.
 - Geometry for booleans of curved solids (design note 0012 §10.7, item
   1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   915 tests and `cargo deny` pass. Tested on its own; the boolean stages
@@ -902,8 +924,17 @@ name open unchanged.
   moved by about a tolerance or more.
 - Solver conflict detection is local: from a start far from any solution it
   can call a sketch conflicting although another branch would satisfy it.
-- Booleans handle only solids bounded by planes; a body with a curved
-  face or edge fails as not supported yet (design note 0012 §8 step 2).
+- Booleans handle solids bounded by planes and circular cylinders. They
+  refuse as not supported yet (design note 0012 §11): cones and spheres
+  (revolves); two cylinders at an angle (their curve is a quartic);
+  tangent contacts, where faces touch without crossing (a box's face
+  resting on a cylinder's side, a slot tangent to a hole): 13 of 1,000
+  random operations, most of the curved fuzz's refusals; and a second
+  boolean on a cylinder an earlier oblique cut left with an elliptical
+  edge, which is stored as a NURBS curve the stages do not recognise.
+  A corner of one body resting exactly where a face's test point falls
+  (the centre of a cylinder's end face) is refused, though the result
+  exists (once in 10,000 random pairs).
   No feature uses booleans yet: each feature still makes its own part.
   Near-coincidences the tolerance cannot decide are refused, not
   resolved: a copy of a body moved by half a tolerance or less is always
@@ -933,22 +964,24 @@ name open unchanged.
   faces are triangulated by constrained Delaunay, whose exact incircle
   test is slow on points sharing a circle (round holes, rectangles); the
   flat faces take two thirds of meshing a plate with round holes, mostly
-  in that test. Validation meshes every result; pieces that are not
-  convex get their interior point from a triangulation; every boolean
-  reads both whole bodies, so its time grows with the bodies rather than
-  with where they meet. All are within their budgets.
+  in that test. Validation meshes every result; small pieces that are
+  not convex get their interior point from a triangulation; curved
+  segments carry about eleven extra chords at each end, so splitting a
+  face with 100 round holes takes 9 ms; every boolean reads both whole
+  bodies, so its time grows with the bodies rather than with where they
+  meet (drilling a hole into a plate with 99 takes 40 ms). All are
+  within their budgets.
 - Non-manifold topology deferred to Phase 3.
 - No STEP or other exchange formats beyond STL (Phase 4; see docs/FORMATS.md).
 
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Phase 3, in the order the design notes give: booleans with planes,
-   cylinders, cones and spheres in closed form (0012 §8 step 2, 0011 §8;
-   the geometry of §10.7 item 1 is done; next the stages for planes and
-   cylinders, item 2, generalising step 1's in place so its tests and
-   fuzz guard every change; then cones and spheres, item 3, with the
-   conics of a plane across a cone); naming through booleans
+2. Phase 3, in the order the design notes give: booleans with cones and
+   spheres (0012 §10.7 item 3, with the conics of a plane across a cone;
+   planes and cylinders, item 2, are done, §11); then tangent contacts
+   (the largest share of the curved refusals) and the elliptical edges
+   oblique cuts leave on cylinders; naming through booleans
    (design note 0013 §10 step 4); then extrude and revolve that add,
    remove and intersect. Alongside, absorb the boolean refusals left
    within the tolerance (0.5–1% of operations at 0.9 tolerances, mostly

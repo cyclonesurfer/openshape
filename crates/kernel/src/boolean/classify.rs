@@ -25,6 +25,14 @@
 //! fixed direction. A bounding-volume tree over the triangles keeps each
 //! test to the triangles near the segment.
 //!
+//! Faces that are not flat (on a cylinder, or on a plane with curved
+//! edges) are met in closed form instead (design note 0012 §10.5): the ray
+//! meets a face's surface at the roots of a polynomial of degree one or
+//! two, and a root counts if it lies in the face, decided in the face's
+//! chart against its outline. A ray that grazes such a surface, or meets
+//! it within the tolerance of the face's boundary, is abandoned for the
+//! next direction, as one through a triangle's edge is.
+//!
 //! This replaces the propagation of design note 0012 §4.3 (classify faces
 //! at the intersection edges, then flood fill): each piece is decided by
 //! one exact test, and no decision depends on another.
@@ -32,6 +40,8 @@
 use glam::{DVec2, DVec3};
 use spade::Triangulation;
 
+use super::chart::Outline;
+use super::quadric::Quadric;
 use super::shape::{Face, Shape};
 use super::show;
 use crate::bvh::{self, Bvh};
@@ -65,11 +75,106 @@ const DIRECTIONS: [[f64; 3]; 8] = [
     [-0.911, -0.265, 0.316],
 ];
 
-/// A body's boundary as triangles on its own vertices, outward facing.
+/// The cosine of the angle between a ray and a curved surface's normal
+/// below which the ray is taken to graze the surface and is abandoned.
+const GRAZE: f64 = 1e-3;
+
+/// A face of a body that is not flat.
+struct Curved<'a> {
+    surface: Quadric,
+    outward: bool,
+    outline: &'a Outline<'a>,
+}
+
+impl Curved<'_> {
+    /// The signed number of times the ray from `p` along the unit `dir`
+    /// passes through the face before `len` (+1 leaving the body, −1
+    /// entering it), or `None` if it grazes the surface or meets it within
+    /// `eps` of the face's boundary.
+    fn hits(&self, p: DVec3, dir: DVec3, len: f64, eps: f64) -> Option<i64> {
+        let roots: Vec<f64> = match self.surface {
+            Quadric::Plane { point, normal } => {
+                let c = dir.dot(normal);
+                if c.abs() < GRAZE {
+                    return None;
+                }
+                vec![-(p - point).dot(normal) / c]
+            }
+            Quadric::Cylinder {
+                point,
+                axis,
+                radius,
+            } => {
+                // |w + s u|² = r² across the axis.
+                let w = p - point;
+                let w = w - axis * w.dot(axis);
+                let u = dir - axis * dir.dot(axis);
+                let (a, b, c) = (u.dot(u), w.dot(u), w.dot(w) - radius * radius);
+                if a < GRAZE * GRAZE {
+                    return None;
+                }
+                let disc = b * b - a * c;
+                if disc < 0.0 {
+                    return Some(0);
+                }
+                // The cosine of the ray with the surface's normal at either
+                // root is √disc / r.
+                let sq = disc.sqrt();
+                if sq < GRAZE * radius {
+                    return None;
+                }
+                let q = -(b + sq.copysign(b));
+                vec![q / a, c / q]
+            }
+            _ => return None,
+        };
+        let mut total = 0;
+        for s in roots {
+            if !(s > 0.0 && s < len) {
+                continue;
+            }
+            let h = p + dir * s;
+            match self
+                .outline
+                .locate(self.outline.chart.map(h), eps, eps / 16.0)
+            {
+                None => return None,
+                Some(false) => {}
+                Some(true) => {
+                    let g = self.surface.gradient(h);
+                    let n = if self.outward { g } else { -g };
+                    total += if n.dot(dir) > 0.0 { 1 } else { -1 };
+                }
+            }
+        }
+        Some(total)
+    }
+
+    /// True if `p` is within `eps` of the face: of a point of its surface
+    /// within twice `eps` of the face (`p`'s foot on the surface is within
+    /// twice `eps` of the face if `p` is within `eps` of it).
+    fn near(&self, p: DVec3, eps: f64) -> bool {
+        if self.surface.distance(p).abs() > eps {
+            return false;
+        }
+        match self.surface.foot(p) {
+            None => true,
+            Some(f) => {
+                let q = self.outline.chart.map(f);
+                self.outline.locate(q, 2.0 * eps, eps / 16.0) != Some(false)
+            }
+        }
+    }
+}
+
+/// A body's boundary: its flat faces as triangles on its own vertices,
+/// outward facing, and its other faces on their surfaces.
 pub(super) struct Boundary<'a> {
     points: &'a [DVec3],
     tris: Vec<[u32; 3]>,
     tree: Bvh,
+    curved: Vec<Curved<'a>>,
+    curved_tree: Bvh,
     /// The centre and half the diagonal of the body's box.
     centre: DVec3,
     reach: f64,
@@ -78,10 +183,26 @@ pub(super) struct Boundary<'a> {
 }
 
 impl<'a> Boundary<'a> {
-    pub fn new(shape: &'a Shape) -> Result<Boundary<'a>, KernelError> {
+    /// The boundary of `shape`, whose faces that are not flat have the
+    /// outlines `outlines`.
+    pub fn new(
+        shape: &'a Shape,
+        outlines: &'a [Option<Outline<'a>>],
+    ) -> Result<Boundary<'a>, KernelError> {
         let points = &shape.points[..];
         let mut tris: Vec<[u32; 3]> = Vec::new();
+        let mut curved = Vec::new();
+        let mut curved_boxes = Vec::new();
         for (fi, f) in shape.faces.iter().enumerate() {
+            if let Some(outline) = &outlines[fi] {
+                curved.push(Curved {
+                    surface: shape.surfaces[f.surface],
+                    outward: f.outward,
+                    outline,
+                });
+                curved_boxes.push((f.lo, f.hi));
+                continue;
+            }
             triangulate(shape, f, &mut tris).map_err(|m| {
                 KernelError::InvalidResult(format!("boolean: face {fi} of an operand: {m}"))
             })?;
@@ -99,7 +220,12 @@ impl<'a> Boundary<'a> {
             })
             .collect();
         let tree = Bvh::new(boxes);
-        let (lo, hi) = tree.bounds().unwrap_or((DVec3::ZERO, DVec3::ZERO));
+        let curved_tree = Bvh::new(curved_boxes);
+        let (lo, hi) = match (tree.bounds(), curved_tree.bounds()) {
+            (Some(a), Some(b)) => (a.0.min(b.0), a.1.max(b.1)),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => (DVec3::ZERO, DVec3::ZERO),
+        };
         let centre = (lo + hi) * 0.5;
         let reach = (hi - lo).length() * 0.5;
         let pad = 1e-9 * (reach + centre.abs().max_element()) + f64::MIN_POSITIVE;
@@ -107,6 +233,8 @@ impl<'a> Boundary<'a> {
             points,
             tris,
             tree,
+            curved,
+            curved_tree,
             centre,
             reach,
             pad,
@@ -123,14 +251,19 @@ impl<'a> Boundary<'a> {
         !self.tree.visit(
             |lo, hi| bvh::near_box(p, lo, hi, r),
             |t| (closest_on_triangle(p, &self.triangle(t)) - p).length() > eps,
+        ) || !self.curved_tree.visit(
+            |lo, hi| bvh::near_box(p, lo, hi, r),
+            |i| !self.curved[i].near(p, eps),
         )
     }
 
-    /// The signed number of triangles the segment `p`–`q` passes through
-    /// (+1 leaving the body, −1 entering it), or `None` if it passes
-    /// through an edge or a corner of one, or lies in a triangle's plane
-    /// across it. `p` is off the boundary; `q` is outside the body's box.
-    fn crossings(&self, p: DVec3, q: DVec3) -> Option<i64> {
+    /// The signed number of times the segment `p`–`q` passes through the
+    /// boundary (+1 leaving the body, −1 entering it), or `None` if it
+    /// passes through an edge or a corner of a triangle, lies in a
+    /// triangle's plane across it, grazes a curved face's surface or meets
+    /// it within `eps` of the face's boundary. `p` is off the boundary; `q`
+    /// is outside the body's box.
+    fn crossings(&self, p: DVec3, q: DVec3, eps: f64) -> Option<i64> {
         let mut total = 0i64;
         let mut clean = true;
         let pad = self.pad + 1e-9 * (p - self.centre).length();
@@ -166,6 +299,23 @@ impl<'a> Boundary<'a> {
                 }
             },
         );
+        if !clean {
+            return None;
+        }
+        let (dir, len) = ((q - p).normalize(), (q - p).length());
+        self.curved_tree.visit(
+            |lo, hi| bvh::segment_meets_box(p, q, lo, hi, pad),
+            |i| match self.curved[i].hits(p, dir, len, eps) {
+                None => {
+                    clean = false;
+                    false
+                }
+                Some(n) => {
+                    total += n;
+                    true
+                }
+            },
+        );
         clean.then_some(total)
     }
 
@@ -183,7 +333,7 @@ impl<'a> Boundary<'a> {
         let length = 2.0 * ((p - self.centre).length() + self.reach) + 1.0;
         for d in DIRECTIONS {
             let q = p + DVec3::from_array(d).normalize() * length;
-            match self.crossings(p, q) {
+            match self.crossings(p, q, eps) {
                 None => continue,
                 Some(1) => return Ok(Class::Inside),
                 Some(0) => return Ok(Class::Outside),
@@ -293,6 +443,100 @@ pub(super) fn interior_point(loops: &[Vec<DVec2>]) -> Result<(DVec2, f64), Strin
         }
     }
     best.ok_or_else(|| "a piece with no area".into())
+}
+
+/// Sides probed inward by [`probe_point`]: this many of the longest, and
+/// this many more spread evenly along the boundary.
+const PROBES: usize = 8;
+
+/// A point inside the polygon `loops` (outer first, counter-clockwise;
+/// holes clockwise: the inside on the left of every side) and its least
+/// distance from the boundary, found without a triangulation, or `None`.
+///
+/// From the middle of each of a few sides ([`PROBES`] of the longest and
+/// as many spread along the boundary), a ray goes inward, square to the
+/// side, to the first side it meets; the candidate is halfway along it.
+/// Each candidate is checked: its winding number, counted with exact
+/// orientation tests, must be one (inside), and its distance from every
+/// side is measured; the farthest from the boundary is returned. The work
+/// is a few passes over the sides, where a triangulation of a polygon
+/// whose points lie on circles (round holes) spends most of its time in
+/// exact incircle tests. The point is good, not the best:
+/// [`interior_point`] serves when it is not good enough.
+pub(super) fn probe_point(loops: &[Vec<DVec2>]) -> Option<(DVec2, f64)> {
+    let sides: Vec<(DVec2, DVec2)> = loops
+        .iter()
+        .flat_map(|l| (0..l.len()).map(move |i| (l[i], l[(i + 1) % l.len()])))
+        .collect();
+    let m = sides.len();
+    if m < 3 {
+        return None;
+    }
+    let mut order: Vec<usize> = (0..m).collect();
+    order.sort_by(|&i, &j| {
+        let len = |k: usize| (sides[k].1 - sides[k].0).length_squared();
+        len(j).total_cmp(&len(i)).then(i.cmp(&j))
+    });
+    let mut chosen: Vec<usize> = order[..PROBES.min(m)].to_vec();
+    chosen.extend((0..PROBES).map(|k| k * m / PROBES));
+    chosen.sort_unstable();
+    chosen.dedup();
+    let mut best: Option<(DVec2, f64)> = None;
+    for i in chosen {
+        let (a, b) = sides[i];
+        let d = b - a;
+        if d.length_squared() == 0.0 {
+            continue;
+        }
+        let (start, n) = (0.5 * (a + b), d.perp().normalize());
+        // The nearest side the inward ray meets.
+        let mut reach = f64::INFINITY;
+        for (j, &(c, e)) in sides.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            let f = e - c;
+            let den = n.perp_dot(f);
+            if den == 0.0 {
+                continue;
+            }
+            let w = c - start;
+            let t = w.perp_dot(f) / den;
+            let u = w.perp_dot(n) / den;
+            if t > 0.0 && (0.0..=1.0).contains(&u) {
+                reach = reach.min(t);
+            }
+        }
+        if !reach.is_finite() {
+            continue;
+        }
+        let q = start + n * (0.5 * reach);
+        let clearance = sides
+            .iter()
+            .map(|&(c, e)| super::planar::point_segment(q, c, e))
+            .fold(f64::INFINITY, f64::min);
+        if clearance > 0.0 && best.is_none_or(|(_, r)| clearance > r) && winding(&sides, q) == 1 {
+            best = Some((q, clearance));
+        }
+    }
+    best
+}
+
+/// The winding number of the closed sides about `q` (off them), by the
+/// sides crossing the ray from `q` toward +x: +1 upward with `q` on their
+/// left, −1 downward with `q` on their right, each decided exactly.
+fn winding(sides: &[(DVec2, DVec2)], q: DVec2) -> i64 {
+    let mut w = 0;
+    for &(a, b) in sides {
+        if a.y <= q.y {
+            if b.y > q.y && orient2(a, b, q) > 0.0 {
+                w += 1;
+            }
+        } else if b.y <= q.y && orient2(a, b, q) < 0.0 {
+            w -= 1;
+        }
+    }
+    w
 }
 
 /// The centre and radius of the circle inscribed in a triangle, or `None`
@@ -506,6 +750,37 @@ mod tests {
         }
     }
 
+    /// A circle of radius `r` about `c` as `n` points, clockwise (a hole).
+    fn hole(c: DVec2, r: f64, n: usize) -> Vec<DVec2> {
+        (0..n)
+            .map(|k| c + DVec2::from_angle(-std::f64::consts::TAU * k as f64 / n as f64) * r)
+            .collect()
+    }
+
+    #[test]
+    fn probes_find_a_point_among_round_holes() {
+        // A plate with a 10 by 10 grid of round holes, the face a boolean
+        // drilling it splits: the probes find a point between four holes,
+        // as far from them as any point of the plate.
+        let mut loops = vec![poly(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)])];
+        for i in 0..10 {
+            for j in 0..10 {
+                loops.push(hole(DVec2::new(i as f64 + 0.5, j as f64 + 0.5), 0.3, 32));
+            }
+        }
+        let (p, r) = probe_point(&loops).unwrap();
+        let best = 0.5f64.sqrt() - 0.3;
+        assert!(r > 0.99 * best && r <= best, "{p} {r}");
+        assert!(strictly_inside(&loops[0], p));
+        for h in &loops[1..] {
+            let mut ccw = h.clone();
+            ccw.reverse();
+            assert!(!strictly_inside(&ccw, p));
+        }
+        // Too few sides to bound anything.
+        assert_eq!(probe_point(&[poly(&[(0.0, 0.0), (1.0, 0.0)])]), None);
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(400))]
 
@@ -513,6 +788,48 @@ mod tests {
         /// every point given is inside, its clearance a true lower bound
         /// and at least half the triangulation's; a polygon that is not
         /// convex never gets one.
+        #[test]
+        fn probe_points_are_inside(
+            n in 3usize..40,
+            holes in 0usize..12,
+            seed in 0u64..u64::MAX,
+        ) {
+            let mut h = seed;
+            let mut rnd = || {
+                h = h.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (h >> 11) as f64 / (1u64 << 53) as f64
+            };
+            // A star-shaped outer loop about the origin, radii 1 to 2.
+            let outer: Vec<DVec2> = (0..n)
+                .map(|k| {
+                    let a = std::f64::consts::TAU * k as f64 / n as f64;
+                    DVec2::from_angle(a) * (1.0 + rnd())
+                })
+                .collect();
+            let mut loops = vec![outer];
+            let mut discs: Vec<(DVec2, f64)> = Vec::new();
+            for _ in 0..holes {
+                let c = DVec2::new(rnd() - 0.5, rnd() - 0.5) * 1.2;
+                let r = 0.02 + 0.15 * rnd();
+                if discs.iter().all(|&(d, s)| (c - d).length() > r + s + 1e-3)
+                    && boundary_distance(&loops[0], c) > r + 1e-3
+                {
+                    discs.push((c, r));
+                    loops.push(hole(c, r, 3 + (rnd() * 40.0) as usize));
+                }
+            }
+            let (p, r) = probe_point(&loops).unwrap();
+            proptest::prop_assert!(strictly_inside(&loops[0], p));
+            let mut d = boundary_distance(&loops[0], p);
+            for l in &loops[1..] {
+                let mut ccw = l.clone();
+                ccw.reverse();
+                proptest::prop_assert!(!strictly_inside(&ccw, p));
+                d = d.min(boundary_distance(l, p));
+            }
+            proptest::prop_assert!(r > 0.0 && (r - d).abs() <= 1e-12, "{r} against {d}");
+        }
+
         #[test]
         fn convex_interior_points_are_inside(
             n in 3usize..40,

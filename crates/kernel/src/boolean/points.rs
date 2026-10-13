@@ -14,9 +14,11 @@
 use glam::DVec3;
 use rustc_hash::FxHashMap;
 
+use super::meet::Track;
 use super::quadric::Quadric;
 use super::{show, slot, Pair};
 use crate::bvh::Bvh;
+use crate::geom::Curve3;
 use crate::origin::Operand;
 use crate::KernelError;
 
@@ -25,11 +27,35 @@ use crate::KernelError;
 enum Raw {
     /// A vertex of an operand.
     Vertex(Operand, usize),
-    /// An edge of an operand crossing a plane of the other.
+    /// An edge of an operand crossing a surface of the other.
     Crossing,
+    /// A station of an edge within the tolerance of a surface of the
+    /// other operand, where the edge reaches the surface from one side
+    /// ([`Station`]).
+    Station,
     /// Two edges touching.
     Contact,
 }
+
+/// A station of an edge against a surface of the other operand (design
+/// note 0012 §10.2): one of the edge's ends, or a split of it (a turning
+/// point of the surface's implicit function along the edge, or a joint of
+/// its rational Bézier pieces). Between consecutive stations the edge
+/// crosses the surface at most once, exactly when their signs are strictly
+/// opposite.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Station {
+    /// The edge's parameter.
+    pub t: f64,
+    /// The side of the surface: −1, 0 (within the tolerance) or +1, for an
+    /// end the sign of its vertex.
+    pub sign: i8,
+    /// True at a turning point, where the edge may touch the surface.
+    pub turn: bool,
+}
+
+/// An edge of an operand and a surface of the other.
+type EdgeSurface = (Operand, usize, usize);
 
 pub(super) struct Points {
     pub eps: f64,
@@ -41,8 +67,15 @@ pub(super) struct Points {
     raw: Vec<Raw>,
     /// Raw index of each operand's first vertex.
     offset: [usize; 2],
-    /// (operand, edge, surface of the other operand) → raw crossing point.
-    crossings: FxHashMap<(Operand, usize, usize), usize>,
+    /// Per edge and surface of the other operand, its stations, from the
+    /// edge's start to its end, made when first asked for.
+    stations: FxHashMap<EdgeSurface, Vec<Station>>,
+    /// (edge and surface, stretch between stations `k` and `k + 1`) → raw
+    /// crossing point.
+    crossings: FxHashMap<(EdgeSurface, usize), usize>,
+    /// (edge and surface, station) → raw point of an interior station on
+    /// the surface.
+    station_points: FxHashMap<(EdgeSurface, usize), usize>,
     /// Raw point → cluster.
     cluster: Vec<usize>,
     /// The union–find forest over the raw points that the clusters are
@@ -58,6 +91,10 @@ pub(super) struct Points {
     has_vertex: Vec<[bool; 2]>,
     /// Per operand, per edge: the clusters on it from its start to its end.
     on_edges: [Vec<Vec<usize>>; 2],
+    /// Per operand, per curved edge: the parameters of those clusters (the
+    /// edge's own at its ends, of their nearest points between); empty for
+    /// a straight edge.
+    on_params: [Vec<Vec<f64>>; 2],
     /// The clusters' positions, indexed.
     index: Bvh,
 }
@@ -86,13 +123,16 @@ impl Points {
             pos,
             raw,
             offset,
+            stations: FxHashMap::default(),
             crossings: FxHashMap::default(),
+            station_points: FxHashMap::default(),
             cluster: Vec::new(),
             parent: Vec::new(),
             rep: Vec::new(),
             members: Vec::new(),
             has_vertex: Vec::new(),
             on_edges: [Vec::new(), Vec::new()],
+            on_params: [Vec::new(), Vec::new()],
             index: Bvh::new(Vec::new()),
         }
     }
@@ -117,30 +157,120 @@ impl Points {
         }
     }
 
-    /// Records where the edges of face `f` of `op` cross the plane
-    /// `surface` of the other operand (their ends strictly on opposite
-    /// sides).
-    pub fn add_crossings(&mut self, pair: &Pair, op: Operand, f: usize, surface: usize) {
+    /// The side of `surface` (of the other operand) at distance `d`.
+    fn side(&self, d: f64) -> i8 {
+        if d.abs() <= self.eps {
+            0
+        } else {
+            d.signum() as i8
+        }
+    }
+
+    /// The stations of edge `e` of `op` against `surface` of the other
+    /// operand, from the edge's start to its end, each decided once. A
+    /// straight edge has none but its ends against a plane (the distance is
+    /// linear along it).
+    pub fn stations(
+        &mut self,
+        pair: &Pair,
+        op: Operand,
+        e: usize,
+        surface: usize,
+    ) -> Result<&[Station], KernelError> {
+        let key = (op, e, surface);
+        if !self.stations.contains_key(&key) {
+            let shape = pair.get(op);
+            let q = self.surfaces[slot(op)][surface];
+            let (va, vb) = shape.edges[e];
+            let (curve, t0, t1) = shape.curve(e);
+            let mut list = vec![Station {
+                t: t0,
+                sign: self.sign(op, va, surface),
+                turn: false,
+            }];
+            if !(shape.straight[e] && matches!(q, Quadric::Plane { .. })) {
+                for split in q.splits(curve, t0, t1)? {
+                    list.push(Station {
+                        t: split.t,
+                        sign: self.side(q.distance(curve.point(split.t))),
+                        turn: split.turn,
+                    });
+                }
+            }
+            list.push(Station {
+                t: t1,
+                sign: self.sign(op, vb, surface),
+                turn: false,
+            });
+            self.stations.insert(key, list);
+        }
+        Ok(&self.stations[&key])
+    }
+
+    /// The stations of edge `e` of `op` against `surface`, if made.
+    pub fn cached_stations(&self, op: Operand, e: usize, surface: usize) -> Option<&[Station]> {
+        self.stations.get(&(op, e, surface)).map(Vec::as_slice)
+    }
+
+    /// Records where the edges of face `f` of `op` cross `surface` of the
+    /// other operand (between stations of strictly opposite signs), and
+    /// the stations inside them on the surface that the edges reach it at
+    /// from one side.
+    pub fn add_crossings(
+        &mut self,
+        pair: &Pair,
+        op: Operand,
+        f: usize,
+        surface: usize,
+    ) -> Result<(), KernelError> {
         let shape = pair.get(op);
         let face = &shape.faces[f];
-        let q = &pair.get(super::other(op)).surfaces[surface];
+        let q = pair.get(super::other(op)).surfaces[surface];
         let mut near = Vec::new();
-        face.near_surface(q, self.eps, &mut near);
+        face.near_surface(&q, self.eps, &mut near);
         for k in near {
             let (li, i) = face.coedge_at(k);
             let e = face.loops[li][i].0;
-            let (va, vb) = shape.edges[e];
-            let (sa, sb) = (self.sign(op, va, surface), self.sign(op, vb, surface));
-            if sa * sb >= 0 || self.crossings.contains_key(&(op, e, surface)) {
+            if shape.straight[e] && matches!(q, Quadric::Plane { .. }) {
+                // Step 1's crossing of a line and a plane, where the
+                // distance is linear.
+                let (va, vb) = shape.edges[e];
+                let (sa, sb) = (self.sign(op, va, surface), self.sign(op, vb, surface));
+                if sa * sb >= 0 || self.crossings.contains_key(&((op, e, surface), 0)) {
+                    continue;
+                }
+                let (a, b) = (shape.points[va], shape.points[vb]);
+                let (da, db) = (q.distance(a), q.distance(b));
+                let p = a + (b - a) * (da / (da - db));
+                self.crossings.insert(((op, e, surface), 0), self.pos.len());
+                self.pos.push(p);
+                self.raw.push(Raw::Crossing);
                 continue;
             }
-            let (a, b) = (shape.points[va], shape.points[vb]);
-            let (da, db) = (q.distance(a), q.distance(b));
-            let p = a + (b - a) * (da / (da - db));
-            self.crossings.insert((op, e, surface), self.pos.len());
-            self.pos.push(p);
-            self.raw.push(Raw::Crossing);
+            let st = self.stations(pair, op, e, surface)?.to_vec();
+            let (curve, _, _) = shape.curve(e);
+            for k in 0..st.len() - 1 {
+                let key = ((op, e, surface), k);
+                if st[k].sign * st[k + 1].sign >= 0 || self.crossings.contains_key(&key) {
+                    continue;
+                }
+                let p = curve.point(q.crossing(curve, st[k].t, st[k + 1].t));
+                self.crossings.insert(key, self.pos.len());
+                self.pos.push(p);
+                self.raw.push(Raw::Crossing);
+            }
+            for i in 1..st.len() - 1 {
+                let key = ((op, e, surface), i);
+                let reached = st[i - 1].sign != 0 || st[i + 1].sign != 0;
+                if st[i].sign != 0 || !reached || self.station_points.contains_key(&key) {
+                    continue;
+                }
+                self.station_points.insert(key, self.pos.len());
+                self.pos.push(curve.point(st[i].t));
+                self.raw.push(Raw::Station);
+            }
         }
+        Ok(())
     }
 
     /// Records where an edge of one operand touches an edge of the other
@@ -171,9 +301,12 @@ impl Points {
             if examined > limit {
                 return Err(limit);
             }
+            if !pair.first.straight[ea] {
+                continue;
+            }
             for &eb in &near {
                 let xb = &bb[eb];
-                if !super::boxes_overlap(*xa, *xb, eps) {
+                if !pair.second.straight[eb] || !super::boxes_overlap(*xa, *xb, eps) {
                     continue;
                 }
                 let (p0, p1) = pair.first.edge_points(ea);
@@ -313,11 +446,40 @@ impl Points {
     }
 
     /// The cluster of the point where edge `e` of `op` crosses `surface` of
-    /// the other operand, if recorded.
-    pub fn crossing_cluster(&self, op: Operand, e: usize, surface: usize) -> Option<usize> {
+    /// the other operand between its stations `k` and `k + 1`, if recorded.
+    pub fn crossing_cluster(
+        &self,
+        op: Operand,
+        e: usize,
+        surface: usize,
+        k: usize,
+    ) -> Option<usize> {
         self.crossings
-            .get(&(op, e, surface))
+            .get(&((op, e, surface), k))
             .map(|&i| self.cluster[i])
+    }
+
+    /// The cluster of station `i` of edge `e` of `op` against `surface`:
+    /// its vertex's at an end, else its own if recorded.
+    pub fn station_cluster(
+        &self,
+        pair: &Pair,
+        op: Operand,
+        e: usize,
+        surface: usize,
+        i: usize,
+    ) -> Option<usize> {
+        let n = self.stations.get(&(op, e, surface))?.len();
+        let (va, vb) = pair.get(op).edges[e];
+        if i == 0 {
+            Some(self.vertex_cluster(op, va))
+        } else if i + 1 == n {
+            Some(self.vertex_cluster(op, vb))
+        } else {
+            self.station_points
+                .get(&((op, e, surface), i))
+                .map(|&r| self.cluster[r])
+        }
     }
 
     /// Decides, once per cluster and edge, which clusters lie on each edge
@@ -354,8 +516,12 @@ impl Points {
                     .enumerate()
                     .map(|(e, &(va, vb))| {
                         let (c0, c1) = (self.vertex_cluster(op, va), self.vertex_cluster(op, vb));
-                        let (a, b) = shape.edge_points(e);
-                        self.on_segment(a, b, c0, c1, Some(op))
+                        if shape.straight[e] {
+                            let (a, b) = shape.edge_points(e);
+                            self.on_segment(a, b, c0, c1, Some(op))
+                        } else {
+                            self.on_curve(pair, op, e, c0, c1)
+                        }
                     })
                     .collect::<Vec<_>>()
             });
@@ -384,6 +550,7 @@ impl Points {
             // neither more than the other: refused rather than guessed.
             let mut edge_of: FxHashMap<usize, usize> = FxHashMap::default();
             let mut out = Vec::with_capacity(ons.len());
+            let mut params = Vec::with_capacity(ons.len());
             for (e, on) in ons.into_iter().enumerate() {
                 let (_, b) = shape.edge_points(e);
                 let list = self.spaced(on, b)?;
@@ -397,11 +564,141 @@ impl Points {
                         )));
                     }
                 }
+                params.push(if shape.straight[e] {
+                    Vec::new()
+                } else {
+                    let (curve, t0, t1) = shape.curve(e);
+                    let n = list.len();
+                    (0..n)
+                        .map(|k| match k {
+                            0 => t0,
+                            _ if k + 1 == n => t1,
+                            _ => foot_on(curve, t0, self.rep[list[k]]).0,
+                        })
+                        .collect()
+                });
                 out.push(list);
             }
             self.on_edges[slot(op)] = out;
+            self.on_params[slot(op)] = params;
         }
         Ok(())
+    }
+
+    /// The clusters on curved edge `e` of `op` from cluster `c0` (at its
+    /// start) to `c1` (at its end), skipping clusters holding a vertex of
+    /// `op`: those within the tolerance of a point of the edge strictly
+    /// between its ends, nearest in turn, each with its distance from the
+    /// start along the chords between them.
+    fn on_curve(
+        &self,
+        pair: &Pair,
+        op: Operand,
+        e: usize,
+        c0: usize,
+        c1: usize,
+    ) -> Vec<(f64, usize)> {
+        let eps = self.eps;
+        let shape = pair.get(op);
+        let (curve, t0, t1) = shape.curve(e);
+        let (lo, hi) = shape.edge_boxes[e];
+        let mut near = Vec::new();
+        self.index
+            .overlapping(lo - DVec3::splat(eps), hi + DVec3::splat(eps), &mut near);
+        let mut found: Vec<(f64, usize)> = Vec::new();
+        for c in near {
+            if c == c0 || c == c1 || self.has_vertex[c][slot(op)] {
+                continue;
+            }
+            let (t, d) = foot_on(curve, t0, self.rep[c]);
+            if d <= eps && t > t0 && t < t1 {
+                found.push((t, c));
+            }
+        }
+        found.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+        let mut out = Vec::with_capacity(found.len() + 2);
+        out.push((0.0, c0));
+        let (mut at, mut prev) = (0.0, curve.point(t0));
+        for (t, c) in found.into_iter().chain([(t1, c1)]) {
+            let p = curve.point(t);
+            at += (p - prev).length();
+            prev = p;
+            out.push((at, c));
+        }
+        out
+    }
+
+    /// The parameters of the clusters on curved edge `e` of `op`
+    /// ([`Points::on_edge`]).
+    pub fn on_edge_params(&self, op: Operand, e: usize) -> &[f64] {
+        &self.on_params[slot(op)][e]
+    }
+
+    /// The clusters on the closed track `track` strictly between parameters
+    /// `ta` (cluster `lo`) and `tb > ta` (cluster `hi`), less than a turn
+    /// apart: those within the tolerance of it there, in order, each with
+    /// its parameter (unrolled from `ta`), both ends included. Two within
+    /// the tolerance of each other along it are refused.
+    pub fn on_track(
+        &self,
+        track: &Track,
+        (lo, ta): (usize, f64),
+        (hi, tb): (usize, f64),
+    ) -> Result<Vec<(usize, f64)>, KernelError> {
+        let eps = self.eps;
+        // A box holding the track: its stretch for a line, the whole curve
+        // for a closed one.
+        let (box_lo, box_hi) = match *track {
+            Track::Line { .. } => {
+                let (p, q) = (track.point(ta), track.point(tb));
+                (p.min(q), p.max(q))
+            }
+            Track::Circle { center, radius, .. } => {
+                (center - DVec3::splat(radius), center + DVec3::splat(radius))
+            }
+            Track::Ellipse { center, a, b, .. } => (
+                center - DVec3::splat(a.max(b)),
+                center + DVec3::splat(a.max(b)),
+            ),
+        };
+        let mut near = Vec::new();
+        self.index.overlapping(
+            box_lo - DVec3::splat(eps),
+            box_hi + DVec3::splat(eps),
+            &mut near,
+        );
+        let mut found: Vec<(f64, usize)> = Vec::new();
+        for c in near {
+            if c == lo || c == hi {
+                continue;
+            }
+            let (t, d) = track.nearest(self.rep[c]);
+            if d > eps {
+                continue;
+            }
+            let u = if track.closed() {
+                ta + (t - ta).rem_euclid(std::f64::consts::TAU)
+            } else {
+                t
+            };
+            if u > ta && u < tb {
+                found.push((u, c));
+            }
+        }
+        found.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+        let mut out = Vec::with_capacity(found.len() + 2);
+        out.push((lo, ta));
+        out.extend(found.into_iter().map(|(u, c)| (c, u)));
+        out.push((hi, tb));
+        for w in out.windows(2) {
+            if (track.point(w[1].1) - track.point(w[0].1)).length() <= eps {
+                return Err(KernelError::InvalidInput(format!(
+                    "the bodies meet in points closer than the tolerance near {}",
+                    show(self.rep[w[1].0])
+                )));
+            }
+        }
+        Ok(out)
     }
 
     /// The clusters on segment `a`–`b` from cluster `c0` (at `a`) to `c1`
@@ -529,6 +826,22 @@ fn closest_parameters(p: DVec3, u: DVec3, q: DVec3, v: DVec3) -> (f64, f64) {
     s = ((b * t - d) / a).clamp(0.0, 1.0);
     t = ((b * s + e) / c).clamp(0.0, 1.0);
     (s, t)
+}
+
+/// The parameter of the point of the curved edge `curve` nearest `p`
+/// (for a circle, unrolled from the edge's start parameter `t0` into
+/// `[t0, t0 + 2π)`), and its distance from `p`.
+pub(super) fn foot_on(curve: &Curve3, t0: f64, p: DVec3) -> (f64, f64) {
+    let t = match curve {
+        Curve3::Line { origin, dir } => (p - *origin).dot(*dir) / dir.length_squared(),
+        Curve3::Circle { center, x, y, .. } => {
+            let d = p - *center;
+            let a = d.dot(*y).atan2(d.dot(*x));
+            t0 + (a - t0).rem_euclid(std::f64::consts::TAU)
+        }
+        Curve3::Nurbs(n) => n.closest_point(p).0,
+    };
+    (t, (curve.point(t) - p).length())
 }
 
 /// Distance from `p` to the segment `a`–`b`.

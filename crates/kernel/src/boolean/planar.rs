@@ -86,7 +86,6 @@ pub(super) struct Edge<'a> {
 /// an edge (by its position in the list given), between its parameters
 /// `t0` and `t1` (both 0 for a straight edge), straying at most `band`.
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)] // read once curved faces are split (design note 0012 §10)
 pub(super) struct RChord {
     pub p: DVec2,
     pub edge: usize,
@@ -105,7 +104,6 @@ pub(super) struct Region {
     pub chords: Vec<Vec<RChord>>,
 }
 
-#[allow(dead_code)] // `band` and `refined` serve curved faces (design note 0012 §10)
 impl Region {
     /// The cycles as polygons of chart points.
     pub fn polygons(&self) -> Vec<Vec<DVec2>> {
@@ -257,6 +255,14 @@ fn graph(
 /// within the two bands of it, or a cluster within its band and `eps`.
 /// Consecutive chords of one edge share a point of its course and are not
 /// tested against each other.
+///
+/// Two edges meeting at a node always come within their bands there, so an
+/// edge's end chord at a node it shares with another edge is halved until
+/// its band is narrow, one halving a round; those halvings are made first,
+/// all at once ([`split_ends`]). After that, a round tests only the chords
+/// new in it against the others (marking either of a close pair that is
+/// wide): a pair of chords that both stood unchanged through the round
+/// before was tested then, and they were not close.
 fn refine(
     edges: &[&Edge],
     params: &mut [Vec<f64>],
@@ -266,14 +272,23 @@ fn refine(
     eps: f64,
 ) -> Result<Graph, Problem> {
     let fine = eps / 16.0;
-    for _ in 0..MAX_ROUNDS {
+    split_ends(edges, params, ends, pos, fine);
+    // Per parameter of each edge, the round it was made in.
+    let mut born: Vec<Vec<usize>> = params.iter().map(|ts| vec![0; ts.len()]).collect();
+    for round in 0..MAX_ROUNDS {
         let g = graph(edges, params, ends, nodes, pos);
-        let wide: Vec<usize> = (0..g.chords.len())
-            .filter(|&i| g.chords[i].band > fine)
-            .collect();
-        if wide.is_empty() {
-            return Ok(g);
+        // The chords new in this round, in the order `graph` makes them.
+        let mut fresh = Vec::with_capacity(g.chords.len());
+        for (i, e) in edges.iter().enumerate() {
+            match e.bend {
+                None => fresh.push(round == 0),
+                Some(_) => {
+                    let b = &born[i];
+                    fresh.extend(b.windows(2).map(|w| w[0] == round || w[1] == round));
+                }
+            }
         }
+        debug_assert_eq!(fresh.len(), g.chords.len());
         let boxes: Vec<(DVec3, DVec3)> = g
             .chords
             .iter()
@@ -288,25 +303,32 @@ fn refine(
         let point_tree = Bvh::of_points(&points);
         let mut split: Vec<bool> = vec![false; g.chords.len()];
         let mut near = Vec::new();
-        for &i in &wide {
+        for i in (0..g.chords.len()).filter(|&i| fresh[i]) {
             let c = g.chords[i];
             let (a, b) = (g.p[c.from], g.p[c.to]);
             tree.overlapping(boxes[i].0, boxes[i].1, &mut near);
-            let mut hit = near.iter().any(|&j| {
+            for &j in &near {
                 let d = g.chords[j];
-                let consecutive = d.edge == c.edge && (d.to == c.from || d.from == c.to) && j != i;
-                j != i
-                    && !consecutive
-                    && segment_distance(a, b, g.p[d.from], g.p[d.to]) <= c.band + d.band
-            });
-            if !hit {
+                let consecutive = d.edge == c.edge && (d.to == c.from || d.from == c.to);
+                // Nothing to decide when neither could be halved anew.
+                if j == i
+                    || consecutive
+                    || (split[i] || c.band <= fine) && (split[j] || d.band <= fine)
+                {
+                    continue;
+                }
+                if segment_distance(a, b, g.p[d.from], g.p[d.to]) <= c.band + d.band {
+                    split[i] |= c.band > fine;
+                    split[j] |= d.band > fine;
+                }
+            }
+            if c.band > fine && !split[i] {
                 let r = DVec3::splat(c.band + eps);
                 point_tree.overlapping(boxes[i].0 - r, boxes[i].1 + r, &mut near);
-                hit = near.iter().any(|&n| {
+                split[i] = near.iter().any(|&n| {
                     n != c.from && n != c.to && point_segment(g.p[n], a, b) <= c.band + eps
                 });
             }
-            split[i] = hit;
         }
         if !split.iter().any(|&s| s) {
             return Ok(g);
@@ -319,6 +341,7 @@ fn refine(
                     .position(|&t| t == c.t1)
                     .expect("a chord ends at a parameter of its edge");
                 ts.insert(at, 0.5 * (c.t0 + c.t1));
+                born[c.edge].insert(at, round + 1);
             }
         }
     }
@@ -327,6 +350,61 @@ fn refine(
         "a curved segment could not be resolved into chords",
         first,
     ))
+}
+
+/// Halves the end chords of each curved edge at a node it shares with
+/// another edge until their bands are at most `fine` (or [`MAX_ROUNDS`]
+/// halvings are made): the halvings [`refine`] would make there anyway,
+/// one a round, because chords meeting at a node are within their bands
+/// of each other.
+fn split_ends(
+    edges: &[&Edge],
+    params: &mut [Vec<f64>],
+    ends: &[(usize, usize)],
+    pos: &[DVec2],
+    fine: f64,
+) {
+    // Per node, how many edge ends meet there.
+    let mut degree = vec![0usize; pos.len()];
+    for &(a, b) in ends {
+        degree[a] += 1;
+        degree[b] += 1;
+    }
+    for (i, e) in edges.iter().enumerate() {
+        let Some((bend, _)) = &e.bend else { continue };
+        let (na, nb) = ends[i];
+        // An edge from a node back to it meets another edge there only if
+        // a third end is there.
+        let own = if na == nb { 2 } else { 1 };
+        for (node, at_start) in [(na, true), (nb, false)] {
+            if degree[node] <= own {
+                continue;
+            }
+            let ts = &mut params[i];
+            let (t_end, t_next) = if at_start {
+                (ts[0], ts[1])
+            } else {
+                (ts[ts.len() - 1], ts[ts.len() - 2])
+            };
+            let mut inner = Vec::new();
+            let mut t = t_next;
+            for _ in 0..MAX_ROUNDS {
+                if chord_band(bend.as_ref(), t_end, t, pos[node], bend.at(t)) <= fine {
+                    break;
+                }
+                t = 0.5 * (t_end + t);
+                inner.push(t);
+            }
+            // `inner` runs from the end's neighbour toward the end.
+            if at_start {
+                inner.reverse();
+                ts.splice(1..1, inner);
+            } else {
+                let k = ts.len() - 1;
+                ts.splice(k..k, inner);
+            }
+        }
+    }
 }
 
 /// The regions inside the face.

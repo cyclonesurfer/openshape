@@ -232,8 +232,10 @@ pub trait Kernel: Send + Sync {
     /// operands' faces, edges and vertices. Fails with
     /// [`KernelError::InvalidInput`] when the result would be empty or
     /// non-manifold (the bodies touching only along an edge or at a
-    /// point), and with [`KernelError::Unsupported`] for bodies with
-    /// curved faces or edges, which are not handled yet.
+    /// point), and with [`KernelError::Unsupported`] for what is not
+    /// handled yet: faces other than planes and circular cylinders, faces
+    /// that touch without crossing (tangent contacts), and cylinders that
+    /// meet at an angle.
     fn boolean(
         &self,
         a: &Self::Body,
@@ -286,6 +288,13 @@ pub trait Kernel: Send + Sync {
     /// [`Kernel::face_kinds`]), with the face's outward normal; `None` for
     /// a face of any other kind or an index past the body's faces.
     fn face_plane(&self, body: &Self::Body, face: FaceIx) -> Option<FacePlane>;
+
+    /// The tangent plane of a face's surface at the point of the surface
+    /// nearest `near` (exactly for planes, cylinders, cones and spheres,
+    /// closely for other surfaces and points near them), with the face's
+    /// outward normal there; `None` for an index past the body's faces or
+    /// a singular point of the surface (a cone's apex).
+    fn tangent_plane(&self, body: &Self::Body, face: FaceIx, near: DVec3) -> Option<FacePlane>;
 
     /// The planar arrangement of sketch curves: vertices, edges and bounded
     /// regions (design note 0006).
@@ -488,6 +497,16 @@ impl Kernel for BrepKernel {
             vertex_edges,
             seams: tess::seams(b),
         }
+    }
+
+    fn tangent_plane(&self, body: &Body, face: FaceIx, near: DVec3) -> Option<FacePlane> {
+        let f = body.brep.faces.get(face.0 as usize)?;
+        let (u, v) = f.surface.project(near);
+        let n = f.surface.normal(u, v)?;
+        Some(FacePlane {
+            point: f.surface.point(u, v),
+            normal: if f.forward { n } else { -n },
+        })
     }
 
     fn face_plane(&self, body: &Body, face: FaceIx) -> Option<FacePlane> {

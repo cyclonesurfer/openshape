@@ -549,3 +549,121 @@ nesting voids, come from the kernel's exact mass properties.
 
 Volumes in the identities come from the exact mass properties, so the
 identities hold to 1e-9 for curved results as for flat ones.
+
+## 11. As built: step 2, planes and cylinders (2026-10-13)
+
+§10.7 item 2. Solids bounded by planes and circular cylinders (extrudes
+of profiles with lines, arcs and circles, holes included, at any
+orientation) combine; cones and spheres (item 3), cylinders at an angle
+to each other (a quartic), tangent contacts and free-form edges on a
+cylinder (an ellipse a previous oblique cut left, stored as a NURBS
+curve) are refused as `Unsupported` with the reason. Polyhedra take
+step 1's path unchanged: the 100-times fuzz of §9 gives the same
+results, operation for operation, before and after.
+
+**Contacts** (`imprint.rs`, `meet.rs`). How two surfaces meet is found
+once per pair of surfaces, not per pair of faces, over the region where
+faces of both lie (the intersection of each surface's faces' boxes,
+padded by the tolerance): apart, the same surface, touching (refused as
+a tangent contact), unsupported, or tracks, the curves of §10.3 (lines,
+circles, ellipses), each with an id that every later stage uses. A face
+whose boundary lies strictly on one side of the other surface is apart
+from it when the face is curved, or when it is flat and lies inside a
+convex surface (a cylinder): its edges cannot reach the track, and its
+interior cannot either.
+
+**Points** (`points.rs`). Along each edge and surface of the other body,
+the *stations* are the edge's ends (with their vertices' signs) and the
+turning points of the surface's implicit function along the edge
+(§10.2), each with a sign decided once. A crossing lies between two
+stations of strictly opposite signs and is found by bisection; a
+station within the tolerance of the surface, between stations off it,
+is a point too (an arc touching a plane). Crossings are keyed by edge,
+surface and the stations around them, so the two faces of an edge find
+the same point.
+
+**Imprint.** A track's cuts in a face are its boundary's crossings with
+the other surface and its stations on it, by step 1's two half-open
+rules. Each cut is assigned to the nearest track within 16 tolerances
+(a point within the tolerance of both surfaces lies within the
+tolerance over the sine of their angle of the curve where they meet);
+a cut as near to a second track is refused. On a closed track a cut
+enters the face where the boundary goes to the positive side of the
+other surface and the track runs across the face one way
+(`T′ · (n_F × ∇G)` > 0, `T` the track's tangent, `n_F` the face's
+outward normal, `G` the other surface's implicit function), and leaves
+it otherwise; the cuts at one point are taken together (their net is
+±1, or 0 for the boundary touching the track there), and the enters and
+leaves must alternate around the track. A closed track that no cut
+reaches is wholly in the face or wholly out of it, decided by the face's
+outline at four of its points. The stretch in both faces is the
+intersection of the two faces' spans, along a line as in step 1 and
+around a closed track as arcs. A track touching a face's boundary from
+inside it is refused (a tangent contact).
+
+**Segments.** A segment's course is straight, a piece of an operand's
+edge, or a piece of a track; curved segments between the same two
+clusters are one segment when their midpoints are within the tolerance.
+Pieces of circles are reparametrised so that the arc's middle is at a
+quarter turn from the parameter's origin, so no arc crosses it.
+
+**Split** (`chart.rs`, `planar.rs`). A face is split in its chart (a
+plane's frame, a cylinder unrolled about the face's middle, both
+isometric), each curved segment a chain of chords with bands from a
+bound on its course's second derivative (§10.4). Chords are halved
+until no band can hide a contact; the chords at a node shared by two
+segments are halved at once (they always meet there), and each later
+round tests only its new chords. Ordering segments at a point by exact
+tangents and curvature (§10.4) was not needed: the chords near a node
+are within a sixteenth of the tolerance of their courses.
+
+**Classify** (`classify.rs`). A piece's point is found as in step 1,
+with the chords' bands subtracted from its clearance and the clearance
+measured in space; chords are halved while the clearance left is within
+the tolerance. A piece with more than 64 boundary points is first probed:
+from the middle of a few sides inward to the first side met, halfway,
+each candidate checked by its winding number (exact orientation tests;
+Hormann and Agathos, "The point in polygon problem for arbitrary
+polygons", *Computational Geometry* 20, 2001) and measured against every
+side; the triangulation serves when no probe is far enough inside.
+Parity rays meet curved faces in closed form (§10.5); a ray grazing a
+surface (the cosine of its angle with the surface's normal under 1e-3)
+or meeting a face within the tolerance of its boundary is abandoned for
+the next direction.
+
+**Assemble** (`assemble.rs`). Pieces on a curved surface merge only with
+pieces of the same operand face facing the same way (they span no more
+than the face, half a turn); flat pieces merge as in step 1. Curved
+segments join end to end only when they are pieces of one operand edge
+or one track; straight ones join as in step 1. A result whose faces are all flat with straight
+edges gets step 1's exact shell volumes. Otherwise a lone shell is the
+outer shell of the one solid (validation refuses it if it is inside
+out); several shells are ordered by volumes from validation's coarse
+mesh with an error bound (twice the mesh's area times its distance from
+the surfaces), or by the exact mass properties where that bound could
+reach the sign, and each void goes in the smallest solid holding one of
+its own corners.
+
+**Tests.** Golden cases (`crates/kernel/tests/curved.rs`) check volume
+and area to 1e-9 relative, topology and the origins of every face, edge
+and vertex: a plate with a round hole, a boss through and on a plate, a
+D-cut shaft, two parallel cylinders (all three operations), a
+counterbore, a box cut from inside a cylinder and a cylinder from
+inside a box (voids), and a slab cut across a cylinder (two solids).
+Random pairs check the three volume identities of §7 with exact
+volumes: boxes at any angle and prisms of circles, slots, rounded
+rectangles, D shapes, polygons with round holes and discs with
+polygonal holes, along one axis (the world's or a turned one), half of
+them on a quarter-unit grid. On 10,000 pairs (40,000 operations) every
+result is valid with its origins on its operands' surfaces and every
+identity holds where the results exist; 525 operations are refused
+(13 in 1,000): 516 as tangent contacts (on the grid, a box's face on a
+cylinder's side is common), 5 as non-manifold results, and the 4 of one
+pair whose box rests a corner exactly on the centre of a cylinder's end
+face, from inside: the face's test point is its centre, within the
+tolerance of the box, and the face is refused although the union
+exists. Keeping test points clear of such contact points would decide
+it. The run found one fault, now fixed and kept as a golden case: a
+void inside a curved body was placed by a corner of the outer shell
+instead of its own, so cutting a body from inside another was
+refused (88 operations of the first run).

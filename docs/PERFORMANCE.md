@@ -55,6 +55,8 @@ machine. The limit is what the test enforces.
 | Mesh it | 140–220 ms | 1,500 ms |
 | Union or subtract two 256-sided star prisms | 38.5–44 ms | 500 ms |
 | Cut 64 holes into a box, one boolean each | 225–265 ms | 3,000 ms |
+| Drill 64 round holes into a plate, one boolean each | 860–1,050 ms | 10,000 ms |
+| Intersect or subtract a plate with 100 round holes and a box across them | 52–55 ms | 600 ms |
 | Sketch regions of 122 curves (a 41 by 41 grid and 40 circles) | 100–115 ms | 1,200 ms |
 | Regenerate the demo document | 36.5–41 ms | 400 ms |
 
@@ -66,6 +68,7 @@ factor):
 | Extrude a star prism, 256 to 2048 sides | 9.7–12.2 times |
 | Union of two regular prisms, 128 to 1024 sides | 11.3–12.6 times |
 | Mesh a plate, 16 to 121 holes (7.6 times) | 7.4–7.6 times |
+| Cut a box across a plate's round holes, 16 to 121 holes (7.6 times) | 7.8–8.4 times |
 
 The union is scaled on regular prisms, whose result grows with their
 size. Two star prisms overlap in a band where many faces of each meet
@@ -179,6 +182,40 @@ builds) on the 256-sided unions and the 64 cuts above.
   far less per instruction than the arithmetic around it. Too little to
   carry a patched copy for (ADR 0022).
 
+### Third pass: booleans with curved faces
+
+The new curved stages (design note 0012 §11) were timed on one round
+hole drilled into a plate extruded with 99, by callgrind and then by wall
+clock: 211 ms at first.
+
+* **A lone shell needs no volume.** Every curved result's shells were
+  measured by the exact mass properties to order them into solids and
+  voids; a result with one shell is one solid, and validation already
+  checks that it is not inside out. With several, each shell's volume now
+  comes from the coarse mesh validation uses, with a bound on its error
+  (twice its area times the mesh's distance from the surfaces), and the
+  exact mass properties only where that bound could reach the sign.
+* **Chords meeting at a node are halved at once.** A curved segment's
+  chords are halved where their bands could hide a contact; two segments
+  meeting at a point are always within their bands there, so the chords
+  at every node were halved one round at a time, about eleven rounds, and
+  every round rebuilt the whole graph and tested every chord. Those
+  halvings are now made first, all at once, and each round tests only the
+  chords new in it (a pair that stood unchanged through a round was
+  tested in it).
+* **Large pieces are probed, not triangulated.** A piece with more than
+  64 boundary points gets its interior point from probes: from the middle
+  of a few sides, inward to the first side met, halfway, each checked by
+  an exact winding number and measured against every side. The
+  triangulation of the face with 100 holes (5,600 chords) spent 22 ms a
+  face, mostly in exact incircle tests on points of one circle; the probes
+  take about 1 ms. The triangulation remains for small pieces and
+  wherever the probes find no point far enough inside.
+
+The single hole fell from 211 ms to 40 ms: 18 ms in splitting the two faces
+with holes into regions, 15 ms validating the result (which meshes it;
+see the slow spots below), every other stage under 3 ms.
+
 ## Known slow spots
 
 Measured by wall clock, not yet fixed; each is a candidate for a later
@@ -196,6 +233,16 @@ pass.
   need no Delaunay property (any triangulation on their boundary points
   is as good); a triangulation built from orientation tests alone, or a
   cheaper exact incircle stage, would remove most of it.
+* **Curved segments carry many chords near their ends.** The halvings at
+  a node (third pass) go on until the chords' bands are within a
+  sixteenth of the tolerance, about eleven halvings at each end of each
+  arc, so a face with 100 round holes is split on 5,600 chords where
+  1,600 would follow the circles closely enough elsewhere: 9 ms a face,
+  half of drilling a hole into a plate with 99. Two segments leaving a
+  point at a wide angle cannot hide a contact near it once each stays
+  within a cone about its first chord, which a bound on the segments'
+  turning would show; that needs the turning of each course in its
+  chart (design note 0012 §11).
 * **Validation meshes the result** to check each shell's orientation by
   its volume, and to check that every face can be meshed: about a fifth
   of a 256-sided union (8 ms of 43) and a quarter of each of the 64 cuts,

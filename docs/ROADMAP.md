@@ -39,7 +39,7 @@ item is delivered in the phase noted.
 
 ## Phase 3 — Booleans and core features
 - [ ] Curve/curve, curve/surface, surface/surface intersection (design note 0011 written)
-- [ ] Robust booleans; fuzzing; `|A∪B| = |A|+|B|−|A∩B|` property test; failure-rate metric in CI (design note 0012; polyhedral solids done with the volume identities, tolerance fuzzing and refusal rates printed by CI (§9); curved faces next)
+- [ ] Robust booleans; fuzzing; `|A∪B| = |A|+|B|−|A∩B|` property test; failure-rate metric in CI (design note 0012; polyhedral solids done with the volume identities, tolerance fuzzing and refusal rates printed by CI (§9); planes and circular cylinders done with golden cases and random pairs (§11); cones and spheres, cylinders at an angle and tangent contacts next)
 - [ ] Incremental regeneration engine (`regen`): dependency graph, caching, cancellation, error propagation
 - [ ] Persistent naming (`naming`) with reorder/suppress/pattern-count tests (design note 0013; kernel origin tables (ADR 0018), the `naming` crate for box, extrude and revolve, and the first references from features (sketch on a planar face, extrude up to a parallel face, both picked in the viewport; ADR 0019) done; split/merge through booleans and the reorder/suppress/pattern tests to come)
 - [ ] Hole, patterns, mirror, construction planes

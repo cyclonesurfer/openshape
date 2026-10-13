@@ -261,6 +261,72 @@ fn booleans() {
     within("cut 64 holes into a box one at a time", t, LIMIT.pins_64);
 }
 
+/// A cylinder of radius `r` about `(x, y)`, from `z0` up `h`.
+fn pin(x: f64, y: f64, z0: f64, r: f64, h: f64) -> Body {
+    let frame = Frame {
+        origin: DVec3::new(0.0, 0.0, z0),
+        ..Frame::WORLD
+    };
+    k().extrude(
+        &Profile::circle(frame, DVec2::new(x, y), r),
+        &ExtrudeSpec {
+            distance: h,
+            symmetric: false,
+        },
+    )
+    .expect("a pin")
+}
+
+/// Half the thickness of `plate(m)`'s plate and more: a box over its upper
+/// half that cuts every hole across.
+fn upper(m: usize) -> Body {
+    k().make_box(
+        &Frame {
+            origin: DVec3::new(-0.5, -0.5, 0.1),
+            ..Frame::WORLD
+        },
+        DVec3::new(m as f64 + 1.0, m as f64 + 1.0, 1.0),
+    )
+    .expect("a box")
+}
+
+#[test]
+fn curved_booleans() {
+    // A plate drilled with an 8 by 8 grid of holes, one boolean each: the
+    // body grows to 134 faces, two half cylinders a hole (ADR 0008).
+    let (body, t) = best(1, || {
+        let mut body = k()
+            .make_box(&Frame::WORLD, DVec3::new(8.0, 8.0, 0.2))
+            .expect("a plate");
+        for i in 0..8 {
+            for j in 0..8 {
+                let hole = pin(i as f64 + 0.5, j as f64 + 0.5, -0.5, 0.3, 1.2);
+                body = k()
+                    .boolean(&body, &hole, BooleanOp::Subtract)
+                    .expect("a hole");
+            }
+        }
+        body
+    });
+    assert_eq!(k().topology(&body).faces, 6 + 64 * 2);
+    within(
+        "drill 64 holes into a plate one at a time",
+        t,
+        LIMIT.drill_64,
+    );
+
+    // A plate with 100 holes and a box over its upper half, across them.
+    let (p, top) = (plate(10), upper(10));
+    for op in [BooleanOp::Intersect, BooleanOp::Subtract] {
+        let (_, t) = best(3, || k().boolean(&p, &top, op).expect("a boolean"));
+        within(
+            &format!("{op:?} a plate with 100 holes and a box across them"),
+            t,
+            LIMIT.plate_box,
+        );
+    }
+}
+
 #[test]
 fn sketch_regions() {
     // A grid of 41 by 41 lines and 40 circles: 1,681 crossings among the
@@ -330,6 +396,17 @@ fn scaling() {
     );
 
     let (p4, p11) = (plate(4), plate(11));
+    let (top4, top11) = (upper(4), upper(11));
+    scales(
+        "cut a box across a plate's holes, 16 to 121 holes",
+        121.0 / 16.0,
+        5,
+        || k().boolean(&p4, &top4, BooleanOp::Subtract).expect("a cut"),
+        || {
+            k().boolean(&p11, &top11, BooleanOp::Subtract)
+                .expect("a cut")
+        },
+    );
     scales(
         "mesh a plate, 16 to 121 holes",
         121.0 / 16.0,
@@ -351,6 +428,8 @@ struct Limits {
     mesh_plate: f64,
     boolean_256: f64,
     pins_64: f64,
+    drill_64: f64,
+    plate_box: f64,
     regions_122: f64,
 }
 
@@ -364,5 +443,7 @@ const LIMIT: Limits = Limits {
     mesh_plate: 1500.0,
     boolean_256: 500.0,
     pins_64: 3000.0,
+    drill_64: 10000.0,
+    plate_box: 600.0,
     regions_122: 1200.0,
 };

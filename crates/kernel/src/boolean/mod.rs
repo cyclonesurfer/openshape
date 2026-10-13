@@ -30,7 +30,7 @@
 //! Anything the stages cannot decide within the tolerance is refused with
 //! a message and a location rather than guessed.
 
-use glam::DVec3;
+use glam::{DVec2, DVec3};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::bvh::Bvh;
@@ -39,25 +39,24 @@ use crate::topo::Brep;
 use crate::{BooleanOp, KernelError, Tolerance};
 
 mod assemble;
-// The geometry layer of step 2 (design note 0012 §10.7, item 1), tested on
-// its own; the pipeline uses it as it gains curved faces.
-#[allow(dead_code)]
 mod bernstein;
+mod chart;
 mod classify;
-#[allow(dead_code)]
+mod imprint;
 mod meet;
 mod planar;
 mod points;
-#[allow(dead_code)]
 mod quadric;
-#[allow(dead_code)]
 mod shape;
 #[cfg(test)]
 mod testing;
 
+use chart::Chart;
 use classify::Class;
+use imprint::Relation;
+use meet::Track;
 use points::Points;
-use shape::{Face, Shape};
+use shape::Shape;
 
 /// Work limits (docs/PERFORMANCE.md): pairs of faces that meet, pairs of
 /// edges near each other, candidate points, and segments of the result's
@@ -122,17 +121,6 @@ fn pad(eps: f64) -> DVec3 {
     DVec3::splat(2.0 * eps)
 }
 
-/// How two faces of different operands lie.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Relation {
-    /// One face lies wholly on one side of the other's plane.
-    Apart,
-    /// On one plane (either orientation).
-    Coplanar,
-    /// The faces' planes cross, and each face reaches the other's plane.
-    Crossing,
-}
-
 /// Two clusters, the lesser first: the ends of a segment.
 type Key = (usize, usize);
 
@@ -154,6 +142,33 @@ enum Source {
 enum Course {
     /// The straight line between the clusters' places.
     Straight,
+    /// Along curved edge `e` of operand `op`, from its parameter `ta` at
+    /// the segment's `a` to `tb` at its `b`.
+    Edge {
+        op: Operand,
+        e: usize,
+        ta: f64,
+        tb: f64,
+    },
+    /// Along closed track `id`, from parameter `ta` at `a` to `tb` at `b`,
+    /// less than a turn apart.
+    Track { id: usize, ta: f64, tb: f64 },
+}
+
+impl Course {
+    /// The course run the other way.
+    fn reversed(self) -> Course {
+        match self {
+            Course::Straight => Course::Straight,
+            Course::Edge { op, e, ta, tb } => Course::Edge {
+                op,
+                e,
+                ta: tb,
+                tb: ta,
+            },
+            Course::Track { id, ta, tb } => Course::Track { id, ta: tb, tb: ta },
+        }
+    }
 }
 
 /// A segment of the result's candidate edges.
@@ -163,6 +178,9 @@ struct Seg {
     b: usize,
     course: Course,
     sources: Vec<Source>,
+    /// For a curved segment, the point of its course halfway along its
+    /// parameter.
+    mid: Option<DVec3>,
 }
 
 /// A segment in one face's graph: material on the left of `a → b`
@@ -211,15 +229,21 @@ fn boolean_within(
         first: shape::shape(a, "first")?,
         second: shape::shape(b, "second")?,
     };
-    for (s, which) in [(&pair.first, "first"), (&pair.second, "second")] {
-        if !s.flat {
-            return Err(KernelError::Unsupported(format!(
-                "booleans of bodies with curved faces or edges (the {which} body has some; \
-                 design note 0012 §10)"
-            )));
-        }
-    }
     let eps = tol.linear;
+    let outlines = [
+        imprint::outlines(&pair.first)?,
+        imprint::outlines(&pair.second)?,
+    ];
+    // Each face's chart: its plane's frame, or its outline's.
+    let charts: [Vec<Chart>; 2] = [Operand::First, Operand::Second].map(|op| {
+        pair.get(op)
+            .faces
+            .iter()
+            .zip(&outlines[slot(op)])
+            .map(|(f, o)| o.as_ref().map_or(Chart::Plane(f.frame), |o| o.chart))
+            .collect()
+    });
+    let mut contacts = imprint::Contacts::new(&pair);
     let mut pts = Points::new(&pair, eps);
 
     // Face pairs that can meet, and how.
@@ -237,12 +261,12 @@ fn boolean_within(
             if crossing.len() + coplanar.len() >= limits.face_pairs {
                 return Err(too_large("pairs of faces that meet", limits.face_pairs));
             }
-            match relation(&pair, &pts, fa, fb)? {
+            match imprint::relation(&pair, &mut pts, &mut contacts, fa, fb)? {
                 Relation::Apart => {}
                 Relation::Coplanar => coplanar.push((fa, fb)),
                 Relation::Crossing => {
-                    pts.add_crossings(&pair, Operand::First, fa, b.surface);
-                    pts.add_crossings(&pair, Operand::Second, fb, a.surface);
+                    pts.add_crossings(&pair, Operand::First, fa, b.surface)?;
+                    pts.add_crossings(&pair, Operand::Second, fb, a.surface)?;
                     if pts.raw_count() > limits.points {
                         return Err(too_large("candidate points", limits.points));
                     }
@@ -277,10 +301,30 @@ fn boolean_within(
                 for &(e, forward) in l {
                     if edge_segs[slot(op)][e].is_empty() {
                         let along = pts.on_edge(op, e);
-                        edge_segs[slot(op)][e] = along
-                            .windows(2)
-                            .map(|w| segs.add(w[0], w[1], Course::Straight, Source::Edge(op, e)))
-                            .collect();
+                        edge_segs[slot(op)][e] = if shape.straight[e] {
+                            along
+                                .windows(2)
+                                .map(|w| {
+                                    segs.add(w[0], w[1], Course::Straight, Source::Edge(op, e))
+                                })
+                                .collect()
+                        } else {
+                            let ts = pts.on_edge_params(op, e);
+                            let (curve, _, _) = shape.curve(e);
+                            (0..along.len() - 1)
+                                .map(|k| {
+                                    let (ta, tb) = (ts[k], ts[k + 1]);
+                                    segs.add_curved(
+                                        along[k],
+                                        along[k + 1],
+                                        Course::Edge { op, e, ta, tb },
+                                        curve.point(0.5 * (ta + tb)),
+                                        Source::Edge(op, e),
+                                        eps,
+                                    )
+                                })
+                                .collect()
+                        };
                     }
                     let along = pts.on_edge(op, e);
                     for (k, &s) in edge_segs[slot(op)][e].iter().enumerate() {
@@ -295,25 +339,66 @@ fn boolean_within(
         }
     }
     for &(fa, fb) in &crossing {
-        for (lo, hi) in meeting(&pair, &pts, fa, fb)? {
-            for w in pts.split_segment(lo, hi)?.windows(2) {
-                let s = segs.add(w[0], w[1], Course::Straight, Source::Meet(fa, fb));
-                face_segs[0][fa].push(FaceSeg { seg: s, side: None });
-                face_segs[1][fb].push(FaceSeg { seg: s, side: None });
+        let (a, b) = (&pair.first.faces[fa], &pair.second.faces[fb]);
+        let planes = matches!(
+            pair.first.surfaces[a.surface],
+            quadric::Quadric::Plane { .. }
+        ) && matches!(
+            pair.second.surfaces[b.surface],
+            quadric::Quadric::Plane { .. }
+        );
+        let mut imprint = |s: usize| {
+            face_segs[0][fa].push(FaceSeg { seg: s, side: None });
+            face_segs[1][fb].push(FaceSeg { seg: s, side: None });
+        };
+        if planes {
+            for (lo, hi) in imprint::plane_meeting(&pair, &pts, &outlines, fa, fb)? {
+                for w in pts.split_segment(lo, hi)?.windows(2) {
+                    imprint(segs.add(w[0], w[1], Course::Straight, Source::Meet(fa, fb)));
+                }
+            }
+            continue;
+        }
+        for st in imprint::stretches(&pair, &pts, &outlines, &contacts, fa, fb)? {
+            let track = contacts.tracks[st.track];
+            if !track.closed() {
+                for w in pts.split_segment(st.lo.0, st.hi.0)?.windows(2) {
+                    imprint(segs.add(w[0], w[1], Course::Straight, Source::Meet(fa, fb)));
+                }
+                continue;
+            }
+            for w in pts.on_track(&track, st.lo, st.hi)?.windows(2) {
+                let (ta, tb) = (w[0].1, w[1].1);
+                imprint(segs.add_curved(
+                    w[0].0,
+                    w[1].0,
+                    Course::Track {
+                        id: st.track,
+                        ta,
+                        tb,
+                    },
+                    track.point(0.5 * (ta + tb)),
+                    Source::Meet(fa, fb),
+                    eps,
+                ));
             }
         }
     }
     for &(fa, fb) in &coplanar {
         for (op, f, g) in [(Operand::First, fa, fb), (Operand::Second, fb, fa)] {
-            // The pieces of g's edges inside f (closed).
-            let face = &pair.get(op).faces[f];
+            // The pieces of g's edges in f (closed).
+            let shape = pair.get(op);
+            let face = &shape.faces[f];
             let gs = pair.get(other(op));
             for l in &gs.faces[g].loops {
                 for &(e, _) in l {
                     for &s in &edge_segs[slot(other(op))][e] {
                         let seg = &segs.list[s];
-                        let m = (pts.rep[seg.a] + pts.rep[seg.b]) * 0.5;
-                        if in_closed_face(pair.get(op), face, m, eps) {
+                        let m = seg
+                            .mid
+                            .unwrap_or_else(|| (pts.rep[seg.a] + pts.rep[seg.b]) * 0.5);
+                        let outline = outlines[slot(op)][f].as_ref();
+                        if imprint::locate(shape, outline, face, m, eps) != Some(false) {
                             face_segs[slot(op)][f].push(FaceSeg { seg: s, side: None });
                         }
                     }
@@ -334,9 +419,10 @@ fn boolean_within(
         partners[1].entry(fb).or_default().push(fa);
     }
     let boundaries = [
-        classify::Boundary::new(&pair.first)?,
-        classify::Boundary::new(&pair.second)?,
+        classify::Boundary::new(&pair.first, &outlines[0])?,
+        classify::Boundary::new(&pair.second, &outlines[1])?,
     ];
+
     let boxes = [pair.first.extent(), pair.second.extent()];
     let mut pieces: Vec<Piece> = Vec::new();
     for op in [Operand::First, Operand::Second] {
@@ -345,24 +431,14 @@ fn boolean_within(
         for (fi, f) in shape.faces.iter().enumerate() {
             // A face farther than the tolerance from the other body's box
             // is untouched by it (no point where the bodies meet is on its
-            // edges, and no face of the other body is on its plane) and
+            // edges, and no face of the other body is on its surface) and
             // wholly outside it: its one piece, its own loops, needs no
             // point inside it and no test.
             let clear = !boxes_overlap((f.lo, f.hi), boxes[slot(other(op))], eps);
-            let edges: Vec<planar::Edge> = face_segs[slot(op)][fi]
-                .iter()
-                .map(|fs| {
-                    let s = &segs.list[fs.seg];
-                    planar::Edge {
-                        seg: fs.seg,
-                        a: s.a,
-                        b: s.b,
-                        side: fs.side,
-                        bend: None,
-                    }
-                })
-                .collect();
-            let pos = |c: usize| f.to2(pts.rep[c]);
+            let chart = charts[slot(op)][fi];
+            let list = face_segs[slot(op)][fi].iter().map(|fs| (fs.seg, fs.side));
+            let edges = planar_edges(&pair, &contacts.tracks, &segs, &chart, list)?;
+            let pos = |c: usize| chart.map(pts.rep[c]);
             let regions = planar::regions(&edges, &pos, eps).map_err(|p| match p {
                 planar::Problem::Close(c) => KernelError::InvalidInput(format!(
                     "a point where the bodies meet lies within the tolerance of an edge \
@@ -391,9 +467,9 @@ fn boolean_within(
                     });
                     continue;
                 }
-                let (inner, clearance) = classify::interior_point(&region.polygons())
+                let (inner, clearance) = interior(&region, &edges, &chart, eps)
                     .map_err(|m| KernelError::InvalidResult(format!("boolean: face {fi}: {m}")))?;
-                let at = f.to3(inner);
+                let at = chart.unmap(inner);
                 if clearance <= eps {
                     return Err(KernelError::InvalidInput(format!(
                         "the bodies leave a sliver thinner than the tolerance near {}",
@@ -413,8 +489,16 @@ fn boolean_within(
                 // one on it.
                 for &g in partners[slot(op)].get(&fi).into_iter().flatten() {
                     let gf = &them.faces[g];
-                    if in_face(them, gf, at) {
-                        let same = gf.normal().dot(f.normal()) > 0.0;
+                    let on = match &outlines[slot(other(op))][g] {
+                        None => imprint::in_face(them, gf, at),
+                        Some(o) => o.locate(o.chart.map(at), 0.0, eps / 16.0) == Some(true),
+                    };
+                    if on {
+                        let same = if f.flat && gf.flat {
+                            gf.normal().dot(f.normal()) > 0.0
+                        } else {
+                            outward(shape, f, at).dot(outward(them, gf, at)) > 0.0
+                        };
                         class = Some(if same {
                             Class::OnSame
                         } else {
@@ -439,7 +523,98 @@ fn boolean_within(
         }
     }
     let coplanar: FxHashSet<(usize, usize)> = coplanar.into_iter().collect();
-    assemble::assemble(&pair, &pts, segs, pieces, &coplanar, op, tol)
+    let geometry = assemble::Geometry {
+        pair: &pair,
+        tracks: &contacts.tracks,
+        charts: &charts,
+    };
+    assemble::assemble(&geometry, &pts, segs, pieces, &coplanar, op, tol)
+}
+
+/// The outward normal of face `f` of `shape` at `p` (on its surface).
+fn outward(shape: &Shape, f: &shape::Face, p: DVec3) -> DVec3 {
+    let g = shape.surfaces[f.surface].gradient(p);
+    if f.outward {
+        g
+    } else {
+        -g
+    }
+}
+
+/// Points on a piece's boundary above which [`interior`] probes the piece
+/// ([`classify::probe_point`]) before triangulating it.
+const PROBE_ABOVE: usize = 64;
+
+/// A point inside a region of a face and its distance in space from the
+/// region's boundary at least: inside the polygon of the region's chords,
+/// as far from its sides as can be found, less the chords' bands, as a
+/// distance in space (the chart's lengths are lengths along the surface).
+/// While that is within the tolerance, chords are halved, until their
+/// bands are within a sixteenth of it.
+fn interior(
+    region: &planar::Region,
+    edges: &[planar::Edge],
+    chart: &Chart,
+    eps: f64,
+) -> Result<(DVec2, f64), String> {
+    let mut refined: Option<planar::Region> = None;
+    loop {
+        let r = refined.as_ref().unwrap_or(region);
+        let polygons = r.polygons();
+        let band = r.band();
+        // A large piece is probed first: a triangulation of it costs far
+        // more, most of all when its points lie on circles.
+        if polygons.iter().map(Vec::len).sum::<usize>() > PROBE_ABOVE {
+            if let Some((inner, clearance)) = classify::probe_point(&polygons) {
+                let space = chart.space(clearance - band);
+                if space > eps {
+                    return Ok((inner, space));
+                }
+            }
+        }
+        let (inner, clearance) = classify::interior_point(&polygons)?;
+        let space = chart.space(clearance - band);
+        if space > eps || band <= eps / 16.0 {
+            return Ok((inner, space));
+        }
+        refined = Some(r.refined(edges, band / 4.0));
+    }
+}
+
+/// The segments `list` (with their sides) of a face whose chart is
+/// `chart`, as edges of its planar graph: a curved one with its course in
+/// the chart, unless that is straight there.
+fn planar_edges<'a>(
+    pair: &'a Pair,
+    tracks: &[Track],
+    segs: &Segments,
+    chart: &Chart,
+    list: impl Iterator<Item = (usize, Option<bool>)>,
+) -> Result<Vec<planar::Edge<'a>>, KernelError> {
+    let traced = |of: chart::TraceOf<'a>, ta: f64, tb: f64| {
+        Ok::<_, KernelError>(chart::trace(chart, of)?.map(|t| {
+            let ts = t.division(ta, tb);
+            (Box::new(t) as Box<dyn planar::Bend + 'a>, ts)
+        }))
+    };
+    list.map(|(s, side)| {
+        let seg = &segs.list[s];
+        let bend = match seg.course {
+            Course::Straight => None,
+            Course::Edge { op, e, ta, tb } => {
+                traced(chart::TraceOf::Curve(pair.get(op).curve(e).0), ta, tb)?
+            }
+            Course::Track { id, ta, tb } => traced(chart::TraceOf::Track(tracks[id]), ta, tb)?,
+        };
+        Ok(planar::Edge {
+            seg: s,
+            a: seg.a,
+            b: seg.b,
+            side,
+            bend,
+        })
+    })
+    .collect()
 }
 
 fn slot(op: Operand) -> usize {
@@ -466,29 +641,80 @@ struct Segments {
     list: Vec<Seg>,
     /// The straight segment between two clusters, if there is one.
     straight: FxHashMap<Key, usize>,
+    /// The curved segments between two clusters.
+    curved: FxHashMap<Key, Vec<usize>>,
 }
 
 impl Segments {
     /// The segment from `from` to `to` along `course` from `source`: a new
     /// one, or the one already there (which gains the source).
     fn add(&mut self, from: usize, to: usize, course: Course, s: Source) -> usize {
+        debug_assert_eq!(
+            course,
+            Course::Straight,
+            "a curved segment needs its midpoint"
+        );
         let k = key(from, to);
-        let i = match course {
-            Course::Straight => *self.straight.entry(k).or_insert_with(|| {
-                self.list.push(Seg {
-                    a: k.0,
-                    b: k.1,
-                    course,
-                    sources: Vec::new(),
-                });
-                self.list.len() - 1
-            }),
-        };
+        let i = *self.straight.entry(k).or_insert_with(|| {
+            self.list.push(Seg {
+                a: k.0,
+                b: k.1,
+                course,
+                sources: Vec::new(),
+                mid: None,
+            });
+            self.list.len() - 1
+        });
+        self.source(i, s);
+        i
+    }
+
+    /// The curved segment from `from` to `to` along `course` (given from
+    /// `from`), with `mid` the point halfway along it, from source `s`: a
+    /// new one, or one already between the two clusters whose midpoint is
+    /// within the tolerance `eps` of `mid` (two pieces of one course, an
+    /// operand's edge and the curve where faces meet along it), which
+    /// gains the source.
+    fn add_curved(
+        &mut self,
+        from: usize,
+        to: usize,
+        course: Course,
+        mid: DVec3,
+        s: Source,
+        eps: f64,
+    ) -> usize {
+        let k = key(from, to);
+        let found = self.curved.get(&k).and_then(|l| {
+            l.iter()
+                .copied()
+                .find(|&i| self.list[i].mid.is_some_and(|m| (m - mid).length() <= eps))
+        });
+        let i = found.unwrap_or_else(|| {
+            self.list.push(Seg {
+                a: k.0,
+                b: k.1,
+                course: if from <= to {
+                    course
+                } else {
+                    course.reversed()
+                },
+                sources: Vec::new(),
+                mid: Some(mid),
+            });
+            let i = self.list.len() - 1;
+            self.curved.entry(k).or_default().push(i);
+            i
+        });
+        self.source(i, s);
+        i
+    }
+
+    fn source(&mut self, i: usize, s: Source) {
         let list = &mut self.list[i].sources;
         if !list.contains(&s) {
             list.push(s);
         }
-        i
     }
 
     /// The cluster segment `s` starts at when run forward (from `a` to `b`)
@@ -506,249 +732,6 @@ impl Segments {
     fn end(&self, s: usize, forward: bool) -> usize {
         self.start(s, !forward)
     }
-}
-
-fn relation(pair: &Pair, pts: &Points, fa: usize, fb: usize) -> Result<Relation, KernelError> {
-    let a = &pair.first.faces[fa];
-    let b = &pair.second.faces[fb];
-    // Which sides of the plane the face's vertices are on: those of the
-    // coedges near the plane one by one, the others by their boxes.
-    let signs = |op: Operand, f: &Face, surface: usize| -> (bool, bool, bool) {
-        let mut near = Vec::new();
-        let q = &pair.get(other(op)).surfaces[surface];
-        let (mut pos, mut neg) = f.near_surface(q, pts.eps, &mut near);
-        let mut zero = false;
-        for k in near {
-            let (li, i) = f.coedge_at(k);
-            match pts.sign(op, f.verts[li][i], surface) {
-                1 => pos = true,
-                -1 => neg = true,
-                _ => zero = true,
-            }
-        }
-        (pos, neg, zero)
-    };
-    let (ap, an, az) = signs(Operand::First, a, b.surface);
-    let (bp, bn, bz) = signs(Operand::Second, b, a.surface);
-    let a_on = az && !ap && !an;
-    let b_on = bz && !bp && !bn;
-    if a_on && b_on {
-        return Ok(Relation::Coplanar);
-    }
-    if a_on || b_on {
-        let p = pair.first.points[a.verts[0][0]];
-        return Err(KernelError::InvalidInput(format!(
-            "two faces of the bodies nearly coincide but are not on one plane, \
-             within the tolerance, near {}",
-            show(p)
-        )));
-    }
-    let apart = |p: bool, n: bool, z: bool| !z && (p != n);
-    if apart(ap, an, az) || apart(bp, bn, bz) {
-        return Ok(Relation::Apart);
-    }
-    Ok(Relation::Crossing)
-}
-
-/// A closed interval of the common line of two face planes, between two
-/// clusters, with their positions along the line.
-#[derive(Clone, Copy, Debug)]
-struct Span {
-    lo: (f64, usize),
-    hi: (f64, usize),
-}
-
-/// The stretches of the common line of two crossing faces that lie in both
-/// (closed) faces, as pairs of clusters.
-fn meeting(
-    pair: &Pair,
-    pts: &Points,
-    fa: usize,
-    fb: usize,
-) -> Result<Vec<(usize, usize)>, KernelError> {
-    let a = &pair.first.faces[fa];
-    let b = &pair.second.faces[fb];
-    let dir = a.normal().cross(b.normal());
-    if dir.length() == 0.0 {
-        return Ok(Vec::new());
-    }
-    let dir = dir.normalize();
-    let eps = pts.eps;
-    let sa = face_line(pair, pts, Operand::First, fa, b.surface, dir)?;
-    let sb = face_line(pair, pts, Operand::Second, fb, a.surface, dir)?;
-    let mut out = Vec::new();
-    for x in &sa {
-        for y in &sb {
-            let lo = later(x.lo, y.lo, eps, pts)?;
-            let hi = earlier(x.hi, y.hi, eps, pts)?;
-            if lo.1 != hi.1 && lo.0 < hi.0 {
-                out.push((lo.1, hi.1));
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn compare(
-    x: (f64, usize),
-    y: (f64, usize),
-    eps: f64,
-    pts: &Points,
-) -> Result<std::cmp::Ordering, KernelError> {
-    if x.1 == y.1 {
-        return Ok(std::cmp::Ordering::Equal);
-    }
-    if (x.0 - y.0).abs() <= eps {
-        return Err(KernelError::InvalidInput(format!(
-            "the bodies meet in points closer than the tolerance near {}",
-            show(pts.rep[x.1])
-        )));
-    }
-    Ok(x.0.total_cmp(&y.0))
-}
-
-fn later(
-    x: (f64, usize),
-    y: (f64, usize),
-    eps: f64,
-    pts: &Points,
-) -> Result<(f64, usize), KernelError> {
-    Ok(match compare(x, y, eps, pts)? {
-        std::cmp::Ordering::Less => y,
-        _ => x,
-    })
-}
-
-fn earlier(
-    x: (f64, usize),
-    y: (f64, usize),
-    eps: f64,
-    pts: &Points,
-) -> Result<(f64, usize), KernelError> {
-    Ok(match compare(x, y, eps, pts)? {
-        std::cmp::Ordering::Greater => y,
-        _ => x,
-    })
-}
-
-/// The closed face `f` of `op` cut by the plane `surface` of the other
-/// operand: the intervals of the planes' common line (direction `dir`)
-/// inside the face.
-///
-/// The crossings of the face's boundary with the plane come from the signs
-/// of its vertices against the plane (decided once, `Points::sign`). Two
-/// half-open rules, counting a vertex on the plane as on its positive side
-/// and then as on its negative side, give the interior together with the
-/// boundary edges lying in the plane from either side; their union is the
-/// closed face's intersection with the line.
-fn face_line(
-    pair: &Pair,
-    pts: &Points,
-    op: Operand,
-    f: usize,
-    surface: usize,
-    dir: DVec3,
-) -> Result<Vec<Span>, KernelError> {
-    let shape = pair.get(op);
-    let face = &shape.faces[f];
-    let eps = pts.eps;
-    let mut spans: Vec<Span> = Vec::new();
-    // Only coedges near the plane can cross it under either rule.
-    let mut near = Vec::new();
-    face.near_surface(&pair.get(other(op)).surfaces[surface], eps, &mut near);
-    for zero_positive in [true, false] {
-        let side = |s: i8| if zero_positive { s >= 0 } else { s > 0 };
-        let mut cuts: Vec<(f64, usize)> = Vec::new();
-        for &c in &near {
-            let (li, k) = face.coedge_at(c);
-            let (vs, e) = (&face.verts[li], face.loops[li][k].0);
-            let (va, vb) = (vs[k], vs[(k + 1) % vs.len()]);
-            let (sa, sb) = (pts.sign(op, va, surface), pts.sign(op, vb, surface));
-            if side(sa) == side(sb) {
-                continue;
-            }
-            let c = if sa == 0 {
-                pts.vertex_cluster(op, va)
-            } else if sb == 0 {
-                pts.vertex_cluster(op, vb)
-            } else {
-                pts.crossing_cluster(op, e, surface).ok_or_else(|| {
-                    KernelError::InvalidResult(format!(
-                        "boolean: no crossing recorded for edge {e} of the {} body",
-                        name(op)
-                    ))
-                })?
-            };
-            cuts.push((pts.rep[c].dot(dir), c));
-        }
-        cuts.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
-        for w in cuts.windows(2) {
-            if w[0].1 != w[1].1 && (w[1].0 - w[0].0) <= eps {
-                return Err(KernelError::InvalidInput(format!(
-                    "the bodies meet in points closer than the tolerance near {}",
-                    show(pts.rep[w[0].1])
-                )));
-            }
-        }
-        if cuts.len() % 2 != 0 {
-            return Err(KernelError::InvalidResult(format!(
-                "boolean: face {f} of the {} body crosses a plane an odd number of times",
-                name(op)
-            )));
-        }
-        for c in cuts.chunks(2) {
-            spans.push(Span { lo: c[0], hi: c[1] });
-        }
-    }
-    // Union of the two rules' intervals.
-    spans.sort_by(|x, y| x.lo.0.total_cmp(&y.lo.0));
-    let mut out: Vec<Span> = Vec::new();
-    for s in spans {
-        if let Some(last) = out.last_mut() {
-            if s.lo.1 == last.hi.1 || s.lo.0 <= last.hi.0 {
-                if s.hi.0 > last.hi.0 {
-                    last.hi = s.hi;
-                }
-                continue;
-            }
-        }
-        out.push(s);
-    }
-    Ok(out)
-}
-
-/// True if `p` (on the face's plane) lies in the closed face: within the
-/// tolerance of one of its edges, or inside it.
-fn in_closed_face(shape: &Shape, face: &Face, p: DVec3, eps: f64) -> bool {
-    for l in &face.loops {
-        for &(e, _) in l {
-            let (a, b) = shape.edge_points(e);
-            if points::segment_distance(p, a, b) <= eps {
-                return true;
-            }
-        }
-    }
-    in_face(shape, face, p)
-}
-
-/// True if `p` (on the face's plane) lies inside the face, by the parity
-/// of the face's edges crossed by a ray from it; for a point off its edges.
-fn in_face(shape: &Shape, face: &Face, p: DVec3) -> bool {
-    let q = face.to2(p);
-    let mut inside = false;
-    for vs in &face.verts {
-        for k in 0..vs.len() {
-            let a = face.to2(shape.points[vs[k]]);
-            let b = face.to2(shape.points[vs[(k + 1) % vs.len()]]);
-            if (a.y > q.y) != (b.y > q.y) {
-                let x = a.x + (q.y - a.y) / (b.y - a.y) * (b.x - a.x);
-                if x > q.x {
-                    inside = !inside;
-                }
-            }
-        }
-    }
-    inside
 }
 
 #[cfg(test)]

@@ -246,6 +246,26 @@ impl Quadric {
         }
     }
 
+    /// The point of the surface nearest `p`, for a plane or a cylinder
+    /// (`None` for a point on a cylinder's axis, and for the surfaces of
+    /// item 3).
+    pub fn foot(&self, p: DVec3) -> Option<DVec3> {
+        match *self {
+            Quadric::Plane { point, normal } => Some(p - normal * (p - point).dot(normal)),
+            Quadric::Cylinder {
+                point,
+                axis,
+                radius,
+            } => {
+                let w = p - point;
+                let h = w.dot(axis);
+                let out = (w - axis * h).try_normalize()?;
+                Some(point + axis * h + out * radius)
+            }
+            _ => None,
+        }
+    }
+
     /// Size of the coordinates the surface is given by, for its rounding.
     pub fn magnitude(&self) -> f64 {
         match *self {
@@ -535,6 +555,19 @@ pub(super) fn curve_box(curve: &Curve3, t0: f64, t1: f64) -> Option<(DVec3, DVec
         }
     }
     Some(b)
+}
+
+/// The control points of the rational Bézier pieces of `curve` on `[t0,
+/// t1]` (either order), dehomogenised: the convex hull of each piece's
+/// points holds the piece. `None` for a NURBS curve of degree above five.
+pub(super) fn hull_points(curve: &Curve3, t0: f64, t1: f64) -> Option<Vec<Vec<DVec3>>> {
+    let (lo, hi) = if t0 <= t1 { (t0, t1) } else { (t1, t0) };
+    Some(
+        pieces(curve, lo, hi)?
+            .iter()
+            .map(|piece| piece.pw.iter().map(|q| q.truncate() / q.w).collect())
+            .collect(),
+    )
 }
 
 /// The rational Bézier pieces of `curve` on `[t0, t1]` (`t0 ≤ t1`), in

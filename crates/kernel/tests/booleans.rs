@@ -6,7 +6,7 @@ use std::f64::consts::TAU;
 
 use opendatum_kernel::{
     Body, BooleanOp, BrepKernel, DVec2, DVec3, EdgeOrigin, ExtrudeSpec, FaceIx, FaceOrigin, Frame,
-    Kernel, KernelError, Merged, Operand, Profile, TessellationOptions, VertexOrigin,
+    Kernel, KernelError, Merged, Operand, Profile, RevolveSpec, TessellationOptions, VertexOrigin,
 };
 
 fn k() -> BrepKernel {
@@ -331,19 +331,24 @@ fn golden_cases_at_millimetre_and_kilometre_scales() {
 }
 
 #[test]
-fn curved_bodies_are_not_supported_yet() {
+fn cones_are_not_supported_yet() {
     let a = cuboid(DVec3::ZERO, DVec3::ONE);
-    let disc = k()
-        .extrude(
-            &Profile::circle(Frame::WORLD, DVec2::ZERO, 0.5),
-            &ExtrudeSpec {
-                distance: 1.0,
-                symmetric: false,
+    // A cone: a right triangle revolved about its upright side.
+    let cone = k()
+        .revolve(
+            &Profile::polygon(
+                Frame::WORLD,
+                &[DVec2::ZERO, DVec2::new(0.5, 0.0), DVec2::new(0.0, 1.0)],
+            ),
+            &RevolveSpec {
+                axis_origin: DVec2::ZERO,
+                axis_dir: DVec2::Y,
+                angle: TAU,
             },
         )
         .unwrap();
     assert!(matches!(
-        k().boolean(&a, &disc, BooleanOp::Union),
+        k().boolean(&a, &cone, BooleanOp::Union),
         Err(KernelError::Unsupported(_))
     ));
 }

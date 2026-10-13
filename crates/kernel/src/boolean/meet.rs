@@ -140,6 +140,38 @@ impl Track {
         !matches!(self, Track::Line { .. })
     }
 
+    /// The parameter of the point of the curve nearest `p` and its
+    /// distance from `p`: in closed form for a line and a circle; for an
+    /// ellipse by Newton's method on `(C(t) − p) · C'(t) = 0` from the
+    /// eccentric angle of `p`, which for a point near the curve is near
+    /// the foot (the questions asked of it are about points within a few
+    /// tolerances of the curve).
+    pub fn nearest(&self, p: DVec3) -> (f64, f64) {
+        let t = match *self {
+            Track::Line { origin, dir } => (p - origin).dot(dir),
+            Track::Circle { .. } => self.param(p),
+            Track::Ellipse { center, x, y, a, b } => {
+                let d = p - center;
+                let mut t = (d.dot(y) / b).atan2(d.dot(x) / a);
+                for _ in 0..NEWTON {
+                    let (c, c1) = (self.point(t) - p, self.deriv(t));
+                    let f = c.dot(c1);
+                    let df = c1.dot(c1) + c.dot(self.second(t));
+                    if df <= 0.0 {
+                        break;
+                    }
+                    let step = (f / df).clamp(-0.25, 0.25);
+                    t -= step;
+                    if step.abs() <= 1e-15 * (1.0 + t.abs()) {
+                        break;
+                    }
+                }
+                wrap(t)
+            }
+        };
+        (t, (self.point(t) - p).length())
+    }
+
     /// The edge geometry of the curve from `ta` to `tb` (`ta < tb`, less
     /// than a turn apart on a closed curve), with its parameter range:
     /// a line or circle as itself, an elliptical arc as an exact rational
@@ -197,6 +229,9 @@ impl Track {
         })
     }
 }
+
+/// Newton steps for the foot of a point on an ellipse.
+const NEWTON: usize = 30;
 
 /// An angle wrapped into `[−π/2, 3π/2)`.
 fn wrap(a: f64) -> f64 {

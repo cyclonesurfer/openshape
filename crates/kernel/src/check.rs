@@ -4,9 +4,9 @@ use glam::DVec3;
 use rustc_hash::FxHashMap;
 
 use crate::geom::Surface;
-use crate::tess::{self, BrepTess, TessellationOptions};
+use crate::tess::{self, TessellationOptions};
 use crate::topo::Brep;
-use crate::{Tolerance, TopologyCounts};
+use crate::{KernelError, Tolerance, TopologyCounts};
 
 /// Counts entities and derives the genus from the Euler–Poincaré formula
 /// `V − E + F − R = 2 (S − H)` where `R` is the number of inner loops.
@@ -161,15 +161,11 @@ pub(crate) fn validate(b: &Brep, tol: &Tolerance) -> Vec<String> {
 
     // Orientation: every outer shell must enclose positive volume.
     if issues.is_empty() {
-        let opts = TessellationOptions {
-            chord_tolerance: bounding_size(b).max(1e-9) * 1e-2,
-            max_angle: 0.6,
-        };
-        match tess::tessellate(b, &opts, tol) {
-            Ok(t) => {
+        match shell_volumes(b, tol) {
+            Ok(volumes) => {
                 for (si, solid) in b.solids.iter().enumerate() {
                     for (k, sh) in solid.shells.iter().enumerate() {
-                        let v = shell_volume(b, &t, sh.idx());
+                        let v = volumes[sh.idx()].0;
                         if k == 0 && v <= 0.0 {
                             issues.push(format!("solid {si}: outer shell is inside-out"));
                         }
@@ -206,16 +202,30 @@ pub(crate) fn bounding_size(b: &Brep) -> f64 {
     }
 }
 
-fn shell_volume(b: &Brep, t: &BrepTess, shell: usize) -> f64 {
-    let mut v = 0.0;
-    for f in &b.shells[shell].faces {
-        let ft = &t.faces[f.idx()];
-        for tri in &ft.triangles {
-            let [a, bb, c] = tri.map(|i| ft.positions[i as usize]);
-            v += a.dot(bb.cross(c)) / 6.0;
-        }
-    }
-    v
+/// Each shell's volume (by index) from a coarse mesh, a hundredth of the
+/// body's size from its surfaces, with a bound on the volume's error: twice
+/// the mesh's area times that distance.
+pub(crate) fn shell_volumes(b: &Brep, tol: &Tolerance) -> Result<Vec<(f64, f64)>, KernelError> {
+    let opts = TessellationOptions {
+        chord_tolerance: bounding_size(b).max(1e-9) * 1e-2,
+        max_angle: 0.6,
+    };
+    let t = tess::tessellate(b, &opts, tol)?;
+    Ok(b.shells
+        .iter()
+        .map(|shell| {
+            let (mut v, mut area) = (0.0, 0.0);
+            for f in &shell.faces {
+                let ft = &t.faces[f.idx()];
+                for tri in &ft.triangles {
+                    let [a, bb, c] = tri.map(|i| ft.positions[i as usize]);
+                    v += a.dot(bb.cross(c)) / 6.0;
+                    area += 0.5 * (bb - a).cross(c - a).length();
+                }
+            }
+            (v, 2.0 * area * opts.chord_tolerance)
+        })
+        .collect())
 }
 
 #[cfg(test)]

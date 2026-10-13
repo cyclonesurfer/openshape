@@ -135,10 +135,6 @@ impl Face {
         let d = p - self.frame.origin;
         glam::DVec2::new(d.dot(self.frame.x), d.dot(self.frame.y))
     }
-
-    pub fn to3(&self, q: glam::DVec2) -> DVec3 {
-        self.frame.point2(q)
-    }
 }
 
 /// An operand.
@@ -154,8 +150,6 @@ pub(super) struct Shape<'a> {
     pub edge_boxes: Vec<(DVec3, DVec3)>,
     /// Vertex positions.
     pub points: Vec<DVec3>,
-    /// True if every face is flat ([`Face::flat`]): a polyhedron of step 1.
-    pub flat: bool,
 }
 
 impl Shape<'_> {
@@ -321,7 +315,6 @@ pub(super) fn shape<'a>(b: &'a Brep, which: &str) -> Result<Shape<'a>, KernelErr
             starts,
         });
     }
-    let flat = faces.iter().all(|f| f.flat);
     Ok(Shape {
         brep: b,
         faces,
@@ -330,6 +323,5 @@ pub(super) fn shape<'a>(b: &'a Brep, which: &str) -> Result<Shape<'a>, KernelErr
         straight,
         edge_boxes,
         points,
-        flat,
     })
 }

@@ -61,11 +61,6 @@ impl Bernstein {
         Bernstein::new(&[v]).expect("one coefficient")
     }
 
-    /// The coefficients.
-    pub fn coefficients(&self) -> &[f64] {
-        &self.c[..self.n]
-    }
-
     /// The degree.
     pub fn degree(&self) -> usize {
         self.n - 1
