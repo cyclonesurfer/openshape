@@ -35,6 +35,9 @@ enum Raw {
     Station,
     /// Two edges touching.
     Contact,
+    /// A point put on a closed track that no edge reaches, to split it
+    /// into edges with ends.
+    Seam,
 }
 
 /// A station of an edge against a surface of the other operand (design
@@ -425,6 +428,28 @@ impl Points {
         }
         self.index = Bvh::of_points(&self.rep);
         Ok(())
+    }
+
+    /// New clusters at `ps`, after the clustering, each of one point: the
+    /// seams of closed tracks that no edge reaches, which the caller keeps
+    /// clear of every other point. Returns the first new cluster; the rest
+    /// follow it in order.
+    pub fn add_seams(&mut self, ps: &[DVec3]) -> usize {
+        let first = self.rep.len();
+        for &p in ps {
+            let i = self.pos.len();
+            self.pos.push(p);
+            self.raw.push(Raw::Seam);
+            self.parent.push(i);
+            self.cluster.push(self.rep.len());
+            self.members.push(vec![i]);
+            self.rep.push(p);
+            self.has_vertex.push([false, false]);
+        }
+        if !ps.is_empty() {
+            self.index = Bvh::of_points(&self.rep);
+        }
+        first
     }
 
     /// The cluster of vertex `v` of `op`.

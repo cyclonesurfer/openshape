@@ -7,8 +7,12 @@
 //! tolerance somewhere the earlier stages found no contact (seen in the
 //! face's chart rather than in space), and the boolean is refused there.
 //!
-//! The split is made in a chart of the face's surface, in which lengths
-//! are lengths along the surface. A straight segment is one chord; a curved
+//! The split is made in a chart of the face's surface. A point's
+//! tolerance there is its [`reach`](super::chart::Chart::reach), the chart
+//! distance beyond which points are farther than the tolerance from it in
+//! space (the tolerance itself in a plane's or a developed surface's
+//! chart, more toward the rim of a sphere's); bands are measured in the
+//! chart, which no chart makes shorter than in space. A straight segment is one chord; a curved
 //! one is a chain of chords through points of its course, each with a
 //! *band*, a bound on how far the course strays from the chord. Chords are
 //! halved wherever a band could hide a contact (another chord or a point
@@ -286,7 +290,8 @@ fn graph(
 
 /// Halves the chords whose bands could hide a contact until none can:
 /// a chord whose sag is over `eps / 16` is halved when another chord comes
-/// within the two bands of it, or a cluster within its band and `eps`.
+/// within the two bands of it, or a cluster within its band and the
+/// cluster's reach `near`.
 /// Consecutive chords of one edge share a point of its course and are not
 /// tested against each other.
 ///
@@ -303,9 +308,12 @@ fn refine(
     ends: &[(usize, usize)],
     nodes: &[usize],
     pos: &[DVec2],
+    near: &[f64],
     eps: f64,
 ) -> Result<Graph, Problem> {
     let fine = eps / 16.0;
+    // The widest reach of a cluster, for the box searches.
+    let widest = near.iter().fold(0.0f64, |m, &r| m.max(r));
     split_ends(edges, params, ends, pos, fine);
     // Per parameter of each edge, the round it was made in.
     let mut born: Vec<Vec<usize>> = params.iter().map(|ts| vec![0; ts.len()]).collect();
@@ -336,12 +344,12 @@ fn refine(
         let points: Vec<DVec3> = g.p[..g.real].iter().map(|q| q.extend(0.0)).collect();
         let point_tree = Bvh::of_points(&points);
         let mut split: Vec<bool> = vec![false; g.chords.len()];
-        let mut near = Vec::new();
+        let mut close = Vec::new();
         for i in (0..g.chords.len()).filter(|&i| fresh[i]) {
             let c = g.chords[i];
             let (a, b) = (g.p[c.from], g.p[c.to]);
-            tree.overlapping(boxes[i].0, boxes[i].1, &mut near);
-            for &j in &near {
+            tree.overlapping(boxes[i].0, boxes[i].1, &mut close);
+            for &j in &close {
                 let d = g.chords[j];
                 let consecutive = d.edge == c.edge && (d.to == c.from || d.from == c.to);
                 // Nothing to decide when neither could be halved anew.
@@ -357,10 +365,10 @@ fn refine(
                 }
             }
             if c.sag > fine && !split[i] {
-                let r = DVec3::splat(c.band + eps);
-                point_tree.overlapping(boxes[i].0 - r, boxes[i].1 + r, &mut near);
-                split[i] = near.iter().any(|&n| {
-                    n != c.from && n != c.to && point_segment(g.p[n], a, b) <= c.band + eps
+                let r = DVec3::splat(c.band + widest);
+                point_tree.overlapping(boxes[i].0 - r, boxes[i].1 + r, &mut close);
+                split[i] = close.iter().any(|&n| {
+                    n != c.from && n != c.to && point_segment(g.p[n], a, b) <= c.band + near[n]
                 });
             }
         }
@@ -441,10 +449,13 @@ fn split_ends(
     }
 }
 
-/// The regions inside the face.
+/// The regions inside the face whose segments are `edges`, the clusters
+/// at chart points `pos`; `reach` gives the tolerance `eps` in the chart at
+/// a chart point.
 pub(super) fn regions(
     edges: &[Edge],
     pos: &dyn Fn(usize) -> DVec2,
+    reach: &dyn Fn(DVec2) -> f64,
     eps: f64,
 ) -> Result<Vec<Region>, Problem> {
     // Unique segments, in order of first appearance, with their sides.
@@ -487,6 +498,7 @@ pub(super) fn regions(
         }
     }
     let pos_nodes: Vec<DVec2> = nodes.iter().map(|&c| pos(c)).collect();
+    let near: Vec<f64> = pos_nodes.iter().map(|&q| reach(q)).collect();
     let ends: Vec<(usize, usize)> = list
         .iter()
         .map(|e| (node_of[&e.a], node_of[&e.b]))
@@ -496,14 +508,14 @@ pub(super) fn regions(
         .map(|e| e.bend.as_ref().map(|(_, t)| t.clone()).unwrap_or_default())
         .collect();
     let g = if list.iter().any(|e| e.bend.is_some()) {
-        refine(&list, &mut params, &ends, &nodes, &pos_nodes, eps)?
+        refine(&list, &mut params, &ends, &nodes, &pos_nodes, &near, eps)?
     } else {
         graph(&list, &params, &ends, &nodes, &pos_nodes)
     };
     let p = &g.p;
     let chord_ends: Vec<(usize, usize)> = g.chords.iter().map(|c| (c.from, c.to)).collect();
 
-    consistent(&chord_ends, p, g.real, &g.cluster, eps)?;
+    consistent(&chord_ends, p, g.real, &g.cluster, &near)?;
 
     // Half-edges: 2s runs from → to, 2s + 1 runs to → from.
     let nh = 2 * chord_ends.len();
@@ -767,23 +779,25 @@ fn scale(p: &[DVec2]) -> f64 {
 }
 
 /// No two chords cross, and no cluster (the first `real` nodes) lies within
-/// `eps` of a chord it does not end. Problems are reported in the order of
-/// a full pairwise scan (by chord, then crossings before close points, each
-/// by index), whether the candidates come from the scan or from the trees.
+/// its reach `near` of a chord it does not end. Problems are reported in
+/// the order of a full pairwise scan (by chord, then crossings before
+/// close points, each by index), whether the candidates come from the scan
+/// or from the trees.
 fn consistent(
     ends: &[(usize, usize)],
     p: &[DVec2],
     real: usize,
     cluster: &[usize],
-    eps: f64,
+    near: &[f64],
 ) -> Result<(), Problem> {
     let boxes: Vec<(DVec3, DVec3)> = ends
         .iter()
         .map(|&(a, b)| (p[a].min(p[b]).extend(0.0), p[a].max(p[b]).extend(0.0)))
         .collect();
-    // A computed distance within `eps` puts the point within `eps` of the
-    // chord's box, up to rounding.
-    let r = eps + 1e-9 * (eps + scale(p));
+    // A computed distance within a reach puts the point within that reach
+    // of the chord's box, up to rounding.
+    let widest = near.iter().fold(0.0f64, |m, &r| m.max(r));
+    let r = widest + 1e-9 * (widest + scale(p));
     let trees = (ends.len() > SMALL).then(|| {
         let points: Vec<DVec3> = p[..real].iter().map(|q| q.extend(0.0)).collect();
         (Bvh::new(boxes.clone()), Bvh::of_points(&points))
@@ -819,7 +833,7 @@ fn consistent(
             }
         }
         for &n in &points {
-            if n != a && n != b && point_segment(p[n], p[a], p[b]) <= eps {
+            if n != a && n != b && point_segment(p[n], p[a], p[b]) <= near[n] {
                 return Err(Problem::Close(cluster[n]));
             }
         }

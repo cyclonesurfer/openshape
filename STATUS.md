@@ -11,10 +11,11 @@ which names the faces, edges and vertices of boxes, extrudes and
 revolves as the user sees them and resolves stored references, and a
 sketch on a picked planar face and an extrude up to a picked parallel
 face, from the viewport through the model (ADR 0019). Booleans combine
-solids bounded by planes and cylinders (design note 0012 §9 and §11, ADR
-0020): union, intersection and difference, checked by the volume
-identities on tens of thousands of random pairs. Next: cones and
-spheres in booleans, then the features that use them.
+solids bounded by planes, cylinders, spheres and cones where their faces
+meet in lines and circles (design note 0012 §9, §11 and §13, ADR 0020):
+union, intersection and difference, checked by the volume identities and
+point membership on tens of thousands of random pairs. Next: planes
+across cones (the conics), then the features that use booleans.
 The product is now named OpenDatum (ADR 0017): packages `opendatum-*`,
 binary `opendatum`, documents `.odatum`; documents saved under the old
 name open unchanged.
@@ -84,11 +85,15 @@ name open unchanged.
     the topology and right by an independent geometric check, on tilted
     planes, symmetric extrudes, and partial and full revolves either way
     round, and that they follow the curves, not their order.
-  - Booleans (`Kernel::boolean`, design note 0012 §9 and §11, ADR 0020):
-    union, intersection and difference of solids bounded by planes and
-    circular cylinders (boxes, extrudes of profiles with lines, arcs and
-    circles, holes included, at any orientation), with coincident
-    faces, edges and vertices, voids and several solids. Where a plane
+  - Booleans (`Kernel::boolean`, design note 0012 §9, §11 and §13, ADR
+    0020): union, intersection and difference of solids bounded by
+    planes and circular cylinders (boxes, extrudes of profiles with
+    lines, arcs and circles, holes included, at any orientation), with
+    coincident faces, edges and vertices, voids and several solids; and
+    with spheres and cones where every meeting is a circle (a ball with
+    planes at any angle or with another ball anywhere; cones, cylinders
+    and balls about one axis, with planes square to it: dimples,
+    countersinks, pointed and rounded ends). Where a plane
     or a cylinder meets another surface the curve is found in closed form
     (lines, circles, ellipses), once per pair of surfaces, and faces are
     split in charts in which lengths are lengths in space. Numerical
@@ -105,8 +110,9 @@ name open unchanged.
     meet. What the tolerance cannot decide is refused with a message and
     a place (non-manifold results, points or edges closer than the
     tolerance, slivers, faces running within the tolerance of the other
-    surface); cones, spheres, cylinders at an angle to each other and
-    tangent contacts fail as not supported yet.
+    surface); planes across a cone off its axis (conics), spheres and
+    cones with cylinders or cones off their axes, cylinders at an angle
+    to each other and tangent contacts fail as not supported yet.
 - **Features** (`opendatum-features`): regenerates a Part Studio through the
   kernel with per-feature status (ok, warning, suppressed, failed with
   message). A failing feature never blocks the others. Sketch features are
@@ -683,6 +689,39 @@ name open unchanged.
   property test of elliptical arcs failed the gate by chance (it summed
   2,000 rounded steps against the rounding of one); it now counts whole
   turns, and the failing case is kept.
+- Booleans of spheres and coaxial cones (design note 0012 §13, item
+  3a), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`, 948
+  tests and `cargo deny` pass, and the release time guards pass as CI
+  runs them. Golden cases with all four operations, exact to 1e-9 in
+  volume, with topology and origins: a ball resting in a plate, a ball
+  cut by a box, a spherical pocket, two balls side by side and on one
+  axis, a countersink, a cone on a rod, a pointed cone cut square, and a
+  ball crossed twice by a cone. Planes across a cone off its axis are
+  refused as conics (tested: a hyperbola, an ellipse, the apex). A fuzz
+  of balls, cones, frustums, rods with round ends, tubes and stepped
+  rods about one axis, with each other, with boxes at any angle, with
+  balls anywhere and with slabs, at 50 times its default size (5,000
+  pairs, 20,000 operations): every result valid, correct by the volume
+  identities and by point membership, with its origins on its operands'
+  surfaces; 56 refusals in 1,000 (1,096 tangent contacts, mostly on the
+  grid, and 26 non-manifold). Its first runs found 5 correct results in
+  40,000 operations refused as inside out: a thin ring a ball keeps
+  outside a cone meshes coarsely to no volume, and validation took the
+  shell's orientation from that mesh alone. It now decides as assembly
+  does, by the shell's mass properties where the mesh cannot (kept as a
+  golden case and a unit test). The other fuzzes at scale on the final
+  code refuse exactly what they refused before: polyhedra at 100 times
+  (47 of 120,000 operations, every result correct), planes and
+  cylinders at 50 times (827 of 40,000) and at an angle (9,598 of
+  20,000, quartics). New time guards (docs/PERFORMANCE.md, fourth pass)
+  for dimpled and countersunk plates and a ball's mesh found two things,
+  both fixed before this commit: the validation change at first made
+  every thin flat body measured exactly (the 1024-sided prism's
+  validation 10 ms to 87 ms), and meshing a curved face searched √n
+  triangles for each point it added (a unit ball's mesh now 220–249 ms,
+  from 364–411 ms). The curved fuzz's own checks cost 2.4 times its
+  booleans, from about 8 (shared meshes; ray parity in a tree of boxes,
+  checked against the winding number).
 - Geometry for booleans of curved solids (design note 0012 §10.7, item
   1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   915 tests and `cargo deny` pass. Tested on its own; the boolean stages
@@ -998,9 +1037,11 @@ name open unchanged.
   moved by about a tolerance or more.
 - Solver conflict detection is local: from a start far from any solution it
   can call a sketch conflicting although another branch would satisfy it.
-- Booleans handle solids bounded by planes and circular cylinders. They
-  refuse as not supported yet (design note 0012 §11): cones and spheres
-  (revolves); two cylinders at an angle (their curve is a quartic);
+- Booleans handle solids bounded by planes and circular cylinders, and
+  spheres and cones where every meeting is a circle (design note 0012
+  §13). They refuse as not supported yet: a plane across a cone off its
+  axis (a conic, next); spheres and cones with cylinders or cones off
+  their axes, and two cylinders at an angle (quartics);
   tangent contacts, where faces touch without crossing (a box's face
   resting on a cylinder's side, a slot tangent to a hole): 13 of 1,000
   random operations, most of the curved fuzz's refusals; and a second
@@ -1051,9 +1092,9 @@ name open unchanged.
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Phase 3, in the order the design notes give: booleans with cones and
-   spheres (0012 §10.7 item 3, with the conics of a plane across a cone;
-   planes and cylinders, item 2, are done, §11); then tangent contacts
+2. Phase 3, in the order the design notes give: the conics of a plane
+   across a cone, then planes through its apex (0012 §12.4 item 3; balls
+   and coaxial cones, item 3a, are done, §13); then tangent contacts
    (the largest share of the curved refusals) and the elliptical edges
    oblique cuts leave on cylinders; naming through booleans
    (design note 0013 §10 step 4); then extrude and revolve that add,

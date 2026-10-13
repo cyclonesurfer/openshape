@@ -4,9 +4,9 @@
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use opendatum_kernel::{
-    Body, BooleanOp, BrepKernel, DVec2, DVec3, EdgeOrigin, ExtrudeSpec, FaceIx, FaceOrigin, Frame,
-    Kernel, KernelError, Merged, Operand, Profile, ProfileCurve, RevolveSpec, TessellationOptions,
-    VertexOrigin,
+    Body, BodyMesh, BooleanOp, BrepKernel, DVec2, DVec3, EdgeOrigin, ExtrudeSpec, FaceIx,
+    FaceOrigin, Frame, Kernel, KernelError, Merged, Operand, Profile, ProfileCurve, RevolveSpec,
+    TessellationOptions, VertexOrigin,
 };
 
 fn k() -> BrepKernel {
@@ -75,23 +75,48 @@ fn run(a: &Body, b: &Body, op: BooleanOp) -> Body {
 /// two faces where the bodies meet; a vertex at an operand vertex. Within
 /// three tolerances, the most a cluster moves a point.
 fn origins_agree(a: &Body, b: &Body, r: &Body, op: BooleanOp) -> Result<(), String> {
+    let mesh = |x: &Body| {
+        k().tessellate(x, &mesh_options())
+            .map_err(|e| e.to_string())
+    };
+    origins_agree_on((a, &mesh(a)?), (b, &mesh(b)?), (r, &mesh(r)?), op)
+}
+
+/// How far the meshes of the checks are from the surfaces: points a few
+/// hundredths of the unit apart at most (the default mesh of a unit ball
+/// has 52,720, which made the checks take seconds).
+const CHORD: f64 = 1e-3;
+
+/// The options of the checks' meshes.
+fn mesh_options() -> TessellationOptions {
+    TessellationOptions {
+        chord_tolerance: CHORD,
+        max_angle: 0.5,
+    }
+}
+
+/// [`origins_agree`] on the bodies' meshes.
+fn origins_agree_on(
+    (a, ma): (&Body, &BodyMesh),
+    (b, mb): (&Body, &BodyMesh),
+    (r, mr): (&Body, &BodyMesh),
+    op: BooleanOp,
+) -> Result<(), String> {
     let near = 3.0 * k().tolerance().linear;
-    let opts = TessellationOptions::default();
-    let mesh = |x: &Body| k().tessellate(x, &opts).map_err(|e| e.to_string());
-    let (ma, mb, mr) = (mesh(a)?, mesh(b)?, mesh(r)?);
     let (ja, jb) = (k().adjacency(a), k().adjacency(b));
     let body = |o: Operand| match o {
-        Operand::First => (a, &ma, &ja),
-        Operand::Second => (b, &mb, &jb),
+        Operand::First => (a, ma, &ja),
+        Operand::Second => (b, mb, &jb),
     };
     // How far `p` is from the surface of face `f` of `x`, and the outward
-    // normal there.
-    let on = |x: &Body, f: FaceIx, p: DVec3| -> Result<(f64, DVec3), String> {
-        let t = k()
-            .tangent_plane(x, f, p)
-            .ok_or_else(|| format!("face {} has no tangent plane", f.0))?;
-        Ok(((p - t.point).length(), t.normal))
+    // normal there; `None` where the surface has no tangent plane (a
+    // cone's apex), which a face or an edge reaches at its corners only.
+    let on = |x: &Body, f: FaceIx, p: DVec3| -> Option<(f64, DVec3)> {
+        let t = k().tangent_plane(x, f, p)?;
+        Some(((p - t.point).length(), t.normal))
     };
+    // Mesh points of a face or an edge at an apex: at most its corners.
+    const SINGULAR: usize = 2;
     let o = k().origins(r);
     let face = |i: usize, origin: &FaceOrigin| -> Result<(), String> {
         let FaceOrigin::Operand { operand, face } = *origin else {
@@ -99,15 +124,19 @@ fn origins_agree(a: &Body, b: &Body, r: &Body, op: BooleanOp) -> Result<(), Stri
         };
         let (x, _, _) = body(operand);
         let flip = op == BooleanOp::Subtract && operand == Operand::Second;
+        let mut singular = 0;
         for p in &mr.faces[i].positions {
-            let (d, n) = on(x, face, *p)?;
+            let (Some((d, n)), Some((_, m))) = (on(x, face, *p), on(r, FaceIx(i as u32), *p))
+            else {
+                singular += 1;
+                continue;
+            };
             if d > near {
                 return Err(format!(
                     "face {i} leaves the surface of {operand:?} face {} by {d:e}",
                     face.0
                 ));
             }
-            let (_, m) = on(r, FaceIx(i as u32), *p)?;
             let facing = m.dot(n);
             if (facing < 0.0) != flip || facing.abs() < 1.0 - 1e-6 {
                 return Err(format!(
@@ -115,6 +144,9 @@ fn origins_agree(a: &Body, b: &Body, r: &Body, op: BooleanOp) -> Result<(), Stri
                     face.0
                 ));
             }
+        }
+        if singular > SINGULAR {
+            return Err(format!("face {i}: no tangent plane at {singular} points"));
         }
         Ok(())
     };
@@ -130,9 +162,14 @@ fn origins_agree(a: &Body, b: &Body, r: &Body, op: BooleanOp) -> Result<(), Stri
             EdgeOrigin::Meet { first, second } => vec![(a, first), (b, second)],
             _ => return Err(format!("edge {i}: origin {origin:?}")),
         };
+        let mut singular = 0;
         for p in &mr.edges[i] {
+            let mut apex = false;
             for &(x, f) in &faces {
-                let (d, _) = on(x, f, *p)?;
+                let Some((d, _)) = on(x, f, *p) else {
+                    apex = true;
+                    continue;
+                };
                 if d > near {
                     return Err(format!(
                         "edge {i} ({origin:?}) leaves the surface of face {} by {d:e}",
@@ -140,6 +177,10 @@ fn origins_agree(a: &Body, b: &Body, r: &Body, op: BooleanOp) -> Result<(), Stri
                     ));
                 }
             }
+            singular += usize::from(apex);
+        }
+        if singular > SINGULAR {
+            return Err(format!("edge {i}: no tangent plane at {singular} points"));
         }
         Ok(())
     };
@@ -580,11 +621,17 @@ struct Tally {
 }
 
 /// A boolean's outcome: `None` for a refusal, `Some(None)` for an empty
-/// result, else the result and its volume.
-type Outcome = Option<Option<(Body, f64)>>;
+/// result, else the result's volume and mesh.
+type Outcome = Option<Option<(f64, Mesh)>>;
 
 /// A boolean's outcome; refusals and kernel bugs are recorded.
-fn measured(t: &mut Tally, a: &Body, b: &Body, op: BooleanOp, case: &str) -> Outcome {
+fn measured(
+    t: &mut Tally,
+    (a, ma): (&Body, &Mesh),
+    (b, mb): (&Body, &Mesh),
+    op: BooleanOp,
+    case: &str,
+) -> Outcome {
     match k().boolean(a, b, op) {
         Ok(r) => {
             let issues = k().validate(&r);
@@ -593,12 +640,20 @@ fn measured(t: &mut Tally, a: &Body, b: &Body, op: BooleanOp, case: &str) -> Out
                     .push(format!("{case} {op:?}: invalid result: {issues:?}"));
                 return None;
             }
-            if let Err(e) = origins_agree(a, b, &r, op) {
+            let mr = match Mesh::of(&r) {
+                Ok(m) => m,
+                Err(e) => {
+                    t.bugs
+                        .push(format!("{case} {op:?}: meshing the result: {e}"));
+                    return None;
+                }
+            };
+            if let Err(e) = origins_agree_on((a, &ma.raw), (b, &mb.raw), (&r, &mr.raw), op) {
                 t.bugs.push(format!("{case} {op:?}: origins: {e}"));
                 return None;
             }
             match k().mass_properties(&r, 1e-12) {
-                Ok(m) => Some(Some((r, m.volume))),
+                Ok(m) => Some(Some((m.volume, mr))),
                 Err(e) => {
                     t.bugs.push(format!("{case} {op:?}: {e}"));
                     None
@@ -617,49 +672,194 @@ fn measured(t: &mut Tally, a: &Body, b: &Body, op: BooleanOp, case: &str) -> Out
     }
 }
 
-/// A body's surface as triangles within `chord` of it, for deciding
+/// A body's surface as triangles within [`CHORD`] of it, for deciding
 /// whether points well away from it are inside: a check of the booleans
 /// that shares none of their code (the volume identities hold for a result
 /// that misses where the bodies meet altogether, as if they were apart).
+/// The triangles are in a tree of boxes (a bounding volume hierarchy: T.
+/// L. Kay and J. T. Kajiya, "Ray tracing complex scenes", SIGGRAPH 1986),
+/// so a point walks down the tree instead of visiting every triangle.
 struct Mesh {
+    raw: BodyMesh,
     tris: Vec<[DVec3; 3]>,
-    chord: f64,
+    nodes: Vec<Node>,
 }
 
+/// A node of a mesh's tree: the box of the triangles `start..end`, and
+/// its two children unless it is a leaf.
+struct Node {
+    lo: DVec3,
+    hi: DVec3,
+    start: usize,
+    end: usize,
+    children: Option<(usize, usize)>,
+}
+
+/// Directions of rays for [`Mesh::inside`], away from the axes and the
+/// diagonals so that they rarely run along a face of a test body.
+const RAYS: [DVec3; 3] = [
+    DVec3::new(0.544_2, 0.327_1, 0.772_3),
+    DVec3::new(-0.615_7, 0.741_1, 0.268_3),
+    DVec3::new(0.291_7, -0.439_2, 0.849_7),
+];
+
 impl Mesh {
-    fn of(b: &Body, chord: f64) -> Result<Mesh, String> {
-        let opts = TessellationOptions {
-            chord_tolerance: chord,
-            max_angle: 0.5,
-        };
-        let (pos, tris) = k()
-            .tessellate(b, &opts)
-            .map_err(|e| e.to_string())?
-            .welded();
-        Ok(Mesh {
-            tris: tris.iter().map(|t| t.map(|i| pos[i as usize])).collect(),
-            chord,
-        })
+    fn of(b: &Body) -> Result<Mesh, String> {
+        let raw = k()
+            .tessellate(b, &mesh_options())
+            .map_err(|e| e.to_string())?;
+        let (pos, tris) = raw.welded();
+        let mut tris: Vec<[DVec3; 3]> = tris.iter().map(|t| t.map(|i| pos[i as usize])).collect();
+        let mut nodes = Vec::new();
+        Self::build(&mut tris, 0, &mut nodes);
+        Ok(Mesh { raw, tris, nodes })
+    }
+
+    /// Adds the node of `tris`, which start at `start` in the mesh, and
+    /// below it nodes of their halves at the median of their centres along
+    /// the box's longest side, down to four triangles; returns its index.
+    fn build(tris: &mut [[DVec3; 3]], start: usize, nodes: &mut Vec<Node>) -> usize {
+        let (lo, hi) = tris.iter().flatten().fold(
+            (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+            |(lo, hi), q| (lo.min(*q), hi.max(*q)),
+        );
+        let i = nodes.len();
+        nodes.push(Node {
+            lo,
+            hi,
+            start,
+            end: start + tris.len(),
+            children: None,
+        });
+        if tris.len() > 4 {
+            let size = hi - lo;
+            let axis = if size.x >= size.y.max(size.z) {
+                0
+            } else if size.y >= size.z {
+                1
+            } else {
+                2
+            };
+            let key = |t: &[DVec3; 3]| (t[0] + t[1] + t[2])[axis];
+            let mid = tris.len() / 2;
+            tris.select_nth_unstable_by(mid, |s, t| key(s).total_cmp(&key(t)));
+            let (first, second) = tris.split_at_mut(mid);
+            let l = Self::build(first, start, nodes);
+            let r = Self::build(second, start + mid, nodes);
+            nodes[i].children = Some((l, r));
+        }
+        i
     }
 
     /// Whether `p` is inside, if it is farther than `margin` from the
-    /// mesh (so the mesh and the exact surface agree there): by the winding
-    /// number, the sum of the triangles' solid angles about `p` (A. van
-    /// Oosterom and J. Strackee, "The solid angle of a plane triangle",
-    /// IEEE Trans. Biomed. Eng. 30, 1983).
+    /// mesh (so the mesh and the exact surface agree there): by the parity
+    /// of the triangles a ray from `p` crosses, or where every ray passes
+    /// too close to an edge or runs along a triangle, by the winding number.
     fn inside(&self, p: DVec3, margin: f64) -> Option<bool> {
+        if self.near(p, margin + CHORD) {
+            return None;
+        }
+        Some(
+            match RAYS.iter().find_map(|d| self.crossings(p, d.normalize())) {
+                Some(n) => n % 2 == 1,
+                None => self.winding(p) > 0.5,
+            },
+        )
+    }
+
+    /// Whether a triangle comes within `r` of `p`.
+    fn near(&self, p: DVec3, r: f64) -> bool {
+        let mut stack = vec![0];
+        while let Some(i) = stack.pop() {
+            let n = &self.nodes[i];
+            if (n.lo - p).max(p - n.hi).max(DVec3::ZERO).length() > r {
+                continue;
+            }
+            match n.children {
+                Some((a, b)) => stack.extend([a, b]),
+                None => {
+                    if self.tris[n.start..n.end]
+                        .iter()
+                        .any(|t| triangle_distance(p, t) <= r)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// How many triangles the ray from `p` along the unit vector `d`
+    /// crosses (T. Möller and B. Trumbore, "Fast, minimum storage
+    /// ray-triangle intersection", J. Graphics Tools 2(1), 1997), or `None`
+    /// if it runs within a millionth of a radian of a triangle's plane, or
+    /// meets a triangle so near its boundary that rounding could put the
+    /// crossing on either side: there it could be counted twice or not at
+    /// all.
+    fn crossings(&self, p: DVec3, d: DVec3) -> Option<usize> {
+        let inv = d.recip();
+        let reaches = |lo: DVec3, hi: DVec3| {
+            let (t0, t1) = ((lo - p) * inv, (hi - p) * inv);
+            let far = t0.max(t1).min_element();
+            t0.min(t1).max_element() <= far && far >= 0.0
+        };
+        let mut count = 0;
+        let mut stack = vec![0];
+        while let Some(i) = stack.pop() {
+            let n = &self.nodes[i];
+            if !reaches(n.lo, n.hi) {
+                continue;
+            }
+            if let Some((a, b)) = n.children {
+                stack.extend([a, b]);
+                continue;
+            }
+            for t in &self.tris[n.start..n.end] {
+                let (e1, e2) = (t[1] - t[0], t[2] - t[0]);
+                let h = d.cross(e2);
+                let det = e1.dot(h);
+                if det.abs() <= 1e-6 * e1.cross(e2).length() {
+                    if reaches(t[0].min(t[1]).min(t[2]), t[0].max(t[1]).max(t[2])) {
+                        return None;
+                    }
+                    continue;
+                }
+                let s = p - t[0];
+                let q = s.cross(e1);
+                if e2.dot(q) / det <= 0.0 {
+                    continue;
+                }
+                let (u, v) = (s.dot(h) / det, d.dot(q) / det);
+                let least = u.min(v).min(1.0 - u - v);
+                // A generous bound on the rounding of the three
+                // coordinates: of `s`, of the products over the sizes of
+                // their factors, and of the division by `det`.
+                let size = e1.length() + e2.length();
+                let reach = s.length() + p.length() + t[0].length() + (u.abs() + v.abs()) * size;
+                if least.abs() <= 64.0 * f64::EPSILON * reach * size / det.abs() {
+                    return None;
+                }
+                count += usize::from(least > 0.0);
+            }
+        }
+        Some(count)
+    }
+
+    /// The winding number of the mesh about `p`: the sum of the
+    /// triangles' solid angles about it over 4π (A. van Oosterom and J.
+    /// Strackee, "The solid angle of a plane triangle", IEEE Trans.
+    /// Biomed. Eng. 30, 1983).
+    fn winding(&self, p: DVec3) -> f64 {
         let mut total = 0.0;
         for t in &self.tris {
-            if triangle_distance(p, t) <= margin + self.chord {
-                return None;
-            }
             let [a, b, c] = t.map(|q| q - p);
             let (la, lb, lc) = (a.length(), b.length(), c.length());
             let num = a.dot(b.cross(c));
             let den = la * lb * lc + a.dot(b) * lc + b.dot(c) * la + c.dot(a) * lb;
             total += 2.0 * num.atan2(den);
         }
-        Some(total / (4.0 * PI) > 0.5)
+        total / (4.0 * PI)
     }
 }
 
@@ -691,47 +891,26 @@ fn triangle_distance(p: DVec3, t: &[DVec3; 3]) -> f64 {
 /// operation's rule on the operands says so.
 fn membership(
     t: &mut Tally,
-    a: &Body,
-    b: &Body,
+    ma: &Mesh,
+    mb: &Mesh,
     results: &[(BooleanOp, bool, &Outcome)],
     case: &str,
     rng: &mut Rng,
 ) {
-    const CHORD: f64 = 1e-3;
     const MARGIN: f64 = 1e-3;
-    let mesh = |x: &Body| Mesh::of(x, CHORD);
-    let (ma, mb) = match (mesh(a), mesh(b)) {
-        (Ok(x), Ok(y)) => (x, y),
-        (Err(e), _) | (_, Err(e)) => {
-            t.bugs.push(format!("{case}: meshing an operand: {e}"));
-            return;
-        }
-    };
-    let bounds = |m: &Mesh| {
-        m.tris.iter().flatten().fold(
-            (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
-            |(lo, hi), q| (lo.min(*q), hi.max(*q)),
-        )
-    };
-    let ((la, ha), (lb, hb)) = (bounds(&ma), bounds(&mb));
+    let ((la, ha), (lb, hb)) = (
+        (ma.nodes[0].lo, ma.nodes[0].hi),
+        (mb.nodes[0].lo, mb.nodes[0].hi),
+    );
     let (lo, hi) = if la.cmple(hb).all() && lb.cmple(ha).all() {
         (la.max(lb), ha.min(hb))
     } else {
         (la.min(lb), ha.max(hb))
     };
-    let mut meshes = Vec::new();
-    for &(op, swapped, r) in results {
-        match r {
-            None => {}
-            Some(None) => meshes.push((op, swapped, None)),
-            Some(Some((body, _))) => match mesh(body) {
-                Ok(m) => meshes.push((op, swapped, Some(m))),
-                Err(e) => t
-                    .bugs
-                    .push(format!("{case} {op:?}: meshing the result: {e}")),
-            },
-        }
-    }
+    let meshes: Vec<(BooleanOp, bool, Option<&Mesh>)> = results
+        .iter()
+        .filter_map(|&(op, swapped, r)| Some((op, swapped, r.as_ref()?.as_ref().map(|x| &x.1))))
+        .collect();
     for _ in 0..24 {
         let p = DVec3::new(
             rng.range(lo.x, hi.x),
@@ -768,11 +947,19 @@ fn membership(
 fn identities(t: &mut Tally, a: &Body, b: &Body, case: &str, slack: f64, rng: &mut Rng) {
     t.pairs += 1;
     let (va, vb) = (volume(a), volume(b));
+    let (ma, mb) = match (Mesh::of(a), Mesh::of(b)) {
+        (Ok(x), Ok(y)) => (x, y),
+        (Err(e), _) | (_, Err(e)) => {
+            t.bugs.push(format!("{case}: meshing an operand: {e}"));
+            return;
+        }
+    };
+    let (a, b) = ((a, &ma), (b, &mb));
     let ru = measured(t, a, b, BooleanOp::Union, case);
     let ri = measured(t, a, b, BooleanOp::Intersect, case);
     let rab = measured(t, a, b, BooleanOp::Subtract, case);
     let rba = measured(t, b, a, BooleanOp::Subtract, case);
-    let vol = |r: &Outcome| r.as_ref().map(|x| x.as_ref().map_or(0.0, |y| y.1));
+    let vol = |r: &Outcome| r.as_ref().map(|x| x.as_ref().map_or(0.0, |y| y.0));
     let (u, i, ab, ba) = (vol(&ru), vol(&ri), vol(&rab), vol(&rba));
     let tol = 1e-9 * va.max(vb) + slack;
     let mut check = |name: &str, lhs: f64, rhs: f64| {
@@ -801,8 +988,8 @@ fn identities(t: &mut Tally, a: &Body, b: &Body, case: &str, slack: f64, rng: &m
     }
     membership(
         t,
-        a,
-        b,
+        &ma,
+        &mb,
         &[
             (BooleanOp::Union, false, &ru),
             (BooleanOp::Intersect, false, &ri),
@@ -1226,4 +1413,416 @@ fn pairs_a_fuzz_of_turned_solids_found() {
     }
     assert!(t.refused.is_empty(), "{:?}", t.refused);
     assert!(t.bugs.is_empty(), "{:?}", t.bugs);
+}
+
+/// A ball of radius `r` about `centre`: a half disc turned about the
+/// world's z axis, in two faces on the sphere.
+fn ball(centre: DVec3, r: f64) -> Body {
+    let plane = Frame {
+        origin: centre,
+        x: DVec3::X,
+        y: DVec3::Z,
+        z: -DVec3::Y,
+    };
+    k().revolve(
+        &Profile {
+            plane,
+            curves: vec![
+                arc(DVec2::ZERO, r, -FRAC_PI_2, PI),
+                line(DVec2::new(0.0, r), DVec2::new(0.0, -r)),
+            ],
+        },
+        &RevolveSpec {
+            axis_origin: DVec2::ZERO,
+            axis_dir: DVec2::Y,
+            angle: TAU,
+        },
+    )
+    .expect("a ball")
+}
+
+/// The volume of a cap of height `h` of a ball of radius `r`.
+fn cap(r: f64, h: f64) -> f64 {
+    PI * h * h * (3.0 * r - h) / 3.0
+}
+
+/// The volume of a cone of base radius `r` and height `h`.
+fn cone_volume(r: f64, h: f64) -> f64 {
+    PI * r * r * h / 3.0
+}
+
+/// Faces, edges and vertices.
+type Topology = (usize, usize, usize);
+
+/// A golden case: its name, its operands, and the volumes and topology of
+/// A ∪ B, A ∩ B, A − B and B − A.
+type Golden<'a> = (&'a str, &'a Body, &'a Body, [f64; 4], [Topology; 4]);
+
+/// Balls and cones with planes, cylinders and each other (design note
+/// 0012 §12.4, item 3a): every result valid with its origins on the
+/// operands' surfaces, its volume exact to 1e-9, and its faces, edges and
+/// vertices as first found, each count checked against Euler's formula
+/// (a face with a hole adds a loop). Each case gives A ∪ B, A ∩ B, A − B
+/// and B − A.
+#[test]
+fn balls_and_cones_with_plates_boxes_and_rods() {
+    let plate = cuboid(DVec3::new(-2.0, -2.0, -1.0), DVec3::new(2.0, 2.0, 0.0));
+    let ball_volume = |r: f64| 4.0 / 3.0 * PI * r.powi(3);
+    // A ball resting half a radius deep in a plate.
+    let resting = ball(DVec3::new(0.0, 0.0, 0.5), 1.0);
+    let dip = cap(1.0, 0.5);
+    // A ball cut by a box along its axis, off its centre.
+    let unit = ball(DVec3::ZERO, 1.0);
+    let side = cuboid(DVec3::new(0.3, -2.0, -2.0), DVec3::new(2.0, 2.0, 2.0));
+    let slice = cap(1.0, 0.7);
+    // A spherical pocket: a ball centred on the plate's top face.
+    let pocket = ball(DVec3::ZERO, 0.8);
+    let half = 0.5 * ball_volume(0.8);
+    // Two balls across their axes, and two along their common axis.
+    let beside = ball(DVec3::new(1.2, 0.0, 0.0), 1.0);
+    let above = ball(DVec3::new(0.0, 0.0, 1.2), 1.0);
+    let lens = 2.0 * cap(1.0, 0.4);
+    // A countersink: a cone, apex down, 0.6 into the plate.
+    let sink = turned_solid(
+        Frame::WORLD,
+        DVec3::new(0.0, 0.0, 0.2),
+        &[(0.0, 0.0), (0.8, 0.0), (0.0, -0.8)],
+        TAU,
+    );
+    let (sunk, sink_all) = (cone_volume(0.6, 0.6), cone_volume(0.8, 0.8));
+    // A cone on a rod, coaxial, its base inside the rod.
+    let rod = cylinder(at_z(0.0), DVec2::ZERO, 1.0, 1.0);
+    let point = turned_solid(
+        Frame::WORLD,
+        DVec3::new(0.0, 0.0, 0.5),
+        &[(0.0, 0.0), (0.9, 0.0), (0.0, 0.9)],
+        TAU,
+    );
+    let (tip, point_all) = (cone_volume(0.4, 0.4), cone_volume(0.9, 0.9));
+    // A pointed cone cut square to its axis half way up.
+    let tall = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (1.0, 0.0), (0.0, 2.0)],
+        TAU,
+    );
+    let top = cuboid(DVec3::new(-2.0, -2.0, 1.0), DVec3::new(2.0, 2.0, 3.0));
+    let (tall_tip, tall_all) = (cone_volume(0.5, 1.0), cone_volume(1.0, 2.0));
+    // A cone, apex down onto a ball from above, whose side crosses the
+    // sphere twice close together: besides its cap below the cone's base,
+    // the ball keeps a ring 0.011 thick outside the cone between the two
+    // circles, which a coarse mesh of the result flattens to nothing.
+    let (apex, slope, base) = (2.0, 0.57, -0.2);
+    let crossing = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, base), (slope * (apex - base), base), (0.0, apex)],
+        TAU,
+    );
+    // The sphere's radius squared less the cone's at height z,
+    // (1 − z²) − m²(a − z)², is positive between the circles, its roots.
+    let (qa, qb, qc) = (
+        -(1.0 + slope * slope),
+        2.0 * slope * slope * apex,
+        1.0 - slope * slope * apex * apex,
+    );
+    let root = (qb * qb - 4.0 * qa * qc).sqrt();
+    let (z1, z2) = ((-qb + root) / (2.0 * qa), (-qb - root) / (2.0 * qa));
+    let integral = |z: f64| PI * (qa * z.powi(3) / 3.0 + 0.5 * qb * z * z + qc * z);
+    let ring = (integral(z2) - integral(z1)).abs();
+    let outside = cap(1.0, 1.0 + base) + ring;
+    let (inside, crossing_all) = (
+        ball_volume(1.0) - outside,
+        cone_volume(slope * (apex - base), apex - base),
+    );
+    let cases: [Golden; 9] = [
+        (
+            "a ball resting in a plate",
+            &resting,
+            &plate,
+            [
+                ball_volume(1.0) + 16.0 - dip,
+                dip,
+                ball_volume(1.0) - dip,
+                16.0 - dip,
+            ],
+            [(8, 16, 11), (3, 4, 3), (3, 4, 3), (8, 16, 11)],
+        ),
+        (
+            "a ball cut by a box",
+            &unit,
+            &side,
+            [
+                ball_volume(1.0) + 27.2 - slice,
+                slice,
+                ball_volume(1.0) - slice,
+                27.2 - slice,
+            ],
+            [(8, 17, 12), (3, 3, 2), (3, 5, 4), (8, 15, 10)],
+        ),
+        (
+            "a spherical pocket",
+            &plate,
+            &pocket,
+            [16.0 + half, half, 16.0 - half, half],
+            [(8, 16, 11), (3, 4, 3), (8, 16, 11), (3, 4, 3)],
+        ),
+        (
+            "two balls side by side",
+            &unit,
+            &beside,
+            [
+                2.0 * ball_volume(1.0) - lens,
+                lens,
+                ball_volume(1.0) - lens,
+                ball_volume(1.0) - lens,
+            ],
+            [(4, 8, 6), (4, 4, 2), (4, 6, 4), (4, 6, 4)],
+        ),
+        (
+            "two balls on one axis",
+            &unit,
+            &above,
+            [
+                2.0 * ball_volume(1.0) - lens,
+                lens,
+                ball_volume(1.0) - lens,
+                ball_volume(1.0) - lens,
+            ],
+            [(4, 6, 4), (4, 6, 4), (4, 6, 4), (4, 6, 4)],
+        ),
+        (
+            "a countersink",
+            &plate,
+            &sink,
+            [16.0 + sink_all - sunk, sunk, 16.0 - sunk, sink_all - sunk],
+            [(9, 18, 12), (3, 4, 3), (8, 16, 11), (4, 6, 4)],
+        ),
+        (
+            "a cone on a rod",
+            &rod,
+            &point,
+            [PI + tip, point_all - tip, PI - point_all + tip, tip],
+            [(6, 10, 7), (4, 6, 4), (7, 12, 8), (3, 4, 3)],
+        ),
+        (
+            "a pointed cone cut square",
+            &tall,
+            &top,
+            [
+                tall_all + 32.0 - tall_tip,
+                tall_tip,
+                tall_all - tall_tip,
+                32.0 - tall_tip,
+            ],
+            [(9, 18, 12), (3, 4, 3), (4, 6, 4), (8, 16, 11)],
+        ),
+        (
+            "a ball crossed twice by a cone",
+            &unit,
+            &crossing,
+            [
+                ball_volume(1.0) + crossing_all - inside,
+                inside,
+                outside,
+                crossing_all - inside,
+            ],
+            [(9, 16, 10), (7, 12, 7), (7, 12, 7), (9, 16, 10)],
+        ),
+    ];
+    for (name, a, b, volumes, topology) in cases {
+        for (k, (x, y, op)) in [
+            (a, b, BooleanOp::Union),
+            (a, b, BooleanOp::Intersect),
+            (a, b, BooleanOp::Subtract),
+            (b, a, BooleanOp::Subtract),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let r = run(x, y, op);
+            assert!(
+                close(volume(&r), volumes[k]),
+                "{name}, {k}: {} vs {}",
+                volume(&r),
+                volumes[k]
+            );
+            assert_eq!(counts(&r), topology[k], "{name}, {k}");
+        }
+    }
+}
+
+/// A solid turned a whole turn about the line through `origin` along
+/// `axis`'s normal from `curves`, (radius, height) curves in the half
+/// plane of that line.
+fn turned_curves(axis: Frame, origin: DVec3, curves: Vec<ProfileCurve>) -> Body {
+    let plane = Frame {
+        origin,
+        x: axis.x,
+        y: axis.z,
+        z: -axis.y,
+    };
+    k().revolve(
+        &Profile { plane, curves },
+        &RevolveSpec {
+            axis_origin: DVec2::ZERO,
+            axis_dir: DVec2::Y,
+            angle: TAU,
+        },
+    )
+    .expect("a revolve")
+}
+
+/// A random solid turned about `axis`'s normal, its origin on that line:
+/// a ball, a pointed cone (point up or down), a frustum, a rod with a
+/// round end (a cylinder and a sphere meeting smoothly), or one of
+/// `random_curved`'s turned rods, tubes and stepped rods. True with a
+/// ball.
+fn random_revolve(r: &mut Rng, axis: Frame) -> (Body, bool) {
+    let snap = r.chance(0.5);
+    let origin = axis.origin + axis.z * r.coord(-0.5, 0.5, snap);
+    let rad = r.coord(0.25, 1.0, snap).max(0.25);
+    let (h0, h1) = (
+        -r.coord(0.25, 0.75, snap).max(0.25),
+        r.coord(0.25, 0.75, snap).max(0.25),
+    );
+    let small = rad * if snap { 0.5 } else { r.range(0.3, 0.7) };
+    let polygon = |pts: &[(f64, f64)]| -> Vec<ProfileCurve> {
+        (0..pts.len())
+            .map(|k| {
+                let (a, b) = (pts[k], pts[(k + 1) % pts.len()]);
+                line(DVec2::new(a.0, a.1), DVec2::new(b.0, b.1))
+            })
+            .collect()
+    };
+    let kind = r.next() % 8;
+    let curves = match kind {
+        0 | 1 => vec![
+            arc(DVec2::ZERO, rad, -FRAC_PI_2, PI),
+            line(DVec2::new(0.0, rad), DVec2::new(0.0, -rad)),
+        ],
+        2 => polygon(&[(0.0, h0), (rad, h0), (0.0, h1)]),
+        3 => polygon(&[(0.0, h0), (rad, h1), (0.0, h1)]),
+        4 => polygon(&[(0.0, h0), (rad, h0), (small, h1), (0.0, h1)]),
+        5 => {
+            let top = 0.5 * (h0 + h1);
+            vec![
+                line(DVec2::new(0.0, h0), DVec2::new(rad, h0)),
+                line(DVec2::new(rad, h0), DVec2::new(rad, top)),
+                arc(DVec2::new(0.0, top), rad, 0.0, FRAC_PI_2),
+                line(DVec2::new(0.0, top + rad), DVec2::new(0.0, h0)),
+            ]
+        }
+        6 => polygon(&[(small, h0), (rad, h0), (rad, h1), (small, h1)]),
+        _ => polygon(&[
+            (0.0, h0),
+            (rad, h0),
+            (rad, 0.5 * (h0 + h1)),
+            (small, 0.5 * (h0 + h1)),
+            (small, h1),
+            (0.0, h1),
+        ]),
+    };
+    (turned_curves(axis, origin, curves), kind < 2)
+}
+
+/// A random pair of solids turned about one axis, with faces on spheres,
+/// cones, cylinders and planes square to the axis, or a ball and a box
+/// turned any way or another ball anywhere: every curve where two of their
+/// faces meet is a circle (design note 0012 §12.4, item 3a).
+fn random_revolve_pair(r: &mut Rng) -> (Body, Body) {
+    let axis = if r.chance(0.5) {
+        Frame::WORLD
+    } else {
+        turned(r, DVec3::ZERO)
+    };
+    let (first, round) = random_revolve(r, axis);
+    let second = if r.chance(0.5) {
+        random_revolve(r, axis).0
+    } else if round && r.chance(0.5) {
+        if r.chance(0.5) {
+            // A ball anywhere: two spheres meet in a circle about the line
+            // through their centres.
+            let snap = r.chance(0.5);
+            let mut at = || r.coord(-1.0, 1.0, snap);
+            let centre = axis.origin + DVec3::new(at(), at(), at());
+            return (first, ball(centre, r.coord(0.25, 1.0, snap).max(0.25)));
+        }
+        let size = DVec3::new(r.range(0.25, 1.5), r.range(0.25, 1.5), r.range(0.25, 1.5));
+        let corner =
+            axis.origin + DVec3::new(r.range(-1.0, 0.5), r.range(-1.0, 0.5), r.range(-1.0, 0.5));
+        k().make_box(&turned(r, corner), size).expect("a box")
+    } else {
+        // A slab square to the axis, wider than any of the solids.
+        let snap = r.chance(0.5);
+        let z0 = r.coord(-1.0, 0.75, snap);
+        let thick = r.coord(0.25, 1.0, snap).max(0.25);
+        let frame = Frame {
+            origin: axis.origin - axis.x * 3.0 - axis.y * 3.0 + axis.z * z0,
+            ..axis
+        };
+        k().make_box(&frame, DVec3::new(6.0, 6.0, thick))
+            .expect("a slab")
+    };
+    (first, second)
+}
+
+#[test]
+fn volume_identities_on_random_revolves() {
+    let mut t = Tally::default();
+    let mut r = Rng(0x0BA1_1C0E);
+    let mut points = Rng(0x5A3F_0E14);
+    for case in 0..scale(100) {
+        let (a, b) = random_revolve_pair(&mut r);
+        identities(&mut t, &a, &b, &format!("pair {case}"), 0.0, &mut points);
+    }
+    report("random balls and cones about one axis", &t);
+}
+
+/// The membership check's rays against its winding numbers, at points
+/// near and far from random solids: every ray that answers gives the
+/// winding number's answer, and the winding numbers are whole (the meshes
+/// are closed and face out).
+#[test]
+fn rays_and_winding_numbers_agree() {
+    let mut r = Rng(0x0BA1_1C0F);
+    let (mut points, mut rays, mut answered) = (0, 0, 0);
+    for case in 0..16 {
+        let axis = turned(&mut r, DVec3::ZERO);
+        let body = if case % 2 == 0 {
+            random_revolve(&mut r, axis).0
+        } else {
+            random_curved(&mut r, axis)
+        };
+        let m = Mesh::of(&body).expect("a mesh");
+        let (lo, hi) = (m.nodes[0].lo - 0.2, m.nodes[0].hi + 0.2);
+        for _ in 0..200 {
+            let p = DVec3::new(
+                r.range(lo.x, hi.x),
+                r.range(lo.y, hi.y),
+                r.range(lo.z, hi.z),
+            );
+            if m.near(p, 2.0 * CHORD) {
+                continue;
+            }
+            points += 1;
+            let w = m.winding(p);
+            assert!(
+                w.abs() < 1e-9 || (w - 1.0).abs() < 1e-9,
+                "solid {case}: winding number {w} at {p:?}"
+            );
+            for d in RAYS {
+                rays += 1;
+                if let Some(n) = m.crossings(p, d.normalize()) {
+                    answered += 1;
+                    assert_eq!(n % 2 == 1, w > 0.5, "solid {case}: {n} crossings at {p:?}");
+                }
+            }
+        }
+    }
+    assert!(points > 2000, "{points} points");
+    assert!(
+        answered + rays / 1000 >= rays,
+        "{answered} of {rays} rays answered"
+    );
 }

@@ -333,6 +333,36 @@ impl Surface {
         }
     }
 
+    /// The unit normal at `(u, v)` as [`Surface::normal`], or at a point
+    /// of a surface of revolution's axis where the surface is smooth (a
+    /// sphere's pole), where `S_u` vanishes: there the normal is along the
+    /// axis, pointing as `S_u × S_v` does beside the point. `None` where
+    /// the profile meets the axis at a slant (a cone's apex, where the
+    /// surface has no tangent plane).
+    pub fn normal_or_limit(&self, u: f64, v: f64) -> Option<DVec3> {
+        if let Some(n) = self.normal(u, v) {
+            return Some(n);
+        }
+        let Surface::Revolution { frame, profile } = self else {
+            return None;
+        };
+        let dp = profile.deriv(v);
+        let len = dp.length();
+        if len.is_nan() || len == 0.0 || dp.dot(frame.z).abs() > 1e-9 * len {
+            return None;
+        }
+        // A step along the profile far above the rounding of its points and
+        // far below its size, to the side of the axis it lies on (x ≥ 0 in
+        // the frame); beside a smooth point the normal keeps its side.
+        let step = 1e-8 * profile.magnitude().max(len) / len;
+        [step, -step].into_iter().find_map(|dv| {
+            let w = v + dv;
+            let rho = (profile.point(w) - frame.origin).dot(frame.x);
+            let n = self.normal(u, w).filter(|_| rho > 0.0)?;
+            Some(frame.z * n.dot(frame.z).signum())
+        })
+    }
+
     /// Parameters of the closest point to `p`. Exact for points on the
     /// surface; a good approximation for nearby points.
     pub fn project(&self, p: DVec3) -> (f64, f64) {

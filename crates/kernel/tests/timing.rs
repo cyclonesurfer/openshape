@@ -327,6 +327,139 @@ fn curved_booleans() {
     }
 }
 
+/// The vertical plane through `origin` holding the world's z axis as its
+/// y axis: profiles in it revolve about the vertical.
+fn upright(origin: DVec3) -> Frame {
+    Frame {
+        origin,
+        x: DVec3::X,
+        y: DVec3::Z,
+        z: -DVec3::Y,
+    }
+}
+
+/// A whole turn about the vertical.
+fn turn() -> RevolveSpec {
+    RevolveSpec {
+        axis_origin: DVec2::ZERO,
+        axis_dir: DVec2::Y,
+        angle: TAU,
+    }
+}
+
+/// A ball of radius `r` about `centre`.
+fn ball(centre: DVec3, r: f64) -> Body {
+    let p = Profile {
+        plane: upright(centre),
+        curves: vec![
+            ProfileCurve::Arc {
+                center: DVec2::ZERO,
+                radius: r,
+                start_angle: -TAU / 4.0,
+                sweep_angle: TAU / 2.0,
+            },
+            ProfileCurve::Line {
+                start: DVec2::new(0.0, r),
+                end: DVec2::new(0.0, -r),
+            },
+        ],
+    };
+    k().revolve(&p, &turn()).expect("a ball")
+}
+
+/// The tool of a countersunk hole about the vertical through `(x, y)` in
+/// a plate 0.4 thick: a shank of radius 0.15 and a 90° countersink 0.1
+/// deep at the plate's top.
+fn countersink(x: f64, y: f64) -> Body {
+    let pts = [
+        (0.0, -0.5),
+        (0.15, -0.5),
+        (0.15, 0.25),
+        (0.35, 0.45),
+        (0.0, 0.45),
+    ]
+    .map(|(r, h)| DVec2::new(r, h));
+    k().revolve(
+        &Profile::polygon(upright(DVec3::new(x, y, 0.0)), &pts),
+        &turn(),
+    )
+    .expect("a countersink")
+}
+
+#[test]
+fn spheres_and_cones() {
+    let plate = || {
+        k().make_box(&Frame::WORLD, DVec3::new(4.0, 4.0, 0.4))
+            .expect("a plate")
+    };
+    // A plate dimpled by a 4 by 4 grid of balls, one boolean each.
+    let (dimpled, t) = best(1, || {
+        let mut body = plate();
+        for i in 0..4 {
+            for j in 0..4 {
+                let b = ball(DVec3::new(i as f64 + 0.5, j as f64 + 0.5, 0.55), 0.3);
+                body = k()
+                    .boolean(&body, &b, BooleanOp::Subtract)
+                    .expect("a dimple");
+            }
+        }
+        body
+    });
+    assert_eq!(k().topology(&dimpled).faces, 6 + 16 * 2);
+    within(
+        "dimple a plate 16 times with balls, one boolean each",
+        t,
+        LIMIT.dimple_16,
+    );
+    // The same plate with 16 countersunk holes.
+    let (sunk, t) = best(1, || {
+        let mut body = plate();
+        for i in 0..4 {
+            for j in 0..4 {
+                let tool = countersink(i as f64 + 0.5, j as f64 + 0.5);
+                body = k()
+                    .boolean(&body, &tool, BooleanOp::Subtract)
+                    .expect("a countersunk hole");
+            }
+        }
+        body
+    });
+    let topology = k().topology(&sunk);
+    assert_eq!((topology.faces, topology.genus), (6 + 16 * 4, Some(16)));
+    within(
+        "cut 16 countersunk holes into a plate, one boolean each",
+        t,
+        LIMIT.sink_16,
+    );
+    let opts = TessellationOptions::default();
+    for (name, body, [mesh, validate, mass]) in [
+        ("dimpled", &dimpled, LIMIT.dimpled),
+        ("countersunk", &sunk, LIMIT.countersunk),
+    ] {
+        let (m, t) = best(2, || k().tessellate(body, &opts).expect("a mesh"));
+        within(
+            &format!("mesh the {name} plate ({} triangles)", m.triangle_count()),
+            t,
+            mesh,
+        );
+        let (_, t) = best(2, || k().validate(body));
+        within(&format!("validate the {name} plate"), t, validate);
+        let (_, t) = best(2, || k().mass_properties(body, 1e-9).expect("mass"));
+        within(
+            &format!("mass properties of the {name} plate (1e-9)"),
+            t,
+            mass,
+        );
+    }
+    let b = ball(DVec3::ZERO, 1.0);
+    let (m, t) = best(2, || k().tessellate(&b, &opts).expect("a mesh"));
+    within(
+        &format!("mesh a unit ball ({} triangles)", m.triangle_count()),
+        t,
+        LIMIT.mesh_ball,
+    );
+}
+
 #[test]
 fn sketch_regions() {
     // A grid of 41 by 41 lines and 40 circles: 1,681 crossings among the
@@ -414,6 +547,25 @@ fn scaling() {
         || k().tessellate(&p4, &opts).expect("a mesh"),
         || k().tessellate(&p11, &opts).expect("a mesh"),
     );
+
+    // A ball meshed eight times as finely: on a doubly curved face the
+    // triangles grow as the tolerance shrinks.
+    let b = ball(DVec3::ZERO, 1.0);
+    let fine = |chord_tolerance: f64| TessellationOptions {
+        chord_tolerance,
+        ..opts
+    };
+    let (coarse, finer) = (fine(1e-3), fine(1.25e-4));
+    let count =
+        |o: &TessellationOptions| k().tessellate(&b, o).expect("a mesh").triangle_count() as f64;
+    let (n, m) = (count(&coarse), count(&finer));
+    scales(
+        &format!("mesh a ball, {n} to {m} triangles"),
+        m / n,
+        5,
+        || k().tessellate(&b, &coarse).expect("a mesh"),
+        || k().tessellate(&b, &finer).expect("a mesh"),
+    );
 }
 
 /// Release-build limits in milliseconds, about ten times the times measured
@@ -430,6 +582,13 @@ struct Limits {
     pins_64: f64,
     drill_64: f64,
     plate_box: f64,
+    dimple_16: f64,
+    sink_16: f64,
+    /// Meshing, validation and mass properties of the dimpled plate.
+    dimpled: [f64; 3],
+    /// The same of the countersunk plate.
+    countersunk: [f64; 3],
+    mesh_ball: f64,
     regions_122: f64,
 }
 
@@ -445,5 +604,10 @@ const LIMIT: Limits = Limits {
     pins_64: 3000.0,
     drill_64: 10000.0,
     plate_box: 600.0,
+    dimple_16: 1200.0,
+    sink_16: 2500.0,
+    dimpled: [2500.0, 80.0, 150.0],
+    countersunk: [300.0, 150.0, 250.0],
+    mesh_ball: 2500.0,
     regions_122: 1200.0,
 };

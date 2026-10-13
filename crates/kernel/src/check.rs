@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 use crate::geom::{Curve3, Surface};
 use crate::math::Frame;
 use crate::tess::{self, TessellationOptions};
-use crate::topo::Brep;
+use crate::topo::{Brep, ShellId};
 use crate::{KernelError, Tolerance, TopologyCounts};
 
 /// A point between an edge's ends where it passes within `tol` of the axis
@@ -237,11 +237,11 @@ pub(crate) fn validate(b: &Brep, tol: &Tolerance) -> Vec<String> {
 
     // Orientation: every outer shell must enclose positive volume.
     if issues.is_empty() {
-        match shell_volumes(b, tol) {
+        match shell_signed_volumes(b, tol) {
             Ok(volumes) => {
                 for (si, solid) in b.solids.iter().enumerate() {
                     for (k, sh) in solid.shells.iter().enumerate() {
-                        let v = volumes[sh.idx()].0;
+                        let v = volumes[sh.idx()];
                         if k == 0 && v <= 0.0 {
                             issues.push(format!("solid {si}: outer shell is inside-out"));
                         }
@@ -251,7 +251,7 @@ pub(crate) fn validate(b: &Brep, tol: &Tolerance) -> Vec<String> {
                     }
                 }
             }
-            Err(e) => issues.push(format!("cannot tessellate: {e}")),
+            Err(e) => issues.push(format!("cannot measure the shells' volumes: {e}")),
         }
     }
     issues
@@ -279,8 +279,10 @@ pub(crate) fn bounding_size(b: &Brep) -> f64 {
 }
 
 /// Each shell's volume (by index) from a coarse mesh, a hundredth of the
-/// body's size from its surfaces, with a bound on the volume's error: twice
-/// the mesh's area times that distance.
+/// body's size from its surfaces, with a bound on the volume's error:
+/// twice the area of the mesh of its curved faces times that distance (the
+/// mesh of a flat face lies in its plane, so the region between the mesh
+/// and the body is along curved faces), plus the rounding of the sum.
 pub(crate) fn shell_volumes(b: &Brep, tol: &Tolerance) -> Result<Vec<(f64, f64)>, KernelError> {
     let opts = TessellationOptions {
         chord_tolerance: bounding_size(b).max(1e-9) * 1e-2,
@@ -290,18 +292,67 @@ pub(crate) fn shell_volumes(b: &Brep, tol: &Tolerance) -> Result<Vec<(f64, f64)>
     Ok(b.shells
         .iter()
         .map(|shell| {
-            let (mut v, mut area) = (0.0, 0.0);
+            let (mut v, mut curved, mut magnitude) = (0.0, 0.0, 0.0);
             for f in &shell.faces {
                 let ft = &t.faces[f.idx()];
+                let flat = b.faces[f.idx()].surface.plane().is_some();
                 for tri in &ft.triangles {
                     let [a, bb, c] = tri.map(|i| ft.positions[i as usize]);
-                    v += a.dot(bb.cross(c)) / 6.0;
-                    area += 0.5 * (bb - a).cross(c - a).length();
+                    let w = a.dot(bb.cross(c)) / 6.0;
+                    v += w;
+                    magnitude += w.abs();
+                    if !flat {
+                        curved += 0.5 * (bb - a).cross(c - a).length();
+                    }
                 }
             }
-            (v, 2.0 * area * opts.chord_tolerance)
+            let rounding = 64.0 * f64::EPSILON * magnitude;
+            (v, 2.0 * curved * opts.chord_tolerance + rounding)
         })
         .collect())
+}
+
+/// Each shell's signed volume (by index), as orientation is decided: from
+/// [`shell_volumes`]' coarse mesh where its error bound cannot reach the
+/// sign, else from the mass properties of the shell alone (exact on the
+/// surfaces, to a millionth). A thin shell between two curved faces close
+/// together (the ring a ball keeps outside a cone that crosses its sphere
+/// twice close together) can mesh to nothing at the coarse mesh's
+/// distance from the surfaces (found 2026-10-13: such a ring was refused
+/// as inside out).
+pub(crate) fn shell_signed_volumes(b: &Brep, tol: &Tolerance) -> Result<Vec<f64>, KernelError> {
+    let size = bounding_size(b).max(tol.linear);
+    shell_volumes(b, tol)?
+        .into_iter()
+        .enumerate()
+        .map(|(i, (v, bound))| {
+            if v.abs() > bound {
+                return Ok(v);
+            }
+            let shell = shell_brep(b, ShellId(i as u32));
+            Ok(crate::mass::mass_properties(&shell, size, 1e-6)?.volume)
+        })
+        .collect()
+}
+
+/// The shell `shell` of `b` as a body of its own (no solid), sharing all of
+/// `b`'s vertices and edges.
+pub(crate) fn shell_brep(b: &Brep, shell: ShellId) -> Brep {
+    let mut out = Brep {
+        vertices: b.vertices.clone(),
+        edges: b.edges.clone(),
+        ..Brep::default()
+    };
+    let ids = b.shells[shell.idx()]
+        .faces
+        .iter()
+        .map(|f| {
+            let face = &b.faces[f.idx()];
+            out.add_face(face.surface.clone(), face.forward, face.loops.clone())
+        })
+        .collect();
+    out.add_shell(ids);
+    out
 }
 
 #[cfg(test)]
