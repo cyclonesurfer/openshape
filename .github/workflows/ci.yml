@@ -27,6 +27,13 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Boolean fuzzing at ten times the default size, with refusal rates (design note 0012 §7)
+        shell: bash
+        run: |
+          BOOLEAN_SCALE=10 cargo test --release -p opendatum-kernel --test booleans -- \
+            --nocapture volume_identities motions | tee booleans.txt
+          { echo '### Booleans'; echo; grep -E '^(random|motions)' booleans.txt | sed 's/^/- /'; } \
+            >> "$GITHUB_STEP_SUMMARY"
       - name: Headless end-to-end demo (op log -> kernel -> wgpu on lavapipe)
         run: cargo run -p opendatum -- --headless-demo demo-out
       - uses: actions/upload-artifact@v4

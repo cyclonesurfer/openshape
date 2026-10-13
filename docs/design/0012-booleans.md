@@ -47,6 +47,14 @@ each of these, and around refusing loudly where it cannot.
 * J. R. Shewchuk, "Adaptive precision floating-point arithmetic and fast
   robust geometric predicates", *DCG* 18, 1997 (already used by the
   profile and tessellation code).
+* A. van Oosterom & J. Strackee, "The solid angle of a plane triangle",
+  *IEEE Trans. Biomedical Engineering* BME-30(2), 1983, and A. Jacobson,
+  L. Kavan & O. Sorkine-Hornung, "Robust inside-outside segmentation
+  using generalized winding numbers", *ACM TOG* 32(4), 2013: the winding
+  number of a closed triangulated surface as a sum of solid angles,
+  used for classification in §9.
+* C. Ericson, *Real-Time Collision Detection*, Morgan Kaufmann, 2005,
+  §5.1.5: the closest point of a triangle.
 * Our design notes 0006 (the tolerant 2D arrangement, reused in §4.2),
   0008 (periodic faces split at π) and 0011 (intersections).
 
@@ -191,3 +199,109 @@ for faces it cannot absorb as artefacts of the tolerance).
 4. Features: extrude and revolve with add, remove and intersect; the
    first part-combining UI; patterns and mirror once booleans are
    measured robust.
+
+## 9. As built: step 1, polyhedral solids (2026-10-13)
+
+`Kernel::boolean(a, b, op)` (ADR 0020) handles solids bounded by planes
+with straight edges: boxes and extrudes of polygons, holes included.
+Bodies with curved faces or edges fail with `KernelError::Unsupported`
+until step 2. The code is `crates/kernel/src/boolean/`, one module per
+stage.
+
+**Points** (`points.rs`). Each vertex of either body gets one sign
+(−1, 0 within the tolerance, +1) per face plane of the other body, once.
+The candidate vertices of the result are the bodies' vertices, the
+points where an edge crosses a plane of the other body (its ends'
+signs strictly opposite) and the points where two non-parallel edges
+come within the tolerance; points within the tolerance of each other
+are joined into clusters (union–find on a grid), each placed at a
+body's vertex if it holds one, else at the mean. A cluster holding two
+vertices of one body, or spreading wider than twice the tolerance, is
+refused. Whether a cluster lies on an edge is then decided once, by its
+distance from the edge, and the edge is split at the clusters on it.
+
+**Imprint** (`mod.rs`). Faces on two planes meet along the stretch of
+the planes' common line inside both closed faces, found from the
+vertices' signs by two half-open parity rules (counting a vertex on the
+plane as on its positive and then its negative side; their union is the
+closed face); no new geometric test is made. Faces on one plane (all
+vertex signs zero both ways) imprint the pieces of each other's edges
+that lie in the other closed face; a face on the other's plane only one
+way round is refused as nearly coincident.
+
+**Split** (`planar.rs`). Each face's edge pieces and imprints form a
+planar graph on known points, walked with exact orientation predicates
+(Shewchuk); counter-clockwise cycles are regions, clockwise ones the
+holes of the smallest region of another component around them.
+
+**Classify** (`classify.rs`). This replaces the propagation of §4.3. A
+piece inside a coincident face of the other body is on it, with the same
+or the opposite normal; any other piece is classified by the winding
+number of the other body's boundary (van Oosterom & Strackee; Jacobson
+et al.) at the incentre of its triangle with the largest inscribed
+circle in a constrained Delaunay triangulation. Each piece is decided by
+its own test, so no decision depends on another, and the test's margin
+is measurable: a piece whose inscribed circle is no wider than the
+tolerance is a sliver, and a point within the tolerance of the other
+body's surface is on it; both are refused. A winding number more than a
+quarter from 0 and 1 is refused too.
+
+**Select, sew, merge** (`assemble.rs`). Pieces are kept by the table of
+§4.4. Every segment must then be used exactly once in each direction (a
+segment used more often is a non-manifold result, refused; fewer is a
+kernel error), adjacent coplanar faces with the same orientation are
+merged by re-running the split on their joint boundary, collinear edges
+meeting at a point no third edge reaches are joined, and a vertex whose
+faces form more than one fan is refused as non-manifold. Shells are the
+connected components; outer shells have positive volume, and each void
+goes to the solid whose outer shell winds around it. Origins follow ADR
+0020.
+
+**What is refused**, each with a location: an empty result; a
+non-manifold result (bodies touching along an edge or at a point);
+points of the bodies closer than the tolerance (two vertices of one body
+in a cluster, a cluster spread wider than twice the tolerance, two
+points on one edge or one line within the tolerance of each other, a
+point within the tolerance of two edges of one body away from their
+vertex, or of an edge it is not on); edges passing within the tolerance
+of each other without meeting; faces that nearly coincide; slivers
+thinner than the tolerance; a face running within the tolerance of the
+other body's surface without lying on one of its faces. Internal
+inconsistencies (a piece without a partner across an edge, a region
+both inside and outside a face) are `InvalidResult` errors, which the
+tests count as failures.
+
+**Measured** (`crates/kernel/tests/booleans.rs`). Golden cases: two
+overlapping cubes (volume, area, topology), stacked and flush boxes that
+merge into one, a box against part of a side (a T-shaped prism), a slot
+and a through hole (genus 1), nested bodies (a void), disjoint and
+identical bodies, bodies touching along an edge or at a corner, the
+cubes and the hole at 1 mm and 1 km, and the origin tables of a union.
+Random pairs of boxes and extruded star-shaped polygons (some with
+holes; half on a quarter-unit grid so that faces, edges and vertices
+coincide; about two thirds on axis-aligned frames):
+all four operations, checked by `|A ∪ B| + |A ∩ B| = |A| + |B|`,
+`|A − B| + |A ∩ B| = |A|` and `|B − A| + |A ∩ B| = |B|` with exact
+volumes to 1e-9 relative. Every result in every test is validated and
+its origins checked against the operands' geometry: each face on its
+operand face's plane and facing the right way, each edge along its
+operand edge (a piece of it, or reaching it when joined from several)
+or on both planes where the bodies meet, each vertex at its operand
+vertex, all within three tolerances. On 6,000 pairs (20 times the default run)
+every result is valid, every identity holds where the three results
+exist, and 11 of 24,000 operations are refused (0.5 per thousand), each
+because the result would be non-manifold (bodies on the grid touching
+along an edge or at a point), which is the right answer. The tolerance
+test moves a copy of a random body by 0.25 to 10 tolerances and checks
+the same identities with a slack of the area times the motion; it is the
+adversarial case (every face against its own copy). On 1,400 pairs no
+result is invalid or inconsistent. Refusals per shift (of 800
+operations each): 4 at a quarter of the tolerance and 24 at a half (for
+points closer than the tolerance: these are coincidences the stage
+should absorb, the first robustness target), 108 at 0.9, 564 at 1.1,
+all 800 at 1.5, 524 at 3 and 156 at 10 tolerances, where faces nearly
+parallel to the motion move by about a tolerance and edges nearly
+parallel to it leave slivers thinner than the tolerance. CI prints
+these rates on every run. The surface-area identity waits for step 2's
+tests.
+

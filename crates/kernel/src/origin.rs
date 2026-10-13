@@ -48,6 +48,16 @@ pub struct ProfileVertex {
     pub ends: [PieceEnd; 2],
 }
 
+/// One of the two bodies of a boolean (ADR 0020): `a` and `b` of
+/// [`crate::Kernel::boolean`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Operand {
+    /// The first body, `a`.
+    First,
+    /// The second body, `b`.
+    Second,
+}
+
 /// How a face arose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -67,6 +77,13 @@ pub enum FaceOrigin {
         at: u32,
         /// The region, an index into [`Origins::regions`].
         region: u32,
+    },
+    /// A face of a boolean's operand, or a piece of one.
+    Operand {
+        /// The operand.
+        operand: Operand,
+        /// Its face.
+        face: FaceIx,
     },
 }
 
@@ -90,6 +107,21 @@ pub enum EdgeOrigin {
         /// The span.
         span: u32,
     },
+    /// An edge of a boolean's operand, or a piece of one.
+    Operand {
+        /// The operand.
+        operand: Operand,
+        /// Its edge.
+        edge: EdgeIx,
+    },
+    /// Where face `first` of a boolean's first operand meets face `second`
+    /// of its second.
+    Meet {
+        /// The first operand's face.
+        first: FaceIx,
+        /// The second operand's face.
+        second: FaceIx,
+    },
 }
 
 /// How a vertex arose.
@@ -104,6 +136,28 @@ pub enum VertexOrigin {
         /// The position.
         at: u32,
     },
+    /// A vertex of a boolean's operand.
+    Operand {
+        /// The operand.
+        operand: Operand,
+        /// Its vertex.
+        vertex: VertexIx,
+    },
+    /// A new vertex of a boolean, where the operands meet.
+    Meet,
+}
+
+/// A further origin of an entity made of several (ADR 0020): faces joined
+/// where they continue one another, edges joined end to end, an edge or
+/// vertex of both operands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Merged {
+    /// A face and one more of its origins.
+    Face(FaceIx, FaceOrigin),
+    /// An edge and one more of its origins.
+    Edge(EdgeIx, EdgeOrigin),
+    /// A vertex and one more of its origins.
+    Vertex(VertexIx, VertexOrigin),
 }
 
 /// The origins of a body's entities, in handle order (ADR 0018).
@@ -124,6 +178,10 @@ pub struct Origins {
     /// (counter-clockwise about the profile plane's normal for the outer
     /// loop, clockwise for holes).
     pub regions: Vec<Vec<Vec<ProfilePiece>>>,
+    /// The further origins of entities made of several, sorted; empty but
+    /// for booleans.
+    #[serde(default)]
+    pub merged: Vec<Merged>,
 }
 
 /// Which entities meet which, for naming edges by their faces and

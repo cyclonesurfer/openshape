@@ -11,6 +11,7 @@
 //! Units: lengths are metres, angles radians, all arithmetic `f64`.
 
 pub mod arrangement;
+mod boolean;
 mod check;
 mod geom;
 mod mass;
@@ -31,8 +32,8 @@ pub use geom::SurfaceKind;
 pub use glam::{DMat4, DVec2, DVec3};
 pub use math::{Frame, Tolerance};
 pub use origin::{
-    Adjacency, EdgeIx, EdgeOrigin, FaceIx, FaceOrigin, Origins, PieceEnd, ProfilePiece,
-    ProfileVertex, VertexIx, VertexOrigin,
+    Adjacency, EdgeIx, EdgeOrigin, FaceIx, FaceOrigin, Merged, Operand, Origins, PieceEnd,
+    ProfilePiece, ProfileVertex, VertexIx, VertexOrigin,
 };
 pub use profile::{Profile, ProfileCurve};
 pub use sweep::{ExtrudeSpec, RevolveSpec};
@@ -56,6 +57,21 @@ pub enum KernelError {
     /// Mass properties could not be computed to the requested accuracy.
     #[error("mass properties: {0}")]
     MassProperties(String),
+    /// The inputs are valid but of a kind the operation does not handle
+    /// yet (ADR 0020).
+    #[error("not supported yet: {0}")]
+    Unsupported(String),
+}
+
+/// A boolean operation (design note 0012).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum BooleanOp {
+    /// Everything in either body.
+    Union,
+    /// What is in both bodies.
+    Intersect,
+    /// What is in the first body and not in the second.
+    Subtract,
 }
 
 /// Entity counts of a body, plus the genus derived from Euler–Poincaré.
@@ -204,6 +220,20 @@ pub trait Kernel: Send + Sync {
 
     /// Revolves a planar profile about an axis lying in its plane.
     fn revolve(&self, profile: &Profile, spec: &RevolveSpec) -> Result<Self::Body, KernelError>;
+
+    /// The union, intersection or difference (`a − b`) of two bodies
+    /// (design note 0012, ADR 0020). The result's origins refer to the
+    /// operands' faces, edges and vertices. Fails with
+    /// [`KernelError::InvalidInput`] when the result would be empty or
+    /// non-manifold (the bodies touching only along an edge or at a
+    /// point), and with [`KernelError::Unsupported`] for bodies with
+    /// curved faces or edges, which are not handled yet.
+    fn boolean(
+        &self,
+        a: &Self::Body,
+        b: &Self::Body,
+        op: BooleanOp,
+    ) -> Result<Self::Body, KernelError>;
 
     /// Tessellates a body for display or export.
     fn tessellate(
@@ -378,6 +408,10 @@ impl Kernel for BrepKernel {
 
     fn revolve(&self, profile: &Profile, spec: &RevolveSpec) -> Result<Body, KernelError> {
         self.finish(sweep::revolve(profile, spec, &self.tol)?)
+    }
+
+    fn boolean(&self, a: &Body, b: &Body, op: BooleanOp) -> Result<Body, KernelError> {
+        self.finish(boolean::boolean(&a.brep, &b.brep, op, &self.tol)?)
     }
 
     fn tessellate(&self, body: &Body, opts: &TessellationOptions) -> Result<BodyMesh, KernelError> {

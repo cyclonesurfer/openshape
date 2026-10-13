@@ -1177,7 +1177,9 @@ fn param_scale(s: &Surface, loops: &[Vec<Sample>]) -> Result<DVec2, String> {
 /// Triangles inside the constrained boundary, found by flood fill from the
 /// outer face, toggling inside/outside each time a constraint edge is
 /// crossed. Purely topological, so robust to nearly collinear boundaries.
-fn inside_triangles(cdt: &ConstrainedDelaunayTriangulation<Point2<f64>>) -> Vec<[usize; 3]> {
+pub(crate) fn inside_triangles(
+    cdt: &ConstrainedDelaunayTriangulation<Point2<f64>>,
+) -> Vec<[usize; 3]> {
     let mut parity: Vec<Option<bool>> = vec![None; cdt.num_all_faces()];
     let mut queue = std::collections::VecDeque::new();
     for f in cdt.inner_faces() {

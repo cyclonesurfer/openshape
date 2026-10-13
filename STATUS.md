@@ -10,7 +10,11 @@ the kernel's origin tables (ADR 0018), the `opendatum-naming` crate,
 which names the faces, edges and vertices of boxes, extrudes and
 revolves as the user sees them and resolves stored references, and a
 sketch on a picked planar face and an extrude up to a picked parallel
-face, from the viewport through the model (ADR 0019). Next: booleans.
+face, from the viewport through the model (ADR 0019). Booleans have
+begun: union, intersection and difference of solids bounded by planes
+(design note 0012 §9, ADR 0020), checked by the volume identities on
+thousands of random pairs. Next: curved faces in booleans, then the
+features that use them.
 The product is now named OpenDatum (ADR 0017): packages `opendatum-*`,
 binary `opendatum`, documents `.odatum`; documents saved under the old
 name open unchanged.
@@ -80,6 +84,20 @@ name open unchanged.
     the topology and right by an independent geometric check, on tilted
     planes, symmetric extrudes, and partial and full revolves either way
     round, and that they follow the curves, not their order.
+  - Booleans (`Kernel::boolean`, design note 0012 §9, ADR 0020): union,
+    intersection and difference of solids bounded by planes with straight
+    edges (boxes, extrudes of polygons, holes included), with coincident
+    faces, edges and vertices, voids and several solids. Numerical
+    decisions are made once (a sign per vertex and plane, clusters of
+    points within the tolerance, one incidence decision per point and
+    edge) and each piece of a face is classified by the winding number of
+    the other body at a point well inside it. Coplanar neighbours and
+    collinear edges are merged; origins record which operand faces,
+    edges and vertices each result entity comes from, and where faces
+    meet. What the tolerance cannot decide is refused with a message and
+    a place (non-manifold results, points or edges closer than the
+    tolerance, slivers, faces running within the tolerance of the other
+    surface); curved bodies fail as not supported yet.
 - **Features** (`opendatum-features`): regenerates a Part Studio through the
   kernel with per-feature status (ok, warning, suppressed, failed with
   message). A failing feature never blocks the others. Sketch features are
@@ -565,6 +583,25 @@ name open unchanged.
   passed with every region's mass to 1e-10, no fallback; it refused 313
   unresolvable perturbed inputs, 18 loops below resolution and 44
   pinched profiles (the cases are random per run).
+- Booleans of polyhedral solids (design note 0012 §9), 2026-10-13, on
+  Mesa lavapipe: fmt, clippy with `-D warnings`, 881 tests and
+  `cargo deny` pass. Golden cases check volume, area, topology counts,
+  genus and origins (overlapping cubes, merged and flush boxes, a T, a
+  slot and a through hole, a void, disjoint, identical and touching
+  bodies, at 1 mm and 1 km too). Every result is validated and its
+  origins checked against the operands' geometry (planes, edge lines,
+  vertex positions). Random pairs check the three volume identities to
+  1e-9 relative: at 20 times the default run, 6,000 pairs
+  with every result valid and 11 of 24,000 operations refused, each a
+  non-manifold result. A copy of a random body moved by 0.25 to 10
+  tolerances (1,400 pairs) gives no invalid or inconsistent result;
+  refusals per 800 operations are 4 and 24 at a quarter and a half
+  tolerance, 108 to 800 between 0.9 and 3, and 156 at 10. Writing the
+  tolerance test found five inconsistencies (a point near a corner on
+  two edges, points close in the face's plane but not in space, pieces
+  classified within the tolerance of the other surface); each is now a
+  named refusal. CI runs both random tests at ten times the default size
+  and prints the rates.
 - Picking and references in the application (ADR 0019), 2026-10-13, on
   Mesa lavapipe: fmt, clippy with `-D warnings`, 867 tests and `cargo
   deny` pass. The new UI tests (4) drive the real app offscreen: the
@@ -771,8 +808,16 @@ name open unchanged.
   moved by about a tolerance or more.
 - Solver conflict detection is local: from a start far from any solution it
   can call a sketch conflicting although another branch would satisfy it.
-- No booleans: each feature makes its own part (Phase 3; design notes
-  0011 and 0012 are the plan).
+- Booleans handle only solids bounded by planes; a body with a curved
+  face or edge fails as not supported yet (design note 0012 §8 step 2).
+  No feature uses booleans yet: each feature still makes its own part.
+  Near-coincidences the tolerance cannot decide are refused, not
+  resolved: a copy of a body moved by half a tolerance is refused 3% of
+  the time, and by about a tolerance most of the time (design note 0012
+  §9 gives the rates). The result's vertices sit at the clusters' points,
+  so a vertex can be up to twice the tolerance from where an exact
+  construction would put it; the surface-area identity is not tested
+  yet.
 - References to model geometry (ADR 0019): up to a face works only for
   a planar face parallel to the sketch; others fail with a message
   until surface intersection exists. Picked edges and vertices select
@@ -794,8 +839,10 @@ name open unchanged.
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Phase 3, in the order the design notes give: the boolean pipeline
-   end to end on polyhedral solids with plane/plane intersections and
-   the volume identities (0012 §8, 0011 §8), then naming through
-   booleans (design note 0013 §10 step 4). The rest of the Phase 2 sketcher (project/convert, intersection
+2. Phase 3, in the order the design notes give: absorb the
+   near-coincidences of the tolerance test that are refused at half a
+   tolerance; booleans with planes, cylinders, cones and spheres in
+   closed form (0012 §8 step 2, 0011 §8); naming through booleans
+   (design note 0013 §10 step 4); then extrude and revolve that add,
+   remove and intersect. The rest of the Phase 2 sketcher (project/convert, intersection
    curves, pierce) needs Phase 3 faces.

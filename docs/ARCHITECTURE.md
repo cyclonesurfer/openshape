@@ -26,7 +26,7 @@ from it by deterministic replay and regeneration.
 |---|---|---|
 | Op log, sync primitives | `oplog` | Phase 0 ✔ (undo/redo, history, CBOR container, convergence tests) |
 | Document model | `core-model` | Phase 0 ✔ (part studios, primitive/extrude/revolve features, units) |
-| Geometry kernel | `kernel` (+ private `nurbs`) | Phase 1 ✔ for B-rep, NURBS, tessellation, extrude, revolve |
+| Geometry kernel | `kernel` (+ private `nurbs`) | Phase 1 ✔ for B-rep, NURBS, tessellation, extrude, revolve; Phase 3: booleans of polyhedral solids ✔ (design note 0012 §9, ADR 0020) |
 | Persistent naming | `naming` | Phase 3: names of box, extrude and revolve entities from the kernel's origin tables, and reference resolution ✔ (design note 0013, ADR 0018); sketches on planar faces and extrudes up to parallel faces resolve through them, picked in the viewport ✔ (ADR 0019); booleans' splits and merges next |
 | Regeneration | `features` today; `regen` in Phase 3 | Phase 0 sequential evaluator ✔; every part carries its names, and references resolve against the parts made before the referring feature (ADR 0019) |
 | Sketcher | `sketch-solver` | Phase 2 |
