@@ -42,7 +42,9 @@ room for them.
 ## Budgets
 
 Release builds, best of 2–3 runs, measured 2026-10-13 on the reference
-machine. The limit is what the test enforces.
+machine (the rows that mesh curved faces, and the new rows from the
+tilted countersunk holes to the creased revolve's validation, on
+2026-10-15, after the fifth pass). The limit is what the test enforces.
 
 | Operation | Measured | Limit |
 |---|---|---|
@@ -50,22 +52,34 @@ machine. The limit is what the test enforces.
 | Mesh it | 8 ms | 100 ms |
 | Validate it | 8.6 ms | 100 ms |
 | Its mass properties to 1e-9 | 70 ms | 700 ms |
-| Mesh a revolved ring (115,352 triangles) | 204–247 ms | 3,000 ms |
-| Mesh a unit ball (104,988 triangles) | 220–249 ms | 2,500 ms |
+| Mesh a revolved ring (85,368 triangles) | 222–274 ms | 3,000 ms |
+| Mesh a unit ball (126,656 triangles) | 319–374 ms | 3,500 ms |
 | Extrude a plate with 100 round holes | 12.5–23 ms | 150 ms |
-| Mesh it | 140–220 ms | 1,500 ms |
+| Mesh it | 198–261 ms | 2,500 ms |
 | Union or subtract two 256-sided star prisms | 38.5–44 ms | 500 ms |
 | Cut 64 holes into a box, one boolean each | 225–265 ms | 3,000 ms |
 | Drill 64 round holes into a plate, one boolean each | 860–1,050 ms | 10,000 ms |
 | Intersect or subtract a plate with 100 round holes and a box across them | 52–55 ms | 600 ms |
 | Dimple a plate with 16 balls, one boolean each | 113–125 ms | 1,200 ms |
-| Mesh it (155,654 triangles) | 227–267 ms | 2,500 ms |
+| Mesh it (173,680 triangles) | 382–406 ms | 4,000 ms |
 | Validate it | 5.3–8 ms | 80 ms |
 | Its mass properties to 1e-9 | 14–17 ms | 150 ms |
 | Cut 16 countersunk holes (a shank and a cone each) into a plate, one boolean each | 220–245 ms | 2,500 ms |
-| Mesh it (9,612 triangles) | 30–34 ms | 300 ms |
+| Mesh it (9,612 triangles) | 31–37 ms | 300 ms |
 | Validate it | 14.4–14.8 ms | 150 ms |
 | Its mass properties to 1e-9 | 22–24 ms | 250 ms |
+| Cut 16 countersunk holes leaning 10° into a plate in one boolean (ellipses) | 39–42 ms | 450 ms |
+| Mesh it (12,956 triangles) | 44–59 ms | 600 ms |
+| Validate it | 14–17 ms | 150 ms |
+| Its mass properties to 1e-9 | 17–20 ms | 200 ms |
+| Flatten 16 pins of 5° draft along their axes in one boolean (hyperbolas) | 32–38 ms | 400 ms |
+| Mesh it (9,868 triangles) | 26–35 ms | 350 ms |
+| Validate it | 9–11 ms | 100 ms |
+| Its mass properties to 1e-9 | 13 ms | 150 ms |
+| Revolve a rational cubic bending nearly to a crease (validation meshes it) | 12–15 ms | 150 ms |
+| Mesh it (108,486 triangles) | 446–482 ms | 5,000 ms |
+| Mesh it at 1e-3 and 5° (92,264 triangles) | 400–407 ms | 4,000 ms |
+| Validate it | 13–16 ms | 150 ms |
 | Sketch regions of 122 curves (a 41 by 41 grid and 40 circles) | 100–115 ms | 1,200 ms |
 | Regenerate the demo document | 36.5–41 ms | 400 ms |
 
@@ -76,9 +90,9 @@ factor):
 |---|---|
 | Extrude a star prism, 256 to 2048 sides | 9.7–12.2 times |
 | Union of two regular prisms, 128 to 1024 sides | 11.3–12.6 times |
-| Mesh a plate, 16 to 121 holes (7.6 times) | 7.4–7.6 times |
+| Mesh a plate, 16 to 121 holes (7.6 times) | 6.8–8.2 times |
 | Cut a box across a plate's round holes, 16 to 121 holes (7.6 times) | 7.8–8.4 times |
-| Mesh a ball, 11,884 to 92,660 triangles (7.8 times) | 11.2–12.3 times |
+| Mesh a ball, 13,964 to 105,556 triangles (7.6 times) | 8.6–9.6 times |
 
 The union is scaled on regular prisms, whose result grows with their
 size. Two star prisms overlap in a band where many faces of each meet
@@ -262,6 +276,68 @@ things.
   from another side, and points on one circle have several equally good
   triangulations. Each mesh is the same on every run.
 
+## What changed, 2026-10-15
+
+### Fifth pass: meshes measured against their tolerance (item 3b)
+
+Meshing of curved faces was rebuilt to hold the chord tolerance much
+more closely (design note 0002 §4): each triangle is measured at
+thirteen points, with the surface's derivatives at each, and the quartic
+through them is bounded. Between the points this is an estimate, not a
+proof: a surface that bends faster than a quartic there can stray
+further. On every probe case the worst distance found is now within the
+tolerance, where main measured the surface's height over the triangle's
+plane at its centroid and the middles of its interior edges (up to four
+points) and strayed past it (5% past on a ball, 2.4 times the tolerance
+on a nearly closed torus). The first version took 692 and 726 ms in two
+runs for a unit ball's default mesh, 3.6 times main's 193 ms in the
+first of them. Profiled with callgrind and the stages timed in
+place:
+
+* **A hash table of the edges measured** grew to over a hundred
+  thousand entries a face on the ball, tens of megabytes. It is now a
+  direct-mapped cache of at most 4,096 slots (754 kB), one an edge by a
+  hash of its corners, and the triangles of a pass are judged in the
+  order found about each new point, so the two beside an edge come close
+  together. Counted on the ball's default mesh (2026-10-15), 42% of the
+  lookups hit, of the 49% that can (each edge is looked up from both
+  sides), and measurements repeated come to an eighth of the edges;
+  judged in the order of their corners instead, 32% hit and repeats come
+  to a third (the ring, the S-spline and the creased
+  revolve likewise: 41–45% against 32–36%).
+* **The longest edge is measured first** and the first failure decides,
+  so a failing triangle is measured only up to it.
+* **No inverse cosines:** the turn of the normal comes from above as a
+  tangent (0002 §4); points on lines and circles take one `sin_cos`.
+* **One evaluation a vertex:** a vertex's point, normal and whether it is
+  singular come from one call of the surface's derivatives.
+* **NURBS basis functions in arrays.** Meshing a rational cubic revolved
+  nearly to a crease spent 59% of its 6.42 billion instructions in the
+  general basis routine (Algorithm A2.3, inclusive), which builds and
+  moves small vectors on every call. Values and first derivatives, all
+  that evaluation for meshing asks, now come from fixed arrays with the
+  same arithmetic in the same order, equal bit for bit (a property test
+  checks degrees 1 to 7 on random knot vectors): 3.18 billion
+  instructions, half as many.
+
+Against main, best of five runs interleaved with two of main's, on the
+reference machine (2026-10-15):
+
+| Mesh | main | now |
+|---|---|---|
+| Unit ball, defaults | 104,988 triangles, 179 ms, 1.052 tolerances off | 126,656 triangles, 377 ms, within (0.9998) |
+| Ring (torus, radii 1 and 0.3), defaults | 228,880, 364 ms, 1.010 | 174,756, 504 ms, 0.9998 |
+| Turned S-spline, 10⁻³ | 30,400, 52 ms, 0.9994 | 24,584, 101 ms, 0.9935 |
+| Creased rational revolve, 10⁻³ and 5° | 85,902, 198 ms, 0.9917 | 92,264, 337 ms, 0.9887 |
+
+(Worst distance from closest points on a grid of sixths of every
+triangle, in tolerances. The benchmark runs one case at a time; the time
+guards above run beside other tests and read higher, e.g. 400–407 ms for
+the creased revolve.) On these four bodies a triangle now costs 1.6 to
+2.4 times what it did: the measurements and the bound, and the exact
+incircle tests that bisecting edges on a regular grid brings (slow spots
+below).
+
 ## Known slow spots
 
 Measured by wall clock, not yet fixed; each is a candidate for a later
@@ -279,6 +355,20 @@ pass.
   need no Delaunay property (any triangulation on their boundary points
   is as good); a triangulation built from orientation tests alone, or a
   cheaper exact incircle stage, would remove most of it.
+* **Exact incircle tests on curved faces.** Refinement splits a
+  triangle's longest edge at its middle in the parameters, and on a
+  regular grid of parameters (a ball's, a torus's) the new point and
+  three others often lie on one circle: the Delaunay test then reaches
+  its exact stage, which zeroes 26 kB of buffers each call. A unit
+  ball's default mesh makes 38,282 such calls (main, adding centroids,
+  364): 18% of its instructions, 12% of all of them in clearing memory
+  alone. Adding only centroids instead took more triangles (2026-10-15:
+  24% more on the S-spline at 10⁻³, 31% on the ring, 5% on the ball,
+  about as many on the creased revolve). A cheaper exact stage would
+  remove most of it, as for the flat faces above.
+* **Sines and cosines** in evaluating a ball's surface take 14% of its
+  default mesh's instructions (a torus's points take two `sin_cos` each;
+  not profiled).
 * **Curved segments carry many chords near their ends.** The halvings at
   a node (third pass) go on until the chords' bands are within a
   sixteenth of the tolerance, about eleven halvings at each end of each

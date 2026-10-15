@@ -18,7 +18,7 @@ use crate::{KernelError, Tolerance, TopologyCounts};
 ///
 /// The distance from the axis is sampled along the edge and each sampled
 /// local least refined by golden-section search between its neighbours.
-fn through_axis(c: &Curve3, t0: f64, t1: f64, fr: &Frame, tol: f64) -> Option<DVec3> {
+pub(crate) fn through_axis(c: &Curve3, t0: f64, t1: f64, fr: &Frame, tol: f64) -> Option<DVec3> {
     const SAMPLES: usize = 64;
     let dist = |t: f64| (c.point(t) - fr.origin).cross(fr.z).length();
     let at = |k: usize| t0 + (t1 - t0) * k as f64 / SAMPLES as f64;
@@ -80,13 +80,17 @@ pub(crate) fn counts(b: &Brep) -> TopologyCounts {
     }
 }
 
+/// Geometry tolerance for "lies on": a generous multiple of the model
+/// resolution to absorb projection round-off in iterative inversions.
+pub(crate) fn on_tolerance(tol: &Tolerance) -> f64 {
+    tol.linear * 100.0
+}
+
 /// Checks topological and geometric consistency. Returns a list of problems;
 /// an empty list means the body is valid.
 pub(crate) fn validate(b: &Brep, tol: &Tolerance) -> Vec<String> {
     let mut issues = Vec::new();
-    // Geometry tolerance for "lies on": a generous multiple of the model
-    // resolution to absorb projection round-off in iterative inversions.
-    let on_tol = tol.linear * 100.0;
+    let on_tol = on_tolerance(tol);
     // A plane needs no iteration (its projection is exact), so its edges
     // are held to what constructions leave: a boolean puts a vertex at a
     // cluster of points within twice the tolerance of each other, a few

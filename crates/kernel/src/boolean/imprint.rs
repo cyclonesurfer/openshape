@@ -9,8 +9,9 @@
 //! a face only where the face's boundary crosses the other surface, so the
 //! cuts along it are those crossings and the boundary's stations on that
 //! surface (decided once, in `points`), taken by step 1's two half-open
-//! rules. On a line the cuts of one rule pair up in order; on a closed
-//! track (a circle or an ellipse) each cut says whether the track enters or
+//! rules. On an open track (a line or a conic, whose parameter runs along
+//! it one way) the cuts of one rule pair up in order; on a closed track (a
+//! circle or an ellipse) each cut says whether the track enters or
 //! leaves the face there, from the side of the other surface the boundary
 //! goes to and the way the track runs across the face. A closed track that
 //! no cut reaches lies wholly in the face or wholly out of it, decided at
@@ -26,7 +27,7 @@ use rustc_hash::FxHashMap;
 use super::chart::Outline;
 use super::meet::{self, Meet, Track};
 use super::points::{self, Points};
-use super::quadric::Quadric;
+use super::quadric::{self, Quadric};
 use super::shape::{Face, Shape};
 use super::{name, other, show, slot, Pair};
 use crate::origin::Operand;
@@ -127,6 +128,10 @@ pub(super) struct Contacts {
     meets: FxHashMap<(usize, usize), Contact>,
     /// Per operand, per surface, the box of its faces.
     boxes: [Vec<(DVec3, DVec3)>; 2],
+    /// Per operand, per surface, for a cone the least height of its faces
+    /// above its apex along its axis ([`meet::Region::lift`]); infinite for
+    /// other surfaces.
+    lifts: [Vec<f64>; 2],
 }
 
 impl Contacts {
@@ -139,10 +144,12 @@ impl Contacts {
             }
             b
         });
+        let lifts = [&pair.first, &pair.second].map(lifts);
         Contacts {
             tracks: Vec::new(),
             meets: FxHashMap::default(),
             boxes,
+            lifts,
         }
     }
 
@@ -158,8 +165,8 @@ impl Contacts {
                 Contact::Apart
             } else {
                 let region = meet::Region {
-                    center: (lo + hi) * 0.5,
-                    radius: (hi - lo).length() * 0.5,
+                    lift: self.lifts[0][sa].min(self.lifts[1][sb]),
+                    ..meet::Region::of_box(lo, hi)
                 };
                 let (qa, qb) = (&pair.first.surfaces[sa], &pair.second.surfaces[sb]);
                 match meet::meet(qa, qb, &region, eps) {
@@ -187,6 +194,40 @@ impl Contacts {
             _ => &[],
         }
     }
+}
+
+/// Per surface of `shape`, for a cone the least height of its faces above
+/// its apex along its axis, from the control points of their edges' Bézier
+/// pieces: a face on a cone lies in the convex hull of its boundary (each
+/// of its rulings ends on it), and that in the hull of those points.
+/// Infinite for other surfaces; minus infinity for a cone with an edge
+/// that has no such pieces.
+fn lifts(shape: &Shape) -> Vec<f64> {
+    let mut out = vec![f64::INFINITY; shape.surfaces.len()];
+    for f in &shape.faces {
+        let Quadric::Cone {
+            point,
+            axis,
+            radius,
+            slope,
+        } = shape.surfaces[f.surface]
+        else {
+            continue;
+        };
+        let apex = point - axis * (radius / slope);
+        for &(e, _) in f.loops.iter().flatten() {
+            let (curve, t0, t1) = shape.curve(e);
+            let low = quadric::hull_points(curve, t0, t1).map_or(f64::NEG_INFINITY, |pieces| {
+                pieces
+                    .iter()
+                    .flatten()
+                    .map(|&p| (p - apex).dot(axis))
+                    .fold(f64::INFINITY, f64::min)
+            });
+            out[f.surface] = out[f.surface].min(low);
+        }
+    }
+    out
 }
 
 fn is_plane(q: &Quadric) -> bool {
@@ -306,7 +347,7 @@ pub(super) fn relation(
             show(corner())
         ))),
         Contact::Unsupported(m) => Err(KernelError::Unsupported(format!(
-            "booleans of bodies whose faces meet where {m} (design note 0012 §10.3), near {}",
+            "booleans of bodies whose faces meet where {m}, near {}",
             show(corner())
         ))),
         Contact::Tracks(_) => Ok(Relation::Crossing),
@@ -402,9 +443,27 @@ fn cuts(
     Ok(out)
 }
 
-/// The clusters where edges of face `f` of `op` touch `surface` of the
-/// other operand from one side inside the edge (a station on it between
-/// two strictly on one side): tangent contacts.
+/// Where a loop of a face meets a surface: a vertex of the face, or a
+/// station (by its index along the edge) of an edge.
+#[derive(Clone, Copy)]
+enum Mark {
+    Vertex(usize),
+    Station(usize, usize),
+}
+
+/// The clusters where the boundary of face `f` of `op` touches `surface`
+/// of the other operand from one side: a station or a vertex on it, or a
+/// run of them, between two strictly on one side along a loop (tangent
+/// contacts, at a vertex too: a rim touching a plane where a seam meets
+/// it, found by review). A run holding a whole edge is that edge lying on
+/// the surface (a rim on a plate), not a touch; nor is a run through a
+/// vertex that another edge leaves to the other side, or whose faces all
+/// lie on one surface (smooth there), where the operand crosses the
+/// surface and the curve where they meet passes through the vertex (a
+/// box's corner on a cylinder or a plane, a cylinder crossing a rod along
+/// its seam, a circle through a rod's cap's centre along the line that
+/// halves the cap; found refused as touches by diffing the fuzz's refusals
+/// against those of the code before this rule).
 fn touches(
     pair: &Pair,
     pts: &Points,
@@ -413,24 +472,146 @@ fn touches(
     surface: usize,
     near: &[usize],
 ) -> Result<Vec<usize>, KernelError> {
-    let face = &pair.get(op).faces[f];
+    let shape = pair.get(op);
+    let face = &shape.faces[f];
+    let plane = is_plane(&pair.get(other(op)).surfaces[surface]);
     let mut out = Vec::new();
-    for &c in near {
-        let (li, k) = face.coedge_at(c);
-        let e = face.loops[li][k].0;
-        let Some(st) = pts.cached_stations(op, e, surface) else {
-            continue;
-        };
-        for i in 1..st.len().saturating_sub(1) {
-            if st[i].sign == 0 && st[i - 1].sign != 0 && st[i - 1].sign == st[i + 1].sign {
-                out.push(
-                    pts.station_cluster(pair, op, e, surface, i)
-                        .ok_or_else(|| missing(op, e))?,
-                );
+    // Along a run of coedges: each station's side, where it is, and
+    // whether its edge lies wholly on the surface.
+    let mut seq: Vec<(i8, Mark, bool)> = Vec::new();
+    // Per loop, its coedges near the surface (by position in the loop).
+    let mut k = 0;
+    while k < near.len() {
+        let li = face.coedge_at(near[k]).0;
+        let mut idx = Vec::new();
+        while k < near.len() && face.coedge_at(near[k]).0 == li {
+            idx.push(face.coedge_at(near[k]).1);
+            k += 1;
+        }
+        let len = face.loops[li].len();
+        let whole = idx.len() == len;
+        // Runs of consecutive coedges, from one after a coedge not near
+        // (strictly on one side, so a run starts and ends off the surface
+        // unless it is the whole loop).
+        if !whole {
+            let at = (0..idx.len())
+                .find(|&i| idx[(i + idx.len() - 1) % idx.len()] != (idx[i] + len - 1) % len)
+                .unwrap_or(0);
+            idx.rotate_left(at);
+        }
+        let mut i = 0;
+        while i < idx.len() {
+            let mut j = i;
+            while j + 1 < idx.len() && idx[j + 1] == (idx[j] + 1) % len {
+                j += 1;
             }
+            seq.clear();
+            for (n, &c) in idx[i..=j].iter().enumerate() {
+                let (e, forward) = face.loops[li][c];
+                let (va, vb) = shape.edges[e];
+                let mut marks: Vec<(i8, Mark)> = match pts.cached_stations(op, e, surface) {
+                    Some(st) if !(shape.straight[e] && plane) => {
+                        let last = st.len() - 1;
+                        st.iter()
+                            .enumerate()
+                            .map(|(s, x)| {
+                                let m = match s {
+                                    0 => Mark::Vertex(va),
+                                    s if s == last => Mark::Vertex(vb),
+                                    s => Mark::Station(e, s),
+                                };
+                                (x.sign, m)
+                            })
+                            .collect()
+                    }
+                    _ => vec![
+                        (pts.sign(op, va, surface), Mark::Vertex(va)),
+                        (pts.sign(op, vb, surface), Mark::Vertex(vb)),
+                    ],
+                };
+                if !forward {
+                    marks.reverse();
+                }
+                let on = marks.iter().all(|x| x.0 == 0);
+                if whole || n < j - i {
+                    // The end is the next coedge's start.
+                    marks.pop();
+                }
+                seq.extend(marks.into_iter().map(|(sign, m)| (sign, m, on)));
+            }
+            if whole {
+                // Around the loop from a point off the surface back to it.
+                let Some(at) = seq.iter().position(|x| x.0 != 0) else {
+                    break;
+                };
+                seq.rotate_left(at);
+                seq.push(seq[0]);
+            }
+            let mut a = 1;
+            while a + 1 < seq.len() {
+                if seq[a].0 != 0 || seq[a - 1].0 == 0 {
+                    a += 1;
+                    continue;
+                }
+                let mut b = a;
+                while b + 1 < seq.len() && seq[b + 1].0 == 0 {
+                    b += 1;
+                }
+                let lying = seq[a..=b].iter().any(|x| x.2);
+                let mut crossed = false;
+                for x in &seq[a..=b] {
+                    if let Mark::Vertex(v) = x.1 {
+                        crossed |= smooth_at(shape, v)
+                            || leaves_to(pair, pts, op, v, surface, -seq[a - 1].0)?;
+                    }
+                }
+                if b + 1 < seq.len() && seq[a - 1].0 == seq[b + 1].0 && !lying && !crossed {
+                    let cluster = match seq[a].1 {
+                        Mark::Vertex(v) => Some(pts.vertex_cluster(op, v)),
+                        Mark::Station(e, s) => pts.station_cluster(pair, op, e, surface, s),
+                    };
+                    let e = match seq[a].1 {
+                        Mark::Station(e, _) => e,
+                        Mark::Vertex(_) => face.loops[li][idx[i]].0,
+                    };
+                    out.push(cluster.ok_or_else(|| missing(op, e))?);
+                }
+                a = b + 1;
+            }
+            i = j + 1;
         }
     }
     Ok(out)
+}
+
+/// Whether vertex `v` of `shape` lies inside a smooth piece of its
+/// surface: all its faces on one surface, not a cone (whose apex is not
+/// smooth). Such a piece crosses any other surface through `v` (one
+/// touching it there is refused by the surfaces' contact instead).
+fn smooth_at(shape: &Shape, v: usize) -> bool {
+    shape
+        .one_surface(v)
+        .is_some_and(|s| !matches!(shape.surfaces[s], Quadric::Cone { .. }))
+}
+
+/// Whether an edge of `op` at its vertex `v`, which lies on `surface` of
+/// the other operand, leaves it strictly on side `side` (by its first
+/// station past `v`).
+fn leaves_to(
+    pair: &Pair,
+    pts: &Points,
+    op: Operand,
+    v: usize,
+    surface: usize,
+    side: i8,
+) -> Result<bool, KernelError> {
+    let shape = pair.get(op);
+    for &e in shape.edges_at(v) {
+        if pts.leaving(pair, op, e, surface, shape.edges[e].0 == v)? == side {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Refuses an edge of either face touching the other face's surface at a
@@ -626,15 +807,21 @@ pub(super) struct Stretch {
 /// A point on a track: its cluster and its parameter along the track.
 type End = (usize, f64);
 
+/// The cluster of a span's end where an open track ends inside a face, at
+/// a parameter of −∞ or +∞ (its start or its end): no point of the
+/// result.
+const OPEN: usize = usize::MAX;
+
 /// The part of a track in a face under one rule.
 #[derive(Clone, Copy, Debug)]
 enum Span {
     /// The whole closed track.
     Full,
     /// From cluster `lo.0` at parameter `lo.1` to `hi.0` at `hi.1`, along
-    /// the track's direction (on a line `lo.1 < hi.1`; on a closed track
-    /// the parameters as the track gives them, the span running from `lo`
-    /// the way the parameter grows).
+    /// the track's direction (on an open track `lo.1 < hi.1`, either end
+    /// [`OPEN`] where the track ends in the face; on a closed track the
+    /// parameters as the track gives them, the span running from `lo` the
+    /// way the parameter grows).
     Part { lo: End, hi: End },
 }
 
@@ -647,11 +834,38 @@ const ON_TRACK: f64 = 16.0;
 
 /// The track (by position in `tracks`) a cut at `p` is on, and its
 /// parameter there: the nearest, within [`ON_TRACK`] tolerances, and no
-/// other that near.
-fn assign(tracks: &[&Track], p: DVec3, eps: f64) -> Result<(usize, f64), KernelError> {
+/// other that near. `None` for a cut on a ray's line well before where it
+/// starts beyond the region (§14), which no face on the other surface
+/// reaches; a cut within half [`meet::CLIP`] tolerances of that start is
+/// refused, as the face's side of the start is found from the face (where
+/// the cut could be on either side of it).
+fn assign(tracks: &[&Track], p: DVec3, eps: f64) -> Result<Option<(usize, f64)>, KernelError> {
+    let mut before = false;
+    for t in tracks {
+        if let Track::Ray {
+            origin,
+            dir,
+            start,
+            from_apex: false,
+        } = **t
+        {
+            let w = p - origin;
+            let s = w.dot(dir);
+            if s <= start + 0.5 * meet::CLIP * eps && (w - dir * s).length() <= ON_TRACK * eps {
+                if s >= start - 0.5 * meet::CLIP * eps {
+                    return Err(through_apex(p));
+                }
+                before = true;
+            }
+        }
+    }
     let mut best: Option<(usize, f64, f64)> = None;
     let mut second = f64::INFINITY;
     for (k, t) in tracks.iter().enumerate() {
+        if t.ends().0 == f64::INFINITY {
+            // A ray that stays away from the region.
+            continue;
+        }
         let (u, d) = t.nearest(p);
         match best {
             Some(b) if d >= b.2 => second = second.min(d),
@@ -669,6 +883,13 @@ fn assign(tracks: &[&Track], p: DVec3, eps: f64) -> Result<(usize, f64), KernelE
             show(p)
         ))
     })?;
+    if before {
+        // Unless it is on a track where it matters, too.
+        if d <= ON_TRACK * eps {
+            return Err(nearly_touch(p));
+        }
+        return Ok(None);
+    }
     if d > ON_TRACK * eps {
         return Err(KernelError::InvalidInput(format!(
             "faces of the bodies meet at too shallow an angle near {}",
@@ -676,17 +897,39 @@ fn assign(tracks: &[&Track], p: DVec3, eps: f64) -> Result<(usize, f64), KernelE
         )));
     }
     if second <= ON_TRACK * eps {
-        return Err(KernelError::Unsupported(format!(
-            "booleans of bodies whose faces nearly touch (design note 0011 §4.4) near {}",
-            show(p)
-        )));
+        // Rays meet at their apex: a pointed cone's, on the plane but
+        // outside the faces of it that meet the cone (§14).
+        if let Track::Ray { start, .. } = *tracks[k] {
+            if (tracks[k].point(start) - p).length() <= ON_TRACK * eps {
+                return Err(through_apex(p));
+            }
+        }
+        return Err(nearly_touch(p));
     }
-    Ok((k, u))
+    Ok(Some((k, u)))
+}
+
+fn nearly_touch(p: DVec3) -> KernelError {
+    KernelError::Unsupported(format!(
+        "booleans of bodies whose faces nearly touch (design note 0011 §4.4) near {}",
+        show(p)
+    ))
+}
+
+/// The refusal of a plane through a cone's apex where a face's boundary
+/// reaches it, or crosses a ray from it or runs along one at the ray's
+/// start (§14).
+fn through_apex(p: DVec3) -> KernelError {
+    KernelError::Unsupported(format!(
+        "booleans of bodies whose faces meet where a plane through a cone's apex meets it in \
+         two rulings (design note 0012 §14), near {}",
+        show(p)
+    ))
 }
 
 /// Per rule (points on the surface counted positive, then negative), per
 /// track of `ids`, the spans of the tracks in face `f` of `op`, which
-/// meets `surface` of the other operand along them.
+/// meets the surface of face `g` of the other operand along them.
 #[allow(clippy::too_many_arguments)]
 fn face_spans(
     pair: &Pair,
@@ -695,13 +938,16 @@ fn face_spans(
     contacts: &Contacts,
     op: Operand,
     f: usize,
-    surface: usize,
+    g: usize,
     ids: &[usize],
 ) -> Result<[Vec<Vec<Span>>; 2], KernelError> {
     let shape = pair.get(op);
     let face = &shape.faces[f];
+    let gf = &pair.get(other(op)).faces[g];
+    let surface = gf.surface;
     let theirs = &pair.get(other(op)).surfaces[surface];
     let eps = pts.eps;
+    let region = (face.lo.max(gf.lo) - eps, face.hi.min(gf.hi) + eps);
     let mut near = Vec::new();
     face.near_surface(theirs, eps, &mut near);
     let tracks: Vec<&Track> = ids.iter().map(|&i| &contacts.tracks[i]).collect();
@@ -709,18 +955,20 @@ fn face_spans(
     for (r, zero_positive) in [true, false].into_iter().enumerate() {
         let mut on: Vec<Vec<(f64, usize, bool)>> = vec![Vec::new(); ids.len()];
         for c in cuts(pair, pts, op, f, surface, &near, zero_positive)? {
-            let (k, t) = assign(&tracks, pts.rep[c.cluster], eps)?;
-            on[k].push((t, c.cluster, c.up));
+            if let Some((k, t)) = assign(&tracks, pts.rep[c.cluster], eps)? {
+                on[k].push((t, c.cluster, c.up));
+            }
         }
         for (k, list) in on.into_iter().enumerate() {
-            out[r][k] = spans_on(pair, pts, outlines, op, f, theirs, tracks[k], list)?;
+            out[r][k] = spans_on(pair, pts, outlines, op, f, theirs, tracks[k], region, list)?;
         }
     }
     Ok(out)
 }
 
 /// The spans of `track` in face `f` of `op` under one rule, from the cuts
-/// on it: (parameter, cluster, up).
+/// on it: (parameter, cluster, up), `region` the box (`lo`, `hi`) where
+/// faces of both operands can be.
 #[allow(clippy::too_many_arguments)]
 fn spans_on(
     pair: &Pair,
@@ -730,6 +978,7 @@ fn spans_on(
     f: usize,
     theirs: &Quadric,
     track: &Track,
+    region: (DVec3, DVec3),
     list: Vec<(f64, usize, bool)>,
 ) -> Result<Vec<Span>, KernelError> {
     let shape = pair.get(op);
@@ -785,20 +1034,75 @@ fn spans_on(
         return Err(inconsistent(pts.rep[e.1]));
     }
     ends.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+    if !track.closed() {
+        // An end of an open track inside the face (a ray from a cone's
+        // apex or from where it comes near the region, or the half of an
+        // ellipse ending on its minor axis): the face holds the track from
+        // or to there. No edge of the result ends there, as the end lies
+        // beyond the region where both faces can be (§14), so it is open,
+        // the other face bounding the part in both.
+        let (t0, t1) = track.ends();
+        let outline = outlines[slot(op)][f].as_ref();
+        let inside = |t: f64| {
+            if !t.is_finite() {
+                return Ok(false);
+            }
+            let p = track.point(t);
+            locate(shape, outline, face, p, eps).ok_or_else(|| {
+                if matches!(*track, Track::Ray { .. }) {
+                    // The apex or the ray's start beyond the region, on
+                    // the face's boundary (a pointed cone's seam along
+                    // the ray).
+                    return through_apex(p);
+                }
+                KernelError::Unsupported(format!(
+                    "booleans where a curve where faces meet ends on an edge (design note \
+                     0012 §14) near {}",
+                    show(p)
+                ))
+            })
+        };
+        if inside(t0)? {
+            ends.insert(0, (f64::NEG_INFINITY, OPEN, 1));
+        }
+        if inside(t1)? {
+            ends.push((f64::INFINITY, OPEN, -1));
+        }
+    }
     if ends.is_empty() {
         if !track.closed() {
             return Ok(Vec::new());
         }
         // Wholly in the face or wholly out of it; points of the track
         // within the tolerance of the boundary are in the closed face.
+        // Decided where faces of the other body can be: far from there
+        // the track can come within the tolerance of the boundary without
+        // a cut, which no stretch depends on (found by review: a plane
+        // nearly tangent to a cone along a ruling, their ellipse metres
+        // long, grazing the edge of a plate far from the cone's faces).
+        // Where every point tried there is on the boundary (a track along
+        // a rim), by the quarters of the track.
         let outline = outlines[slot(op)][f].as_ref();
-        let (mut inside, mut outside) = (false, false);
-        for k in 0..4 {
-            match locate(shape, outline, face, track.point(k as f64 * FRAC_PI_2), eps) {
-                Some(true) => inside = true,
-                Some(false) => outside = true,
-                None => {}
+        let (lo, hi) = region;
+        let quarters = (0..4).map(|k| track.point(k as f64 * FRAC_PI_2));
+        let near = quarters
+            .clone()
+            .filter(|p| p.cmpge(lo).all() && p.cmple(hi).all())
+            .chain([track.point(track.nearest((lo + hi) * 0.5).0)]);
+        let sides = |probes: &mut dyn Iterator<Item = DVec3>| {
+            let (mut inside, mut outside) = (false, false);
+            for p in probes {
+                match locate(shape, outline, face, p, eps) {
+                    Some(true) => inside = true,
+                    Some(false) => outside = true,
+                    None => {}
+                }
             }
+            (inside, outside)
+        };
+        let (mut inside, mut outside) = sides(&mut near.into_iter());
+        if !inside && !outside {
+            (inside, outside) = sides(&mut quarters.into_iter());
         }
         return match (inside, outside) {
             (true, true) => Err(inconsistent(track.point(0.0))),
@@ -810,7 +1114,7 @@ fn spans_on(
     let pairs = if track.closed() { n } else { n - 1 };
     for k in 0..pairs {
         let (x, y) = (ends[k], ends[(k + 1) % n]);
-        if (track.point(x.0) - track.point(y.0)).length() <= eps {
+        if x.1 != OPEN && y.1 != OPEN && (track.point(x.0) - track.point(y.0)).length() <= eps {
             return Err(close(pts.rep[y.1]));
         }
     }
@@ -827,7 +1131,12 @@ fn spans_on(
             .enumerate()
             .any(|(k, e)| e.2 != if k % 2 == 0 { 1 } else { -1 })
     {
-        return Err(inconsistent(pts.rep[ends[0].1]));
+        // Near a cut, not the open end of a track inside the face.
+        let near = match ends.iter().find(|e| e.1 != OPEN) {
+            Some(e) => pts.rep[e.1],
+            None => track.point(track.ends().0.max(0.0)),
+        };
+        return Err(inconsistent(near));
     }
     Ok(ends
         .chunks(2)
@@ -853,6 +1162,11 @@ fn both(track: &Track, x: Span, y: Span, pts: &Points) -> Result<Vec<(End, End)>
             if !track.closed() {
                 let lo = later((xl.1, xl.0), (yl.1, yl.0), eps, pts)?;
                 let hi = earlier((xh.1, xh.0), (yh.1, yh.0), eps, pts)?;
+                if lo.0 < hi.0 && (lo.1 == OPEN || hi.1 == OPEN) {
+                    return Err(KernelError::InvalidResult(
+                        "boolean: a curve where faces meet ends inside both of them".into(),
+                    ));
+                }
                 return Ok(if lo.1 != hi.1 && lo.0 < hi.0 {
                     vec![((lo.1, lo.0), (hi.1, hi.0))]
                 } else {
@@ -907,27 +1221,12 @@ pub(super) fn stretches(
 ) -> Result<(Vec<Stretch>, Vec<usize>), KernelError> {
     let a = &pair.first.faces[fa];
     let b = &pair.second.faces[fb];
+    // An edge touching the other face first: its cuts would not pair up
+    // along the tracks.
+    refuse_touches(pair, pts, outlines, fa, fb)?;
     let ids = contacts.tracks_of(a.surface, b.surface);
-    let fs = face_spans(
-        pair,
-        pts,
-        outlines,
-        contacts,
-        Operand::First,
-        fa,
-        b.surface,
-        ids,
-    )?;
-    let gs = face_spans(
-        pair,
-        pts,
-        outlines,
-        contacts,
-        Operand::Second,
-        fb,
-        a.surface,
-        ids,
-    )?;
+    let fs = face_spans(pair, pts, outlines, contacts, Operand::First, fa, fb, ids)?;
+    let gs = face_spans(pair, pts, outlines, contacts, Operand::Second, fb, fa, ids)?;
     let mut out = Vec::new();
     let mut whole = Vec::new();
     for (k, &id) in ids.iter().enumerate() {
@@ -957,6 +1256,5 @@ pub(super) fn stretches(
             }
         }
     }
-    refuse_touches(pair, pts, outlines, fa, fb)?;
     Ok((out, whole))
 }

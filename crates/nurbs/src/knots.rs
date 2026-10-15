@@ -5,6 +5,31 @@ use smallvec::{smallvec, SmallVec};
 
 use crate::{Basis, BasisDerivatives, NurbsError};
 
+/// Highest degree [`KnotVector::basis_and_first`] evaluates (its arrays hold
+/// eight values, the inline size of [`Basis`]).
+pub(crate) const FAST_DEGREE: usize = 7;
+
+/// Basis functions and their derivatives, row `k` holding the `k`-th
+/// derivatives of the `degree + 1` non-vanishing functions (see
+/// [`KnotVector::derivative_rows`]).
+pub(crate) enum DerivativeRows {
+    /// Values and first derivatives, in arrays, with the degree.
+    First([[f64; 8]; 2], usize),
+    /// The general result of [`KnotVector::ders_basis_funs`].
+    Any(BasisDerivatives),
+}
+
+impl DerivativeRows {
+    /// Row `k`: the `k`-th derivatives (`k` at most the order asked for).
+    #[inline]
+    pub(crate) fn row(&self, k: usize) -> &[f64] {
+        match self {
+            DerivativeRows::First(rows, degree) => &rows[k][..=*degree],
+            DerivativeRows::Any(rows) => &rows[k],
+        }
+    }
+}
+
 /// A non-decreasing sequence of finite knot values.
 ///
 /// The vector itself does not know the degree of the entity it belongs to;
@@ -265,6 +290,82 @@ impl KnotVector {
         ders
     }
 
+    /// Non-vanishing basis functions and their derivatives up to order `n`,
+    /// computed the cheapest way: [`KnotVector::basis_and_first`] when
+    /// `n <= 1` and the degree is at most [`FAST_DEGREE`], else
+    /// [`KnotVector::ders_basis_funs`]. Either way the values are the same,
+    /// bit for bit.
+    #[inline]
+    pub(crate) fn derivative_rows(
+        &self,
+        span: usize,
+        u: f64,
+        degree: usize,
+        n: usize,
+    ) -> DerivativeRows {
+        if n <= 1 && degree <= FAST_DEGREE {
+            DerivativeRows::First(self.basis_and_first(span, u, degree), degree)
+        } else {
+            DerivativeRows::Any(self.ders_basis_funs(span, u, degree, n))
+        }
+    }
+
+    /// The non-vanishing basis functions (row 0) and their first derivatives
+    /// (row 1) at `u`, for degrees up to [`FAST_DEGREE`]: the first two rows
+    /// of [`KnotVector::ders_basis_funs`], bit for bit, in plain arrays.
+    ///
+    /// Surface and curve evaluation for meshing asks for exactly these, and
+    /// the general routine, which builds and moves small vectors on every
+    /// call, took 59% of the instructions of meshing a creased rational
+    /// revolve (inclusive, measured with callgrind on 2026-10-15). The
+    /// arithmetic is Algorithm A2.3's for `n = 1`, in its order: the first
+    /// derivative of `N_{i,p}` is `p (N_{i,p-1} / (u_{i+p} - u_i) -
+    /// N_{i+1,p-1} / (u_{i+p+1} - u_{i+1}))` (Eq. 2.7), with the reciprocals
+    /// A2.3 takes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `span + degree` is not a valid knot index or `span < degree`;
+    /// debug builds also check `degree <= FAST_DEGREE`.
+    pub(crate) fn basis_and_first(&self, span: usize, u: f64, degree: usize) -> [[f64; 8]; 2] {
+        debug_assert!(degree <= FAST_DEGREE);
+        let knots = &self.knots;
+        let p = degree;
+        let mut basis = [0.0; 8];
+        let mut first = [0.0; 8];
+        let mut left = [0.0; 8];
+        let mut right = [0.0; 8];
+        basis[0] = 1.0;
+        for j in 1..=p {
+            left[j] = u - knots[span + 1 - j];
+            right[j] = knots[span + j] - u;
+            let mut saved = 0.0;
+            for r in 0..j {
+                let gap = right[r + 1] + left[j - r];
+                if j == p {
+                    // The degree p - 1 functions, before this pass replaces
+                    // them, give the derivatives.
+                    let share = 1.0 / gap * basis[r];
+                    first[r] = if r == 0 {
+                        0.0 - share
+                    } else {
+                        first[r] - share
+                    };
+                    first[r + 1] = share;
+                }
+                let temp = basis[r] / gap;
+                basis[r] = saved + right[r + 1] * temp;
+                saved = left[j - r] * temp;
+            }
+            basis[j] = saved;
+        }
+        let factor = p as f64;
+        for value in &mut first[..=p] {
+            *value *= factor;
+        }
+        [basis, first]
+    }
+
     /// Wraps values that are already known to be valid (used for the results
     /// of algorithms such as knot insertion).
     pub(crate) fn from_vec_unchecked(knots: Vec<f64>) -> Self {
@@ -430,6 +531,85 @@ mod tests {
         let kv = KnotVector::new(vec![0., 0., 0., 0.5, 0.5, 1., 1., 1.]).unwrap();
         assert!(kv.validate_for(2, 5).is_ok());
         assert!(kv.validate_for(2, 4).is_err());
+    }
+
+    /// Clamped knots of degree `p` from interior gaps (a zero gap repeats
+    /// a knot), with the multiplicity of every interior knot capped at `p`.
+    fn knots_from_gaps(p: usize, gaps: &[f64]) -> KnotVector {
+        let mut knots = vec![0.0; p + 1];
+        let mut at = 0.0;
+        let mut repeat = 0;
+        for &g in gaps {
+            if g == 0.0 && repeat < p - 1 && at > 0.0 {
+                repeat += 1;
+            } else {
+                at += g.max(0.05);
+                repeat = 0;
+            }
+            knots.push(at);
+        }
+        let end = at + 1.0;
+        knots.extend(std::iter::repeat_n(end, p + 1));
+        KnotVector::new(knots).unwrap()
+    }
+
+    proptest::proptest! {
+        /// The array routine gives A2.3's first two rows bit for bit, inside
+        /// spans, at their ends and a little beyond (the analytic
+        /// continuation curves and surfaces evaluate there).
+        #[test]
+        fn basis_and_first_matches_a2_3(
+            p in 1usize..=FAST_DEGREE,
+            gaps in proptest::collection::vec(
+                proptest::prop_oneof![proptest::strategy::Just(0.0), 0.0..3.0f64],
+                0..7,
+            ),
+            t in -0.1..1.1f64,
+        ) {
+            let kv = knots_from_gaps(p, &gaps);
+            let (a, b) = kv.domain(p);
+            let last = kv.as_slice().len() - p - 2;
+            let u = a + (b - a) * t;
+            let span = kv.find_span(p, last, u.clamp(a, b));
+            for n in 1..=3 {
+                let general = kv.ders_basis_funs(span, u, p, n);
+                let fast = kv.basis_and_first(span, u, p);
+                for k in 0..2 {
+                    for j in 0..=p {
+                        proptest::prop_assert_eq!(
+                            fast[k][j].to_bits(),
+                            general[k][j].to_bits(),
+                            "degree {} span {} u {} row {} entry {}", p, span, u, k, j
+                        );
+                    }
+                }
+                proptest::prop_assert!(fast[0][p + 1..].iter().chain(&fast[1][p + 1..]).all(|&x| x == 0.0));
+            }
+        }
+    }
+
+    #[test]
+    fn derivative_rows_choose_either_routine() {
+        for p in 1..=9 {
+            let kv = knots_from_gaps(p, &[0.5, 0.0, 1.25, 0.75]);
+            let (a, b) = kv.domain(p);
+            let last = kv.as_slice().len() - p - 2;
+            for i in 0..=20 {
+                let u = a + (b - a) * f64::from(i) / 20.0;
+                let span = kv.find_span(p, last, u);
+                for n in 0..=3 {
+                    let rows = kv.derivative_rows(span, u, p, n);
+                    assert_eq!(
+                        matches!(rows, DerivativeRows::First(..)),
+                        n <= 1 && p <= FAST_DEGREE
+                    );
+                    let general = kv.ders_basis_funs(span, u, p, n);
+                    for (k, row) in general.iter().enumerate() {
+                        assert_eq!(rows.row(k), &row[..], "degree {p} n {n} row {k}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
