@@ -4,9 +4,9 @@
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
 use opendatum_kernel::{
-    Body, BodyMesh, BooleanOp, BrepKernel, DVec2, DVec3, EdgeOrigin, ExtrudeSpec, FaceIx,
-    FaceOrigin, Frame, Kernel, KernelError, Merged, Operand, Profile, ProfileCurve, RevolveSpec,
-    TessellationOptions, VertexOrigin,
+    Body, BodyMesh, BooleanOp, BrepKernel, CurveKind, DVec2, DVec3, EdgeOrigin, ExtrudeSpec,
+    FaceIx, FaceOrigin, Frame, Kernel, KernelError, Merged, Operand, Profile, ProfileCurve,
+    RevolveSpec, TessellationOptions, VertexOrigin,
 };
 
 fn k() -> BrepKernel {
@@ -2044,6 +2044,365 @@ fn planes_across_cones_in_ellipses_parabolas_and_hyperbolas() {
     }
 }
 
+/// Solids, shells and genus.
+type Solids = (usize, usize, Option<usize>);
+
+/// A second cut's expected results: per operation (A ∪ B, A ∩ B, A − B,
+/// B − A), the volume, faces, edges and vertices, and solids, shells and
+/// genus, or `None` where the result is empty (refused as such).
+type Second<'a> = (
+    &'a str,
+    &'a Body,
+    &'a Body,
+    [Option<(f64, Topology, Solids)>; 4],
+);
+
+/// Second cuts on bodies whose first cut left conic edges on their curved
+/// faces (design note 0012 §16, ADR 0023): ellipses on rods and cones,
+/// a hyperbola on a drafted pin, crossed by a second plane (three surfaces
+/// at a point), halved through a cone's apex, cut beside the first cut,
+/// re-cut in the same plane and with the same cone (a stored edge and the
+/// curve where faces meet coincide), with a void beside an ellipse, and
+/// apart. Every result valid with its origins on the operands' surfaces,
+/// its volume exact to 1e-9 against a derivation from first principles,
+/// its faces, edges and vertices as first found, each count checked
+/// against Euler's formula.
+#[test]
+fn second_cuts_across_conic_edges() {
+    let tilt = 20f64.to_radians();
+    let slope = tilt.tan();
+    let [n1, n2] = [1.0, -1.0].map(|s: f64| DVec3::new(s * tilt.sin(), 0.0, tilt.cos()));
+    // A rod (radius 1, 3 long) cut under the plane through (0, 0, 2)
+    // tilted 20°: half the rod's volume at its middle height, 2π. A
+    // second plane tilted the other way through the same point crosses
+    // the first's ellipse where it meets the rod's side at (0, ±1, 2):
+    // under both, the volume over the unit disc of 2 − |x| tan 20°, less
+    // 4/3 tan 20° (∫∫ |x| over the disc is 4/3).
+    let rod = cylinder(at_z(0.0), DVec2::ZERO, 1.0, 3.0);
+    let ridge = DVec3::new(0.0, 0.0, 2.0);
+    let first = slab(ridge, n1, 6.0, 3.0);
+    let cut_rod = run(&rod, &first, BooleanOp::Subtract);
+    assert!(close(volume(&cut_rod), 2.0 * PI), "{}", volume(&cut_rod));
+    let second = slab(ridge, n2, 6.0, 3.0);
+    let wedge = 4.0 / 3.0 * slope;
+    // The pointed cone (apex (0, 0, 2), base radius 1) of the first
+    // conic cases cut under the plane through (0, 0, 1) tilted 20°: its
+    // tip beyond, a cone over the ellipse. Under a second plane the
+    // other way, what is above both is a cone from the apex over the
+    // parts of the two ellipses on the far side of the line x = 0 from
+    // their centres: segments of them square to their major axes, d =
+    // x_c / cos 20° from the centre, of area ab·segment(1, d/a).
+    let tall = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (1.0, 0.0), (0.0, 2.0)],
+        TAU,
+    );
+    let mid = DVec3::new(0.0, 0.0, 1.0);
+    let [e1, e2] = [0.5, -0.5].map(|s: f64| {
+        let t = 1.0 / (1.0 - s * slope);
+        DVec3::new(s * t, 0.0, 2.0 - t)
+    });
+    let (centre, a) = (0.5 * (e1 + e2), 0.5 * (e1 - e2).length());
+    let b = ((0.5 * (2.0 - centre.z)).powi(2) - centre.x * centre.x).sqrt();
+    let tip = tilt.cos() * PI * a * b / 3.0;
+    let tall_all = cone_volume(1.0, 2.0);
+    let cut_cone = run(&tall, &slab(mid, n1, 6.0, 3.0), BooleanOp::Subtract);
+    assert!(close(volume(&cut_cone), tall_all - tip));
+    let both = 2.0 / 3.0 * tilt.cos() * a * b * segment(1.0, centre.x / tilt.cos() / a);
+    let cone_ridge = slab(mid, n2, 6.0, 3.0);
+    // The same cone between z = 1/2 and 3/2: the ellipse lies between
+    // them (from z = 2 − 1/(1 − tan 20°/2) to 2 − 1/(1 + tan 20°/2)), so
+    // of it the first cut takes the tip but for the cone above z = 3/2.
+    assert!(e1.z > 0.5 && e2.z < 1.5);
+    let band = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.5), (0.75, 0.5), (0.25, 1.5), (0.0, 1.5)],
+        TAU,
+    );
+    let band_all = cone_volume(0.75, 1.5) - cone_volume(0.25, 0.5);
+    let band_cut = band_all - (tip - cone_volume(0.25, 0.5));
+    // The countersunk plate of the first conic cases, its sink leaning
+    // 15° in the xz plane, sunk again 1.4 along y, clear of the first.
+    let plate = cuboid(DVec3::new(-2.0, -2.0, -1.0), DVec3::new(2.0, 2.0, 0.0));
+    let lean = 15f64.to_radians();
+    let up = DVec3::new(lean.sin(), 0.0, lean.cos());
+    let sink_at = |y: f64| {
+        turned_solid(
+            Frame::from_normal(DVec3::new(0.0, y, 0.0), up, DVec3::X),
+            DVec3::new(0.0, y, 0.4),
+            &[(0.0, 0.0), (0.8, 0.0), (0.0, -0.8)],
+            TAU,
+        )
+    };
+    let low = DVec3::new(0.0, 0.0, 0.4) - up * 0.8;
+    let [x1, x2] = [lean + PI / 4.0, lean - PI / 4.0].map(|f| low.x - low.z * f.tan());
+    let (m, sa) = (DVec3::new(0.5 * (x1 + x2), 0.0, 0.0), 0.5 * (x1 - x2).abs());
+    let (w, s) = (m - low, (m - low).dot(up));
+    let sb = (2.0 * s * s - w.length_squared()).sqrt();
+    let sunk = -low.z * PI * sa * sb / 3.0;
+    let sink_all = cone_volume(0.8, 0.8);
+    let sunk_plate = run(&plate, &sink_at(0.0), BooleanOp::Subtract);
+    assert!(close(volume(&sunk_plate), 16.0 - sunk));
+    // Clear of the first: the ellipses are within sb ≈ 0.4 of their
+    // centres across the plate, and the second sink's cone within its
+    // base radius 0.8 of its axis.
+    assert!(sb < 0.45);
+    let sink2 = sink_at(1.4);
+    // A tapered hole through the plate leaning the same way (tan α =
+    // 0.4, its apex below the plate), halved through its axis: the plane
+    // y = 0 holds the hole's axis and apex and crosses its wall in two
+    // rulings, the plate's faces in lines, and the ellipses at their ends.
+    // The hole is the cone from its apex over the top ellipse less that
+    // over the bottom one; at height z the ellipse runs between the
+    // rulings at lean ± α from upright, and across its centre m a point m
+    // + y ŷ is on the cone where (|w|² + y²) cos² α = (w · axis)².
+    let alpha = 0.4f64.atan();
+    let hole = turned_solid(
+        Frame::from_normal(DVec3::ZERO, up, DVec3::X),
+        DVec3::new(0.0, 0.0, 0.4),
+        &[(0.0, 0.0), (0.8, 0.0), (0.0, -2.0)],
+        TAU,
+    );
+    let apex = DVec3::new(0.0, 0.0, 0.4) - up * 2.0;
+    assert!(apex.z < -1.0);
+    let cone_to = |z: f64| {
+        let [x1, x2] = [lean + alpha, lean - alpha].map(|f| apex.x + (z - apex.z) * f.tan());
+        let m = DVec3::new(0.5 * (x1 + x2), 0.0, z);
+        let (w, s) = (m - apex, (m - apex).dot(up));
+        let b = ((s / alpha.cos()).powi(2) - w.length_squared()).sqrt();
+        (z - apex.z) * PI * 0.5 * (x1 - x2).abs() * b / 3.0
+    };
+    let holed_all = 16.0 - (cone_to(0.0) - cone_to(-1.0));
+    let holed = run(&plate, &hole, BooleanOp::Subtract);
+    assert!(close(volume(&holed), holed_all), "{}", volume(&holed));
+    let north = cuboid(DVec3::new(-3.0, 0.0, -2.0), DVec3::new(3.0, 3.0, 1.0));
+    // The drafted pin of the first conic cases flattened at x = 0.3, then
+    // flattened again at x = −0.3 and halved along y = 0.
+    let draft = 1f64.to_radians().tan();
+    let top = 1.0 - 2.0 * draft;
+    let tapered = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (1.0, 0.0), (top, 2.0), (0.0, 2.0)],
+        TAU,
+    );
+    let tapered_all = 2.0 * PI * (1.0 + top + top * top) / 3.0;
+    let (c, high) = (0.3, 1.0 / draft);
+    let g = |u: f64| u * (u * u - c * c).sqrt() - c * c * (u / c).acosh();
+    let face = (g(1.0) - g(top)) / draft;
+    let shaved = (segment(1.0, c) * high + (2.0 - high) * segment(top, c) - c * face) / 3.0;
+    let pin = run(
+        &tapered,
+        &cuboid(DVec3::new(c, -2.0, -1.0), DVec3::new(2.0, 2.0, 3.0)),
+        BooleanOp::Subtract,
+    );
+    assert!(close(volume(&pin), tapered_all - shaved));
+    let other_flat = cuboid(DVec3::new(-2.0, -2.0, -1.0), DVec3::new(-c, 2.0, 3.0));
+    let half = cuboid(DVec3::new(-2.0, 0.0, -1.0), DVec3::new(2.0, 2.0, 3.0));
+    // In the plane of the first cut: a smaller slab on the cut rod's
+    // face, touching it along the ellipse's whole disc.
+    let same_plane = slab(ridge, n1, 4.0, 2.0);
+    // A unit block on the cut's plane over part of the ellipse's disc
+    // reaching past its far vertex: the block's sides cross the ellipse,
+    // and between the crossings the rod's edge and the curve where the
+    // block's face meets the rod coincide, with different parameters.
+    let along_cut = DVec3::new(tilt.cos(), 0.0, -tilt.sin());
+    let block = slab(ridge + along_cut * 0.6, n1, 1.0, 1.0);
+    // The same on the cut cone, a block 0.4 square about the ellipse's
+    // lower vertex: there the stored edge's parameter and the conic
+    // track's differ most.
+    let cone_block = slab(e1, n1, 0.4, 0.4);
+    // A ball clear inside the cut rod, a void beside its ellipse; and a
+    // box apart from it.
+    let pebble = ball(DVec3::new(0.0, 0.0, 1.0), 0.3);
+    let pebble_all = 4.0 / 3.0 * PI * 0.027;
+    let apart = cuboid(DVec3::new(5.0, 0.0, 0.0), DVec3::new(6.0, 1.0, 1.0));
+    let cut_cone_all = tall_all - tip;
+    let rod_cut = 2.0 * PI;
+    let plate_all = 16.0 - sunk;
+    let pin_all = tapered_all - shaved;
+    let cases: [Second; 12] = [
+        (
+            "a rod under a ridge",
+            &cut_rod,
+            &second,
+            [
+                Some((rod_cut + 108.0 - wedge, (10, 21, 14), (1, 1, Some(0)))),
+                Some((wedge, (4, 6, 4), (1, 1, Some(0)))),
+                Some((rod_cut - wedge, (5, 9, 6), (1, 1, Some(0)))),
+                Some((108.0 - wedge, (9, 18, 12), (1, 1, Some(0)))),
+            ],
+        ),
+        (
+            "a pointed cone under a ridge",
+            &cut_cone,
+            &cone_ridge,
+            [
+                Some((
+                    cut_cone_all + 108.0 - (tip - both),
+                    (10, 21, 14),
+                    (1, 1, Some(0)),
+                )),
+                Some((tip - both, (4, 6, 4), (1, 1, Some(0)))),
+                Some((cut_cone_all - (tip - both), (5, 9, 6), (1, 1, Some(0)))),
+                Some((108.0 - (tip - both), (9, 18, 12), (1, 1, Some(0)))),
+            ],
+        ),
+        (
+            "a cut cone and a band of the same cone",
+            &cut_cone,
+            &band,
+            [
+                Some((
+                    cut_cone_all + band_all - band_cut,
+                    (6, 10, 6),
+                    (1, 1, Some(0)),
+                )),
+                Some((band_cut, (4, 6, 4), (1, 1, Some(0)))),
+                Some((cut_cone_all - band_cut, (4, 6, 4), (1, 1, Some(0)))),
+                Some((band_all - band_cut, (4, 6, 4), (1, 1, Some(0)))),
+            ],
+        ),
+        (
+            "a plate with a leaning tapered hole halved through its axis",
+            &holed,
+            &north,
+            [
+                Some((
+                    holed_all + 54.0 - 0.5 * holed_all,
+                    (12, 30, 20),
+                    (1, 1, Some(1)),
+                )),
+                Some((0.5 * holed_all, (8, 18, 12), (1, 1, Some(0)))),
+                Some((0.5 * holed_all, (8, 18, 12), (1, 1, Some(0)))),
+                Some((54.0 - 0.5 * holed_all, (12, 30, 20), (1, 1, Some(1)))),
+            ],
+        ),
+        (
+            "a second countersink beside the first",
+            &sunk_plate,
+            &sink2,
+            [
+                Some((plate_all + sink_all - sunk, (11, 22, 15), (1, 1, Some(0)))),
+                Some((sunk, (3, 4, 3), (1, 1, Some(0)))),
+                Some((plate_all - sunk, (10, 20, 14), (1, 1, Some(0)))),
+                Some((sink_all - sunk, (4, 6, 4), (1, 1, Some(0)))),
+            ],
+        ),
+        (
+            "a flattened pin flattened on its other side",
+            &pin,
+            &other_flat,
+            [
+                Some((pin_all + 27.2 - shaved, (11, 24, 16), (1, 1, Some(0)))),
+                Some((shaved, (5, 9, 6), (1, 1, Some(0)))),
+                Some((pin_all - shaved, (6, 12, 8), (1, 1, Some(0)))),
+                Some((27.2 - shaved, (10, 21, 14), (1, 1, Some(0)))),
+            ],
+        ),
+        (
+            "a flattened pin halved",
+            &pin,
+            &half,
+            [
+                Some((
+                    pin_all + 32.0 - 0.5 * pin_all,
+                    (10, 21, 14),
+                    (1, 1, Some(0)),
+                )),
+                Some((0.5 * pin_all, (5, 9, 6), (1, 1, Some(0)))),
+                Some((0.5 * pin_all, (5, 9, 6), (1, 1, Some(0)))),
+                Some((32.0 - 0.5 * pin_all, (10, 21, 14), (1, 1, Some(0)))),
+            ],
+        ),
+        (
+            "a cut rod re-cut in the plane of its cut",
+            &cut_rod,
+            &same_plane,
+            [
+                Some((rod_cut + 32.0, (9, 18, 12), (1, 1, Some(0)))),
+                None,
+                Some((rod_cut, (4, 6, 4), (1, 1, Some(0)))),
+                Some((32.0, (6, 12, 8), (1, 1, Some(0)))),
+            ],
+        ),
+        (
+            "a cut rod with a block on part of its cut",
+            &cut_rod,
+            &block,
+            [
+                Some((rod_cut + 1.0, (10, 22, 14), (1, 1, Some(0)))),
+                None,
+                Some((rod_cut, (4, 6, 4), (1, 1, Some(0)))),
+                Some((1.0, (6, 12, 8), (1, 1, Some(0)))),
+            ],
+        ),
+        (
+            "a cut cone with a block on part of its cut",
+            &cut_cone,
+            &cone_block,
+            [
+                Some((cut_cone_all + 0.064, (10, 22, 14), (1, 1, Some(0)))),
+                None,
+                Some((cut_cone_all, (4, 6, 4), (1, 1, Some(0)))),
+                Some((0.064, (6, 12, 8), (1, 1, Some(0)))),
+            ],
+        ),
+        (
+            "a cut rod around a ball",
+            &cut_rod,
+            &pebble,
+            [
+                Some((rod_cut, (4, 6, 4), (1, 1, Some(0)))),
+                Some((pebble_all, (2, 2, 2), (1, 1, Some(0)))),
+                Some((rod_cut - pebble_all, (6, 8, 6), (1, 2, Some(0)))),
+                None,
+            ],
+        ),
+        (
+            "a cut rod and a box apart",
+            &cut_rod,
+            &apart,
+            [
+                Some((rod_cut + 1.0, (10, 18, 12), (2, 2, Some(0)))),
+                None,
+                Some((rod_cut, (4, 6, 4), (1, 1, Some(0)))),
+                Some((1.0, (6, 12, 8), (1, 1, Some(0)))),
+            ],
+        ),
+    ];
+    for (name, a, b, volumes) in cases {
+        for (i, (x, y, op)) in [
+            (a, b, BooleanOp::Union),
+            (a, b, BooleanOp::Intersect),
+            (a, b, BooleanOp::Subtract),
+            (b, a, BooleanOp::Subtract),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let Some((want, topology, solids)) = volumes[i] else {
+                match k().boolean(x, y, op) {
+                    Err(KernelError::InvalidInput(_)) => {}
+                    other => panic!("{name}, {i}: {:?}", other.map(|r| volume(&r))),
+                }
+                continue;
+            };
+            let r = run(x, y, op);
+            assert!(
+                (volume(&r) - want).abs() <= 1e-9 + 1e-12 * want.abs(),
+                "{name}, {i}: {} vs {want}",
+                volume(&r)
+            );
+            assert_eq!(counts(&r), topology, "{name}, {i}");
+            let t = k().topology(&r);
+            assert_eq!((t.solids, t.shells, t.genus), solids, "{name}, {i}");
+        }
+    }
+}
+
 /// A solid turned a whole turn about the line through `origin` along
 /// `axis`'s normal from `curves`, (radius, height) curves in the half
 /// plane of that line.
@@ -2237,6 +2596,13 @@ fn random_conic_pair(r: &mut Rng) -> (Body, Body) {
         turned(r, DVec3::ZERO)
     };
     let (first, tapers) = random_tapered(r, axis);
+    let second = random_cone_cutter(r, axis, &tapers);
+    (first, second)
+}
+
+/// The second operand of [`random_conic_pair`], across one of the cones
+/// `tapers` of a solid turned about `axis`.
+fn random_cone_cutter(r: &mut Rng, axis: Frame, tapers: &[Taper]) -> Body {
     let taper = &tapers[r.next() as usize % tapers.len()];
     let u = taper.u;
     let phi = if r.chance(0.5) {
@@ -2252,7 +2618,7 @@ fn random_conic_pair(r: &mut Rng) -> (Body, Body) {
     let ruling = (u + e * taper.slope).normalize();
     let out = (e - u * taper.slope).normalize();
     let flip = if r.chance(0.5) { 1.0 } else { -1.0 };
-    let second = match r.next() % 4 {
+    match r.next() % 4 {
         0 => {
             let size = DVec3::new(r.range(0.25, 1.5), r.range(0.25, 1.5), r.range(0.25, 1.5));
             let corner = axis.origin
@@ -2291,8 +2657,7 @@ fn random_conic_pair(r: &mut Rng) -> (Body, Body) {
             let off = [0.0, 0.5, 2.0, 10.0][r.next() as usize % 4] * r.range(-1.0, 1.0).signum();
             slab(apex + n * (off * 1e-7), n * flip, r.range(1.0, 6.0), 3.0)
         }
-    };
-    (first, second)
+    }
 }
 
 /// A box beside a wide frustum whose axis leans, its face on y = 0 through
@@ -2749,6 +3114,217 @@ fn volume_identities_on_planes_across_cones() {
     report("random planes across cones", &t);
 }
 
+/// A cutter for a solid about `axis` from [`random_curved`]: a box turned
+/// any way near it, or a slab whose face crosses the axis at an angle (an
+/// ellipse on each cylinder of the solid it crosses).
+fn random_rod_cutter(r: &mut Rng, axis: Frame) -> Body {
+    if r.chance(0.5) {
+        let size = DVec3::new(r.range(0.25, 1.5), r.range(0.25, 1.5), r.range(0.25, 1.5));
+        let corner =
+            axis.origin + DVec3::new(r.range(-1.0, 0.5), r.range(-1.0, 0.5), r.range(-1.0, 0.5));
+        k().make_box(&turned(r, corner), size).expect("a box")
+    } else {
+        let (tilt, phi) = (r.range(0.1, 1.4), r.range(0.0, TAU));
+        let n = axis.z * tilt.cos() + (axis.x * phi.cos() + axis.y * phi.sin()) * tilt.sin();
+        let point =
+            axis.origin + DVec3::new(r.range(-0.5, 0.5), r.range(-0.5, 0.5), r.range(-0.5, 0.5));
+        let flip = if r.chance(0.5) { 1.0 } else { -1.0 };
+        slab(point, n * flip, r.range(1.0, 6.0), 3.0)
+    }
+}
+
+/// What a fuzz of second cuts saw: the first cuts made, refused or empty,
+/// and the conic edges (NURBS curves) their results carried.
+#[derive(Default)]
+struct Firsts {
+    made: usize,
+    refused: usize,
+    empty: usize,
+    with_conics: usize,
+    conics: usize,
+}
+
+impl Firsts {
+    /// `a` cut by `b` (the part of `a` outside `b`, or inside it, at
+    /// random), or `None` where that is refused or empty; a failure is
+    /// recorded as a bug of `t`.
+    fn cut(&mut self, t: &mut Tally, case: &str, r: &mut Rng, a: &Body, b: &Body) -> Option<Body> {
+        let op = if r.chance(0.5) {
+            BooleanOp::Subtract
+        } else {
+            BooleanOp::Intersect
+        };
+        match k().boolean(a, b, op) {
+            Ok(c) => {
+                self.made += 1;
+                let n = k()
+                    .edge_kinds(&c)
+                    .iter()
+                    .filter(|&&e| e == CurveKind::Nurbs)
+                    .count();
+                self.conics += n;
+                self.with_conics += usize::from(n > 0);
+                Some(c)
+            }
+            Err(KernelError::InvalidInput(m)) if m.contains("empty") => {
+                self.empty += 1;
+                None
+            }
+            Err(KernelError::InvalidInput(_) | KernelError::Unsupported(_)) => {
+                self.refused += 1;
+                None
+            }
+            Err(e) => {
+                t.bugs.push(format!("{case}: the first cut, {op:?}: {e}"));
+                None
+            }
+        }
+    }
+
+    fn report(&self, name: &str) {
+        println!(
+            "{name}: {} first cuts made ({} refused, {} empty), {} with conic edges ({} edges)",
+            self.made, self.refused, self.empty, self.with_conics, self.conics
+        );
+    }
+}
+
+/// No refusal of a fuzz names an edge on a curved face by its curve's
+/// kind: conic edges on cylinders and cones are operands like any other
+/// (design note 0012 §16, ADR 0023).
+fn no_refusal_names_conic_edges(t: &Tally) {
+    for m in &t.refused {
+        assert!(
+            !m.contains("free-form edge")
+                && !m.contains("NURBS edge")
+                && !m.contains("could not be bounded"),
+            "{m}"
+        );
+    }
+}
+
+/// Second cuts across the conic edges of first cuts (design note 0012
+/// §16, ADR 0023): a random tapered solid cut by a box or a slab as the
+/// fuzz of planes across cones draws them (the part outside it or inside
+/// it), then another drawn against the same cones. Every operation valid,
+/// with the volume identities and the membership of sampled points.
+#[test]
+fn volume_identities_on_second_cuts_of_cones() {
+    let mut t = Tally::default();
+    let mut f = Firsts::default();
+    let mut r = Rng(0x2C07_0C0E);
+    let mut points = Rng(0x5A3F_0E16);
+    for case in 0..scale(150) {
+        let axis = if r.chance(0.5) {
+            Frame::WORLD
+        } else {
+            turned(&mut r, DVec3::ZERO)
+        };
+        let (solid, tapers) = random_tapered(&mut r, axis);
+        let cutter = random_cone_cutter(&mut r, axis, &tapers);
+        let second = random_cone_cutter(&mut r, axis, &tapers);
+        let case = format!("pair {case}");
+        let Some(first) = f.cut(&mut t, &case, &mut r, &solid, &cutter) else {
+            continue;
+        };
+        identities(&mut t, &first, &second, &case, 0.0, &mut points);
+    }
+    f.report("first cuts of cones");
+    no_refusal_names_conic_edges(&t);
+    report("second cuts of cones", &t);
+    assert!(
+        f.with_conics * 2 > f.made,
+        "{} of {}",
+        f.with_conics,
+        f.made
+    );
+}
+
+/// Second cuts of rods, tubes and prisms with round edges, whose first
+/// cuts by boxes turned any way and slabs at an angle to the axis left
+/// ellipses on their cylinders.
+#[test]
+fn volume_identities_on_second_cuts_of_rods() {
+    let mut t = Tally::default();
+    let mut f = Firsts::default();
+    let mut r = Rng(0x2C07_0D0E);
+    let mut points = Rng(0x5A3F_0E17);
+    for case in 0..scale(150) {
+        let axis = if r.chance(0.5) {
+            Frame::WORLD
+        } else {
+            turned(&mut r, DVec3::ZERO)
+        };
+        let solid = random_curved(&mut r, axis);
+        let cutter = random_rod_cutter(&mut r, axis);
+        let second = random_rod_cutter(&mut r, axis);
+        let case = format!("pair {case}");
+        let Some(first) = f.cut(&mut t, &case, &mut r, &solid, &cutter) else {
+            continue;
+        };
+        identities(&mut t, &first, &second, &case, 0.0, &mut points);
+    }
+    f.report("first cuts of rods");
+    no_refusal_names_conic_edges(&t);
+    report("second cuts of rods", &t);
+    assert!(
+        f.with_conics * 3 > f.made,
+        "{} of {}",
+        f.with_conics,
+        f.made
+    );
+}
+
+/// Chains of cuts: a tapered solid or a rod cut by three or four cutters
+/// in turn, the volume identities and membership checked at every cut
+/// after the first, whose operand carries the conic edges of the cuts
+/// before it.
+#[test]
+fn volume_identities_on_chains_of_cuts() {
+    let mut t = Tally::default();
+    let mut f = Firsts::default();
+    let mut r = Rng(0x2C07_0E0E);
+    let mut points = Rng(0x5A3F_0E18);
+    for case in 0..scale(50) {
+        let axis = if r.chance(0.5) {
+            Frame::WORLD
+        } else {
+            turned(&mut r, DVec3::ZERO)
+        };
+        let cone = r.chance(0.5);
+        let (mut body, tapers) = if cone {
+            random_tapered(&mut r, axis)
+        } else {
+            (random_curved(&mut r, axis), Vec::new())
+        };
+        let cuts = 3 + usize::from(r.chance(0.5));
+        for step in 0..cuts {
+            let cutter = if cone {
+                random_cone_cutter(&mut r, axis, &tapers)
+            } else {
+                random_rod_cutter(&mut r, axis)
+            };
+            if step > 0 {
+                let name = format!("chain {case}, cut {step}");
+                identities(&mut t, &body, &cutter, &name, 0.0, &mut points);
+            }
+            match f.cut(
+                &mut t,
+                &format!("chain {case}, cut {step}"),
+                &mut r,
+                &body,
+                &cutter,
+            ) {
+                Some(b) => body = b,
+                None => break,
+            }
+        }
+    }
+    f.report("cuts in chains");
+    no_refusal_names_conic_edges(&t);
+    report("chains of cuts", &t);
+}
+
 /// Pairs the fuzz of planes across cones found faulty at fifty times its
 /// size (2026-10-15), with their operands as drawn: a pointed cone and a
 /// slab through or by its apex. Meshing the results (and the kernel's own
@@ -3006,4 +3582,107 @@ fn planes_nearly_tangent_to_a_frustum_by_its_apex() {
     assert!(lumps.is_empty(), "{lumps:#?}");
     assert!(t.checked > 0);
     report("planes nearly tangent to a frustum by its apex", &t);
+}
+
+/// A pair the fuzz of second cuts found faulty in its first cut
+/// (2026-10-15), with its operands as drawn: a frustum (radius 0.5 to
+/// 0.25 over a height of 1, its apex 1 above its top) and a slab whose
+/// face passes through the apex within 10⁻⁷ rad of tangent along the
+/// ruling of its seam. The plane meets the cone in two rulings 0.4 mm
+/// apart, within a tolerance of it between them out to about a metre
+/// from the apex, just short of the frustum's top; there the slab's face
+/// ends, its boundary grazing the cone, and the cut where a ruling
+/// leaves it was taken for a touch. Neither ruling reaches the box
+/// where faces of both bodies can be, but the rulings' stretches in the
+/// slab's face were still paired up, and the boolean failed as an
+/// inconsistent cut (design note 0012 §17). Every operation must succeed,
+/// valid with the volume identities, or be refused with a message.
+#[test]
+fn a_plane_by_a_frustums_apex_along_its_seam() {
+    let axis = Frame {
+        origin: DVec3::ZERO,
+        x: DVec3::new(
+            -0.12813390031370372,
+            0.9914662659760367,
+            0.024007228535021186,
+        ),
+        y: DVec3::new(
+            -0.6916154966932576,
+            -0.07198037316571915,
+            -0.7186701820812259,
+        ),
+        z: DVec3::new(-0.710809192627766, -0.10868978475670413, 0.6949365599573855),
+    };
+    let frustum = turned_solid(
+        axis,
+        axis.origin,
+        &[(0.0, -0.75), (0.5, -0.75), (0.25, 0.25), (0.0, 0.25)],
+        TAU,
+    );
+    // As random_cone_cutter draws a slab nearly tangent along a ruling
+    // through the apex: the ruling at φ = π, tilted by −10⁻⁷.
+    let (u, slope) = (axis.z, -0.25);
+    let e = axis.x * PI.cos() + axis.y * PI.sin();
+    let apex = (axis.origin + u * -0.75) - u * (0.5 / slope);
+    let ruling = (u + e * slope).normalize();
+    let out = (e - u * slope).normalize();
+    let tilt: f64 = -1e-7;
+    let n = out * tilt.cos() + ruling * tilt.sin();
+    let block = slab(apex, -n, 1.4261870333318676, 3.0);
+    let mut t = Tally::default();
+    let mut rng = Rng(0x0A9E_5EA3);
+    identities(&mut t, &frustum, &block, "seam", 0.0, &mut rng);
+    report("a plane by a frustum's apex along its seam", &t);
+}
+
+/// A rod of radius 5 cm cut under a tilted plane and then under another
+/// tilted the other way (the second cut follows the first's ellipse, a
+/// NURBS edge on the rod's side), at distances from the origin up to
+/// 3,000 km: near enough it is cut, the volumes as near the origin; past
+/// where the rounding of the courses' bounds is wider than a sixteenth of
+/// the tolerance, it is cut or refused as too far from the origin, and
+/// either way soon (beyond 145 km the halving of the second cut's chords
+/// went on without end; found by review).
+#[test]
+fn second_cuts_far_from_the_origin_finish() {
+    let tilt = 20f64.to_radians();
+    let [n1, n2] = [1.0, -1.0].map(|s: f64| DVec3::new(s * tilt.sin(), 0.0, tilt.cos()));
+    let (r, h) = (0.05, 0.15);
+    // Under both planes through the rod's axis at height 0.1: the volume
+    // over the disc of 0.1 − |x| tan 20°.
+    let both = PI * r * r * 0.1 - 4.0 / 3.0 * r * r * r * tilt.tan();
+    let mut cut = 0;
+    for far in [0.0, 1e3, 3e4, 3e5, 3e6] {
+        let at = DVec3::new(far, 0.3 * far, 0.0);
+        let rod = cylinder(
+            Frame {
+                origin: at,
+                ..Frame::WORLD
+            },
+            DVec2::ZERO,
+            r,
+            h,
+        );
+        let ridge = at + DVec3::new(0.0, 0.0, 0.1);
+        let start = std::time::Instant::now();
+        let once = k().boolean(&rod, &slab(ridge, n1, 0.3, 0.2), BooleanOp::Subtract);
+        let twice =
+            once.and_then(|b| k().boolean(&b, &slab(ridge, n2, 0.3, 0.2), BooleanOp::Subtract));
+        let took = start.elapsed().as_secs_f64();
+        eprintln!("FAR {far}: ok={} {:?}", twice.is_ok(), twice.as_ref().err());
+        assert!(took < 5.0, "{far}: {took} s");
+        match twice {
+            Ok(b) => {
+                assert_eq!(k().validate(&b), Vec::<String>::new(), "{far}");
+                let v = volume(&b);
+                assert!((v - both).abs() <= 1e-6 * both, "{far}: {v} for {both}");
+                cut += 1;
+            }
+            Err(KernelError::InvalidInput(m)) if far >= 3e5 => {
+                assert!(m.contains("too far from the origin"), "{far}: {m}");
+            }
+            Err(e) => panic!("{far}: {e}"),
+        }
+    }
+    assert!(cut >= 3, "{cut}");
 }

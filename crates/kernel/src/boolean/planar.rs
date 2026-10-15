@@ -17,7 +17,9 @@
 //! *band*, a bound on how far the course strays from the chord. Chords are
 //! halved wherever a band could hide a contact (another chord or a point
 //! within the band, plus the tolerance for a point) until every such band
-//! is under a sixteenth of the tolerance, so the chords form a straight-line
+//! is under a sixteenth of the tolerance (where the rounding of a bound
+//! keeps it wider, the bodies lying too far from the origin, the face is
+//! refused), so the chords form a straight-line
 //! graph with the same structure as the segments: two courses that cross
 //! have chords that cross, and a decision taken on the chords is off only
 //! within that sixteenth (a refusal for points within 1.06 rather than 1
@@ -45,6 +47,11 @@ pub(super) enum Problem {
     Cross(usize),
     /// The earlier stages disagree: a kernel error.
     Inconsistent(&'static str, usize),
+    /// A chord whose band could hide a contact cannot be narrowed: its
+    /// sag's own rounding holds it over the tolerance's sixteenth (it is
+    /// over that and not [`halvable`]), the bodies being too far from the
+    /// origin (design note 0012 §16.2).
+    Far(usize),
 }
 
 impl Problem {
@@ -57,8 +64,51 @@ impl Problem {
             ),
             Problem::Cross(c) => ("two segments crossing", c),
             Problem::Inconsistent(m, c) => (m, c),
+            Problem::Far(c) => (FAR, c),
         }
     }
+}
+
+/// Why a curved course that rounding keeps from being resolved is refused.
+pub(super) const FAR: &str = "the bodies lie too far from the origin for the tolerance: \
+                              rounding keeps a curved edge's course from being resolved \
+                              within it";
+
+/// A bound on how far a course strays from the chord of a stretch of it
+/// ([`Bend::sag`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Sag {
+    /// The bound.
+    pub bound: f64,
+    /// The part of `bound` that its terms' allowances for their own
+    /// rounding make, which halving the chord does not narrow: as the chord
+    /// shrinks, the bound comes to at most about three times this (the
+    /// allowances, and as much again of rounding in the terms they allow
+    /// for). Zero where the bound narrows to nothing.
+    pub floor: f64,
+}
+
+impl Sag {
+    /// A straight chord's.
+    pub const ZERO: Sag = Sag {
+        bound: 0.0,
+        floor: 0.0,
+    };
+
+    /// Whether halving the chord can still narrow the bound toward `fine`:
+    /// it is over `fine` and over four times its floor (an unbounded one
+    /// is, to be halved toward a bound).
+    pub fn wide(self, fine: f64) -> bool {
+        self.bound > fine.max(4.0 * self.floor)
+    }
+}
+
+/// Whether the chord of a course on `[t0, t1]` with `sag` is to be halved
+/// toward `fine`: [`Sag::wide`], and its parameters have a middle between
+/// them.
+pub(super) fn halvable(sag: Sag, t0: f64, t1: f64, fine: f64) -> bool {
+    let tm = 0.5 * (t0 + t1);
+    sag.wide(fine) && tm != t0 && tm != t1
 }
 
 /// The course of a curved segment in a face's chart.
@@ -66,8 +116,16 @@ pub(super) trait Bend {
     /// The chart point at parameter `t`.
     fn at(&self, t: f64) -> DVec2;
     /// A bound on the distance from the course on `[t0, t1]` (either
-    /// order) to the chord between its ends.
-    fn band(&self, t0: f64, t1: f64) -> f64;
+    /// order) to the chord between its ends, less [`Bend::slack`], from the
+    /// course's bend: halving the chord narrows it, by about four times
+    /// where the course is smooth and the bound from its derivatives, by
+    /// about two where it is from control points, down to a few times its
+    /// floor ([`Sag`]).
+    fn sag(&self, t0: f64, t1: f64) -> Sag;
+    /// What every such bound adds to the sag and no halving narrows: an
+    /// allowance for the rounding of the chart's points (design note 0012
+    /// §12.1).
+    fn slack(&self) -> f64;
 }
 
 /// A segment of a face's graph.
@@ -96,8 +154,8 @@ pub(super) struct RChord {
     pub t0: f64,
     pub t1: f64,
     pub band: f64,
-    /// The part of `band` that halving the chord narrows ([`Band`]).
-    pub sag: f64,
+    /// The part of `band` from the course's bend ([`Band`]).
+    pub sag: Sag,
 }
 
 /// A region inside the face.
@@ -124,13 +182,29 @@ impl Region {
         self.chords.iter().flatten().fold(0.0, |m, c| m.max(c.band))
     }
 
-    /// The widest sag of its chords: what halving can still narrow.
-    pub fn sag(&self) -> f64 {
-        self.chords.iter().flatten().fold(0.0, |m, c| m.max(c.sag))
+    /// The widest sag of its chords that halving can still narrow toward
+    /// `fine` ([`halvable`]), zero if none can be.
+    pub fn widest(&self, fine: f64) -> f64 {
+        self.chords
+            .iter()
+            .flatten()
+            .filter(|c| halvable(c.sag, c.t0, c.t1, fine))
+            .fold(0.0, |m, c| m.max(c.sag.bound))
     }
 
-    /// The region with every chord whose sag is over `fine` halved.
-    pub fn refined(&self, edges: &[Edge], fine: f64) -> Region {
+    /// Whether a chord's sag is over `fine` though halving can no longer
+    /// narrow it ([`halvable`]): rounding holds it up, the course lying too
+    /// far from the origin for the tolerance.
+    pub fn stuck(&self, fine: f64) -> bool {
+        self.chords
+            .iter()
+            .flatten()
+            .any(|c| c.sag.bound > fine && !halvable(c.sag, c.t0, c.t1, fine))
+    }
+
+    /// The region with every chord halved whose sag is over `above` and
+    /// can still be narrowed toward `fine` ([`halvable`]).
+    pub fn refined(&self, edges: &[Edge], above: f64, fine: f64) -> Region {
         let chords = self
             .chords
             .iter()
@@ -139,7 +213,9 @@ impl Region {
                 for (i, c) in l.iter().enumerate() {
                     let next = l[(i + 1) % l.len()].p;
                     match &edges[c.edge].bend {
-                        Some((bend, _)) if c.sag > fine => {
+                        Some((bend, _))
+                            if c.sag.bound > above && halvable(c.sag, c.t0, c.t1, fine) =>
+                        {
                             let tm = 0.5 * (c.t0 + c.t1);
                             let pm = bend.at(tm);
                             let first = Band::of(bend.as_ref(), c.t0, tm, c.p, pm);
@@ -177,34 +253,41 @@ impl Region {
 /// The band of the chord from `p` to `q` along a course on `[t0, t1]`.
 #[derive(Clone, Copy, Debug)]
 struct Band {
-    /// How far the course strays from the chord: its sag, plus how far the
-    /// chord's ends are moved from the course's (to the clusters' places,
-    /// at the ends of a segment).
+    /// How far the course strays from the chord: its band about its own
+    /// chord, plus how far the chord's ends are moved from the course's
+    /// (to the clusters' places, at the ends of a segment).
     band: f64,
-    /// The course's band about its own chord, which halving the chord
-    /// narrows. The rest of the band, an end moved to its cluster (by up to
-    /// the tolerance), stays with the end chord however short it gets, so
-    /// halving is decided by the sag alone: halving by the whole band
-    /// never ended at a cluster moved more than `fine` from the course.
-    sag: f64,
+    /// The course's band about its own chord ([`Bend::sag`]). The rest of
+    /// the band, the rounding allowance and an end moved to its cluster (by
+    /// up to the tolerance), stays with the chord however short it gets, so
+    /// halving is decided by the sag alone: halving by the whole band never
+    /// ended at a cluster moved more than `fine` from the course, nor, far
+    /// from the origin, where the allowance is wider than `fine` (found by
+    /// review).
+    sag: Sag,
 }
 
 impl Band {
     fn of(bend: &dyn Bend, t0: f64, t1: f64, p: DVec2, q: DVec2) -> Band {
         let moved = (bend.at(t0) - p).length().max((bend.at(t1) - q).length());
-        let sag = bend.band(t0, t1);
+        let sag = bend.sag(t0, t1);
         Band {
-            band: sag + moved,
+            band: sag.bound + bend.slack() + moved,
             sag,
         }
     }
 }
 
-/// Rounds of halving after which a curved segment is taken as unresolved:
-/// each round quarters the bands it halves, so this many rounds take a
-/// chord across a kilometre down to well under a sixteenth of the default
-/// tolerance.
-const MAX_ROUNDS: usize = 60;
+/// Rounds of halving after which a curved segment is taken as unresolved,
+/// and the most halvings of a chord at a node ([`split_ends`]) or of the
+/// chords about a point sought inside a region. A halving narrows a sag
+/// about four times where it is bounded from the course's derivatives and
+/// about two times where from control points, down to a few times its
+/// floor ([`Bend::sag`]); sixty halvings shorten a chord 2⁶⁰ ≈ 10¹⁸ times,
+/// past the last bit of its parameters, so a sag stops narrowing at its
+/// floor or at the parameter's last bit ([`halvable`]) before this is
+/// reached.
+pub(super) const MAX_ROUNDS: usize = 60;
 
 /// A chord of the graph.
 #[derive(Clone, Copy, Debug)]
@@ -216,8 +299,8 @@ struct Chord {
     t0: f64,
     t1: f64,
     band: f64,
-    /// The part of `band` that halving narrows ([`Band`]).
-    sag: f64,
+    /// The part of `band` from the course's bend ([`Band`]).
+    sag: Sag,
 }
 
 /// The chords of the edges, given each curved edge's parameters: nodes
@@ -251,7 +334,7 @@ fn graph(
                 t0: 0.0,
                 t1: 0.0,
                 band: 0.0,
-                sag: 0.0,
+                sag: Sag::ZERO,
             }),
             Some((bend, _)) => {
                 let ts = &params[i];
@@ -291,7 +374,9 @@ fn graph(
 /// Halves the chords whose bands could hide a contact until none can:
 /// a chord whose sag is over `eps / 16` is halved when another chord comes
 /// within the two bands of it, or a cluster within its band and the
-/// cluster's reach `near`.
+/// cluster's reach `near`. Where such a chord's sag is held over `eps / 16`
+/// by its own rounding (it is not [`halvable`]), the face is refused
+/// ([`Problem::Far`]) rather than decided on a band wider than allowed.
 /// Consecutive chords of one edge share a point of its course and are not
 /// tested against each other.
 ///
@@ -344,6 +429,18 @@ fn refine(
         let points: Vec<DVec3> = g.p[..g.real].iter().map(|q| q.extend(0.0)).collect();
         let point_tree = Bvh::of_points(&points);
         let mut split: Vec<bool> = vec![false; g.chords.len()];
+        // A chord whose band could hide a contact is halved; one whose sag
+        // rounding holds over `fine` cannot be, and the face is refused.
+        let halve = |k: usize, split: &mut [bool]| {
+            let c = g.chords[k];
+            if c.sag.bound > fine && !split[k] {
+                if !halvable(c.sag, c.t0, c.t1, fine) {
+                    return Err(Problem::Far(g.cluster[c.from]));
+                }
+                split[k] = true;
+            }
+            Ok(())
+        };
         let mut close = Vec::new();
         for i in (0..g.chords.len()).filter(|&i| fresh[i]) {
             let c = g.chords[i];
@@ -355,21 +452,23 @@ fn refine(
                 // Nothing to decide when neither could be halved anew.
                 if j == i
                     || consecutive
-                    || (split[i] || c.sag <= fine) && (split[j] || d.sag <= fine)
+                    || (split[i] || c.sag.bound <= fine) && (split[j] || d.sag.bound <= fine)
                 {
                     continue;
                 }
                 if segment_distance(a, b, g.p[d.from], g.p[d.to]) <= c.band + d.band {
-                    split[i] |= c.sag > fine;
-                    split[j] |= d.sag > fine;
+                    halve(i, &mut split)?;
+                    halve(j, &mut split)?;
                 }
             }
-            if c.sag > fine && !split[i] {
+            if c.sag.bound > fine && !split[i] {
                 let r = DVec3::splat(c.band + widest);
                 point_tree.overlapping(boxes[i].0 - r, boxes[i].1 + r, &mut close);
-                split[i] = close.iter().any(|&n| {
+                if close.iter().any(|&n| {
                     n != c.from && n != c.to && point_segment(g.p[n], a, b) <= c.band + near[n]
-                });
+                }) {
+                    halve(i, &mut split)?;
+                }
             }
         }
         if !split.iter().any(|&s| s) {
@@ -395,8 +494,9 @@ fn refine(
 }
 
 /// Halves the end chords of each curved edge at a node it shares with
-/// another edge until their sags are at most `fine` (or [`MAX_ROUNDS`]
-/// halvings are made): the halvings [`refine`] would make there anyway,
+/// another edge until their sags are at most `fine`, or rounding holds
+/// them over it ([`halvable`]), or [`MAX_ROUNDS`] halvings are made: the
+/// halvings [`refine`] would make there anyway,
 /// one a round, because chords meeting at a node are within their bands
 /// of each other.
 fn split_ends(
@@ -431,7 +531,7 @@ fn split_ends(
             let mut inner = Vec::new();
             let mut t = t_next;
             for _ in 0..MAX_ROUNDS {
-                if bend.band(t_end, t) <= fine {
+                if !halvable(bend.sag(t_end, t), t_end, t, fine) {
                     break;
                 }
                 t = 0.5 * (t_end + t);

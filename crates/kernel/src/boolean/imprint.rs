@@ -993,6 +993,19 @@ fn spans_on(
             show(p)
         ))
     };
+    // A line or a ray that misses the box where faces of both bodies can
+    // be bounds no part of the result: its stretches in the face matter to
+    // nothing. Beyond that box the tolerance need not decide where it
+    // leaves the face (a plane within the tolerance of a cone along a
+    // ruling there, the face's boundary grazing the cone: no rule refuses
+    // it, as no result depends on it), so its cuts may not pair up (found
+    // by the fuzz of second cuts: §17).
+    if let Track::Line { origin, dir } | Track::Ray { origin, dir, .. } = *track {
+        let (t0, t1) = track.ends();
+        if !line_meets_box(origin, dir, t0, t1, region) {
+            return Ok(Vec::new());
+        }
+    }
     // Which way the track runs across the face: with the face's outward
     // normal `n` and the other surface's gradient `g`, the track runs along
     // `n × g` or against it, the same way all along it (the surfaces cross
@@ -1145,6 +1158,24 @@ fn spans_on(
             hi: (c[1].1, c[1].0),
         })
         .collect())
+}
+
+/// Whether the line `origin + t dir` for `t` in `[t0, t1]` meets the box
+/// `(lo, hi)`.
+fn line_meets_box(origin: DVec3, dir: DVec3, t0: f64, t1: f64, (lo, hi): (DVec3, DVec3)) -> bool {
+    let (mut a, mut b) = (t0, t1);
+    for k in 0..3 {
+        if dir[k] == 0.0 {
+            if origin[k] < lo[k] || origin[k] > hi[k] {
+                return false;
+            }
+            continue;
+        }
+        let (x, y) = ((lo[k] - origin[k]) / dir[k], (hi[k] - origin[k]) / dir[k]);
+        a = a.max(x.min(y));
+        b = b.min(x.max(y));
+    }
+    a <= b
 }
 
 /// The stretches of `track` in both of two spans, not both the whole

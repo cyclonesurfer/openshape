@@ -36,6 +36,7 @@ use glam::{DVec2, DVec3};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::bvh::Bvh;
+use crate::geom::Curve3;
 use crate::origin::{Operand, Origins};
 use crate::topo::Brep;
 use crate::{BooleanOp, KernelError, Tolerance};
@@ -157,6 +158,258 @@ enum Course {
     Track { id: usize, ta: f64, tb: f64 },
 }
 
+/// The courses of curved segments: the operands' curved edges and the
+/// tracks where their surfaces meet.
+#[derive(Clone, Copy)]
+struct Courses<'a> {
+    pair: &'a Pair<'a>,
+    tracks: &'a [Track],
+}
+
+impl Courses<'_> {
+    /// The point of `course` at parameter `t`.
+    fn point(&self, course: Course, t: f64) -> DVec3 {
+        match course {
+            Course::Straight => unreachable!("a straight segment has no parameter"),
+            Course::Edge { op, e, .. } => self.pair.get(op).curve(e).0.point(t),
+            Course::Track { id, .. } => self.tracks[id].point(t),
+        }
+    }
+
+    /// The point of `course` at the fraction `f` of its parameters' way
+    /// from `ta` to `tb`.
+    fn along(&self, course: Course, f: f64) -> DVec3 {
+        match course {
+            Course::Straight => unreachable!("a straight segment has no parameter"),
+            Course::Edge { ta, tb, .. } | Course::Track { ta, tb, .. } => {
+                self.point(course, ta + (tb - ta) * f)
+            }
+        }
+    }
+
+    /// The point of `course` as far from one end as from the other: at
+    /// least half its chord from each, wherever its parameter crowds (the
+    /// point halfway along a hyperbola's NURBS parameter can be within
+    /// 10⁻⁴ of the stretch of an end, review measured). By bisection on
+    /// the difference of the squares of the distances, which is affine in
+    /// the point, so changes sign once along a conic's stretch.
+    fn middle(&self, course: Course) -> DVec3 {
+        let (ta, tb) = match course {
+            Course::Straight => unreachable!("a straight segment has no parameter"),
+            Course::Edge { ta, tb, .. } | Course::Track { ta, tb, .. } => (ta, tb),
+        };
+        let (a, b) = (self.point(course, ta), self.point(course, tb));
+        let side = |t: f64| {
+            let x = self.point(course, t);
+            (x - a).length_squared() - (x - b).length_squared()
+        };
+        let (mut lo, mut hi) = (ta, tb);
+        for _ in 0..60 {
+            let m = 0.5 * (lo + hi);
+            if m == lo || m == hi {
+                break;
+            }
+            if side(m) < 0.0 {
+                lo = m;
+            } else {
+                hi = m;
+            }
+        }
+        self.point(course, 0.5 * (lo + hi))
+    }
+
+    /// The point of `course` where its tangent has turned the fraction `f`
+    /// of its whole turning from `ta` to `tb`, for an ellipse, a conic or
+    /// a NURBS curve (`None` for a circle, whose parameter is its angle):
+    /// on a conic track in closed form ([`meet::conic_at_turn`]), else by
+    /// [`turned`], an ellipse's stretch broken into pieces of at most a
+    /// quarter of its parameter's period and a NURBS curve's at its knots
+    /// ([`ellipse_breaks`], [`knot_breaks`]).
+    fn at_turn(&self, course: Course, f: f64) -> Option<DVec3> {
+        let t = match course {
+            Course::Straight => unreachable!("a straight segment has no parameter"),
+            Course::Track { id, ta, tb } => match self.tracks[id] {
+                Track::Conic { c, .. } => {
+                    let (fa, fb) = (meet::conic_turn(c, ta), meet::conic_turn(c, tb));
+                    meet::conic_at_turn(c, fa + (fb - fa) * f)
+                }
+                track @ Track::Ellipse { .. } => {
+                    turned(|t| track.deriv(t), &ellipse_breaks(ta, tb), f)
+                }
+                _ => return None,
+            },
+            Course::Edge { op, e, ta, tb } => {
+                let curve = self.pair.get(op).curve(e).0;
+                let Curve3::Nurbs(n) = curve else {
+                    return None;
+                };
+                turned(|t| curve.deriv(t), &knot_breaks(n, ta, tb), f)
+            }
+        };
+        Some(self.point(course, t))
+    }
+
+    /// The distance from `p` (a point near the curve) to the stretch of
+    /// `course` between its parameters: to the foot of `p` on the curve
+    /// where that is in the stretch, else to the nearer end.
+    fn distance(&self, course: Course, p: DVec3) -> f64 {
+        match course {
+            Course::Straight => unreachable!("a straight segment has no parameter"),
+            Course::Edge { op, e, ta, tb } => {
+                points::foot_on(self.pair.get(op).curve(e).0, ta, tb, p).1
+            }
+            Course::Track { id, ta, tb } => {
+                let track = self.tracks[id];
+                let (lo, hi) = if ta <= tb { (ta, tb) } else { (tb, ta) };
+                let (t, d) = track.nearest(p);
+                let t = if track.closed() {
+                    lo + (t - lo).rem_euclid(TAU)
+                } else {
+                    t
+                };
+                if (lo..=hi).contains(&t) {
+                    d
+                } else {
+                    (track.point(lo) - p)
+                        .length()
+                        .min((track.point(hi) - p).length())
+                }
+            }
+        }
+    }
+}
+
+/// The parameter between the first and the last of `breaks` (in order
+/// along the stretch) where the direction of `deriv` has turned the
+/// fraction `f` of its whole turning along them. The breaks are chosen
+/// so that between consecutive ones a plane curve that turns one way (a
+/// conic's stretch) turns less than a half turn ([`ellipse_breaks`],
+/// [`knot_breaks`]), so its turning there is the angle between its
+/// directions at the two, and grows steadily from the first: the turnings
+/// are summed to find the piece, then the parameter is found in it by
+/// bisection on the angle from its first direction. Along another curve,
+/// some parameter between the ends. (The angle from the stretch's first
+/// direction alone falls back after a half turn, which crowded the probes
+/// of an ellipse's longer stretches into their first part; found by
+/// review.)
+fn turned(deriv: impl Fn(f64) -> DVec3, breaks: &[f64], f: f64) -> f64 {
+    let angle = |d0: DVec3, d: DVec3| d0.cross(d).length().atan2(d0.dot(d));
+    let dirs: Vec<DVec3> = breaks.iter().map(|&t| deriv(t)).collect();
+    let turns: Vec<f64> = dirs.windows(2).map(|w| angle(w[0], w[1])).collect();
+    let mut goal = f * turns.iter().sum::<f64>();
+    let mut k = 0;
+    while k + 1 < turns.len() && goal > turns[k] {
+        goal -= turns[k];
+        k += 1;
+    }
+    let (d0, mut lo, mut hi) = (dirs[k], breaks[k], breaks[k + 1]);
+    // Within 10⁻¹² of the piece's parameters: far finer than a probe
+    // needs.
+    for _ in 0..40 {
+        let m = 0.5 * (lo + hi);
+        if angle(d0, deriv(m)) < goal {
+            lo = m;
+        } else {
+            hi = m;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// Breaks of an ellipse's stretch from `ta` to `tb` for [`turned`]: equal
+/// pieces of at most a quarter of its parameter's period. The tangents at
+/// parameters half a period apart are opposite (the ellipse is symmetric
+/// about its centre) and turn steadily, so a piece shorter than half a
+/// period turns less than a half turn.
+fn ellipse_breaks(ta: f64, tb: f64) -> Vec<f64> {
+    let k = ((tb - ta).abs() / std::f64::consts::FRAC_PI_2)
+        .ceil()
+        .max(1.0) as usize;
+    (0..=k)
+        .map(|i| {
+            if i == k {
+                tb
+            } else {
+                ta + (tb - ta) * (i as f64 / k as f64)
+            }
+        })
+        .collect()
+}
+
+/// Breaks of the stretch of the NURBS curve `n` from `ta` to `tb` for
+/// [`turned`]: its ends, the knots between them, and the halvings of any
+/// piece between them not shown to turn less than a half turn
+/// ([`within_half_turn`]). A rational quadratic piece of a conic, the
+/// edges booleans write, is always shown so; a piece of higher degree
+/// can turn further (review: an arc of 238° of an ellipse as one cubic
+/// span, its weights positive), and is halved until its parts are.
+fn knot_breaks(n: &opendatum_nurbs::NurbsCurve, ta: f64, tb: f64) -> Vec<f64> {
+    /// Halvings of a piece before it is kept as it is: a smooth curve's
+    /// pieces pass long before (its control points close in on its
+    /// tangent), a cusp's never do.
+    const DEPTH: usize = 30;
+    let (lo, hi) = (ta.min(tb), ta.max(tb));
+    let segments = n.bezier_segments();
+    // The pieces' ends from `lo` up, each piece halved until it passes.
+    let mut breaks = vec![lo];
+    let mut stack: Vec<(f64, f64, usize)> = quadric::spans(&segments, lo, hi)
+        .map(|(a, b, _)| (a, b, 0))
+        .collect();
+    stack.reverse();
+    while let Some((a, b, depth)) = stack.pop() {
+        let m = 0.5 * (a + b);
+        let pass = depth >= DEPTH
+            || m <= a
+            || m >= b
+            || quadric::spans(&segments, a, b).all(|(_, _, pw)| within_half_turn(&pw));
+        if pass {
+            breaks.push(b);
+        } else {
+            stack.push((m, b, depth + 1));
+            stack.push((a, m, depth + 1));
+        }
+    }
+    if breaks.len() == 1 {
+        breaks.push(hi);
+    }
+    // The stretch's own ends, exactly.
+    *breaks.last_mut().expect("two breaks") = hi;
+    if ta > tb {
+        breaks.reverse();
+    }
+    breaks
+}
+
+/// Whether every tangent of the rational Bézier piece with homogeneous
+/// control points `pw` (positive weights) lies on one side of a plane
+/// through the origin, so that the piece, turning one way, turns less
+/// than a half turn. Its tangent is a combination with nonnegative
+/// coefficients of the differences `Pⱼ − Pᵢ` (`i < j`) of its control
+/// points: by the quotient rule (Piegl & Tiller, *The NURBS Book*, ch.
+/// 4) `X' = Σᵢ<ⱼ wᵢ wⱼ (Bᵢ Bⱼ' − Bᵢ' Bⱼ) (Pⱼ − Pᵢ) / W²`, and `Bₖ' / Bₖ =
+/// k / s − (n − k) / (1 − s)` grows with `k`. So
+/// the test asks whether each difference has a positive component along
+/// the sum of the directions of the first and the last leg: true of a
+/// quadratic whose legs are not opposite, as a conic's arc of less than
+/// a half turn has. A sufficient test, not a necessary one.
+fn within_half_turn(pw: &[glam::DVec4]) -> bool {
+    let p: Vec<DVec3> = pw.iter().map(|q| q.truncate() / q.w).collect();
+    let n = p.len() - 1;
+    let first = (1..=n).map(|j| p[j] - p[0]).find(|d| *d != DVec3::ZERO);
+    let last = (0..n).rev().map(|i| p[n] - p[i]).find(|d| *d != DVec3::ZERO);
+    let (Some(first), Some(last)) = (first, last) else {
+        // A point.
+        return true;
+    };
+    let u = first.normalize() + last.normalize();
+    (0..n).all(|i| {
+        (i + 1..=n).all(|j| {
+            let d = p[j] - p[i];
+            d == DVec3::ZERO || u.dot(d) > 0.0
+        })
+    })
+}
+
 impl Course {
     /// The course run the other way.
     fn reversed(self) -> Course {
@@ -180,9 +433,6 @@ struct Seg {
     b: usize,
     course: Course,
     sources: Vec<Source>,
-    /// For a curved segment, the point of its course halfway along its
-    /// parameter.
-    mid: Option<DVec3>,
 }
 
 /// A segment in one face's graph: material on the left of `a → b`
@@ -287,6 +537,10 @@ fn boolean_within(
 
     // Each face's segments: its own edges' pieces, then imprints.
     let mut segs = Segments::default();
+    let courses = Courses {
+        pair: &pair,
+        tracks: &contacts.tracks,
+    };
     let mut face_segs: [Vec<Vec<FaceSeg>>; 2] = [
         vec![Vec::new(); pair.first.faces.len()],
         vec![Vec::new(); pair.second.faces.len()],
@@ -312,7 +566,6 @@ fn boolean_within(
                                 .collect()
                         } else {
                             let ts = pts.on_edge_params(op, e);
-                            let (curve, _, _) = shape.curve(e);
                             (0..along.len() - 1)
                                 .map(|k| {
                                     let (ta, tb) = (ts[k], ts[k + 1]);
@@ -320,8 +573,8 @@ fn boolean_within(
                                         along[k],
                                         along[k + 1],
                                         Course::Edge { op, e, ta, tb },
-                                        curve.point(0.5 * (ta + tb)),
                                         Source::Edge(op, e),
+                                        &courses,
                                         eps,
                                     )
                                 })
@@ -383,8 +636,8 @@ fn boolean_within(
                         ta,
                         tb,
                     },
-                    track.point(0.5 * (ta + tb)),
                     Source::Meet(fa, fb),
+                    &courses,
                     eps,
                 ));
             }
@@ -427,8 +680,8 @@ fn boolean_within(
                     w[0].0,
                     w[1].0,
                     Course::Track { id, ta, tb },
-                    track.point(0.5 * (ta + tb)),
                     Source::Meet(fa, fb),
+                    &courses,
                     eps,
                 );
                 face_segs[0][fa].push(FaceSeg { seg: s, side: None });
@@ -446,9 +699,10 @@ fn boolean_within(
                 for &(e, _) in l {
                     for &s in &edge_segs[slot(other(op))][e] {
                         let seg = &segs.list[s];
-                        let m = seg
-                            .mid
-                            .unwrap_or_else(|| (pts.rep[seg.a] + pts.rep[seg.b]) * 0.5);
+                        let m = match seg.course {
+                            Course::Straight => (pts.rep[seg.a] + pts.rep[seg.b]) * 0.5,
+                            course => courses.middle(course),
+                        };
                         let outline = outlines[slot(op)][f].as_ref();
                         if imprint::locate(shape, outline, face, m, eps) != Some(false) {
                             face_segs[slot(op)][f].push(FaceSeg { seg: s, side: None });
@@ -508,6 +762,9 @@ fn boolean_within(
                     name(op),
                     show(pts.rep[c])
                 )),
+                planar::Problem::Far(c) => {
+                    KernelError::InvalidInput(format!("{} near {}", planar::FAR, show(pts.rep[c])))
+                }
             })?;
             for region in regions {
                 if clear {
@@ -520,8 +777,7 @@ fn boolean_within(
                     });
                     continue;
                 }
-                let (inner, clearance) = interior(&region, &edges, &chart, eps)
-                    .map_err(|m| KernelError::InvalidResult(format!("boolean: face {fi}: {m}")))?;
+                let (inner, clearance) = interior(&region, &edges, &chart, fi, eps)?;
                 let at = chart.unmap(inner);
                 if clearance <= eps {
                     return Err(KernelError::InvalidInput(format!(
@@ -598,20 +854,26 @@ fn outward(shape: &Shape, f: &shape::Face, p: DVec3) -> DVec3 {
 /// ([`classify::probe_point`]) before triangulating it.
 const PROBE_ABOVE: usize = 64;
 
-/// A point inside a region of a face and its distance in space from the
-/// region's boundary at least: inside the polygon of the region's chords,
-/// as far from its sides as can be found, less the chords' bands, as a
-/// distance in space ([`Chart::space`]).
-/// While that is within the tolerance, chords are halved, until their
-/// sags are within a sixteenth of it.
+/// A point inside a region of face `face` and its distance in space from
+/// the region's boundary at least: inside the polygon of the region's
+/// chords, as far from its sides as can be found, less the chords' bands,
+/// as a distance in space ([`Chart::space`]).
+/// While that is within the tolerance, the chords whose sags are widest
+/// are halved, until every sag is within a sixteenth of it or down to its
+/// own rounding ([`planar::Sag::wide`]). A sag that rounding holds over
+/// the sixteenth is refused ([`planar::FAR`]): the bodies are too far from
+/// the origin for the tolerance (found by review: without the floors the
+/// halving went on forever, the chords doubling each round).
 fn interior(
     region: &planar::Region,
     edges: &[planar::Edge],
     chart: &Chart,
+    face: usize,
     eps: f64,
-) -> Result<(DVec2, f64), String> {
+) -> Result<(DVec2, f64), KernelError> {
+    let fine = eps / 16.0;
     let mut refined: Option<planar::Region> = None;
-    loop {
+    for _ in 0..planar::MAX_ROUNDS {
         let r = refined.as_ref().unwrap_or(region);
         let polygons = r.polygons();
         let band = r.band();
@@ -625,14 +887,33 @@ fn interior(
                 }
             }
         }
-        let (inner, clearance) = classify::interior_point(&polygons)?;
+        let (inner, clearance) = classify::interior_point(&polygons)
+            .map_err(|m| KernelError::InvalidResult(format!("boolean: face {face}: {m}")))?;
         let space = chart.space(inner, clearance - band);
-        let sag = r.sag();
-        if space > eps || sag <= eps / 16.0 {
+        if space > eps {
             return Ok((inner, space));
         }
-        refined = Some(r.refined(edges, sag / 4.0));
+        let wide = r.widest(fine);
+        if !wide.is_finite() {
+            return Err(KernelError::InvalidResult(format!(
+                "boolean: face {face}: a curved boundary's band could not be bounded"
+            )));
+        }
+        if wide == 0.0 {
+            if r.stuck(fine) {
+                return Err(KernelError::InvalidInput(format!(
+                    "{} near {}",
+                    planar::FAR,
+                    show(chart.unmap(inner))
+                )));
+            }
+            return Ok((inner, space));
+        }
+        refined = Some(r.refined(edges, wide / 4.0, fine));
     }
+    Err(KernelError::InvalidResult(format!(
+        "boolean: face {face}: a curved boundary could not be resolved into chords"
+    )))
 }
 
 /// The segments `list` (with their sides) of a face whose chart is
@@ -717,7 +998,6 @@ impl Segments {
                 b: k.1,
                 course,
                 sources: Vec::new(),
-                mid: None,
             });
             self.list.len() - 1
         });
@@ -726,25 +1006,47 @@ impl Segments {
     }
 
     /// The curved segment from `from` to `to` along `course` (given from
-    /// `from`), with `mid` the point halfway along it, from source `s`: a
-    /// new one, or one already between the two clusters whose midpoint is
-    /// within the tolerance `eps` of `mid` (two pieces of one course, an
-    /// operand's edge and the curve where faces meet along it), which
-    /// gains the source.
+    /// `from`), from source `s`: a new one, or one already between the two
+    /// clusters along the same curve within the tolerance `eps` (two pieces
+    /// of one course, an operand's edge and the curve where faces meet
+    /// along it), which gains the source. The same curve: the points a
+    /// quarter, half and three quarters of the way along each course, by
+    /// its parameter and, for an ellipse, a conic or a NURBS curve, by the
+    /// turning of its tangent ([`Courses::at_turn`]), are within `eps` of
+    /// the other's stretch (design note 0012 §16.3). Its parameters and
+    /// the other's need not agree (a conic's NURBS edge and its track).
+    /// Two different conics between the same ends can pass within the
+    /// tolerance of three points of each and stray far between them where
+    /// the points crowd: by parameter, on a hyperbola's arms (missing its
+    /// vertex); by turning, near its vertex. Review measured two coplanar
+    /// conic tracks apart by 4.4 × 10⁵ times the largest distance at their
+    /// parameter probes, and by at most 2.3 times it at both sets.
     fn add_curved(
         &mut self,
         from: usize,
         to: usize,
         course: Course,
-        mid: DVec3,
         s: Source,
+        courses: &Courses,
         eps: f64,
     ) -> usize {
         let k = key(from, to);
+        // Every probe of `a` within the tolerance of `b`'s stretch (the
+        // fractions are symmetric, so a course run either way gives the
+        // same points).
+        let near = |a: Course, b: Course| {
+            [0.25, 0.5, 0.75].iter().all(|&f| {
+                courses.distance(b, courses.along(a, f)) <= eps
+                    && courses
+                        .at_turn(a, f)
+                        .is_none_or(|p| courses.distance(b, p) <= eps)
+            })
+        };
         let found = self.curved.get(&k).and_then(|l| {
-            l.iter()
-                .copied()
-                .find(|&i| self.list[i].mid.is_some_and(|m| (m - mid).length() <= eps))
+            l.iter().copied().find(|&i| {
+                let other = self.list[i].course;
+                near(course, other) && near(other, course)
+            })
         });
         let i = found.unwrap_or_else(|| {
             self.list.push(Seg {
@@ -756,7 +1058,6 @@ impl Segments {
                     course.reversed()
                 },
                 sources: Vec::new(),
-                mid: Some(mid),
             });
             let i = self.list.len() - 1;
             self.curved.entry(k).or_default().push(i);
@@ -805,6 +1106,347 @@ mod tests {
             .make_box(&frame, DVec3::splat(size))
             .expect("a box");
         (*body.brep).clone()
+    }
+
+    /// Points on the ellipse a tilted cut leaves on a rod's side, 1 m to
+    /// 3,000 km from the origin, located against that face: on its
+    /// boundary, found at once. Far out the sags of the ellipse's chords
+    /// stop narrowing at their rounding; locating halved every chord
+    /// within its band of the point to the parameter's last bit, the
+    /// chords doubling (found by review: from about 145 km).
+    #[test]
+    fn points_on_a_far_conic_edge_are_located_at_once() {
+        use crate::{ExtrudeSpec, Profile};
+        let tol = Tolerance::default();
+        let eps = tol.linear;
+        let tilt = 20f64.to_radians();
+        let n = DVec3::new(tilt.sin(), 0.0, tilt.cos());
+        for far in [1.0, 3e4, 3e5, 3e6] {
+            let at = DVec3::new(far, 0.3 * far, 0.0);
+            let k = BrepKernel::default();
+            let rod = k
+                .extrude(
+                    &Profile::circle(
+                        Frame {
+                            origin: at,
+                            ..Frame::WORLD
+                        },
+                        DVec2::ZERO,
+                        0.05,
+                    ),
+                    &ExtrudeSpec {
+                        distance: 0.15,
+                        symmetric: false,
+                    },
+                )
+                .expect("a rod");
+            let f = Frame::from_normal(at + DVec3::new(0.0, 0.0, 0.1), n, DVec3::Y);
+            let slab = k
+                .make_box(
+                    &Frame {
+                        origin: f.origin - (f.x + f.y) * 0.15,
+                        ..f
+                    },
+                    DVec3::new(0.3, 0.3, 0.2),
+                )
+                .expect("a box");
+            let (cut, _) =
+                boolean(&rod.brep, &slab.brep, BooleanOp::Subtract, &tol).expect("a cut rod");
+            let shape = shape::shape(&cut, "cut").expect("a shape");
+            let mut located = 0;
+            for face in &shape.faces {
+                let outline = chart::Outline::new(&shape, face).expect("an outline");
+                if !matches!(outline.chart, Chart::Cylinder { .. }) {
+                    continue;
+                }
+                for &(e, _) in face.loops.iter().flatten() {
+                    let (curve, t0, t1) = shape.curve(e);
+                    if !matches!(curve, Curve3::Nurbs(_)) {
+                        continue;
+                    }
+                    for f in [0.3, 0.5, 0.7] {
+                        let q = outline.chart.map(curve.point(t0 + (t1 - t0) * f));
+                        let start = std::time::Instant::now();
+                        assert_eq!(outline.locate(q, eps, eps / 16.0), None, "{far}");
+                        let took = start.elapsed().as_secs_f64();
+                        assert!(took < 1.0, "{far}: {took} s");
+                        located += 1;
+                    }
+                }
+            }
+            assert!(located >= 3, "{far}: {located}");
+        }
+    }
+
+    /// A course whose sag does not narrow when its chords are halved.
+    struct Stuck;
+
+    impl planar::Bend for Stuck {
+        fn at(&self, t: f64) -> DVec2 {
+            DVec2::new(1.0 - t, 2e-8)
+        }
+        fn sag(&self, _: f64, _: f64) -> planar::Sag {
+            planar::Sag {
+                bound: 1e-8,
+                floor: 1e-8,
+            }
+        }
+        fn slack(&self) -> f64 {
+            0.0
+        }
+    }
+
+    /// A sliver whose curved side's sag stays over a sixteenth of the
+    /// tolerance, as the rounding of a course far from the origin keeps
+    /// it: refused, its floor showing that halving cannot narrow it (it was
+    /// halved forever, the chords doubling each round; found by review).
+    #[test]
+    fn a_sag_rounding_holds_up_is_refused() {
+        let chord = |p: DVec2, edge: usize, curved: bool| planar::RChord {
+            p,
+            edge,
+            t0: 0.0,
+            t1: if curved { 1.0 } else { 0.0 },
+            band: if curved { 1e-8 } else { 0.0 },
+            sag: if curved {
+                planar::Bend::sag(&Stuck, 0.0, 1.0)
+            } else {
+                planar::Sag::ZERO
+            },
+        };
+        let region = planar::Region {
+            loops: vec![vec![(0, true), (1, true), (2, true), (3, true)]],
+            chords: vec![vec![
+                chord(DVec2::ZERO, 0, false),
+                chord(DVec2::new(1.0, 0.0), 1, false),
+                chord(DVec2::new(1.0, 2e-8), 2, true),
+                chord(DVec2::new(0.0, 2e-8), 3, false),
+            ]],
+        };
+        let edges: Vec<planar::Edge> = (0..4)
+            .map(|k| planar::Edge {
+                seg: k,
+                a: k,
+                b: (k + 1) % 4,
+                side: Some(true),
+                bend: (k == 2).then(|| (Box::new(Stuck) as Box<dyn planar::Bend>, vec![0.0, 1.0])),
+            })
+            .collect();
+        let chart = Chart::Plane(Frame::WORLD);
+        let got = interior(&region, &edges, &chart, 0, 1e-7);
+        let Err(KernelError::InvalidInput(m)) = got else {
+            panic!("{got:?}")
+        };
+        assert!(m.contains("too far from the origin"), "{m}");
+    }
+
+    /// Two hyperbolas with the same asymptotes, their vertices ten
+    /// tolerances apart, between ends a fiftieth of the tolerance apart:
+    /// every probe of either by parameter falls on its arms, within the
+    /// tolerance of the other, and only the probes by turning, near the
+    /// vertices, tell them apart (design note 0012 §16.3; found by
+    /// review). A hyperbola from either end is still one segment.
+    #[test]
+    fn courses_apart_only_at_a_vertex_are_two_segments() {
+        let box_ = cube(DVec3::ZERO, 1.0);
+        let pair = Pair {
+            first: shape::shape(&box_, "first").expect("a shape"),
+            second: shape::shape(&box_, "second").expect("a shape"),
+        };
+        let (p, q) = (1e-3, 1e-3 * (1.0 + 1e-3));
+        let tracks = [
+            Track::Conic {
+                vertex: DVec3::ZERO,
+                x: DVec3::X,
+                y: DVec3::Y,
+                p,
+                c: -1.0,
+            },
+            Track::Conic {
+                vertex: DVec3::X * (q - p),
+                x: DVec3::X,
+                y: DVec3::Y,
+                p: q,
+                c: -1.0,
+            },
+        ];
+        let courses = Courses {
+            pair: &pair,
+            tracks: &tracks,
+        };
+        let eps = 1e-7;
+        let first = Course::Track {
+            id: 0,
+            ta: -0.5 / p,
+            tb: 0.3 / p,
+        };
+        let second = Course::Track {
+            id: 1,
+            ta: -0.5 / q,
+            tb: 0.3 / q,
+        };
+        for (a, b) in [(first, second), (second, first)] {
+            for f in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                assert!(courses.distance(b, courses.along(a, f)) <= eps / 4.0);
+            }
+            let vertex = courses.at_turn(a, 0.5).expect("a conic");
+            assert!(courses.distance(b, vertex) > 9.0 * eps);
+        }
+        let mut segs = Segments::default();
+        let one = segs.add_curved(0, 1, first, Source::Meet(0, 0), &courses, eps);
+        let two = segs.add_curved(0, 1, second, Source::Meet(0, 1), &courses, eps);
+        assert_ne!(one, two);
+        let again = segs.add_curved(1, 0, first.reversed(), Source::Meet(1, 0), &courses, eps);
+        assert_eq!(again, one);
+        assert_eq!(segs.list.len(), 2);
+    }
+
+    /// Probes by turning along stretches that turn more than a half turn,
+    /// either way: an ellipse track's, and as an operand's edge a NURBS
+    /// ellipse in four quarters and an arc of 238° of another written as
+    /// one cubic span with positive weights. They sit at a quarter, a half
+    /// and three quarters of the turning, by the ellipse's closed form
+    /// (they crowded into the stretch's first part; found by review, the
+    /// cubic by the review after).
+    #[test]
+    fn probes_by_turning_follow_stretches_past_a_half_turn() {
+        use std::f64::consts::FRAC_1_SQRT_2;
+        // The tangent's direction at angle t of the ellipse with semi-axes
+        // a and b along x and y, lifted: within a quarter turn of the
+        // circle's, t + π/2.
+        let turn = |(a, b): (f64, f64), t: f64| {
+            let (s, c) = t.sin_cos();
+            t + ((a - b) * s * c).atan2(a * s * s + b * c * c)
+        };
+        // The ellipse's angle of a point of it, lifted to the stretch
+        // from angle `from` the way `up` says.
+        let angle = |(a, b): (f64, f64), p: DVec3, from: f64, up: bool| {
+            let t = (p.y / b).atan2(p.x / a);
+            if up {
+                from + (t - from).rem_euclid(TAU)
+            } else {
+                from - (from - t).rem_euclid(TAU)
+            }
+        };
+        let check = |ab: (f64, f64), at: &dyn Fn(f64) -> DVec3, ta: f64, tb: f64, up: bool| {
+            let from = angle(ab, at(0.0), ta, up);
+            let to = angle(ab, at(1.0), from + if up { 1e-9 } else { -1e-9 }, up);
+            let whole = turn(ab, to) - turn(ab, from);
+            assert!(whole.abs() > PI, "{ta} {tb}: {whole}");
+            for f in [0.25, 0.5, 0.75] {
+                let t = angle(ab, at(f), from, up);
+                let got = (turn(ab, t) - turn(ab, from)) / whole;
+                assert!((got - f).abs() <= 1e-9, "{ta} {tb}: {got} for {f}");
+            }
+        };
+        let (a, b) = (4.0, 1.0);
+        let box_ = cube(DVec3::ZERO, 1.0);
+        let pair = Pair {
+            first: shape::shape(&box_, "first").expect("a shape"),
+            second: shape::shape(&box_, "second").expect("a shape"),
+        };
+        let tracks = [Track::Ellipse {
+            center: DVec3::ZERO,
+            x: DVec3::X,
+            y: DVec3::Y,
+            a,
+            b,
+        }];
+        let courses = Courses {
+            pair: &pair,
+            tracks: &tracks,
+        };
+        for (ta, tb) in [(0.0, 1.5 * PI), (1.5 * PI, 0.0), (0.3, 0.3 + 1.9 * PI)] {
+            let course = Course::Track { id: 0, ta, tb };
+            let at = |f: f64| match f {
+                0.0 => tracks[0].point(ta),
+                1.0 => tracks[0].point(tb),
+                f => courses.at_turn(course, f).expect("an ellipse"),
+            };
+            check((a, b), &at, ta, tb, tb > ta);
+        }
+        // The ellipse in four quarters, each a rational quadratic.
+        let w = FRAC_1_SQRT_2;
+        let corner = |x: f64, y: f64| DVec3::new(a * x, b * y, 0.0);
+        let quarters = opendatum_nurbs::NurbsCurve::new(
+            2,
+            vec![
+                0.0, 0.0, 0.0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1.0, 1.0, 1.0,
+            ],
+            vec![
+                corner(1.0, 0.0),
+                corner(1.0, 1.0),
+                corner(0.0, 1.0),
+                corner(-1.0, 1.0),
+                corner(-1.0, 0.0),
+                corner(-1.0, -1.0),
+                corner(0.0, -1.0),
+                corner(1.0, -1.0),
+                corner(1.0, 0.0),
+            ],
+            Some(vec![1.0, w, 1.0, w, 1.0, w, 1.0, w, 1.0]),
+        )
+        .expect("an ellipse");
+        // The arc of the ellipse with semi-axes 1.5 and 1 from −119° to
+        // 119° through 0°: a rational quadratic with the middle weight
+        // cos 119° < 0 (the arc of a circle stretched), raised to a cubic
+        // (Piegl & Tiller §5.5), whose weights 1, 0.0101, 0.0101, 1 are
+        // positive.
+        let (s, c) = 119f64.to_radians().sin_cos();
+        let (a2, b2) = (1.5, 1.0);
+        let q = [
+            glam::DVec4::new(a2 * c, -b2 * s, 0.0, 1.0),
+            glam::DVec4::new(a2, 0.0, 0.0, c),
+            glam::DVec4::new(a2 * c, b2 * s, 0.0, 1.0),
+        ];
+        let cubic = opendatum_nurbs::NurbsCurve::from_homogeneous(
+            3,
+            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            vec![
+                q[0],
+                (q[0] + q[1] * 2.0) / 3.0,
+                (q[1] * 2.0 + q[2]) / 3.0,
+                q[2],
+            ],
+        )
+        .expect("an arc");
+        // The quadratics are not halved; the cubic's one span is.
+        assert_eq!(
+            knot_breaks(&quarters, 0.05, 0.85),
+            [0.05, 0.25, 0.5, 0.75, 0.85]
+        );
+        assert!(knot_breaks(&cubic, 0.0, 1.0).len() > 2);
+        for (n, ab, stretches) in [
+            (quarters, (a, b), [(0.05, 0.85), (0.85, 0.05), (0.7, 0.05)]),
+            (cubic, (a2, b2), [(0.0, 1.0), (1.0, 0.0), (0.1, 0.9)]),
+        ] {
+            // The curve as edge 0 of the first operand.
+            let curve = Curve3::Nurbs(n);
+            let mut brep = box_.clone();
+            brep.edges[0].curve = curve.clone();
+            let pair = Pair {
+                first: shape::shape(&brep, "first").expect("a shape"),
+                second: shape::shape(&box_, "second").expect("a shape"),
+            };
+            let courses = Courses {
+                pair: &pair,
+                tracks: &[],
+            };
+            for (ta, tb) in stretches {
+                let course = Course::Edge {
+                    op: Operand::First,
+                    e: 0,
+                    ta,
+                    tb,
+                };
+                let at = |f: f64| match f {
+                    0.0 => curve.point(ta),
+                    1.0 => curve.point(tb),
+                    f => courses.at_turn(course, f).expect("a NURBS ellipse"),
+                };
+                check(ab, &at, ta, tb, tb > ta);
+            }
+        }
     }
 
     /// A thin shell that a coarse mesh flattens to nothing takes its

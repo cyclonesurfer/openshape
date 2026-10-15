@@ -13,8 +13,8 @@ use super::meet::Track;
 use super::points::{segment_distance, Points};
 use super::quadric::Quadric;
 use super::{
-    corners, imprint, key, planar, planar_edges, shape, show, slot, Course, Key, Pair, Piece,
-    Segments, Source,
+    corners, imprint, key, planar, planar_edges, shape, show, slot, Course, Courses, Key, Pair,
+    Piece, Segments, Source,
 };
 use crate::geom::{Curve3, Surface};
 use crate::math::Frame;
@@ -54,12 +54,11 @@ impl Geometry<'_> {
         }
     }
 
-    /// The point of `course` at parameter `t`.
-    fn point(&self, course: Course, t: f64) -> DVec3 {
-        match course {
-            Course::Straight => unreachable!("a straight segment has no parameter"),
-            Course::Edge { op, e, .. } => self.pair.get(op).curve(e).0.point(t),
-            Course::Track { id, .. } => self.tracks[id].point(t),
+    /// The courses of curved segments.
+    fn courses(&self) -> Courses<'_> {
+        Courses {
+            pair: self.pair,
+            tracks: self.tracks,
         }
     }
 }
@@ -371,10 +370,15 @@ fn merge_faces(
         let regions =
             planar::regions(&edges, &|c| chart.map(pts.rep[c]), &reach, eps).map_err(|p| {
                 let (m, c) = p.describe();
-                KernelError::InvalidResult(format!(
-                    "boolean: merging faces: {m} near {}",
-                    super::show(pts.rep[c])
-                ))
+                match p {
+                    planar::Problem::Far(_) => {
+                        KernelError::InvalidInput(format!("{m} near {}", super::show(pts.rep[c])))
+                    }
+                    _ => KernelError::InvalidResult(format!(
+                        "boolean: merging faces: {m} near {}",
+                        super::show(pts.rep[c])
+                    )),
+                }
             })?;
         for region in regions {
             out.push(Out {
@@ -509,15 +513,10 @@ fn merge_edges(
         for (u, v, w, s0, s1, course) in joins {
             let mut sources: BTreeSet<Source> = segs.list[s0].sources.iter().copied().collect();
             sources.extend(segs.list[s1].sources.iter().copied());
-            let mid = match course {
-                Course::Straight => None,
-                Course::Edge { ta, tb, .. } | Course::Track { ta, tb, .. } => {
-                    Some(geometry.point(course, 0.5 * (ta + tb)))
-                }
-            };
-            let mut add = |x: Source| match mid {
-                None => segs.add(u, w, Course::Straight, x),
-                Some(m) => segs.add_curved(u, w, course, m, x, eps),
+            let courses = geometry.courses();
+            let mut add = |x: Source| match course {
+                Course::Straight => segs.add(u, w, Course::Straight, x),
+                _ => segs.add_curved(u, w, course, x, &courses, eps),
             };
             let mut sources = sources.into_iter();
             let first = sources.next().expect("a segment has a source");
@@ -1033,6 +1032,23 @@ fn curved_solids(
             ));
         }
     }
+    if vols.iter().all(|v| *v > 0.0) {
+        return Ok(solids);
+    }
+    // Each outer shell's boundary, built once for all the voids.
+    let shapes = solids
+        .iter()
+        .map(|(s, _)| shape::shape(body(*s), "result"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let outlines = shapes
+        .iter()
+        .map(imprint::outlines)
+        .collect::<Result<Vec<_>, _>>()?;
+    let boundaries = shapes
+        .iter()
+        .zip(&outlines)
+        .map(|(shape, outlines)| classify::Boundary::new(shape, outlines))
+        .collect::<Result<Vec<_>, _>>()?;
     for v in (0..shells.len()).filter(|&i| vols[i] < 0.0) {
         // A corner of the void shell itself (its body shares the whole
         // result's vertices and edges).
@@ -1041,11 +1057,7 @@ fn curved_solids(
         let q = b.vertices[b.edges[first.idx()].v0.idx()].point;
         let mut best: Option<usize> = None;
         for (k, (s, _)) in solids.iter().enumerate() {
-            let outer = body(*s);
-            let shape = shape::shape(outer, "result")?;
-            let outlines = imprint::outlines(&shape)?;
-            let boundary = classify::Boundary::new(&shape, &outlines)?;
-            if boundary.classify(q, eps)? == Class::Inside
+            if boundaries[k].classify(q, eps)? == Class::Inside
                 && best.is_none_or(|b| vols[*s] < vols[solids[b].0])
             {
                 best = Some(k);

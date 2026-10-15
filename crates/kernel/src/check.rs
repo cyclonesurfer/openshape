@@ -1,7 +1,9 @@
 //! B-rep validation, topology statistics and mass properties.
 
-use glam::DVec3;
+use glam::{DVec3, DVec4};
 use rustc_hash::FxHashMap;
+
+use opendatum_nurbs::NurbsCurve;
 
 use crate::geom::{Curve3, Surface};
 use crate::math::Frame;
@@ -16,9 +18,32 @@ use crate::{KernelError, Tolerance, TopologyCounts};
 /// within `tol` of the edge's ends are its vertices, where an edge may
 /// meet the axis.
 ///
-/// The distance from the axis is sampled along the edge and each sampled
-/// local least refined by golden-section search between its neighbours.
+/// A line's least distance from the axis is found in closed form
+/// ([`line_through_axis`]). A NURBS edge each of whose spans lies, with the
+/// convex hull of its control points, farther than `tol` from the axis on
+/// one side of it, and a circle that does everywhere, are clear of it
+/// ([`hull_clear_of_axis`], [`circle_clear_of_axis`]). Otherwise the
+/// distance from the axis is sampled along the edge and each sampled local
+/// least refined by golden-section search between its neighbours.
 pub(crate) fn through_axis(c: &Curve3, t0: f64, t1: f64, fr: &Frame, tol: f64) -> Option<DVec3> {
+    let clear = match c {
+        Curve3::Nurbs(n) => hull_clear_of_axis(n, t0.min(t1), t0.max(t1), fr, tol),
+        Curve3::Circle {
+            center,
+            x,
+            y,
+            radius,
+        } => circle_clear_of_axis(*center, *x, *y, *radius, fr, tol),
+        Curve3::Line { origin, dir } => return line_through_axis(*origin, *dir, t0, t1, fr, tol),
+    };
+    if clear {
+        return None;
+    }
+    sampled_through_axis(c, t0, t1, fr, tol)
+}
+
+/// [`through_axis`] by samples alone.
+fn sampled_through_axis(c: &Curve3, t0: f64, t1: f64, fr: &Frame, tol: f64) -> Option<DVec3> {
     const SAMPLES: usize = 64;
     let dist = |t: f64| (c.point(t) - fr.origin).cross(fr.z).length();
     let at = |k: usize| t0 + (t1 - t0) * k as f64 / SAMPLES as f64;
@@ -55,6 +80,119 @@ pub(crate) fn through_axis(c: &Curve3, t0: f64, t1: f64, fr: &Frame, tol: f64) -
         }
     }
     None
+}
+
+/// [`through_axis`] for the line `origin + t dir`. The parts of its points
+/// square to the axis are affine in `t`, so their length, the distance from
+/// the axis, is convex: its one least on the edge is where that part is
+/// square to the line's (clamped to the edge's ends), the point the sampled
+/// search converges to. An edge whose ends both lie within `tol` of the
+/// axis lies within it all along (convexity again): it runs along the axis
+/// within the tolerance, wherever its distance is least (the sampled
+/// search, deciding by rounding there, may find an end), and its middle
+/// stands for it, reported when farther than `tol` from both ends.
+fn line_through_axis(
+    origin: DVec3,
+    dir: DVec3,
+    t0: f64,
+    t1: f64,
+    fr: &Frame,
+    tol: f64,
+) -> Option<DVec3> {
+    let at = |t: f64| origin + dir * t;
+    let dist = |t: f64| (at(t) - fr.origin).cross(fr.z).length();
+    let away = |p: DVec3| (p - at(t0)).length() > tol && (p - at(t1)).length() > tol;
+    let (lo, hi) = (t0.min(t1), t0.max(t1));
+    if dist(lo).max(dist(hi)) <= tol {
+        let p = at(0.5 * (lo + hi));
+        return away(p).then_some(p);
+    }
+    let perp = |v: DVec3| v - fr.z * v.dot(fr.z);
+    let (u, d) = (perp(origin - fr.origin), perp(dir));
+    let dd = d.length_squared();
+    if dd == 0.0 {
+        return None;
+    }
+    let t = (-u.dot(d) / dd).clamp(lo, hi);
+    let p = at(t);
+    (dist(t) <= tol && away(p)).then_some(p)
+}
+
+/// True if each span of `n` meeting `[lo, hi]` stays farther than `tol`
+/// from the axis of `fr` (its z axis). A span lies in the convex hull of
+/// its `p + 1` control points when their weights are positive (the strong
+/// convex hull property; Piegl & Tiller, *The NURBS Book*, §4.2), and the
+/// distance from the axis is at least the distance along any direction `d`
+/// square to it, `(x − o) · d`, which is linear, so least over the hull at
+/// one of the points. `d` points from the axis toward their mean; the
+/// computed least loses a rounding allowance of 10⁻¹² of the coordinates'
+/// size. A cheap sufficient test: where it fails, [`through_axis`] samples
+/// the curve.
+fn hull_clear_of_axis(n: &NurbsCurve, lo: f64, hi: f64, fr: &Frame, tol: f64) -> bool {
+    let p = n.degree();
+    let u = n.knots().as_slice();
+    let pw = n.homogeneous_points();
+    let off = |q: DVec4| {
+        let v = q.truncate() / q.w - fr.origin;
+        v - fr.z * v.dot(fr.z)
+    };
+    (p..pw.len())
+        .filter(|&i| u[i] < u[i + 1] && u[i + 1] > lo && u[i] < hi)
+        .all(|i| {
+            let pts = &pw[i - p..=i];
+            if pts.iter().any(|q| q.w.is_nan() || q.w <= 0.0) {
+                return false;
+            }
+            let d = pts
+                .iter()
+                .fold(DVec3::ZERO, |m, &q| m + off(q))
+                .normalize_or_zero();
+            if d == DVec3::ZERO {
+                return false;
+            }
+            let size = pts.iter().fold(fr.origin.length(), |m, q| {
+                m.max((q.truncate() / q.w).length())
+            });
+            let least = pts.iter().fold(f64::INFINITY, |m, &q| m.min(off(q).dot(d)));
+            least - 1e-12 * (1.0 + size) > tol
+        })
+}
+
+/// True if the whole circle `center + radius (cos t x + sin t y)` stays
+/// farther than `tol` from the axis of `fr`. With `u`, `X` and `Y` the parts
+/// of `center − o`, `x` and `y` square to the axis, the distance from it is
+/// `|u + r (cos t X + sin t Y)|`, and `|cos t X + sin t Y|` lies between the
+/// singular values `σ₋ ≤ σ₊` of `[X Y]`, so the distance is at least
+/// `max(r σ₋ − |u|, |u| − r σ₊)`: `r` for a circle about the axis. Less a
+/// rounding allowance of 10⁻¹² of the coordinates' size. `σ₊` comes from
+/// the larger eigenvalue of the Gram matrix and `σ₋` as `|X × Y| / σ₊`
+/// (their product): the smaller eigenvalue's square root loses about
+/// `√ε` to cancellation where `σ₋` is near zero, a circle in a plane along
+/// the axis, which cleared such circles through it (found by review).
+fn circle_clear_of_axis(
+    center: DVec3,
+    x: DVec3,
+    y: DVec3,
+    radius: f64,
+    fr: &Frame,
+    tol: f64,
+) -> bool {
+    let perp = |v: DVec3| v - fr.z * v.dot(fr.z);
+    let (u, xa, ya) = (perp(center - fr.origin), perp(x), perp(y));
+    let (a, b, c) = (xa.dot(xa), xa.dot(ya), ya.dot(ya));
+    // The eigenvalues of the Gram matrix [[a, b], [b, c]] are σ².
+    let mean = 0.5 * (a + c);
+    let dev = (0.25 * (a - c) * (a - c) + b * b).sqrt();
+    let most = (mean + dev).sqrt();
+    let least = if most > 0.0 {
+        xa.cross(ya).length() / most
+    } else {
+        0.0
+    };
+    let (r, ul) = (radius.abs(), u.length());
+    let gap = (r * least - ul).max(ul - r * most);
+    let size = 1.0 + center.length() + fr.origin.length() + r;
+    gap - 1e-12 * size > tol
 }
 
 /// Counts entities and derives the genus from the Euler–Poincaré formula
@@ -465,6 +603,313 @@ mod tests {
         ];
         for (c, t0, t1) in &clear {
             assert!(through_axis(c, *t0, *t1, &fr, tol).is_none(), "{c:?}");
+        }
+    }
+
+    /// The tests of NURBS edges' spans and of circles against the axis
+    /// clear only edges that sampling clears too: arcs of circles and
+    /// ellipses written as rational quadratics, and circles, in planes at
+    /// any angle to the axis, through it, near it and away from it, whole
+    /// and in part; and they clear most of those away from it, and every
+    /// circle about the axis.
+    #[test]
+    fn the_quick_tests_of_the_axis_clear_only_clear_edges() {
+        use crate::boolean::testing::Rng;
+        use std::f64::consts::{FRAC_1_SQRT_2, TAU};
+        let tol = 1e-7;
+        let fr = Frame::WORLD;
+        let mut rng = Rng(0xA815_0001);
+        let mut counts = [[0usize; 3]; 2];
+        let dir = |rng: &mut Rng| {
+            DVec3::new(
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            )
+            .normalize_or(DVec3::X)
+        };
+        for case in 0..6000 {
+            let center = DVec3::new(
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ) * 10f64.powf(rng.range(-6.0, 0.0));
+            let x = dir(&mut rng);
+            let y = x
+                .cross(dir(&mut rng))
+                .normalize_or(x.any_orthonormal_vector());
+            let (ra, rb) = (rng.range(0.1, 2.0), rng.range(0.1, 2.0));
+            // A quarter of an ellipse (from centre + a to centre + b, the
+            // middle control point at centre + a + b with weight cos 45°),
+            // or a circle.
+            let nurbs = case % 2 == 0;
+            let make = |center: DVec3| {
+                if nurbs {
+                    Curve3::Nurbs(
+                        NurbsCurve::new(
+                            2,
+                            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                            vec![center + x * ra, center + x * ra + y * rb, center + y * rb],
+                            Some(vec![1.0, FRAC_1_SQRT_2, 1.0]),
+                        )
+                        .expect("an arc"),
+                    )
+                } else {
+                    Curve3::Circle {
+                        center,
+                        x,
+                        y,
+                        radius: ra,
+                    }
+                }
+            };
+            let whole = if nurbs { 1.0 } else { TAU };
+            let (t0, t1) = if case % 4 < 2 {
+                (0.0, whole)
+            } else {
+                let t0 = rng.range(0.0, 0.8);
+                (t0 * whole, rng.range(t0 + 0.1, 1.0) * whole)
+            };
+            // A third through the axis between the ends, a third passing
+            // it 10 to 1,000 tolerances away.
+            let curve = match case % 3 {
+                0 => make(center),
+                k => {
+                    let at = make(center).point(t0 + (t1 - t0) * rng.range(0.1, 0.9));
+                    let gap = if k == 1 {
+                        DVec3::ZERO
+                    } else {
+                        dir(&mut rng).cross(DVec3::Z).normalize_or(DVec3::X)
+                            * (tol * 10f64.powf(rng.range(1.0, 3.0)))
+                    };
+                    make(center - DVec3::new(at.x, at.y, 0.0) + gap)
+                }
+            };
+            let quick = match &curve {
+                Curve3::Nurbs(n) => hull_clear_of_axis(n, t0, t1, &fr, tol),
+                &Curve3::Circle {
+                    center,
+                    x,
+                    y,
+                    radius,
+                } => circle_clear_of_axis(center, x, y, radius, &fr, tol),
+                Curve3::Line { .. } => unreachable!(),
+            };
+            let found = sampled_through_axis(&curve, t0, t1, &fr, tol);
+            let k = usize::from(!nurbs);
+            counts[k][2] += usize::from(found.is_some());
+            if quick {
+                counts[k][0] += 1;
+                assert!(found.is_none(), "case {case}: {curve:?} {t0} {t1}");
+                assert_eq!(through_axis(&curve, t0, t1, &fr, tol), None);
+            } else {
+                counts[k][1] += 1;
+                assert_eq!(through_axis(&curve, t0, t1, &fr, tol), found);
+            }
+        }
+        // Per kind: cleared quickly, sampled, found through the axis.
+        for [quick, sampled, through] in counts {
+            assert!(quick > 300 && sampled > 700 && through > 400, "{counts:?}");
+        }
+        // Circles about the axis, square to it.
+        for k in 0..100 {
+            let r = 10f64.powf(-6.0 + 0.07 * k as f64);
+            let tilt = DVec3::new(1e-13, -2e-13, 1.0).normalize();
+            let x = tilt.any_orthonormal_vector();
+            assert!(circle_clear_of_axis(
+                DVec3::new(0.0, 0.0, r),
+                x,
+                tilt.cross(x),
+                r,
+                &fr,
+                tol
+            ));
+        }
+    }
+
+    /// Circles in planes along a leaning axis, about a point of it (a
+    /// ball's meridians), and in planes tilted from those so that they pass
+    /// within ten times the tolerance either side of it: the quick test
+    /// clears none that sampling finds through the axis, and none of the
+    /// meridians (it cleared some from a kilometre down, whose least
+    /// singular value lost `√ε` to cancellation; found by review).
+    #[test]
+    fn circles_along_a_leaning_axis_are_not_cleared_through_it() {
+        use crate::boolean::testing::Rng;
+        use std::f64::consts::TAU;
+        let tol = 1e-5;
+        // The case review found: a meridian of a ball of radius 700.
+        let z = DVec3::new(0.6132052342058546, -0.05385148810082932, -0.788085882357925);
+        let x = DVec3::new(0.3917140890063436, 0.7540871621540453, -0.5271741878624077);
+        let fr = Frame {
+            origin: DVec3::ZERO,
+            x,
+            y: z.cross(x),
+            z,
+        };
+        let (x, y) = (
+            x,
+            DVec3::new(-0.47214594291149464, 0.6565146549758518, 0.5882743546969849),
+        );
+        assert!(!circle_clear_of_axis(DVec3::ZERO, x, y, 700.0, &fr, tol));
+        let meridian = Curve3::Circle {
+            center: DVec3::ZERO,
+            x,
+            y,
+            radius: 700.0,
+        };
+        assert!(through_axis(&meridian, 0.0, TAU, &fr, tol).is_some());
+        let mut rng = Rng(0xA815_0003);
+        let unit = |rng: &mut Rng| {
+            DVec3::new(
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            )
+            .normalize_or(DVec3::X)
+        };
+        let (mut cleared, mut through) = (0, 0);
+        for case in 0..3000 {
+            let z = unit(&mut rng);
+            let fx = z.any_orthonormal_vector();
+            let fr = Frame {
+                origin: unit(&mut rng) * rng.range(0.0, 100.0),
+                x: fx,
+                y: z.cross(fx),
+                z,
+            };
+            let center = fr.origin + z * rng.range(-100.0, 100.0);
+            let r = if case % 2 == 0 {
+                rng.range(500.0, 1000.0)
+            } else {
+                10f64.powf(rng.range(0.0, 3.0))
+            };
+            // The plane's normal, square to the axis for a meridian, else
+            // tilted toward it so that the circle passes the axis at
+            // r sin θ.
+            let side = z.cross(unit(&mut rng)).normalize_or(fx);
+            let theta = if case % 3 == 0 {
+                0.0
+            } else {
+                (tol * 10f64.powf(rng.range(-1.0, 1.0)) / r).asin()
+            };
+            let n = side * theta.cos() + z * theta.sin();
+            // The start a third to a sixth of a turn from the poles.
+            let phi = rng.range(0.3, 1.2);
+            let w = n.cross(z).normalize();
+            let x = (z * phi.cos() + w * phi.sin() - n * n.dot(w * phi.sin())).normalize();
+            let y = n.cross(x).normalize();
+            let quick = circle_clear_of_axis(center, x, y, r, &fr, tol);
+            let circle = Curve3::Circle {
+                center,
+                x,
+                y,
+                radius: r,
+            };
+            let sampled = sampled_through_axis(&circle, 0.0, TAU, &fr, tol);
+            if case % 3 == 0 {
+                assert!(!quick, "case {case}: a meridian of radius {r} cleared");
+                assert!(sampled.is_some(), "case {case}: {circle:?}");
+            }
+            if quick {
+                cleared += 1;
+                assert!(sampled.is_none(), "case {case}: {circle:?} cleared");
+            }
+            through += usize::from(sampled.is_some());
+        }
+        assert!(cleared > 300 && through > 1500, "{cleared} {through}");
+    }
+
+    /// The closed form for lines finds what sampling finds: lines through
+    /// the axis between their ends and lines passing it 10 to 1,000
+    /// tolerances away, lines from a point on it (a cone's ruling from its
+    /// apex), lines that would meet it beyond their ends, and lines
+    /// parallel to it, off it; about axes at any angle and
+    /// place, either way along the edge. Along the axis, where sampling
+    /// decides by its rounding, the closed form finds the edge's middle.
+    #[test]
+    fn lines_meet_the_axis_where_sampling_finds_them() {
+        use crate::boolean::testing::Rng;
+        let tol = 1e-7;
+        let mut rng = Rng(0xA815_0002);
+        let unit = |rng: &mut Rng| {
+            DVec3::new(
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            )
+            .normalize_or(DVec3::X)
+        };
+        let mut through = 0;
+        for case in 0..6000 {
+            let z = unit(&mut rng);
+            let x = z.any_orthonormal_vector();
+            let fr = Frame {
+                origin: unit(&mut rng) * 10f64.powf(rng.range(-3.0, 1.0)),
+                x,
+                y: z.cross(x),
+                z,
+            };
+            let side = z.cross(unit(&mut rng)).normalize_or(x);
+            let len = 10f64.powf(rng.range(-1.0, 0.5));
+            let on_axis = fr.origin + z * rng.range(-2.0, 2.0);
+            let (origin, dir) = match case % 6 {
+                // The gap along the common perpendicular of the line and
+                // the axis, so that it is the line's least distance.
+                0 | 1 => {
+                    let dir = unit(&mut rng) * len;
+                    let gap = if case % 6 == 0 {
+                        DVec3::ZERO
+                    } else {
+                        z.cross(dir).normalize_or(side) * (tol * 10f64.powf(rng.range(1.0, 3.0)))
+                    };
+                    (on_axis + gap - dir * rng.range(0.1, 0.9), dir)
+                }
+                2 => (on_axis, unit(&mut rng) * len),
+                3 => (
+                    on_axis + side * (tol * 10f64.powf(rng.range(1.0, 5.0))),
+                    z * len,
+                ),
+                4 => (on_axis, z * len),
+                _ => {
+                    let dir = unit(&mut rng) * len;
+                    let at = rng.range(0.2, 2.0);
+                    (
+                        on_axis - dir * if case % 4 < 2 { -at } else { 1.0 + at },
+                        dir,
+                    )
+                }
+            };
+            let (t0, t1) = if case % 2 == 0 {
+                (0.0, 1.0)
+            } else {
+                (1.0, 0.0)
+            };
+            let line = Curve3::Line { origin, dir };
+            let found = line_through_axis(origin, dir, t0, t1, &fr, tol);
+            assert_eq!(through_axis(&line, t0, t1, &fr, tol), found);
+            if case % 6 == 4 {
+                let middle = origin + dir * 0.5;
+                assert!(found.is_some_and(|p| (p - middle).length() <= 1e-12 * len));
+                continue;
+            }
+            let sampled = sampled_through_axis(&line, t0, t1, &fr, tol);
+            assert_eq!(found.is_some(), case % 6 == 0, "case {case}: {line:?}");
+            assert_eq!(found.is_some(), sampled.is_some(), "case {case}: {line:?}");
+            if let (Some(p), Some(q)) = (found, sampled) {
+                assert!((p - q).length() <= 2.0 * tol, "case {case}: {p} {q}");
+                through += 1;
+            }
+        }
+        assert_eq!(through, 1000);
+        // Rulings from a point of the axis, leaning half a tolerance off it
+        // at their far ends: along it within the tolerance, the middle is
+        // reported when farther than the tolerance from both ends.
+        let fr = Frame::WORLD;
+        for (len, along) in [(5.0, true), (1.5, false)] {
+            let dir = DVec3::new(0.5 * tol, 0.0, len * tol);
+            let found = line_through_axis(DVec3::ZERO, dir, 0.0, 1.0, &fr, tol);
+            assert_eq!(found, along.then_some(dir * 0.5), "{len}");
         }
     }
 

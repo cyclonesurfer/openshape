@@ -638,7 +638,7 @@ impl Points {
                         .map(|k| match k {
                             0 => t0,
                             _ if k + 1 == n => t1,
-                            _ => foot_on(curve, t0, self.rep[list[k]]).0,
+                            _ => foot_on(curve, t0, t1, self.rep[list[k]]).0,
                         })
                         .collect()
                 });
@@ -675,7 +675,7 @@ impl Points {
             if c == c0 || c == c1 || self.has_vertex[c][slot(op)] {
                 continue;
             }
-            let (t, d) = foot_on(curve, t0, self.rep[c]);
+            let (t, d) = foot_on(curve, t0, t1, self.rep[c]);
             if d <= eps && t > t0 && t < t1 {
                 found.push((t, c));
             }
@@ -881,18 +881,31 @@ fn closest_parameters(p: DVec3, u: DVec3, q: DVec3, v: DVec3) -> (f64, f64) {
     (s, t)
 }
 
-/// The parameter of the point of the curved edge `curve` nearest `p`
-/// (for a circle, unrolled from the edge's start parameter `t0` into
-/// `[t0, t0 + 2π)`), and its distance from `p`.
-pub(super) fn foot_on(curve: &Curve3, t0: f64, p: DVec3) -> (f64, f64) {
+/// The parameter of the point of the stretch of `curve` between `t0` and
+/// `t1` (either order) nearest `p`, and its distance from `p`: the foot of
+/// `p` on the curve where that is in the stretch (for a circle, its angle
+/// unrolled from the stretch's start), else the nearer end; a NURBS curve
+/// is searched within the stretch only (design note 0012 §16.4), so a
+/// nearer point of the curve outside it is never taken.
+pub(super) fn foot_on(curve: &Curve3, t0: f64, t1: f64, p: DVec3) -> (f64, f64) {
+    let (lo, hi) = if t0 <= t1 { (t0, t1) } else { (t1, t0) };
     let t = match curve {
-        Curve3::Line { origin, dir } => (p - *origin).dot(*dir) / dir.length_squared(),
+        Curve3::Line { origin, dir } => {
+            ((p - *origin).dot(*dir) / dir.length_squared()).clamp(lo, hi)
+        }
         Curve3::Circle { center, x, y, .. } => {
             let d = p - *center;
             let a = d.dot(*y).atan2(d.dot(*x));
-            t0 + (a - t0).rem_euclid(std::f64::consts::TAU)
+            let t = lo + (a - lo).rem_euclid(std::f64::consts::TAU);
+            if t <= hi {
+                t
+            } else if (curve.point(lo) - p).length() <= (curve.point(hi) - p).length() {
+                lo
+            } else {
+                hi
+            }
         }
-        Curve3::Nurbs(n) => n.closest_point(p).0,
+        Curve3::Nurbs(n) => n.closest_point_in(p, lo, hi).0,
     };
     (t, (curve.point(t) - p).length())
 }

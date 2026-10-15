@@ -777,22 +777,45 @@ impl NurbsCurve {
     ///
     /// The result is never farther from `p` than the best sample.
     pub fn closest_point(&self, p: DVec3) -> (f64, DVec3) {
+        let (a, b) = self.domain();
+        self.closest_point_in(p, a, b)
+    }
+
+    /// Closest point to `p` on the part of the curve between parameters
+    /// `t0` and `t1` (either order, clamped to the domain), as `(parameter,
+    /// point)`: the search of [`NurbsCurve::closest_point`] over the knot
+    /// spans' parts in that range, so a nearer point of the curve outside
+    /// it is never returned. Either end of the range can be the answer.
+    pub fn closest_point_in(&self, p: DVec3, t0: f64, t1: f64) -> (f64, DVec3) {
         let deg = self.degree;
+        let (a, b) = self.domain();
+        let (from, to) = (t0.min(t1).clamp(a, b), t0.max(t1).clamp(a, b));
         let breaks = self.knots.breakpoints(deg);
         let mut intervals: Vec<(f64, f64, usize, f64)> = breaks
             .windows(2)
+            .filter(|w| w[1] > from && w[0] < to)
             .map(|w| {
                 let span = self
                     .knots
                     .find_span(deg, self.last_index(), 0.5 * (w[0] + w[1]));
+                // The span's control points hold the whole span's piece, so
+                // also its part in the range.
                 let (lo, hi) = bounding_box(&self.points[span - deg..=span]);
-                (w[0], w[1], span, aabb_distance_squared(lo, hi, p))
+                (
+                    w[0].max(from),
+                    w[1].min(to),
+                    span,
+                    aabb_distance_squared(lo, hi, p),
+                )
             })
             .collect();
         intervals.sort_by(|x, y| x.3.total_cmp(&y.3));
-        let (a, _) = self.domain();
-        let start = self.point(a);
-        let mut best = (a, start, start.distance_squared(p));
+        let start = self.point(from);
+        let end = self.point(to);
+        let mut best = (from, start, start.distance_squared(p));
+        if end.distance_squared(p) < best.2 {
+            best = (to, end, end.distance_squared(p));
+        }
         for &(lo, hi, span, bound) in &intervals {
             if bound >= best.2 {
                 break;

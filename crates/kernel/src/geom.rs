@@ -37,6 +37,15 @@ pub const KNOT_MERGE: f64 = 1e-12;
 const KINK: f64 = 1e-3;
 
 impl Curve3 {
+    /// The analytic kind of this curve.
+    pub fn kind(&self) -> CurveKind {
+        match self {
+            Curve3::Line { .. } => CurveKind::Line,
+            Curve3::Circle { .. } => CurveKind::Circle,
+            Curve3::Nurbs(_) => CurveKind::Nurbs,
+        }
+    }
+
     /// Size of the coordinates the curve's points are computed from (its
     /// origin, its centre plus radius, or its control points' bounds):
     /// together with the size of the points themselves, this sets their
@@ -295,6 +304,19 @@ impl Curve3 {
         }
         Some(())
     }
+}
+
+/// Classification of an edge's curve, used by downstream algorithms and
+/// exporters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CurveKind {
+    /// Straight line.
+    Line,
+    /// Circle or circular arc.
+    Circle,
+    /// Rational B-spline: free-form, or a conic other than a circle
+    /// (ellipses, parabolas and hyperbolas are stored exactly so).
+    Nurbs,
 }
 
 /// Classification of a surface into analytic kinds, used by downstream
