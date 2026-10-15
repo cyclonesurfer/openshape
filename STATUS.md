@@ -1,6 +1,6 @@
 # OpenDatum status
 
-Updated 2026-10-13. Phase 2 (sketcher) is done but for the tools that
+Updated 2026-10-15. Phase 2 (sketcher) is done but for the tools that
 need model faces (project/convert, intersection curves, pierce). Phase 3
 has begun: the design notes for intersections (0011), booleans (0012)
 and persistent naming (0013) are written; every region of the random
@@ -12,10 +12,13 @@ revolves as the user sees them and resolves stored references, and a
 sketch on a picked planar face and an extrude up to a picked parallel
 face, from the viewport through the model (ADR 0019). Booleans combine
 solids bounded by planes, cylinders, spheres and cones where their faces
-meet in lines and circles (design note 0012 §9, §11 and §13, ADR 0020):
-union, intersection and difference, checked by the volume identities and
-point membership on tens of thousands of random pairs. Next: planes
-across cones (the conics), then the features that use booleans.
+meet in lines, circles and conics (design note 0012 §9, §11, §13 and
+§15, ADR 0020): union, intersection and difference, with planes across
+cones at any angle (ellipses, parabolas, hyperbolas, and the rulings of
+a plane through a frustum's apex), checked by the volume identities and
+point membership on tens of thousands of random pairs. Next: bodies with
+those conic edges as operands of further booleans, then tangent
+contacts, then the features that use booleans.
 The product is now named OpenDatum (ADR 0017): packages `opendatum-*`,
 binary `opendatum`, documents `.odatum`; documents saved under the old
 name open unchanged.
@@ -49,6 +52,17 @@ name open unchanged.
     revolution, NURBS.
   - Watertight tessellation with chord and angle tolerances (shared edge
     discretisation, constrained Delaunay per face, singular points handled).
+    Every triangle of a curved face is refined until it faces out and is
+    within the chord tolerance of the surface as estimated: measured at
+    thirteen points of it and, between them, by the quartic through them
+    (design note 0002 §4). Unit tests measure the meshes against exact
+    distances on a grid of 24ths of every triangle (balls, polar caps, a
+    torus, solids turned from S-shaped splines: 0.96 to 0.999 of the
+    tolerance) and against the surfaces' closest points at fifteen points
+    (cones to the apex, balls to the poles, faces cut across their
+    rulings). Slivers too small to split that fold over are mended by
+    edge flips; refinement that cannot finish, or would pass two million
+    vertices, is an error.
     It marks seam edges, where two pieces of one surface meet (the splits of
     ADR 0008) or where a sweep's faces from two profile curves meet at a
     point where the curves have equal first derivatives (a closed spline
@@ -93,9 +107,15 @@ name open unchanged.
     with spheres and cones where every meeting is a circle (a ball with
     planes at any angle or with another ball anywhere; cones, cylinders
     and balls about one axis, with planes square to it: dimples,
-    countersinks, pointed and rounded ends). Where a plane
+    countersinks, pointed and rounded ends); and planes across cones at
+    any angle, in whole and half ellipses, parabolas and hyperbolas
+    (tilted countersinks, drafted pins flattened along their axes,
+    sections through a countersink's axis), and in two rulings where a
+    plane passes through the apex of a cone whose faces stop short of
+    it. Where a plane
     or a cylinder meets another surface the curve is found in closed form
-    (lines, circles, ellipses), once per pair of surfaces, and faces are
+    (lines, circles, ellipses, conics in vertex form with rational
+    quadratic edges), once per pair of surfaces, and faces are
     split in charts in which lengths are lengths in space. Numerical
     decisions are made once (a sign per vertex and plane, clusters of
     points within the tolerance, one incidence decision per point and
@@ -1020,7 +1040,15 @@ name open unchanged.
   never wrong geometry, where two boundary curves of a face cross or
   touch within the tolerance in its parameter space (refinement stops at
   segments a tolerance long) or where a face's boundary would need more
-  than eight times its initial samples plus 100,000. In the random sketch
+  than eight times its initial samples plus 100,000. The chord tolerance
+  is estimated, not bounded: where a surface bends faster than a quartic
+  between the points measured, the mesh can stray a little past it (no
+  test case does; a rigorous bound from the surface's derivatives is not
+  built). A ball meshes to about 2.6 times the triangles an even mesh
+  would need at the same tolerance (128,000 at the defaults): 4.5 times
+  near the poles, where its parameters stretch the triangulation, which
+  is Delaunay in them, and 1.8 times at the equator, from the triangles'
+  shape and refinement stopping short of the tolerance. In the random sketch
   tests every region now extrudes, cusps and slivers included (design
   note 0002 §5). Mass properties are exact to the rounding of the
   coordinates a body's points are computed from: a body far from the
@@ -1037,16 +1065,30 @@ name open unchanged.
   moved by about a tolerance or more.
 - Solver conflict detection is local: from a start far from any solution it
   can call a sketch conflicting although another branch would satisfy it.
-- Booleans handle solids bounded by planes and circular cylinders, and
+- Booleans handle solids bounded by planes and circular cylinders,
   spheres and cones where every meeting is a circle (design note 0012
-  §13). They refuse as not supported yet: a plane across a cone off its
-  axis (a conic, next); spheres and cones with cylinders or cones off
-  their axes, and two cylinders at an angle (quartics);
-  tangent contacts, where faces touch without crossing (a box's face
-  resting on a cylinder's side, a slot tangent to a hole): 13 of 1,000
-  random operations, most of the curved fuzz's refusals; and a second
-  boolean on a cylinder an earlier oblique cut left with an elliptical
-  edge, which is stored as a NURBS curve the stages do not recognise.
+  §13), and planes across cones (§15). They refuse as not supported
+  yet: spheres and cones with cylinders or cones off their axes, and two
+  cylinders at an angle (quartics); tangent contacts, where faces touch
+  without crossing (a box's face resting on a cylinder's side, a slot
+  tangent to a hole): 13 of 1,000 random operations, most of the curved
+  fuzz's refusals; and a second boolean on a body an earlier cut left
+  with a conic edge on a curved face (an elliptical edge on a cylinder
+  or a cone, a parabola or a hyperbola on a cone), which is stored as a
+  NURBS curve the stages do not recognise, even where the bodies are
+  apart. So a half section of a drafted pin cannot be cut again yet.
+- At a cone's apex: a plane through a pointed cone's apex, or whose
+  curve comes within 128 tolerances of the axis there, is refused where
+  the apex lies near where faces of both bodies can be, which takes in
+  nearly every section of a pointed cone through its axis (a half
+  section of a drill point: the result's edges would meet at the cone's
+  singular point). Planes through the apex of a frustum, whose faces stop
+  short of it, work, its axis leaning or not. A box whose face runs
+  between 1 and 100 tolerances (0.1–10 µm) off a turned solid's axis is
+  refused where an edge of the result would pass the centre of a flat
+  end within that ("a turned face's centre"). A ball halved by a plane through its axis at the
+  angle of its faces' seams is refused as edges passing within the
+  tolerance of each other at its poles (at other angles it works).
   A corner of one body resting exactly where a face's test point falls
   (the centre of a cylinder's end face) is refused, though the result
   exists (once in 10,000 random pairs).
@@ -1092,37 +1134,21 @@ name open unchanged.
 ## Next steps
 
 1. Check the new title bar on GNOME (on Pat's desktop).
-2. Phase 3, in the order the design notes give: the conics of a plane
-   across a cone, then planes through its apex (0012 §12.4 item 3; balls
-   and coaxial cones, item 3a, are done, §13). **Item 3b is in progress
-   on branch `wip/item-3b` (paused 2026-10-13 at Pat's request; not
-   gated, not on main).** There: the design (0012 §14: one vertex-form
-   conic track for parabolas, hyperbola branches and far halves of
-   ellipses, closed ellipses near the region, apex rules, exact stable
-   edge weights), `Track::Conic` with its parameters, feet, exact
-   stretch boxes and rational quadratic edges, `plane_cone` and
-   `through_apex` in `meet.rs`, the conic band and first division in
-   `chart.rs`, open curved tracks through `on_track`. Unit tests in
-   `meet.rs`: 6 of 8 pass (meetings on both surfaces and none missed,
-   edges and boxes exact). Left: `planes_near_an_apex_beyond_the_region`
-   gets a tangent contact where two rulings are expected at the snapped
-   apex (case 0; debug `through_apex`'s tilt test), and
-   `conics_near_a_parabola_are_exact` passes its precision checks but
-   draws too few half ellipses for its count (relax or draw more); then
-   `booleans.rs`'s `planes_across_a_cone_off_its_axis_are_not_supported_yet`
-   (keep only the plane through the apex, now "a plane through a cone's
-   apex"), golden cases for each conic (volumes as `(1/3) Σ hᵢ Aᵢ`,
-   §14), a fuzz of turned solids with boxes at any angle and planes
-   along a ruling's direction (membership check, at scale), the time
-   guards, and §14's as-built notes. Then tangent contacts
-   (the largest share of the curved refusals) and the elliptical edges
-   oblique cuts leave on cylinders; naming through booleans
-   (design note 0013 §10 step 4); then extrude and revolve that add,
-   remove and intersect. Alongside, absorb the boolean refusals left
-   within the tolerance (0.5–1% of operations at 0.9 tolerances, mostly
-   a point within the tolerance of two edges near a sharp corner). The
-   rest of the Phase 2 sketcher (project/convert, intersection
-   curves, pierce) needs Phase 3 faces.
+2. Phase 3, in the order the design notes give (0012 §12.4 item 3:
+   balls and coaxial cones, item 3a, §13; planes across cones, item 3b,
+   §15, are done). Next: bodies with conic edges on curved faces as
+   operands (a second cut of a tilted countersink or a flattened pin:
+   recognise the rational quadratic edges the booleans write as their
+   conics, so the stages can split and classify along them), then
+   tangent contacts (the largest share of the curved refusals), then the
+   apex left refused (a plane through a pointed cone's apex where both
+   bodies reach it: edges meeting at the cone's singular point), naming
+   through booleans (design note 0013 §10 step 4), and extrude and
+   revolve that add, remove and intersect. Alongside, absorb the boolean
+   refusals left within the tolerance (0.5–1% of operations at 0.9
+   tolerances, mostly a point within the tolerance of two edges near a
+   sharp corner). The rest of the Phase 2 sketcher (project/convert,
+   intersection curves, pierce) needs Phase 3 faces.
 3. Efficiency, alongside Phase 3 (docs/PERFORMANCE.md, known slow spots):
    flat faces triangulated from orientation tests alone (no incircle
    test), which speeds meshing and validation; booleans that work near

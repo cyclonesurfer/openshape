@@ -1,7 +1,7 @@
 //! Booleans of solids bounded by planes and cylinders (design note 0012
 //! §10.7, item 2): golden cases with exact volumes, areas and topology.
 
-use std::f64::consts::{FRAC_PI_2, PI, TAU};
+use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
 use opendatum_kernel::{
     Body, BodyMesh, BooleanOp, BrepKernel, DVec2, DVec3, EdgeOrigin, ExtrudeSpec, FaceIx,
@@ -1652,6 +1652,327 @@ fn balls_and_cones_with_plates_boxes_and_rods() {
     }
 }
 
+/// The area of the part of a disc of radius `r` beyond a chord `e` from
+/// its centre.
+fn segment(r: f64, e: f64) -> f64 {
+    r * r * (e / r).acos() - e * (r * r - e * e).sqrt()
+}
+
+/// A box `across` square and `depth` deep standing on the plane through
+/// `point` square to `normal`, centred on `point`, on the side `normal`
+/// points to.
+fn slab(point: DVec3, normal: DVec3, across: f64, depth: f64) -> Body {
+    let f = Frame::from_normal(point, normal, DVec3::Y);
+    k().make_box(
+        &Frame {
+            origin: point - (f.x + f.y) * (0.5 * across),
+            ..f
+        },
+        DVec3::new(across, across, depth),
+    )
+    .expect("a box")
+}
+
+/// The volume of the part of a cone of apex (0, 0, 1) and base radius 1/2
+/// on z = 0 beyond the plane through (p, 0, 0) square to `n`, a unit
+/// normal in the xz plane pointing to the apex side, from first
+/// principles: the plane meets the rulings in the xz plane at its
+/// section's vertices, the near one inside the cone, and the base in a
+/// chord across the section's axis 2w long, h from the near vertex. A
+/// conic through a vertex and a chord square to its axis, with its other
+/// vertex 2a away, has semi-axis b = w/√(u(2 ∓ u)), u = h/a, and its
+/// segment has an area of ab(2 asin √(u/2) − (1 − u)√(u(2 − u))) for an
+/// ellipse, ab((1 + u)√(u(2 + u)) − acosh(1 + u)) for a hyperbola, and
+/// 4wh/3 for a parabola (Archimedes). The part is a cone over the base
+/// and the section from the apex: (1/3) Σ hᵢAᵢ over its plane faces, hᵢ
+/// the apex's distance below face i.
+fn beyond(p: f64, n: DVec3) -> f64 {
+    let (apex, at) = (DVec3::Z, DVec3::new(p, 0.0, 0.0));
+    let hits = [0.5, -0.5].map(|s: f64| {
+        let d = DVec3::new(s, 0.0, -1.0);
+        let t = n.dot(at - apex) / n.dot(d);
+        (t, apex + d * t)
+    });
+    let (near, far) = if (0.0..1.0).contains(&hits[0].0) {
+        (hits[0], hits[1])
+    } else {
+        (hits[1], hits[0])
+    };
+    assert!((0.0..1.0).contains(&near.0), "no vertex in the cone");
+    let (w, h) = ((0.25 - p * p).sqrt(), (at - near.1).length());
+    let section = if !far.0.is_finite() || far.0.abs() > 1e12 {
+        4.0 / 3.0 * w * h
+    } else {
+        let a = 0.5 * (far.1 - near.1).length();
+        let u = h / a;
+        if far.0 > 0.0 {
+            let b = w / (u * (2.0 - u)).sqrt();
+            a * b * (2.0 * (0.5 * u).sqrt().asin() - (1.0 - u) * (u * (2.0 - u)).sqrt())
+        } else {
+            let root = (u * (2.0 + u)).sqrt();
+            let b = w / root;
+            a * b * ((1.0 + u) * root - (u + root).ln_1p())
+        }
+    };
+    let base = if n.x > 0.0 {
+        0.25 * PI - segment(0.5, p)
+    } else {
+        segment(0.5, p)
+    };
+    (base + (at - apex).dot(n) * section) / 3.0
+}
+
+/// Planes across cones (design note 0012 §14, item 3b): each conic as
+/// whole ellipses, half ellipses close to a parabola, a parabola and
+/// hyperbolas, and two rulings where the plane passes through a cone's
+/// apex outside the solid. Every result valid with its origins on the
+/// operands' surfaces, its volume exact to 1e-9 against a derivation from
+/// the rulings and chords (never from the kernel's own formulas), its
+/// faces, edges and vertices as first found, and one solid of genus 0.
+/// Each case gives A ∪ B, A ∩ B, A − B and B − A.
+#[test]
+fn planes_across_cones_in_ellipses_parabolas_and_hyperbolas() {
+    // A pointed cone (apex (0, 0, 2), base radius 1) under a box tilted
+    // 20°, through its axis half way up: a whole ellipse. Its major axis
+    // runs between the rulings in the xz plane, (±t/2, 0, 2 − t), and its
+    // minor axis is the chord across the circle of the cone at its centre.
+    let tall = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (1.0, 0.0), (0.0, 2.0)],
+        TAU,
+    );
+    let tilt = 20f64.to_radians();
+    let n = DVec3::new(tilt.sin(), 0.0, tilt.cos());
+    let mid = DVec3::new(0.0, 0.0, 1.0);
+    let roof = slab(mid, n, 6.0, 3.0);
+    let [e1, e2] = [0.5, -0.5].map(|s: f64| {
+        let t = 1.0 / (1.0 - s * tilt.tan());
+        DVec3::new(s * t, 0.0, 2.0 - t)
+    });
+    let (centre, a) = (0.5 * (e1 + e2), 0.5 * (e1 - e2).length());
+    let b = ((0.5 * (2.0 - centre.z)).powi(2) - centre.x * centre.x).sqrt();
+    let tip = (DVec3::new(0.0, 0.0, 2.0) - mid).dot(n) * PI * a * b / 3.0;
+    let tall_all = cone_volume(1.0, 2.0);
+    // A countersink turned 15° from upright, 45° each side of its axis,
+    // apex down into a plate: the plate's top face meets it in a whole
+    // ellipse. Its major axis runs between the rulings at 60° and −30°
+    // from upright; across its centre m, a point m + y ŷ is on the cone
+    // where its distance from the axis, √(|w|² + y² − s²) with w = m − apex
+    // and s = w·axis, equals s.
+    let plate = cuboid(DVec3::new(-2.0, -2.0, -1.0), DVec3::new(2.0, 2.0, 0.0));
+    let lean = 15f64.to_radians();
+    let up = DVec3::new(lean.sin(), 0.0, lean.cos());
+    let sink = turned_solid(
+        Frame::from_normal(DVec3::ZERO, up, DVec3::X),
+        DVec3::new(0.0, 0.0, 0.4),
+        &[(0.0, 0.0), (0.8, 0.0), (0.0, -0.8)],
+        TAU,
+    );
+    let low = DVec3::new(0.0, 0.0, 0.4) - up * 0.8;
+    let [x1, x2] = [lean + PI / 4.0, lean - PI / 4.0].map(|f| low.x - low.z * f.tan());
+    let (m, a) = (DVec3::new(0.5 * (x1 + x2), 0.0, 0.0), 0.5 * (x1 - x2).abs());
+    let (w, s) = (m - low, (m - low).dot(up));
+    let b = (2.0 * s * s - w.length_squared()).sqrt();
+    let sunk = -low.z * PI * a * b / 3.0;
+    let sink_all = cone_volume(0.8, 0.8);
+    // A cone (apex (0, 0, 1), base radius 1/2) cut by planes through the
+    // base at x = 0.2: along a ruling (a parabola), and a thousandth of a
+    // radian either side of one (an ellipse whose far end is 240 below,
+    // and a hyperbola), each slab on the apex's side, the ellipse's also
+    // a slab wide enough to hold all of it; and by a box from x = 0.1 (a
+    // hyperbola, its area also ∫ 1 − 2√(0.01 + y²) dy).
+    let spike = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (0.5, 0.0), (0.0, 1.0)],
+        TAU,
+    );
+    let spike_all = cone_volume(0.5, 1.0);
+    let ruling = 0.5f64.atan();
+    let at = DVec3::new(0.2, 0.0, 0.0);
+    let cut = |f: f64| DVec3::new(f.cos(), 0.0, f.sin());
+    let along = slab(at, cut(ruling), 4.0, 3.0);
+    let long = slab(at, cut(ruling + 1e-3), 4.0, 3.0);
+    let wide = slab(at, cut(ruling + 1e-3), 1000.0, 3.0);
+    let open = slab(at, cut(ruling - 1e-3), 4.0, 3.0);
+    let [near_along, near_long, near_open] =
+        [0.0, 1e-3, -1e-3].map(|f| spike_all - beyond(0.2, cut(ruling + f)));
+    let side = cuboid(DVec3::new(0.1, -2.0, -1.0), DVec3::new(2.0, 2.0, 2.0));
+    let y = 0.24f64.sqrt();
+    let flank = (segment(0.5, 0.1) - 0.1 * (y - 0.02 * (y / 0.1).asinh())) / 3.0;
+    assert!(close(flank, beyond(0.1, -DVec3::X)), "{flank}");
+    // A frustum of 1° draft (radius 1 at z = 0, apex 1/tan 1° up) cut
+    // 0.3 off its axis: a hyperbola whose vertices are far apart. Its
+    // section has an area of ∫₀² 2√(ρ² − 0.09) dz, ρ = 1 − z tan 1°;
+    // slicing across the axis checks the volume.
+    let draft = 1f64.to_radians().tan();
+    let top = 1.0 - 2.0 * draft;
+    let tapered = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (1.0, 0.0), (top, 2.0), (0.0, 2.0)],
+        TAU,
+    );
+    let tapered_all = 2.0 * PI * (1.0 + top + top * top) / 3.0;
+    let (c, high) = (0.3, 1.0 / draft);
+    let g = |u: f64| u * (u * u - c * c).sqrt() - c * c * (u / c).acosh();
+    let face = (g(1.0) - g(top)) / draft;
+    let shaved = (segment(1.0, c) * high + (2.0 - high) * segment(top, c) - c * face) / 3.0;
+    let f = |u: f64| {
+        u.powi(3) / 3.0 * (c / u).acos() - 2.0 * c / 3.0 * u * (u * u - c * c).sqrt()
+            + c.powi(3) / 3.0 * (u / c).acosh()
+    };
+    assert!(close(shaved, (f(1.0) - f(top)) / draft), "{shaved}");
+    let wall = cuboid(DVec3::new(c, -2.0, -1.0), DVec3::new(2.0, 2.0, 3.0));
+    // A frustum (radius 1 at z = 0, 1/2 at z = 1) under a slab whose face
+    // passes through the cone's apex at (0, 0, 2): two rulings. The part
+    // beyond is a cone from the apex over a segment of the base, less one
+    // over a segment of the top, a quarter its area: (2 − 1/4)/3 of it.
+    let frustum = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (1.0, 0.0), (0.5, 1.0), (0.0, 1.0)],
+        TAU,
+    );
+    let frustum_all = PI * 1.75 / 3.0;
+    let wedge = 7.0 / 12.0 * segment(1.0, 0.4);
+    let through = slab(
+        DVec3::new(0.0, 0.0, 2.0),
+        DVec3::new(1.0, 0.0, 0.2).normalize(),
+        6.0,
+        3.0,
+    );
+    let cases: [Golden; 9] = [
+        (
+            "a pointed cone cut at a slant",
+            &tall,
+            &roof,
+            [tall_all + 108.0 - tip, tip, tall_all - tip, 108.0 - tip],
+            [(9, 18, 12), (3, 4, 3), (4, 6, 4), (8, 16, 11)],
+        ),
+        (
+            "a countersink at an angle",
+            &plate,
+            &sink,
+            [16.0 + sink_all - sunk, sunk, 16.0 - sunk, sink_all - sunk],
+            [(9, 18, 12), (3, 4, 3), (8, 16, 11), (4, 6, 4)],
+        ),
+        (
+            "a cone cut along a ruling",
+            &spike,
+            &along,
+            [
+                spike_all + 48.0 - near_along,
+                near_along,
+                spike_all - near_along,
+                48.0 - near_along,
+            ],
+            [(9, 18, 12), (4, 7, 5), (4, 6, 4), (9, 19, 13)],
+        ),
+        (
+            "a cone cut in a long ellipse",
+            &spike,
+            &long,
+            [
+                spike_all + 48.0 - near_long,
+                near_long,
+                spike_all - near_long,
+                48.0 - near_long,
+            ],
+            [(9, 18, 12), (4, 7, 5), (4, 6, 4), (9, 19, 13)],
+        ),
+        (
+            "a cone cut in a long ellipse by a wide slab",
+            &spike,
+            &wide,
+            [
+                spike_all + 3e6 - near_long,
+                near_long,
+                spike_all - near_long,
+                3e6 - near_long,
+            ],
+            [(9, 18, 12), (4, 7, 5), (4, 6, 4), (9, 19, 13)],
+        ),
+        (
+            "a cone cut in a hyperbola close to a parabola",
+            &spike,
+            &open,
+            [
+                spike_all + 48.0 - near_open,
+                near_open,
+                spike_all - near_open,
+                48.0 - near_open,
+            ],
+            [(9, 18, 12), (4, 7, 5), (4, 6, 4), (9, 19, 13)],
+        ),
+        (
+            "a cone cut along its axis",
+            &spike,
+            &side,
+            [
+                spike_all + 22.8 - flank,
+                flank,
+                spike_all - flank,
+                22.8 - flank,
+            ],
+            [(9, 19, 13), (4, 6, 4), (4, 7, 5), (9, 18, 12)],
+        ),
+        (
+            "a slight taper cut along its axis",
+            &tapered,
+            &wall,
+            [
+                tapered_all + 6.8 * 4.0 - shaved,
+                shaved,
+                tapered_all - shaved,
+                6.8 * 4.0 - shaved,
+            ],
+            [(10, 21, 14), (5, 9, 6), (5, 9, 6), (10, 21, 14)],
+        ),
+        (
+            "a frustum cut through its apex",
+            &frustum,
+            &through,
+            [
+                frustum_all + 108.0 - wedge,
+                wedge,
+                frustum_all - wedge,
+                108.0 - wedge,
+            ],
+            [(10, 21, 14), (5, 9, 6), (5, 9, 6), (10, 21, 14)],
+        ),
+    ];
+    for (name, a, b, volumes, topology) in cases {
+        for (i, (x, y, op)) in [
+            (a, b, BooleanOp::Union),
+            (a, b, BooleanOp::Intersect),
+            (a, b, BooleanOp::Subtract),
+            (b, a, BooleanOp::Subtract),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let r = run(x, y, op);
+            // To 1e-9 and the rounding of a large volume (the wide slab's
+            // 3e6): `close` would allow 3e-3 there, a hundredth of the cone.
+            assert!(
+                (volume(&r) - volumes[i]).abs() <= 1e-9 + 1e-12 * volumes[i].abs(),
+                "{name}, {i}: {} vs {}",
+                volume(&r),
+                volumes[i]
+            );
+            assert_eq!(counts(&r), topology[i], "{name}, {i}");
+            let t = k().topology(&r);
+            assert_eq!(
+                (t.solids, t.shells, t.genus),
+                (1, 1, Some(0)),
+                "{name}, {i}"
+            );
+        }
+    }
+}
+
 /// A solid turned a whole turn about the line through `origin` along
 /// `axis`'s normal from `curves`, (radius, height) curves in the half
 /// plane of that line.
@@ -1779,6 +2100,651 @@ fn volume_identities_on_random_revolves() {
     report("random balls and cones about one axis", &t);
 }
 
+/// A conical face of a turned solid: the cone through the circle of
+/// radius `rho` about the solid's axis `u` at `point`, its radius growing
+/// by `slope` per unit along `u`, between heights 0 and `h` from `point`.
+struct Taper {
+    point: DVec3,
+    u: DVec3,
+    rho: f64,
+    slope: f64,
+    h: f64,
+}
+
+/// A random solid with conical faces turned a whole turn about the line
+/// through `axis`'s origin along its normal: a pointed cone either way
+/// up, a frustum, a tube with a tapered bore, or a double cone; with its
+/// cones.
+fn random_tapered(r: &mut Rng, axis: Frame) -> (Body, Vec<Taper>) {
+    let snap = r.chance(0.5);
+    let rad = r.coord(0.25, 1.0, snap).max(0.25);
+    let (h0, h1) = (
+        -r.coord(0.25, 0.75, snap).max(0.25),
+        r.coord(0.25, 0.75, snap).max(0.25),
+    );
+    let small = rad * if snap { 0.5 } else { r.range(0.2, 0.8) };
+    let other = rad * if snap { 0.25 } else { r.range(0.1, 0.8) };
+    let pts = match r.next() % 5 {
+        0 => vec![(0.0, h0), (rad, h0), (0.0, h1)],
+        1 => vec![(0.0, h0), (rad, h1), (0.0, h1)],
+        2 => vec![(0.0, h0), (rad, h0), (small, h1), (0.0, h1)],
+        3 => vec![(small, h0), (rad, h0), (rad, h1), (other, h1)],
+        _ => vec![(0.0, h0), (rad, 0.5 * (h0 + h1)), (0.0, h1)],
+    };
+    let tapers = (0..pts.len())
+        .filter_map(|k| {
+            let (a, b): ((f64, f64), (f64, f64)) = (pts[k], pts[(k + 1) % pts.len()]);
+            (a.0 != b.0 && a.1 != b.1).then(|| Taper {
+                point: axis.origin + axis.z * a.1,
+                u: axis.z,
+                rho: a.0,
+                slope: (b.0 - a.0) / (b.1 - a.1),
+                h: b.1 - a.1,
+            })
+        })
+        .collect();
+    (turned_solid(axis, axis.origin, &pts, TAU), tapers)
+}
+
+/// A random tapered solid and a box across one of its cones (design note
+/// 0012 §14, item 3b): a box turned any way (an ellipse or a hyperbola,
+/// mostly); a slab whose face is parallel to the plane tangent along a
+/// ruling (a parabola), or tilted from it by up to a tenth of a radian,
+/// often by a thousandth to a billionth (an ellipse or a hyperbola close
+/// to a parabola); or a slab whose face passes through the cone's apex or
+/// within a few tolerances of it, crossing the cone (two rulings, a
+/// hyperbola with its vertex by the apex, or a refusal where the apex is
+/// on the solid), the apex in the slab's face or not; or a slab whose face
+/// is within a ten-thousandth to a ten-millionth of a radian of tangent
+/// along a ruling, through the apex or a few tolerances off it (found by
+/// review: such planes made two solids a nanometre apart, and results
+/// the kernel's own check refused).
+fn random_conic_pair(r: &mut Rng) -> (Body, Body) {
+    let axis = if r.chance(0.5) {
+        Frame::WORLD
+    } else {
+        turned(r, DVec3::ZERO)
+    };
+    let (first, tapers) = random_tapered(r, axis);
+    let taper = &tapers[r.next() as usize % tapers.len()];
+    let u = taper.u;
+    let phi = if r.chance(0.5) {
+        FRAC_PI_2 * (r.next() % 4) as f64
+    } else {
+        r.range(0.0, TAU)
+    };
+    let e = axis.x * phi.cos() + axis.y * phi.sin();
+    // A point of the face, the ruling there and the cone's normal.
+    let s = r.range(0.2, 0.8) * taper.h;
+    let rho = taper.rho + taper.slope * s;
+    let on = taper.point + u * s + e * rho;
+    let ruling = (u + e * taper.slope).normalize();
+    let out = (e - u * taper.slope).normalize();
+    let flip = if r.chance(0.5) { 1.0 } else { -1.0 };
+    let second = match r.next() % 4 {
+        0 => {
+            let size = DVec3::new(r.range(0.25, 1.5), r.range(0.25, 1.5), r.range(0.25, 1.5));
+            let corner = axis.origin
+                + DVec3::new(r.range(-1.0, 0.5), r.range(-1.0, 0.5), r.range(-1.0, 0.5));
+            k().make_box(&turned(r, corner), size).expect("a box")
+        }
+        1 => {
+            let tilt = match r.next() % 5 {
+                0 => 0.0,
+                1 => r.range(-1e-3, 1e-3),
+                2 => flip * [1e-6, 1e-9][r.next() as usize % 2],
+                _ => r.range(-0.1, 0.1),
+            };
+            let n = out * tilt.cos() + ruling * tilt.sin();
+            let point = on - out * (r.range(0.05, 0.6) * rho);
+            slab(point, n * flip, r.range(1.0, 6.0), 3.0)
+        }
+        2 => {
+            let apex = taper.point - u * (taper.rho / taper.slope);
+            let psi = r.range(-0.9, 0.9) * taper.slope.abs().atan();
+            let n = u.cross(e) * psi.cos() + u * psi.sin();
+            let off = match r.next() % 4 {
+                0 | 1 => 0.0,
+                2 => r.range(-1.0, 1.0) * 6e-9,
+                _ => r.range(-1.0, 1.0) * 1e-6,
+            };
+            let w = on - apex;
+            let centre = apex + n * off + (w - n * w.dot(n)) * r.range(0.0, 1.2);
+            slab(centre, n * flip, r.range(0.5, 5.0), 3.0)
+        }
+        _ => {
+            let apex = taper.point - u * (taper.rho / taper.slope);
+            let side = if r.chance(0.5) { 1.0 } else { -1.0 };
+            let tilt: f64 = side * [1e-4, 1e-5, 1e-6, 1e-7][r.next() as usize % 4];
+            let n = out * tilt.cos() + ruling * tilt.sin();
+            let off = [0.0, 0.5, 2.0, 10.0][r.next() as usize % 4] * r.range(-1.0, 1.0).signum();
+            slab(apex + n * (off * 1e-7), n * flip, r.range(1.0, 6.0), 3.0)
+        }
+    };
+    (first, second)
+}
+
+/// A box beside a wide frustum whose axis leans, its face on y = 0 through
+/// the apex: that plane meets the cone in two rulings, found from the
+/// region where the faces can meet, whose centre lies below the apex's
+/// height. The rulings were taken on the cone's other nappe, and every
+/// operation refused (found by review).
+#[test]
+fn a_box_beside_a_leaning_frustum_in_a_plane_through_its_apex() {
+    let (s, c) = 80f64.to_radians().sin_cos();
+    let frustum = turned_solid(
+        Frame::from_normal(DVec3::ZERO, DVec3::new(1.0, 0.0, 1.0).normalize(), DVec3::Y),
+        DVec3::ZERO,
+        &[
+            (0.0, 10.0 * c),
+            (10.0 * s, 10.0 * c),
+            (11.0 * s, 11.0 * c),
+            (0.0, 11.0 * c),
+        ],
+        TAU,
+    );
+    let block = cuboid(DVec3::new(2.0, -1.0, -7.0), DVec3::new(8.8, 0.0, -5.9));
+    let mut t = Tally::default();
+    identities(&mut t, &frustum, &block, "beside", 0.0, &mut Rng(0xB5DE));
+    assert!(t.refused.is_empty(), "{:?}", t.refused);
+    assert_eq!((t.checked, t.overlapping), (1, 1));
+    report("a box beside a leaning frustum", &t);
+}
+
+/// Small tools across large cones, where the faces' boxes reach beyond
+/// the region where both faces can be: a box 0.1 wide whose face cuts a
+/// frustum 8 high in an ellipse whose other half (beyond the region,
+/// past the ellipse's centre) the frustum's base and seams cross, and a
+/// slab through a frustum's apex along one of its two rulings whose other
+/// ruling the frustum's edges cross. Both were refused as meeting at too
+/// shallow an angle: the tracks left out the curves' parts away from the
+/// tool, which a face's boundary crossing must lie on.
+#[test]
+fn small_tools_across_large_cones() {
+    let mut t = Tally::default();
+    let mut rng = Rng(0x5A11_7001);
+    // From z = 0 (radius 2) to z = 8 (radius 0.4), its apex at z = 10.
+    let tall = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (2.0, 0.0), (0.4, 8.0), (0.0, 8.0)],
+        TAU,
+    );
+    // Planes turned from the one tangent along the ruling at −x toward it.
+    let ruling = DVec3::new(2.0, 0.0, 10.0).normalize();
+    let out = DVec3::new(-10.0, 0.0, 2.0).normalize();
+    for (tilt, size, side) in [(0.1, 0.1, 1.0), (0.05, 0.05, -1.0), (0.2, 0.05, -1.0)] {
+        let n = out * f64::cos(tilt) + ruling * f64::sin(tilt);
+        let tool = slab(DVec3::new(0.58, 0.0, 7.0), n * side, size, size);
+        identities(&mut t, &tall, &tool, &format!("tilt {tilt}"), 0.0, &mut rng);
+    }
+    // From z = 0 (radius 1) to z = 1 (radius 0.5), its apex at z = 2; a
+    // plane through the apex, its normal 0.3 rad from square to the axis,
+    // crosses it in the rulings at θ with sin θ = 2 tan 0.3, the slab's
+    // face 0.6 wide about the first of them halfway up.
+    let short = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (1.0, 0.0), (0.5, 1.0), (0.0, 1.0)],
+        TAU,
+    );
+    let n = DVec3::new(0.0, f64::cos(0.3), f64::sin(0.3));
+    let theta = (2.0 * f64::tan(0.3)).asin();
+    let at = DVec3::new(0.75 * theta.cos(), 0.75 * theta.sin(), 0.5);
+    for side in [1.0, -1.0] {
+        let tool = slab(at, n * side, 0.6, 3.0);
+        identities(
+            &mut t,
+            &short,
+            &tool,
+            &format!("apex {side}"),
+            0.0,
+            &mut rng,
+        );
+    }
+    assert!(t.refused.is_empty(), "{:?}", t.refused);
+    assert_eq!((t.checked, t.overlapping), (5, 5));
+    report("small tools across large cones", &t);
+}
+
+/// Sections of a frustum by boxes whose edge runs along its axis, or a
+/// few tolerances off it, past the apex: the box's faces through the axis
+/// meet the cone in two rulings from the apex, beyond the frustum, and the
+/// box's edge crosses them there (a section view of a countersink, whose
+/// cone's apex lies in the hole). Every operation was refused, as the
+/// crossing lay on both rulings, and one panicked, until the rulings were
+/// taken from where they come near the region where both faces can be
+/// (design note 0012 §15).
+#[test]
+fn sections_of_a_frustum_by_boxes_along_its_axis() {
+    let mut t = Tally::default();
+    let mut rng = Rng(0xA9E_0FF);
+    // From z = 0 (radius 1) to z = 1 (radius 0.5), its apex at z = 2.
+    let frustum = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (1.0, 0.0), (0.5, 1.0), (0.0, 1.0)],
+        TAU,
+    );
+    let whole = PI * 1.75 / 3.0;
+    // The box from (x, y) on, past the apex or short of it (top 3 or
+    // 1.5); a half section from x = −3. Its volume in the frustum, to
+    // first order in the offsets, which move faces across the frustum's
+    // section through the axis, 0.75 in area each side of the axis.
+    for (x, y, top) in [
+        (0.0, 0.0, 3.0),
+        (0.0, 0.0, 1.5),
+        (-3.0, 0.0, 3.0),
+        (0.0, -5e-7, 3.0),
+        (0.0, -8e-7, 3.0),
+        (1e-6, 2e-6, 3.0),
+        (-3.0, 4e-5, 3.0),
+    ] {
+        let block = cuboid(DVec3::new(x, y, -1.0), DVec3::new(3.0, 3.0, top));
+        let inside = if x < -1.0 {
+            0.5 * whole - 1.5 * y
+        } else {
+            0.25 * whole - 0.75 * (x + y)
+        };
+        let i = run(&frustum, &block, BooleanOp::Intersect);
+        let d = run(&frustum, &block, BooleanOp::Subtract);
+        let u = run(&frustum, &block, BooleanOp::Union);
+        let case = format!("({x}, {y}) to {top}");
+        assert!((volume(&i) - inside).abs() < 1e-9, "{case}: {}", volume(&i));
+        assert!(
+            (volume(&d) - (whole - inside)).abs() < 1e-9,
+            "{case}: {}",
+            volume(&d)
+        );
+        assert!(
+            (volume(&u) - (volume(&block) + whole - inside)).abs() < 1e-9,
+            "{case}: {}",
+            volume(&u)
+        );
+        identities(&mut t, &frustum, &block, &case, 0.0, &mut rng);
+    }
+    assert!(t.refused.is_empty(), "{:?}", t.refused);
+    report("sections of a frustum by boxes along its axis", &t);
+}
+
+/// Sections of a countersunk plate through the hole's axis: halves along
+/// the cone's seams and square to them and turned 30°, and a quarter.
+/// Each plane passes through the countersink's apex, in the hole below
+/// the cone's face, where the region's ball (but not the common box of
+/// the faces) reached it, and every half section was refused as a plane
+/// through a pointed cone's apex until the apex rules asked whether faces
+/// on both surfaces can reach it (design note 0012 §15).
+#[test]
+fn sections_through_a_countersinks_axis() {
+    let plate = cuboid(DVec3::new(-2.0, -2.0, 0.0), DVec3::new(2.0, 2.0, 1.0));
+    // A hole of radius 0.3 with a 90° countersink to radius 0.6 at the
+    // top: its cone's apex at z = 0.4.
+    let tool = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[
+            (0.0, -1.0),
+            (0.3, -1.0),
+            (0.3, 0.7),
+            (0.6, 1.0),
+            (0.6, 2.0),
+            (0.0, 2.0),
+        ],
+        TAU,
+    );
+    let sunk = run(&plate, &tool, BooleanOp::Subtract);
+    let whole = 16.0 - PI * 0.09 * 0.7 - PI * 0.1 * (0.09 + 0.18 + 0.36);
+    assert!((volume(&sunk) - whole).abs() < 1e-9, "{}", volume(&sunk));
+    let turned_half = |angle: f64| {
+        let x = DVec3::new(angle.cos(), angle.sin(), 0.0);
+        let f = Frame::from_normal(DVec3::new(0.0, 0.0, -3.0) - x * 3.0, DVec3::Z, x);
+        k().make_box(&f, DVec3::new(6.0, 3.0, 6.0)).expect("a box")
+    };
+    let mut t = Tally::default();
+    let mut rng = Rng(0xC5_0A15);
+    for (name, block, part) in [
+        ("along the seams", turned_half(0.0), 0.5),
+        ("square to them", turned_half(FRAC_PI_2), 0.5),
+        ("turned 30°", turned_half(PI / 6.0), 0.5),
+        (
+            "a quarter",
+            cuboid(DVec3::new(0.0, 0.0, -3.0), DVec3::new(3.0, 3.0, 3.0)),
+            0.25,
+        ),
+    ] {
+        let i = run(&sunk, &block, BooleanOp::Intersect);
+        let d = run(&sunk, &block, BooleanOp::Subtract);
+        let u = run(&sunk, &block, BooleanOp::Union);
+        assert!((volume(&i) - part * whole).abs() < 1e-9, "{name}");
+        assert!((volume(&d) - (1.0 - part) * whole).abs() < 1e-9, "{name}");
+        let expected = volume(&block) + (1.0 - part) * whole;
+        assert!((volume(&u) - expected).abs() < 1e-9, "{name}");
+        identities(&mut t, &sunk, &block, name, 0.0, &mut rng);
+    }
+    assert!(t.refused.is_empty(), "{:?}", t.refused);
+    report("sections through a countersink's axis", &t);
+}
+
+/// Frustums leaning along (1, 1, 1), their apexes beyond their tops, cut
+/// by planes through the apex: one square to x, at a slant to the axis,
+/// and one along the axis. The faces' boxes, square to the world's axes,
+/// hold the apex beside a leaning axis although no face comes near it, and
+/// these were refused as planes through a pointed cone's apex (found by
+/// review) until the apex rules asked how far above its apex the cone's
+/// faces stay along its axis (design note 0012 §15). A plane through the
+/// apex cuts a cone into cones over the pieces of its base, so the piece
+/// of the frustum is (1 − s³) / 3 · H · (the base disc's segment), the
+/// top's cone a copy of the whole scaled by s about the apex.
+#[test]
+fn leaning_frustums_cut_through_their_apexes() {
+    let u = DVec3::ONE.normalize();
+    let axis = Frame::from_normal(DVec3::ZERO, u, DVec3::X);
+    let mut t = Tally::default();
+    let mut rng = Rng(0x1EA_4A9E);
+    for top in [0.5, 0.25] {
+        // Radius 1 at the base to `top` half a unit along the axis.
+        let frustum = turned_solid(
+            axis,
+            DVec3::ZERO,
+            &[(0.0, 0.0), (1.0, 0.0), (top, 0.5), (0.0, 0.5)],
+            TAU,
+        );
+        let whole = PI * 0.5 * (1.0 + top + top * top) / 3.0;
+        assert!((volume(&frustum) - whole).abs() < 1e-12);
+        let height = 0.5 / (1.0 - top);
+        let apex = u * height;
+        let s = (height - 0.5) / height;
+        // The plane x = apex.x crosses the base's plane `d` from its centre.
+        let d = apex.x / (1.0 - u.x * u.x).sqrt();
+        let segment = d.acos() - d * (1.0 - d * d).sqrt();
+        let beyond = (1.0 - s * s * s) / 3.0 * height * segment;
+        let across = Frame::from_normal(apex, DVec3::new(1.0, -1.0, 0.0).normalize(), u);
+        let half = k()
+            .make_box(
+                &Frame {
+                    origin: apex - (across.x + across.y) * 3.0,
+                    ..across
+                },
+                DVec3::splat(6.0),
+            )
+            .expect("a box");
+        for (name, block, part) in [
+            (
+                "square to x",
+                cuboid(DVec3::new(apex.x, -3.0, -3.0), DVec3::splat(3.0)),
+                beyond,
+            ),
+            ("along the axis", half, 0.5 * whole),
+        ] {
+            let case = format!("top {top}, {name}");
+            let i = run(&frustum, &block, BooleanOp::Intersect);
+            let dif = run(&frustum, &block, BooleanOp::Subtract);
+            let uni = run(&frustum, &block, BooleanOp::Union);
+            assert!((volume(&i) - part).abs() < 1e-9, "{case}: {}", volume(&i));
+            assert!((volume(&dif) - (whole - part)).abs() < 1e-9, "{case}");
+            let expected = volume(&block) + whole - part;
+            assert!((volume(&uni) - expected).abs() < 1e-9, "{case}");
+            identities(&mut t, &frustum, &block, &case, 0.0, &mut rng);
+        }
+    }
+    assert!(t.refused.is_empty(), "{:?}", t.refused);
+    report("leaning frustums cut through their apexes", &t);
+}
+
+/// A slender pointed cone (2° half-angle) cut by planes along its axis a
+/// few tenths of a millimetre from it: the hyperbola comes no nearer the
+/// axis than the plane, thousands of tolerances, but passes within
+/// 0.37 mm of the apex, where the cone is within 128 tolerances of its
+/// axis. The rule refusing curves that turn by the apex took that as too
+/// near (found by review); it now asks how near the curve comes to the
+/// axis. The volumes are `beyond` on the cone scaled to a base radius of
+/// one half (x and y by s, volumes by s²).
+#[test]
+fn planes_beside_a_slender_cones_apex() {
+    let slope = 2f64.to_radians().tan();
+    let cone = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (slope, 0.0), (0.0, 1.0)],
+        TAU,
+    );
+    let whole = cone_volume(slope, 1.0);
+    let s = 0.5 / slope;
+    let mut t = Tally::default();
+    let mut rng = Rng(0x5_1E4D);
+    for d in [2e-4, 3e-4, 3.5e-4] {
+        let block = cuboid(DVec3::new(d, -1.0, -1.0), DVec3::new(1.0, 1.0, 2.0));
+        let past = beyond(d * s, DVec3::NEG_X) / (s * s);
+        let i = run(&cone, &block, BooleanOp::Intersect);
+        let c = run(&cone, &block, BooleanOp::Subtract);
+        assert!(
+            (volume(&i) - past).abs() < 1e-12,
+            "{d}: {} {past}",
+            volume(&i)
+        );
+        assert!(
+            (volume(&c) - (whole - past)).abs() < 1e-12,
+            "{d}: {} {}",
+            volume(&c),
+            whole - past
+        );
+        identities(&mut t, &cone, &block, &format!("{d}"), 0.0, &mut rng);
+    }
+    // A plane 0.1 tolerances nearer the axis than the rule's 128 is refused.
+    let near = cuboid(DVec3::new(1.27e-5, -1.0, -1.0), DVec3::new(1.0, 1.0, 2.0));
+    match k().boolean(&cone, &near, BooleanOp::Intersect) {
+        Err(KernelError::Unsupported(m)) => assert!(m.contains("near a cone's apex"), "{m}"),
+        r => panic!("{r:?}"),
+    }
+    assert!(t.refused.is_empty(), "{:?}", t.refused);
+    assert_eq!((t.checked, t.overlapping), (3, 3));
+    report("planes beside a slender cone's apex", &t);
+}
+
+/// A box whose face crosses a pointed cone 16 µm below its apex, square
+/// to the axis or tilted by 1e-5: a circle (or an ellipse) 8 µm round
+/// the axis, where the validator holds a face's edges off its singular
+/// point by 100 tolerances. Both are refused with a message (found by
+/// review: the square one made an invalid body, caught only by the
+/// kernel's own check of its result).
+#[test]
+fn a_box_across_a_cone_just_below_its_apex_is_refused() {
+    let cone = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (0.5, 0.0), (0.0, 1.0)],
+        TAU,
+    );
+    let mut t = Tally::default();
+    let mut rng = Rng(0x0A9E_C1C1);
+    let z = 1.0 - 1.6e-5;
+    let square = cuboid(DVec3::new(-1.0, -1.0, z), DVec3::new(1.0, 1.0, 2.0));
+    let tilted = slab(
+        DVec3::new(0.0, 0.0, z),
+        DVec3::new(1e-5, 0.0, 1.0).normalize(),
+        2.0,
+        1.0,
+    );
+    identities(&mut t, &cone, &square, "square", 0.0, &mut rng);
+    identities(&mut t, &cone, &tilted, "tilted", 0.0, &mut rng);
+    assert_eq!(t.refused.len(), 8, "{:?}", t.refused);
+    assert!(
+        t.refused.iter().all(|m| m.contains("axis")),
+        "{:?}",
+        t.refused
+    );
+    report("a box across a cone just below its apex", &t);
+}
+
+/// A box whose face runs a few tolerances off a turned rod's axis: its
+/// edge across the rod's flat ends passes their centres, singular points
+/// of the ends' surfaces of revolution, within the hundred tolerances the
+/// validator holds edges off them. Where a result keeps such an edge it
+/// is refused with a message naming them (it was an invalid result,
+/// caught only by the kernel's own check); other results are exact, and
+/// a face 200 tolerances off works.
+#[test]
+fn a_box_a_hair_off_a_turned_rods_axis() {
+    let rod = turned_solid(
+        Frame::WORLD,
+        DVec3::ZERO,
+        &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+        TAU,
+    );
+    let mut refused = 0;
+    for y in [5e-7, 2e-6, 5e-6, 2e-5] {
+        let block = cuboid(DVec3::new(-3.0, y, -3.0), DVec3::new(3.0, 3.0, 3.0));
+        let part = segment(1.0, y);
+        for (op, expected) in [
+            (BooleanOp::Union, volume(&block) + PI - part),
+            (BooleanOp::Intersect, part),
+            (BooleanOp::Subtract, PI - part),
+        ] {
+            match k().boolean(&rod, &block, op) {
+                Ok(r) if y < 1e-5 => {
+                    assert_eq!(k().validate(&r), Vec::<String>::new());
+                    assert!((volume(&r) - expected).abs() < 1e-9, "{y} {op:?}");
+                }
+                Err(KernelError::Unsupported(m)) if y < 1e-5 => {
+                    assert!(m.contains("a turned face's centre"), "{y} {op:?}: {m}");
+                    refused += 1;
+                }
+                _ => {
+                    let r = run(&rod, &block, op);
+                    assert!((volume(&r) - expected).abs() < 1e-9, "{y} {op:?}");
+                }
+            }
+        }
+    }
+    assert!(refused >= 3, "{refused}");
+}
+
+#[test]
+fn volume_identities_on_planes_across_cones() {
+    let mut t = Tally::default();
+    let mut r = Rng(0x0C0A_1C5E);
+    let mut points = Rng(0x5A3F_0E15);
+    for case in 0..scale(100) {
+        let (a, b) = random_conic_pair(&mut r);
+        identities(&mut t, &a, &b, &format!("pair {case}"), 0.0, &mut points);
+    }
+    report("random planes across cones", &t);
+}
+
+/// Pairs the fuzz of planes across cones found faulty at fifty times its
+/// size (2026-10-15), with their operands as drawn: a pointed cone and a
+/// slab through or by its apex. Meshing the results (and the kernel's own
+/// check of them) refused "a triangle faces against the surface where it
+/// is too small to split or flip": needles at the apex, their corners on
+/// nearly one ruling, in a line within the model tolerance, whose side
+/// rounding decides (design note 0002 §4). Every operation must succeed,
+/// valid, with the volume identities and the membership of sampled points.
+#[test]
+fn pairs_a_fuzz_of_cones_found() {
+    let axis = |x: [f64; 3], y: [f64; 3], z: [f64; 3]| Frame {
+        origin: DVec3::ZERO,
+        x: DVec3::from(x),
+        y: DVec3::from(y),
+        z: DVec3::from(z),
+    };
+    let pairs = [
+        (
+            turned_solid(
+                axis(
+                    [
+                        -0.8048554945410071,
+                        0.5870975376206801,
+                        -0.08674165220287786,
+                    ],
+                    [
+                        -0.08192847943355583,
+                        -0.25467734399089315,
+                        -0.9635492591017074,
+                    ],
+                    [
+                        -0.5877885309912539,
+                        -0.7684113037803896,
+                        0.25307846818262764,
+                    ],
+                ),
+                DVec3::ZERO,
+                &[(0.0, -0.75), (0.75, -0.75), (0.0, 0.5)],
+                TAU,
+            ),
+            slab(
+                DVec3::new(
+                    -0.3157350251667678,
+                    0.011842351692448017,
+                    -0.16814781541494764,
+                ),
+                DVec3::new(
+                    -0.3381028400462773,
+                    -0.5737269166800482,
+                    -0.7460052912878341,
+                ),
+                0.8650562169587592,
+                3.0,
+            ),
+        ),
+        (
+            turned_solid(
+                axis(
+                    [-0.796864608307113, -0.577118279788069, 0.17872125548465564],
+                    [-0.320602570501996, 0.6546701098179141, 0.6845590106765911],
+                    [-0.5120749826100316, 0.4882023539941819, -0.7067090446141717],
+                ),
+                DVec3::ZERO,
+                &[
+                    (0.0, -0.3543928295055908),
+                    (0.8862456149308802, -0.3543928295055908),
+                    (0.0, 0.38345553452980197),
+                ],
+                TAU,
+            ),
+            slab(
+                DVec3::new(
+                    -0.22598923947435284,
+                    0.24327038384263963,
+                    0.18347693192756537,
+                ),
+                DVec3::new(0.9001119687661934, 0.4356305875738727, 0.004943162336990964),
+                0.8521832505725762,
+                3.0,
+            ),
+        ),
+        (
+            turned_solid(
+                axis(
+                    [
+                        0.9870518578515366,
+                        -0.06995171628194835,
+                        0.14434468227489314,
+                    ],
+                    [0.1561623788948448, 0.6245996115040233, -0.765172292184529],
+                    [-0.03663251738186855, 0.7778059415421259, 0.6274360333707607],
+                ),
+                DVec3::ZERO,
+                &[(0.0, -0.75), (0.25, -0.75), (0.0, 0.75)],
+                TAU,
+            ),
+            slab(
+                DVec3::new(-0.0658854127382031, 0.3498087349890746, 0.2556507156004063),
+                DVec3::new(0.15457599309365386, 0.6551435845970321, -0.7395222416671876),
+                0.5891312740501218,
+                3.0,
+            ),
+        ),
+    ];
+    let mut t = Tally::default();
+    let mut points = Rng(0x5A3F_0E17);
+    for (i, (a, b)) in pairs.iter().enumerate() {
+        identities(&mut t, a, b, &format!("pair {}", i + 1), 0.0, &mut points);
+    }
+    assert!(t.refused.is_empty(), "{:?}", t.refused);
+    assert!(t.bugs.is_empty(), "{:?}", t.bugs);
+    assert_eq!(t.checked, 3);
+}
+
 /// The membership check's rays against its winding numbers, at points
 /// near and far from random solids: every ray that answers gives the
 /// winding number's answer, and the winding numbers are whole (the meshes
@@ -1825,4 +2791,101 @@ fn rays_and_winding_numbers_agree() {
         answered + rays / 1000 >= rays,
         "{answered} of {rays} rays answered"
     );
+}
+
+/// Frustums cut by planes within a ten-thousandth of a radian of tangent
+/// along a ruling, through the apex or a few tolerances off it, the top
+/// a hundredth to a tenth of a percent of the height below the apex (found
+/// by review, in a sweep of 8,000 such cases: 474 unions gave two solids a
+/// few hundredths of a micrometre apart, where a rim lay within the
+/// tolerance of the plane along the ruling, and 582 operations failed the
+/// kernel's own check of its result, where the plane cut a sliver thinner
+/// than the tolerance from the top, a rim touched the plane where a seam
+/// meets it, or the plane's ellipse grazed the slab's edge metres from the
+/// frustum). Each is now done or refused with a reason; a union of bodies
+/// within the tolerance of each other is one solid or refused.
+#[test]
+fn planes_nearly_tangent_to_a_frustum_by_its_apex() {
+    let eps = 1e-7;
+    let axes = [
+        Frame::WORLD,
+        Frame::from_normal(DVec3::ZERO, DVec3::ONE.normalize(), DVec3::X),
+    ];
+    // (axis, slope, gap below the apex as a part of the height, azimuth,
+    // tilt from tangent as a part of the cone's angle, offset in
+    // tolerances): the cases the review found, then a sweep.
+    let mut cases = vec![
+        (0, 1.0, 1e-3, 0.0, 1e-6 / FRAC_PI_4, 0.0),
+        (0, 1.0, 1e-3, 0.4, -1e-5, 0.0),
+        (0, 1.0, 1e-3, 0.4, -1e-6, 0.0),
+        (0, 1.0, 1e-4, 0.4, -1e-7, 0.5),
+        (0, 2.0, 1e-3, 0.0, -1e-7, 2.0),
+        (0, 2.0, 1e-3, PI, -1e-7, 2.0),
+        (0, 10.0, 1e-3, 0.4, 1e-7, -10.0),
+        (1, 1.0, 1e-3, 0.0, 1e-4, -2.0),
+    ];
+    for slope in [1.0, 10.0] {
+        for phi in [0.0, 0.4] {
+            for f in [-1e-7, 1e-7, 1e-5] {
+                for d in [0.0, 2.0, -2.0, -10.0] {
+                    cases.push((1, slope, 1e-3, phi, f, d));
+                }
+            }
+        }
+    }
+    let mut t = Tally::default();
+    let mut rng = Rng(0x7A_4E47);
+    let mut lumps = Vec::new();
+    for (i, &(ai, slope, gap, phi, f, d)) in cases.iter().enumerate() {
+        let axis = axes[ai];
+        let za = 1.0 / slope;
+        let zt = za * (1.0 - gap);
+        let rt = 1.0 - slope * zt;
+        let frustum = turned_solid(
+            axis,
+            axis.origin,
+            &[(0.0, 0.0), (1.0, 0.0), (rt, zt), (0.0, zt)],
+            TAU,
+        );
+        let apex = axis.origin + axis.z * za;
+        let e = axis.x * phi.cos() + axis.y * phi.sin();
+        let psi = slope.atan() * (1.0 + f);
+        let n = e * psi.cos() + axis.z * psi.sin();
+        let q = apex + n * (d * eps);
+        let block = slab(q, n, 12.0, 12.0);
+        let case =
+            format!("case {i}: slope {slope}, gap {gap}, azimuth {phi}, tilt {f:e}, offset {d}");
+        // How far the frustum reaches toward the slab: from its rims.
+        let reach = [(0.0, 1.0), (zt, rt)]
+            .map(|(z, rho): (f64, f64)| {
+                let w = n - axis.z * n.dot(axis.z);
+                (axis.origin + axis.z * z - q).dot(n) + rho * w.length()
+            })
+            .into_iter()
+            .fold(f64::MIN, f64::max);
+        if let Ok(r) = k().boolean(&frustum, &block, BooleanOp::Union) {
+            let solids = k().topology(&r).solids;
+            if solids > 1 && reach >= -eps {
+                lumps.push(format!("{case}: {solids} solids, {reach:e} apart"));
+            }
+        }
+        if i == 0 {
+            // A plane through the apex cutting a sliver thinner than the
+            // tolerance from the top: refused.
+            for op in [BooleanOp::Union, BooleanOp::Intersect, BooleanOp::Subtract] {
+                let r = k().boolean(&frustum, &block, op);
+                assert!(
+                    matches!(
+                        r,
+                        Err(KernelError::Unsupported(_) | KernelError::InvalidInput(_))
+                    ),
+                    "{op:?}: {r:?}"
+                );
+            }
+        }
+        identities(&mut t, &frustum, &block, &case, 0.0, &mut rng);
+    }
+    assert!(lumps.is_empty(), "{lumps:#?}");
+    assert!(t.checked > 0);
+    report("planes nearly tangent to a frustum by its apex", &t);
 }

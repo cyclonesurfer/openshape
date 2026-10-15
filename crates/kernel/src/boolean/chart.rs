@@ -652,7 +652,7 @@ pub(super) fn trace<'a>(
         )
     };
     let (bound, size) = match (chart, track) {
-        (_, Track::Line { .. }) => match chart {
+        (_, Track::Line { .. } | Track::Ray { .. }) => match chart {
             Chart::Sphere { .. } => return Err(off_surface()),
             _ => return Ok(None),
         },

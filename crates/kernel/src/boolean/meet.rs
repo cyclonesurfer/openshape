@@ -31,12 +31,63 @@ use super::quadric::Quadric;
 use crate::geom::Curve3;
 use crate::KernelError;
 
-/// The part of space where two faces are: a ball holding both faces'
-/// common bounding box.
+/// The part of space where two faces are: their common bounding box
+/// (`lo` to `hi`), the ball holding it, and for a pair with a cone the
+/// least height above its apex, along its axis, of the faces on it
+/// (`lift`: beside an oblique axis the box can hold the apex although no
+/// face comes near it).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Region {
     pub center: DVec3,
     pub radius: f64,
+    pub lo: DVec3,
+    pub hi: DVec3,
+    pub lift: f64,
+}
+
+impl Region {
+    /// The region of the box from `lo` to `hi`, faces on a cone reaching
+    /// its apex.
+    pub fn of_box(lo: DVec3, hi: DVec3) -> Region {
+        Region {
+            center: (lo + hi) * 0.5,
+            radius: (hi - lo).length() * 0.5,
+            lo,
+            hi,
+            lift: f64::NEG_INFINITY,
+        }
+    }
+
+    /// True if `p` is within `margin` of the box.
+    fn holds(&self, p: DVec3, margin: f64) -> bool {
+        p.cmpge(self.lo - margin).all() && p.cmple(self.hi + margin).all()
+    }
+
+    /// True if faces on the pair's cone can come within `margin` of its
+    /// apex `apex` (and within `height` of it along its axis), where faces
+    /// on the other surface can be.
+    fn near_apex(&self, apex: DVec3, margin: f64, height: f64) -> bool {
+        self.lift <= height && self.holds(apex, margin)
+    }
+
+    /// The parameters from `start` (at least zero) where the ray `p + s ·
+    /// dir` is in the box, if it reaches it.
+    fn ray(&self, p: DVec3, dir: DVec3, start: f64) -> Option<(f64, f64)> {
+        let (mut s0, mut s1) = (start, f64::INFINITY);
+        for i in 0..3 {
+            if dir[i] == 0.0 {
+                if p[i] < self.lo[i] || p[i] > self.hi[i] {
+                    return None;
+                }
+                continue;
+            }
+            let a = (self.lo[i] - p[i]) / dir[i];
+            let b = (self.hi[i] - p[i]) / dir[i];
+            s0 = s0.max(a.min(b));
+            s1 = s1.min(a.max(b));
+        }
+        (s0 <= s1).then_some((s0, s1))
+    }
 }
 
 /// A curve where two surfaces meet.
@@ -44,6 +95,18 @@ pub(super) struct Region {
 pub(super) enum Track {
     /// `origin + t · dir`, `dir` a unit vector.
     Line { origin: DVec3, dir: DVec3 },
+    /// A ruling of a cone from its apex, where a plane through the apex
+    /// crosses it (§14): `origin + t · dir` for `t ≥ start`, `dir` a unit
+    /// vector away from the apex. The apex is at `start` when `from_apex`;
+    /// else the ray starts where it comes within [`CLIP`] tolerances of the
+    /// region, the apex lying farther away (at infinity where it stays
+    /// farther): before there no point is in faces on both surfaces.
+    Ray {
+        origin: DVec3,
+        dir: DVec3,
+        start: f64,
+        from_apex: bool,
+    },
     /// `center + radius (cos t · x + sin t · y)`, `x` and `y` orthonormal.
     Circle {
         center: DVec3,
@@ -95,7 +158,7 @@ impl Track {
     /// The point at `t`.
     pub fn point(&self, t: f64) -> DVec3 {
         match *self {
-            Track::Line { origin, dir } => origin + dir * t,
+            Track::Line { origin, dir } | Track::Ray { origin, dir, .. } => origin + dir * t,
             Track::Circle {
                 center,
                 x,
@@ -118,7 +181,7 @@ impl Track {
     /// The first derivative at `t`.
     pub fn deriv(&self, t: f64) -> DVec3 {
         match *self {
-            Track::Line { dir, .. } => dir,
+            Track::Line { dir, .. } | Track::Ray { dir, .. } => dir,
             Track::Circle { x, y, radius, .. } => {
                 let (s, c) = t.sin_cos();
                 (y * c - x * s) * radius
@@ -134,7 +197,7 @@ impl Track {
     /// The second derivative at `t`.
     pub fn second(&self, t: f64) -> DVec3 {
         match *self {
-            Track::Line { .. } => DVec3::ZERO,
+            Track::Line { .. } | Track::Ray { .. } => DVec3::ZERO,
             Track::Circle { center, .. } | Track::Ellipse { center, .. } => center - self.point(t),
             Track::Conic { x, p, c, .. } => x * (p / conic_w(c, t).powi(3)),
         }
@@ -144,7 +207,7 @@ impl Track {
     /// a closed curve, in `[−π/2, 3π/2)` like the kernel's circles.
     pub fn param(&self, p: DVec3) -> f64 {
         match *self {
-            Track::Line { origin, dir } => (p - origin).dot(dir),
+            Track::Line { origin, dir } | Track::Ray { origin, dir, .. } => (p - origin).dot(dir),
             Track::Circle { center, x, y, .. } => {
                 let d = p - center;
                 wrap(d.dot(y).atan2(d.dot(x)))
@@ -164,13 +227,28 @@ impl Track {
         matches!(self, Track::Circle { .. } | Track::Ellipse { .. })
     }
 
-    /// True for a line.
+    /// True for a line or a ray.
     pub fn straight(&self) -> bool {
-        matches!(self, Track::Line { .. })
+        matches!(self, Track::Line { .. } | Track::Ray { .. })
+    }
+
+    /// The parameters of an open curve's ends, infinite where it runs
+    /// off: a line, a parabola and a branch of a hyperbola run off both
+    /// ways, a ray from the apex, and the half of an ellipse ends on its
+    /// minor axis (a closed curve gives both infinite).
+    pub fn ends(&self) -> (f64, f64) {
+        match *self {
+            Track::Ray { start, .. } => (start, f64::INFINITY),
+            Track::Conic { c, .. } if c > 0.0 => {
+                let end = 1.0 / c.sqrt();
+                (-end, end)
+            }
+            _ => (f64::NEG_INFINITY, f64::INFINITY),
+        }
     }
 
     /// The parameter of the point of the curve nearest `p` and its
-    /// distance from `p`: in closed form for a line and a circle; for an
+    /// distance from `p`: in closed form for a line, a ray and a circle; for an
     /// ellipse or a conic by Newton's method on `(C(t) − p) · C'(t) = 0`
     /// from the parameter of `p` (its eccentric angle, or its position
     /// across the conic's axis), which for a point near the curve is near
@@ -179,6 +257,9 @@ impl Track {
     pub fn nearest(&self, p: DVec3) -> (f64, f64) {
         let t = match *self {
             Track::Line { origin, dir } => (p - origin).dot(dir),
+            Track::Ray {
+                origin, dir, start, ..
+            } => (p - origin).dot(dir).max(start),
             Track::Circle { .. } => self.param(p),
             Track::Ellipse { center, x, y, a, b } => {
                 let d = p - center;
@@ -230,7 +311,7 @@ impl Track {
             }
         };
         match *self {
-            Track::Line { .. } => {}
+            Track::Line { .. } | Track::Ray { .. } => {}
             Track::Circle {
                 x, y, radius: a, ..
             }
@@ -275,13 +356,15 @@ impl Track {
 
     /// The edge geometry of the curve from `ta` to `tb` (`ta < tb`, less
     /// than a turn apart on a closed curve), with its parameter range:
-    /// a line or circle as itself, an elliptical arc as an exact rational
+    /// a line (a ray's piece too) or circle as itself, an elliptical arc as an exact rational
     /// quadratic B-spline in pieces of at most a quarter turn (Piegl &
     /// Tiller A7.1 under the affine map from the unit circle, as the
     /// sketch's ellipses).
     pub fn edge(&self, ta: f64, tb: f64) -> Result<(Curve3, f64, f64), KernelError> {
         Ok(match *self {
-            Track::Line { origin, dir } => (Curve3::Line { origin, dir }, ta, tb),
+            Track::Line { origin, dir } | Track::Ray { origin, dir, .. } => {
+                (Curve3::Line { origin, dir }, ta, tb)
+            }
             Track::Circle {
                 center,
                 x,
@@ -498,6 +581,17 @@ fn nearest_on(p: DVec3, dir: DVec3, c: DVec3) -> DVec3 {
     p + dir * (c - p).dot(dir)
 }
 
+/// How near a cone's axis, in tolerances, a curve where a plane crosses
+/// it may pass where faces can be: beyond the hundred the validator holds
+/// a face's edges to off its surface's singular points.
+const ON_AXIS: f64 = 128.0;
+
+/// How far beyond the region, in tolerances, a ray from a cone's apex
+/// outside it starts (§14): the crossings of a face's boundary with it
+/// before there are no business of the boolean, as no point there is in
+/// faces on both surfaces, and near the apex they would lie on both rays.
+pub(super) const CLIP: f64 = 256.0;
+
 /// How `a` and `b` meet in `region`, deciding within `eps`.
 pub(super) fn meet(a: &Quadric, b: &Quadric, region: &Region, eps: f64) -> Meet {
     // Order the pair: plane, cylinder, cone, sphere.
@@ -572,21 +666,33 @@ fn common_axis(a: &Quadric, b: &Quadric, region: &Region, snap: f64) -> Option<A
             // points off it by at most the sine times the circle's radius.
             let axis = axis_of(&other)?;
             let sine = normal.cross(axis.dir).length();
-            let reach = match other {
+            let off = match other {
                 Quadric::Cone {
                     point: c,
                     axis: v,
                     radius,
                     slope,
                 } => {
-                    // The cone's radius where the plane crosses the axis.
+                    // The cone's radius ρ₀ where the plane crosses the axis.
+                    // Tilted by θ, the plane meets the cone at radius ρ₀ / (1
+                    // − k tan θ cos φ) (φ about the axis from the tilt's
+                    // direction): within 2 ρ₀ tan θ (1 + k) of the circle
+                    // while k tan θ ≤ 1/2, the section an ellipse; nearer a
+                    // ruling's direction it is not near the circle, however
+                    // small ρ₀ (a plane through the apex at a slant crosses
+                    // the cone in two rulings).
+                    let tan = sine / normal.dot(v).abs();
+                    let steep = slope * tan;
+                    if steep.is_nan() || steep > 0.5 {
+                        return None;
+                    }
                     let h = (point - c).dot(normal) / normal.dot(v);
-                    (radius + slope * h).abs()
+                    2.0 * (1.0 + slope) * (radius + slope * h).abs() * tan
                 }
-                Quadric::Cylinder { radius, .. } => radius,
+                Quadric::Cylinder { radius, .. } => sine * radius,
                 _ => return None,
             };
-            (sine * reach <= snap).then_some(axis)
+            (off <= snap).then_some(axis)
         }
         (Quadric::Sphere { center, .. }, Quadric::Sphere { center: c2, .. }) => {
             let d = c2 - center;
@@ -681,6 +787,14 @@ fn coaxial(axis: &Axis, a: &Quadric, b: &Quadric, region: &Region, eps: f64) -> 
             // They meet on the axis: a point contact (a cone's apex, the
             // pole of a sphere).
             return Meet::Touch;
+        }
+        if p.x <= ON_AXIS * eps && region.holds(axis.point + axis.dir * p.y, p.x + eps) {
+            // A circle the result's faces would hold within the tolerance
+            // of a pointed cone's apex or a sphere's pole, singular points
+            // of their surfaces, where faces on both can be (§15).
+            return Meet::Unsupported(
+                "surfaces about one axis meet in a circle within the tolerance of the axis",
+            );
         }
         curves.push(axis.circle(p));
     }
@@ -818,18 +932,70 @@ fn plane_cone(
     let cos = 1.0 / (1.0 + k * k).sqrt();
     let tilt = big_a.abs() * cos * cos / ((cos + g) * gamma.abs());
     let tangent = tilt * ((region.center - apex).length() + region.radius) <= eps;
-    if delta.abs() <= eps && (apex - region.center).length() <= region.radius + eps {
-        // Through the apex within the tolerance, where faces can be.
-        return if big_a < 0.0 && !tangent {
-            Meet::Unsupported("a plane through a cone's apex meets it in two rulings")
-        } else {
-            Meet::Touch
-        };
+    if delta.abs() <= eps {
+        // Through the apex within the tolerance. Along the ruling nearest
+        // the plane, toward x, the cone leaves the plane by μ = |cos α |γ| −
+        // sin α g| = cos α |A| / (|γ| + k g) per unit of length from the
+        // apex (α its half-angle): it stays within the tolerance of the plane
+        // (A > 0), or the plane cuts a sliver from it between two rulings
+        // thinner than the tolerance (A < 0), out to `reach` from the apex,
+        // and further the more nearly the plane is tangent to it. Where faces
+        // on both can come that near the apex, the tolerance cannot decide
+        // how they meet (a frustum's top within `reach` of the apex: found
+        // by review, as two solids a nanometre apart and as an inconsistent
+        // cut).
+        let mu = cos * big_a.abs() / (gamma.abs() + k * g);
+        let reach = ((eps + delta.abs()) / mu).max(eps);
+        if region.near_apex(apex, reach, reach * cos) {
+            return if big_a < 0.0 && !tangent {
+                Meet::Unsupported("a plane through a cone's apex meets it in two rulings")
+            } else {
+                Meet::Touch
+            };
+        }
     }
     if delta.abs() <= snap {
         return through_apex(
             n, x, y, a, u, r, k, gamma, g, big_a, tangent, apex, region, eps,
         );
+    }
+    // Within `tip` of the apex the cone is within 128 tolerances of its
+    // axis. The curve comes nearest the axis by the apex, k |δ| / (|γ| +
+    // k g) from it (k |δ| for a circle, |δ| for a plane along the axis); a
+    // curve nearer than 128 tolerances, crossing the cone where faces can
+    // reach the apex, turns there: a face of a pointed cone would get an
+    // edge passing its singular point within the tolerance (§14).
+    let tip = ON_AXIS * eps * (1.0 + k * k).sqrt() / k;
+    if k * delta.abs() <= ON_AXIS * eps * (gamma.abs() + k * g)
+        && region.near_apex(apex, tip, tip)
+        && (big_a < 0.0 || sigma * gamma < 0.0)
+    {
+        return Meet::Unsupported(
+            "a plane passes so near a cone's apex that their curve comes within the tolerance \
+             of its axis",
+        );
+    }
+    // The ruling nearest the plane: from the apex along r̂ = cos α u −
+    // sign(γ) sin α n⊥ / g (n⊥ = n − γ u), the cone leaves the plane at
+    // m = sign(γ) cos α (|γ| − k g) per unit of length, f(s) = δ + s m,
+    // every other ruling at a rate further from zero on the side of γ.
+    // With γ δ > 0 the cone lies on the apex's side of the plane wherever
+    // this ruling does (the others leave toward that side, A ≥ 0, or come
+    // toward the plane more slowly than it, A < 0), nearest the plane on
+    // it: within the tolerance of the plane where faces on both can be,
+    // without crossing, it touches (a frustum's rim within the tolerance
+    // of a plane nearly tangent along this ruling, found by review as two
+    // solids a few hundredths of a micrometre apart).
+    if gamma * delta > 0.0 {
+        let sign = gamma.signum();
+        let ruling = u * cos - (n - u * gamma) * (sign * k * cos / g);
+        let m = sign * cos * (gamma.abs() - k * g);
+        if let Some((s0, s1)) = region.ray(apex, ruling, (region.lift / cos).max(0.0)) {
+            let (f0, f1) = (delta + s0 * m, delta + s1 * m);
+            if f0 * delta > 0.0 && f1 * delta > 0.0 && f0.abs().min(f1.abs()) <= eps {
+                return Meet::Touch;
+            }
+        }
     }
     // The disk where the plane crosses the region.
     let w = region.center - o;
@@ -844,8 +1010,7 @@ fn plane_cone(
         // An ellipse or a parabola on the other nappe.
         return Meet::Apart;
     }
-    // The vertex (by its ξ) and the way the curve opens from it.
-    let (xi, opens) = if big_a > 0.0 && (big_b - big_a * xi0).abs() <= 16.0 * big_a * r0 {
+    if big_a > 0.0 && (big_b - big_a * xi0).abs() <= 16.0 * big_a * r0 {
         // An ellipse whose centre is near the region: closed.
         let center = o + x * (big_b / big_a);
         let (ea, eb) = (p / big_a, p / big_a.sqrt());
@@ -860,24 +1025,32 @@ fn plane_cone(
             a: ea,
             b: eb,
         }]);
-    } else if big_a > 0.0 && big_b - big_a * xi0 < 0.0 {
-        // The half of an ellipse at its vertex of greater ξ, the centre
-        // beyond the region the other way: opening along −x.
-        let xi = if big_b >= 0.0 {
+    }
+    // The roots of A ξ² − 2Bξ + C, each in the form without cancellation:
+    // the vertices of a conic's branch or of an ellipse.
+    let greater = || {
+        if big_b >= 0.0 {
             (big_b + p) / big_a
         } else {
             big_c / (big_b - p)
-        };
-        (xi, -1.0)
-    } else {
-        // A hyperbola's branch on the nappe, a parabola, or the half of an
-        // ellipse at its vertex of lesser ξ: opening along +x.
-        let xi = if big_b >= 0.0 {
+        }
+    };
+    let lesser = || {
+        if big_b >= 0.0 {
             big_c / (big_b + p)
         } else {
             (big_b - p) / big_a
-        };
-        (xi, 1.0)
+        }
+    };
+    // The vertex (by its ξ) and the way the curve opens from it.
+    let (xi, opens) = if big_a > 0.0 && big_b - big_a * xi0 < 0.0 {
+        // The half of an ellipse at its vertex of greater ξ, the centre
+        // beyond the region the other way: opening along −x.
+        (greater(), -1.0)
+    } else {
+        // A hyperbola's branch on the nappe, a parabola, or the half of an
+        // ellipse at its vertex of lesser ξ: opening along +x.
+        (lesser(), 1.0)
     };
     if !xi.is_finite() || (xi0 - xi) * opens < -r0 {
         // The curve lies beyond the region.
@@ -893,19 +1066,40 @@ fn plane_cone(
              it within the tolerance",
         );
     }
-    Meet::Curves(vec![Track::Conic {
+    let mut curves = vec![Track::Conic {
         vertex,
         x: x * opens,
         y,
         p,
         c: big_a,
-    }])
+    }];
+    if big_a > 0.0 {
+        // The ellipse's other half, from its other vertex. It lies beyond
+        // the region, but a face's boundary can cross it where the faces'
+        // boxes reach further (a small tool on a large cone), and every such
+        // crossing must lie on a track. Where its vertex is too far to
+        // compute it within the tolerance, hundreds of kilometres away, no
+        // face reaches it.
+        let far = o + x * if opens > 0.0 { greater() } else { lesser() };
+        let reach = far.abs().max_element() + (far - region.center).length() + region.radius;
+        if far.is_finite() && 8.0 * f64::EPSILON * reach <= eps / 64.0 {
+            curves.push(Track::Conic {
+                vertex: far,
+                x: x * -opens,
+                y,
+                p,
+                c: big_a,
+            });
+        }
+    }
+    Meet::Curves(curves)
 }
 
 /// A plane within `eps / 16` of a cone's apex, which lies outside the
-/// region (§14): two rulings where it crosses the cone (`A < 0`), exact
-/// on the cone at the region's height and within `eps / 16` of the plane;
-/// a tangent contact where it is within the tolerance of the plane
+/// region's box (§14), if not always its ball: two rulings where it crosses the cone (`A < 0`), rays
+/// away from the apex (from where they come within [`CLIP`] tolerances of
+/// the region, or from the apex where it is that near), exact on the cone
+/// at the region's height and within `eps / 16` of the plane; a tangent contact where it is within the tolerance of the plane
 /// tangent along the ruling toward `x` over the region (`tangent`); else
 /// apart.
 #[allow(clippy::too_many_arguments)]
@@ -941,25 +1135,52 @@ fn through_apex(
     }
     // The rulings square to n: unit (cos/g) x ± (√(−A) cos/g) y, and the
     // unit e from the axis toward each, ((γ²/g) x ± (√(−A)/g) y − γ n) / k,
-    // at the region's height h.
+    // at the region's height h; at as far beyond the apex where the
+    // region's centre lies below it (beside an oblique axis), as the cone
+    // is the one nappe.
     let h = (region.center - a).dot(u);
+    let h = if r + k * h < 0.0 { -2.0 * r / k - h } else { h };
     let rho = r + k * h;
     let spread = (-big_a).sqrt();
     let mut curves = Vec::with_capacity(2);
+    let mut near = false;
     for side in [-1.0, 1.0] {
         let dir = (x + y * (side * spread)).normalize();
         let e = (x * (gamma * gamma / g) + y * (side * spread / g) - n * gamma) / k;
         let origin = a + u * h + e * rho;
-        // Only lines that come near the region.
+        // Away from the apex, which lies behind the region.
+        let start = (apex - origin).dot(dir);
+        let (dir, start) = if start > 0.0 {
+            (-dir, -start)
+        } else {
+            (dir, start)
+        };
         let w = region.center - origin;
-        if (w - dir * w.dot(dir)).length() <= region.radius + eps {
-            curves.push(Track::Line { origin, dir });
-        }
+        let along = w.dot(dir);
+        near |= (w - dir * along.max(start)).length() <= region.radius + eps;
+        // From where it comes within CLIP tolerances of the region; where it
+        // stays farther, from infinity (no stretch of it matters).
+        let reach = region.radius + CLIP * eps;
+        let disc = reach * reach - w.length_squared() + along * along;
+        let entry = if disc >= 0.0 {
+            along - disc.sqrt()
+        } else {
+            f64::INFINITY
+        };
+        curves.push(Track::Ray {
+            origin,
+            dir,
+            start: entry.max(start),
+            from_apex: entry <= start,
+        });
     }
-    if curves.is_empty() {
-        Meet::Apart
-    } else {
+    // Both rays where either comes near the region: a face's boundary can
+    // cross the other beyond it, where the faces' boxes reach further, and
+    // every such crossing must lie on a track.
+    if near {
         Meet::Curves(curves)
+    } else {
+        Meet::Apart
     }
 }
 
@@ -1011,6 +1232,12 @@ mod tests {
     use super::*;
 
     const EPS: f64 = 1e-7;
+
+    /// The region of the box holding the ball about `center`.
+    fn ball(center: DVec3, radius: f64) -> Region {
+        let r = DVec3::splat(radius / 3f64.sqrt());
+        Region::of_box(center - r, center + r)
+    }
 
     /// An `(n + 1)²` grid of points of `q` around the region (`None` off
     /// a cone's nappe): plane coordinates about the region's centre, or an
@@ -1093,7 +1320,8 @@ mod tests {
     }
 
     /// Parameters of a track covering its part near the region: a whole
-    /// closed curve; a line's stretch through the region; a conic's
+    /// closed curve; a line's stretch through the region (a ray's from
+    /// its apex at most); a conic's
     /// stretch across it (by its position across the axis), within half
     /// an ellipse.
     fn span(t: &Track, region: &Region) -> (f64, f64) {
@@ -1102,6 +1330,10 @@ mod tests {
             Track::Line { .. } => {
                 let c = t.param(region.center);
                 (c - region.radius, c + region.radius)
+            }
+            Track::Ray { start, .. } => {
+                let c = t.param(region.center);
+                ((c - region.radius).max(start), c + region.radius)
             }
             Track::Conic { p, c, .. } => {
                 let m = t.param(region.center);
@@ -1122,6 +1354,12 @@ mod tests {
             Track::Line { origin, dir } => {
                 let w = p - origin;
                 (w - dir * w.dot(dir)).length()
+            }
+            Track::Ray {
+                origin, dir, start, ..
+            } => {
+                let w = p - origin;
+                (w - dir * w.dot(dir).max(start)).length()
             }
             _ => {
                 // A few Newton steps on the squared distance, from the
@@ -1149,7 +1387,7 @@ mod tests {
             panic!("{case}: {m:?}");
         };
         let mag = 1.0 + a.magnitude() + b.magnitude() + region.center.abs().max_element();
-        for t in tracks {
+        for t in tracks.iter().filter(|t| t.ends().0 < f64::INFINITY) {
             let (lo, hi) = span(t, region);
             for i in 0..=64 {
                 let p = t.point(lo + (hi - lo) * i as f64 / 64.0);
@@ -1223,10 +1461,7 @@ mod tests {
         let mut outcomes = std::collections::BTreeMap::new();
         for case in 0..400 {
             let (p, u) = (rng.point(0.5), rng.unit());
-            let region = Region {
-                center: p + rng.point(0.2),
-                radius: 2.0,
-            };
+            let region = ball(p + rng.point(0.2), 2.0);
             let r = rng.range(0.2, 0.8);
             let flip = |rng: &mut Rng| if rng.next() < 0.5 { u } else { -u };
             let across = |rng: &mut Rng| u.cross(rng.unit()).normalize();
@@ -1330,10 +1565,7 @@ mod tests {
 
     #[test]
     fn touching_coincident_apart_and_unsupported_pairs() {
-        let region = Region {
-            center: DVec3::new(0.1, 0.2, 0.3),
-            radius: 1.5,
-        };
+        let region = ball(DVec3::new(0.1, 0.2, 0.3), 1.5);
         let (o, u) = (DVec3::new(0.1, -0.1, 0.2), DVec3::new(1.0, 2.0, 2.0) / 3.0);
         let x = u.any_orthonormal_vector();
         let cyl = |r: f64, at: DVec3| Quadric::Cylinder {
@@ -1532,10 +1764,7 @@ mod tests {
     #[test]
     fn near_special_configurations_snap_within_a_sixteenth() {
         let mut rng = Rng(0x3EE7_0002);
-        let region = Region {
-            center: DVec3::ZERO,
-            radius: 1.0,
-        };
+        let region = ball(DVec3::ZERO, 1.0);
         // Points of the curves within the region, within `limit` of both.
         let within = |a: &Quadric, b: &Quadric, m: &Meet, limit: f64, case: &str| {
             let Meet::Curves(tracks) = m else {
@@ -1622,10 +1851,7 @@ mod tests {
                     radius: rng.range(0.1, 1.0),
                 },
             );
-            let region = Region {
-                center: DVec3::ZERO,
-                radius: 1.0,
-            };
+            let region = ball(DVec3::ZERO, 1.0);
             let Meet::Curves(t) = meet(&plane, &cyl, &region, EPS) else {
                 panic!()
             };
@@ -1685,17 +1911,14 @@ mod tests {
             point: p + rng.point(0.4),
             normal: axis * beta.cos() + across * beta.sin(),
         };
-        let region = Region {
-            center: p + rng.point(0.2),
-            radius,
-        };
+        let region = ball(p + rng.point(0.2), radius);
         (plane, cone, region)
     }
 
     /// The kind of a conic meeting, for counting.
     fn kind(t: &Track) -> &'static str {
         match *t {
-            Track::Line { .. } => "rulings",
+            Track::Line { .. } | Track::Ray { .. } => "rulings",
             Track::Circle { .. } => "circle",
             Track::Ellipse { .. } => "ellipse",
             Track::Conic { c, .. } if c.abs() < 1e-6 => "parabola",
@@ -1899,24 +2122,33 @@ mod tests {
                 }
             }
         }
-        for k in ["parabola", "half ellipse", "hyperbola"] {
-            assert!(kinds.get(k).copied().unwrap_or(0) >= 20, "{kinds:?}");
+        // Every side of the parabola is reached: open conics of both
+        // signs, and ellipses closed and halved.
+        for (k, least) in [
+            ("parabola", 100),
+            ("hyperbola", 20),
+            ("half ellipse", 5),
+            ("ellipse", 5),
+        ] {
+            assert!(kinds.get(k).copied().unwrap_or(0) >= least, "{kinds:?}");
         }
     }
 
     /// A plane near the apex of a frustum far from it: within a sixteenth
     /// of the tolerance, two rulings within it of both surfaces; beyond, a
-    /// hyperbola's branch on both to rounding.
+    /// hyperbola's branch on both to rounding. Also where the region's
+    /// centre lies below the apex's height, beside a wide cone.
     #[test]
     fn planes_near_an_apex_beyond_the_region() {
         let mut rng = Rng(0x3EE7_0007);
-        let mut lines = 0;
+        let (mut lines, mut below_cases, mut clipped) = (0, 0, 0);
         for case in 0..200 {
             let u = rng.unit();
             let k = 10f64.powf(rng.range(-1.0, 0.5));
             let across = u.cross(rng.unit()).normalize();
             let apex = rng.point(1.0);
-            // The frustum's part where the region is: two to four radii up.
+            // The frustum's part where the region is: two to four units up
+            // the axis from the apex.
             let h = rng.range(2.0, 4.0);
             let cone = Quadric::Cone {
                 point: apex + u * h,
@@ -1924,29 +2156,46 @@ mod tests {
                 radius: k * h,
                 slope: k,
             };
-            let region = Region {
-                center: apex + u * h + across * rng.range(-0.5, 0.5) * k * h,
-                radius: 0.5 * h.min(1.0),
-            };
-            // Steeper than... no: shallower than the rulings, a plane whose
-            // normal is near square to the axis: two rulings.
+            // A plane through the apex nearer the axis's direction than the
+            // rulings (its normal at β from the axis, β beyond π/2 − α): it
+            // crosses the cone in two rulings, h (u − cot β v ± √(k² −
+            // cot² β) across) from the apex, v = across × u.
             let beta = FRAC_PI_2 - rng.range(0.0, 0.8) * k.atan();
-            let n = u * beta.cos() + across.cross(u) * beta.sin();
-            for (off, ruled) in [
-                (0.0, true),
-                (EPS / 32.0, true),
-                (-EPS / 32.0, true),
-                (4.0 * EPS, false),
-                (1e-3, false),
-            ] {
+            let v = across.cross(u);
+            let n = u * beta.cos() + v * beta.sin();
+            let cot = beta.cos() / beta.sin();
+            let ruling = u - v * cot + across * (k * k - cot * cot).sqrt();
+            let mut regions = vec![ball(apex + ruling * h + rng.point(0.1), 0.5 * h.min(1.0))];
+            // Beside a wide cone, a region whose centre lies below the
+            // apex's height and which reaches the ruling at `foot`.
+            let foot = apex + ruling.normalize() * h;
+            let center = foot - u * ((foot - apex).dot(u) + 0.05 * h);
+            let radius = (foot - center).length() + 0.05 * h;
+            if (center - apex).length() > radius + 1e-3 {
+                regions.push(ball(center, radius));
+            }
+            for (region, (off, ruled)) in regions.iter().flat_map(|r| {
+                [
+                    (0.0, true),
+                    (EPS / 32.0, true),
+                    (-EPS / 32.0, true),
+                    (4.0 * EPS, false),
+                    (1e-3, false),
+                ]
+                .map(|o| (r, o))
+            }) {
+                let below = (region.center - apex).dot(u) < 0.0;
+                below_cases += usize::from(below);
                 let plane = Quadric::Plane {
                     point: apex + n * off,
                     normal: n,
                 };
-                let m = meet(&plane, &cone, &region, EPS);
-                assert_eq!(meet(&cone, &plane, &region, EPS), m);
+                let m = meet(&plane, &cone, region, EPS);
+                assert_eq!(meet(&cone, &plane, region, EPS), m);
                 let Meet::Curves(tracks) = &m else {
-                    // Rulings that miss the region.
+                    // Rulings that miss the region, which the one below
+                    // the apex reaches.
+                    assert!(!(below && ruled), "case {case} {off}: {m:?}");
                     assert_eq!(
                         m,
                         Meet::Apart,
@@ -1954,10 +2203,56 @@ mod tests {
                     );
                     continue;
                 };
+                if below && ruled {
+                    assert!(
+                        tracks.iter().any(|t| off_track(t, foot) <= EPS / 16.0),
+                        "case {case} {off}: {tracks:?}"
+                    );
+                }
                 for t in tracks {
                     assert_eq!(t.straight(), ruled, "case {case} {off}: {t:?}");
                     lines += usize::from(t.straight());
-                    let (lo, hi) = span(t, &region);
+                    if let Track::Ray {
+                        origin,
+                        dir,
+                        start,
+                        from_apex,
+                    } = *t
+                    {
+                        // Along a ruling, away from the apex.
+                        let w = apex - origin;
+                        assert!(
+                            (w - dir * w.dot(dir)).length() <= EPS / 16.0
+                                && w.dot(dir) <= start + EPS / 16.0,
+                            "case {case} {off}: {t:?}"
+                        );
+                        let c = region.center - origin;
+                        if start == f64::INFINITY {
+                            // Farther than CLIP tolerances from the region.
+                            assert!(
+                                (c - dir * c.dot(dir)).length() > region.radius + CLIP * EPS,
+                                "case {case} {off}: {t:?}"
+                            );
+                            continue;
+                        }
+                        if from_apex {
+                            assert!(
+                                (t.point(start) - apex).length() <= EPS / 16.0,
+                                "case {case} {off}: {t:?}"
+                            );
+                        } else {
+                            // Where it comes within CLIP tolerances of the
+                            // region, nearer its centre from there on.
+                            assert!(
+                                (t.point(start) - region.center).length()
+                                    >= region.radius + (CLIP - 1e-3) * EPS
+                                    && start <= c.dot(dir) + 1e-12,
+                                "case {case} {off}: {t:?}"
+                            );
+                            clipped += 1;
+                        }
+                    }
+                    let (lo, hi) = span(t, region);
                     for i in 0..=100 {
                         let q = t.point(lo + (hi - lo) * i as f64 / 100.0);
                         if (q - region.center).length() > region.radius {
@@ -1971,5 +2266,7 @@ mod tests {
             }
         }
         assert!(lines > 400, "{lines}");
+        assert!(below_cases > 100, "{below_cases}");
+        assert!(clipped > 400, "{clipped}");
     }
 }

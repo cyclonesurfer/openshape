@@ -460,6 +460,129 @@ fn spheres_and_cones() {
     );
 }
 
+/// The plane through `origin` whose y axis leans `lean` radians from the
+/// vertical toward +x: profiles in it revolve about that line.
+fn leaning(origin: DVec3, lean: f64) -> Frame {
+    let (s, c) = lean.sin_cos();
+    Frame {
+        origin,
+        x: DVec3::new(c, 0.0, -s),
+        y: DVec3::new(s, 0.0, c),
+        z: -DVec3::Y,
+    }
+}
+
+/// The tool of a countersunk hole like [`countersink`]'s, its axis leaning
+/// 10°, its cone reaching higher: the plate's top face meets the cone in
+/// an ellipse.
+fn tilted_countersink(x: f64, y: f64) -> Body {
+    let pts = [
+        (0.0, -0.5),
+        (0.15, -0.5),
+        (0.15, 0.25),
+        (0.45, 0.55),
+        (0.0, 0.55),
+    ]
+    .map(|(r, h)| DVec2::new(r, h));
+    k().revolve(
+        &Profile::polygon(leaning(DVec3::new(x, y, 0.0), 10f64.to_radians()), &pts),
+        &turn(),
+    )
+    .expect("a tilted countersink")
+}
+
+/// A pin of 5° draft about the vertical through `(x, y)`, radius 0.3 at
+/// its foot 0.2 up, inside a plate 0.4 thick, to 1.4 up.
+fn drafted_pin(x: f64, y: f64) -> Body {
+    let top = 0.3 - 1.2 * 5f64.to_radians().tan();
+    let pts = [(0.0, 0.2), (0.3, 0.2), (top, 1.4), (0.0, 1.4)].map(|(r, h)| DVec2::new(r, h));
+    k().revolve(
+        &Profile::polygon(upright(DVec3::new(x, y, 0.0)), &pts),
+        &turn(),
+    )
+    .expect("a drafted pin")
+}
+
+#[test]
+fn planes_across_cones() {
+    let plate = || {
+        k().make_box(&Frame::WORLD, DVec3::new(4.0, 4.0, 0.4))
+            .expect("a plate")
+    };
+    let grid = || (0..16).map(|n| ((n / 4) as f64 + 0.5, (n % 4) as f64 + 0.5));
+    // Disjoint solids made one body, which a body with conic edges on
+    // its curved faces cannot be an operand of yet (STATUS.md).
+    let all = |solids: Vec<Body>| {
+        solids
+            .into_iter()
+            .reduce(|a, b| k().boolean(&a, &b, BooleanOp::Union).expect("a union"))
+            .expect("solids")
+    };
+    // 16 countersunk holes leaning 10°, in one boolean: ellipses where the
+    // plate's faces cross the cones and the shanks.
+    let tools = all(grid().map(|(x, y)| tilted_countersink(x, y)).collect());
+    let (sunk, t) = best(3, || {
+        k().boolean(&plate(), &tools, BooleanOp::Subtract)
+            .expect("tilted countersunk holes")
+    });
+    let topology = k().topology(&sunk);
+    assert_eq!((topology.faces, topology.genus), (6 + 16 * 4, Some(16)));
+    within(
+        "cut 16 countersunk holes leaning 10° into a plate in one boolean",
+        t,
+        LIMIT.tilted_sink_16,
+    );
+    // 16 pins of 5° draft on a plate, flattened on one side by boxes whose
+    // faces run along their axes, in one boolean: hyperbolas.
+    let pins = grid().fold(plate(), |body, (x, y)| {
+        k().boolean(&body, &drafted_pin(x, y), BooleanOp::Union)
+            .expect("a pin")
+    });
+    let boxes = all(grid()
+        .map(|(x, y)| {
+            k().make_box(
+                &Frame {
+                    origin: DVec3::new(x + 0.1, y - 0.4, 0.5),
+                    ..Frame::WORLD
+                },
+                DVec3::new(0.3, 0.8, 1.5),
+            )
+            .expect("a box")
+        })
+        .collect());
+    let (flat, t) = best(3, || {
+        k().boolean(&pins, &boxes, BooleanOp::Subtract)
+            .expect("flattened pins")
+    });
+    let topology = k().topology(&flat);
+    assert_eq!((topology.solids, topology.genus), (1, Some(0)));
+    within(
+        "flatten 16 drafted pins along their axes in one boolean",
+        t,
+        LIMIT.flatten_16,
+    );
+    let opts = TessellationOptions::default();
+    for (name, body, [mesh, validate, mass]) in [
+        ("tilted countersunk", &sunk, LIMIT.tilted),
+        ("flattened pins'", &flat, LIMIT.flattened),
+    ] {
+        let (m, t) = best(2, || k().tessellate(body, &opts).expect("a mesh"));
+        within(
+            &format!("mesh the {name} plate ({} triangles)", m.triangle_count()),
+            t,
+            mesh,
+        );
+        let (_, t) = best(2, || k().validate(body));
+        within(&format!("validate the {name} plate"), t, validate);
+        let (_, t) = best(2, || k().mass_properties(body, 1e-9).expect("mass"));
+        within(
+            &format!("mass properties of the {name} plate (1e-9)"),
+            t,
+            mass,
+        );
+    }
+}
+
 #[test]
 fn sketch_regions() {
     // A grid of 41 by 41 lines and 40 circles: 1,681 crossings among the
@@ -588,6 +711,13 @@ struct Limits {
     dimpled: [f64; 3],
     /// The same of the countersunk plate.
     countersunk: [f64; 3],
+    tilted_sink_16: f64,
+    flatten_16: f64,
+    /// Meshing, validation and mass properties of the plate with tilted
+    /// countersunk holes.
+    tilted: [f64; 3],
+    /// The same of the plate of flattened pins.
+    flattened: [f64; 3],
     mesh_ball: f64,
     regions_122: f64,
 }
@@ -608,6 +738,10 @@ const LIMIT: Limits = Limits {
     sink_16: 2500.0,
     dimpled: [2500.0, 80.0, 150.0],
     countersunk: [300.0, 150.0, 250.0],
-    mesh_ball: 2500.0,
+    tilted_sink_16: 450.0,
+    flatten_16: 300.0,
+    tilted: [400.0, 150.0, 200.0],
+    flattened: [250.0, 100.0, 150.0],
+    mesh_ball: 3500.0,
     regions_122: 1200.0,
 };

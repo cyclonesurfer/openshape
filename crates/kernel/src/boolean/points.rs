@@ -661,9 +661,10 @@ impl Points {
 
     /// The clusters on the curved track `track` strictly between parameters
     /// `ta` (cluster `lo`) and `tb > ta` (cluster `hi`), less than a turn
-    /// apart on a closed track: those within the tolerance of it there, in order, each with
-    /// its parameter (unrolled from `ta`), both ends included. Two within
-    /// the tolerance of each other along it are refused.
+    /// apart on a closed track: those within the tolerance of it there, in
+    /// order, each with its parameter (unrolled from `ta`), both ends
+    /// included. Two within the tolerance of each other along it are
+    /// refused.
     pub fn on_track(
         &self,
         track: &Track,

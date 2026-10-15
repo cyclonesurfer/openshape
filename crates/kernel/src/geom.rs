@@ -155,20 +155,44 @@ impl Curve3 {
 
     /// Parameters subdividing `[t0, t1]` so that the polyline through them
     /// deviates from the curve by at most `chord_tol` and turns by at most
-    /// `max_angle` per segment.
-    pub fn discretize(&self, t0: f64, t1: f64, chord_tol: f64, max_angle: f64) -> Vec<f64> {
+    /// `max_angle` per segment, in at most `limit` segments.
+    ///
+    /// A circle's steps meet `r (1 − cos(Δ/2)) ≤ chord_tol` exactly. A
+    /// NURBS curve's segments are bisected until the curve's points at a
+    /// quarter, half and three quarters of each are within `chord_tol` of
+    /// its chord (an estimate, not a bound), and until its ends' tangents
+    /// differ by at most `max_angle` while its chord is longer than
+    /// `chord_tol` (shorter, its turn is below what the mesh resolves; at a
+    /// kink it never meets the angle). Fails if that takes more than
+    /// `limit` segments, instead of returning a coarser polyline.
+    pub fn discretize(
+        &self,
+        t0: f64,
+        t1: f64,
+        chord_tol: f64,
+        max_angle: f64,
+        limit: usize,
+    ) -> Result<Vec<f64>, String> {
+        let too_many = || format!("an edge needs more than {limit} segments at this tolerance");
         match self {
-            Curve3::Line { .. } => vec![t0, t1],
+            Curve3::Line { .. } => Ok(vec![t0, t1]),
             Curve3::Circle { radius, .. } => {
                 let sweep = t1 - t0;
+                // 1 − cos(Δ/2) = 2 sin²(Δ/4), without the cancellation of
+                // the cosine's form when the tolerance is a tiny part of
+                // the radius.
                 let by_chord = if chord_tol < *radius {
-                    2.0 * (1.0 - chord_tol / radius).acos()
+                    4.0 * (0.5 * chord_tol / radius).sqrt().asin()
                 } else {
                     std::f64::consts::PI
                 };
-                let step = by_chord.min(max_angle).max(1e-4);
-                let n = ((sweep / step).ceil() as usize).max(1);
-                (0..=n).map(|i| t0 + sweep * i as f64 / n as f64).collect()
+                let step = by_chord.min(max_angle);
+                let n = (sweep.abs() / step).ceil();
+                if !(n <= limit as f64) {
+                    return Err(too_many());
+                }
+                let n = (n as usize).max(1);
+                Ok((0..=n).map(|i| t0 + sweep * i as f64 / n as f64).collect())
             }
             Curve3::Nurbs(_) => {
                 // Start from a uniform split, then bisect adaptively.
@@ -177,42 +201,59 @@ impl Curve3 {
                 for i in 0..n0 {
                     let a = t0 + (t1 - t0) * i as f64 / n0 as f64;
                     let b = t0 + (t1 - t0) * (i + 1) as f64 / n0 as f64;
-                    self.refine(a, b, chord_tol, max_angle, 0, &mut out);
+                    self.refine(a, b, chord_tol, max_angle, limit, &mut out)
+                        .ok_or_else(too_many)?;
                 }
-                out
+                Ok(out)
             }
         }
     }
 
-    fn refine(&self, a: f64, b: f64, tol: f64, max_angle: f64, depth: u32, out: &mut Vec<f64>) {
-        let pa = self.point(a);
-        let pb = self.point(b);
-        let mut split = false;
-        if depth < 16 {
-            for f in [0.25, 0.5, 0.75] {
-                let tm = a + (b - a) * f;
-                let pm = self.point(tm);
-                let chord = pa.lerp(pb, f);
-                if (pm - chord).length() > tol {
-                    split = true;
-                    break;
+    /// Bisects `[a, b]` as [`Curve3::discretize`] says, appending the ends
+    /// of its pieces after `a` to `out`; `None` past `limit` of them (or
+    /// sixty levels of halving, where the parameters reach their
+    /// rounding).
+    fn refine(
+        &self,
+        a: f64,
+        b: f64,
+        tol: f64,
+        max_angle: f64,
+        limit: usize,
+        out: &mut Vec<f64>,
+    ) -> Option<()> {
+        // Depth first, by an explicit stack of the pieces still to test
+        // (the later half on top of the earlier).
+        let mut stack = vec![(b, 0u32)];
+        let mut at = a;
+        while let Some((end, depth)) = stack.pop() {
+            let (pa, pb) = (self.point(at), self.point(end));
+            let off = [0.25, 0.5, 0.75].into_iter().any(|f| {
+                let pm = self.point(at + (end - at) * f);
+                (pm - pa.lerp(pb, f)).length() > tol
+            });
+            let turns = || {
+                let (da, db) = (self.deriv(at), self.deriv(end));
+                (pb - pa).length() > tol
+                    && da.length() > 0.0
+                    && db.length() > 0.0
+                    && da.angle_between(db) > max_angle
+            };
+            if off || turns() {
+                if depth == 60 {
+                    return None;
                 }
-            }
-            if !split {
-                let da = self.deriv(a);
-                let db = self.deriv(b);
-                if da.length() > 0.0 && db.length() > 0.0 && da.angle_between(db) > max_angle {
-                    split = true;
+                stack.push((end, depth + 1));
+                stack.push((0.5 * (at + end), depth + 1));
+            } else {
+                out.push(end);
+                if out.len() > limit {
+                    return None;
                 }
+                at = end;
             }
         }
-        if split {
-            let m = 0.5 * (a + b);
-            self.refine(a, m, tol, max_angle, depth + 1, out);
-            self.refine(m, b, tol, max_angle, depth + 1, out);
-        } else {
-            out.push(b);
-        }
+        Some(())
     }
 }
 
@@ -624,11 +665,33 @@ mod tests {
             y: DVec3::Y,
             radius: 1.0,
         };
-        let ts = c.discretize(0.0, PI, 1e-3, 1.0);
+        let ts = c.discretize(0.0, PI, 1e-3, 1.0, 1000).expect("samples");
         for w in ts.windows(2) {
             let mid = c.point(0.5 * (w[0] + w[1]));
             let chord = 0.5 * (c.point(w[0]) + c.point(w[1]));
             assert!((mid - chord).length() <= 1e-3 + 1e-12);
         }
+    }
+
+    /// A kilometre circle at a micrometre: steps of 8.9e-5 rad, where a
+    /// floor of 1e-4 rad left chords 1.25 tolerances off (found by
+    /// review). Far finer than the limit allows is refused, not coarsened.
+    #[test]
+    fn large_circles_meet_fine_tolerances_or_are_refused() {
+        let c = Curve3::Circle {
+            center: DVec3::ZERO,
+            x: DVec3::X,
+            y: DVec3::Y,
+            radius: 1e3,
+        };
+        let ts = c.discretize(0.0, PI, 1e-6, 0.3, 100_000).expect("samples");
+        assert_eq!(ts.len(), 35_126);
+        for w in ts.windows(2) {
+            let mid = c.point(0.5 * (w[0] + w[1]));
+            let chord = 0.5 * (c.point(w[0]) + c.point(w[1]));
+            assert!((mid - chord).length() <= 1e-6 * (1.0 + 1e-6));
+        }
+        assert!(c.discretize(0.0, PI, 1e-12, 0.3, 100_000).is_err());
+        assert!(c.discretize(0.0, PI, 1e-6, 1e-9, 100_000).is_err());
     }
 }

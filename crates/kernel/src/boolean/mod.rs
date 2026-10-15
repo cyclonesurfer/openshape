@@ -51,7 +51,7 @@ mod points;
 mod quadric;
 mod shape;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 
 use chart::Chart;
 use classify::Class;

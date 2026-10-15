@@ -8,7 +8,7 @@ use crate::sweep::{self, RevolveSpec};
 use crate::topo::Brep;
 
 /// A small deterministic generator (xorshift), for repeatable tests.
-pub(super) struct Rng(pub u64);
+pub(crate) struct Rng(pub u64);
 
 impl Rng {
     /// Uniform in `[0, 1)`.

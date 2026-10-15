@@ -4,15 +4,25 @@
 //! 1. Every edge is discretized once, so the two faces that share an edge
 //!    share exactly the same boundary vertices and the mesh is watertight.
 //! 2. Each face's boundary samples are mapped into the face's parameter
-//!    space. Singular boundary points (cone apex, sphere pole) are split into
-//!    two parameter-space points so the parameter-space boundary stays a
-//!    simple polygon.
+//!    space. Singular boundary points (cone apex, sphere pole) become a run
+//!    of parameter-space points along the free parameter, so the
+//!    parameter-space boundary stays a simple polygon.
 //! 3. The parameter-space polygon (outer loop plus holes) is triangulated with
 //!    a constrained Delaunay triangulation, in coordinates scaled so the
-//!    mapping is roughly isometric.
-//! 4. Triangles are refined by inserting their parameter-space centroid until
-//!    the surface deviates from every triangle by less than the chord
-//!    tolerance and the normal varies by less than the angle tolerance.
+//!    mapping is roughly isometric (on a cylinder or a cone, squeezed along
+//!    the rulings).
+//! 4. Triangles are refined, by inserting their parameter-space centroid or
+//!    bisecting their longest edge, until every triangle is within the
+//!    chord tolerance of the surface (measured at thirteen points and
+//!    estimated between them by the quartic through them), faces the way
+//!    the surface does, and its normals turn by less than the angle
+//!    tolerance. A triangle facing against the surface beside a boundary
+//!    segment has the segment bisected and the face meshed again; a sliver
+//!    too small to split that faces against it is mended by an edge flip.
+//!    A face that cannot be refined, or would pass the vertex budget, is an
+//!    error.
+
+use std::f64::consts::FRAC_PI_4;
 
 use glam::{DVec2, DVec3};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -47,6 +57,10 @@ pub(crate) struct FaceTess {
     pub positions: Vec<DVec3>,
     pub normals: Vec<DVec3>,
     pub triangles: Vec<[u32; 3]>,
+    /// Slivers too small to split that faced against the surface, mended
+    /// by an edge flip (design note 0002 §4; counted for the tests).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub unfolded: usize,
 }
 
 /// Mesh of a whole B-rep.
@@ -341,6 +355,11 @@ pub(crate) fn same_surface(a: &Face, b: &Face) -> bool {
 /// Rounds of boundary refinement before giving up (design note 0002 §5).
 const REFINE_ROUNDS: usize = 60;
 
+/// The most vertices a face's mesh, or an edge's samples, may take: work
+/// that grows past it is refused with a message, not left to exhaust the
+/// machine.
+const VERTEX_BUDGET: usize = 2_000_000;
+
 /// Tessellates every face and edge of `brep`. Edges are discretized to the
 /// chord and angle tolerances, then refined where a face's boundary needs
 /// it (design note 0002 §5); no segment shorter than `tol` is split.
@@ -357,11 +376,19 @@ pub(crate) fn tessellate(
     let mut params: Vec<Vec<f64>> = brep
         .edges
         .iter()
-        .map(|e| {
+        .enumerate()
+        .map(|(i, e)| {
             e.curve
-                .discretize(e.t0, e.t1, opts.chord_tolerance, opts.max_angle)
+                .discretize(
+                    e.t0,
+                    e.t1,
+                    opts.chord_tolerance,
+                    opts.max_angle,
+                    VERTEX_BUDGET,
+                )
+                .map_err(|m| KernelError::Tessellation(format!("edge {i}: {m}")))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     let points = |params: &[Vec<f64>]| -> Vec<Vec<DVec3>> {
         brep.edges
             .iter()
@@ -377,11 +404,33 @@ pub(crate) fn tessellate(
             .collect()
     };
     let cusps = find_cusps(brep, opts.max_angle);
+    // Matches the cusps' samples until none is added, returning which
+    // edges changed. Within a group every sample keeps its distance along
+    // the group's direction, so a distance has crossed the longest chain of
+    // cusps after as many passes as there are cusps.
+    let rematch = |params: &mut Vec<Vec<f64>>, edges: &mut Vec<Vec<DVec3>>| {
+        let mut changed = vec![false; brep.edges.len()];
+        for _ in 0..=cusps.len() {
+            let pass = match_cusps(brep, &cusps, params, edges, tol.linear);
+            if !pass.contains(&true) {
+                break;
+            }
+            *edges = points(params);
+            for (c, p) in changed.iter_mut().zip(pass) {
+                *c |= p;
+            }
+        }
+        changed
+    };
     let mut edges = points(&params);
-    if match_cusps(brep, &cusps, &mut params, &edges, tol.linear).contains(&true) {
-        edges = points(&params);
-    }
-    let mut loops: Vec<Vec<Vec<Sample>>> = brep.faces.iter().map(|f| loops_uv(f, &edges)).collect();
+    rematch(&mut params, &mut edges);
+    let face_loops = |i: usize, edges: &[Vec<DVec3>]| {
+        loops_uv(&brep.faces[i], edges, opts.max_angle)
+            .map_err(|m| KernelError::Tessellation(format!("face {i}: {m}")))
+    };
+    let mut loops: Vec<Vec<Vec<Sample>>> = (0..brep.faces.len())
+        .map(|i| face_loops(i, &edges))
+        .collect::<Result<_, _>>()?;
     // Refinement is local; a boundary growing past this many samples is
     // chasing something bisection cannot resolve (the triangulation then
     // reports it).
@@ -397,21 +446,16 @@ pub(crate) fn tessellate(
             }
         }
     }
-    for _ in 0..REFINE_ROUNDS {
-        if params.iter().map(Vec::len).sum::<usize>() > budget {
-            break;
-        }
+    // Bisects the edge segments `split` names (per edge, the indices of
+    // their first samples) longer than the model tolerance, keeping the
+    // cusps matched; returns which edges changed.
+    let bisect = |split: &mut Vec<Vec<usize>>,
+                  params: &mut Vec<Vec<f64>>,
+                  edges: &mut Vec<Vec<DVec3>>| {
         let runs: Vec<CuspRuns> = cusps
             .iter()
-            .map(|c| cusp_runs(brep, c, &params, &edges, tol.linear))
+            .map(|c| cusp_runs(brep, c, params, edges, tol.linear))
             .collect();
-        let mut split: Vec<Vec<usize>> = vec![Vec::new(); brep.edges.len()];
-        for (fi, (face, l)) in brep.faces.iter().zip(&loops).enumerate() {
-            let matched: Vec<&CuspRuns> = cusps_of_face[fi].iter().map(|&k| &runs[k]).collect();
-            for (e, i) in boundary_conflicts(brep, face, l, &params, &matched) {
-                split[e].push(i);
-            }
-        }
         let mut changed = vec![false; brep.edges.len()];
         for (e, segs) in split.iter_mut().enumerate() {
             if segs.is_empty() {
@@ -454,41 +498,132 @@ pub(crate) fn tessellate(
             params[e] = out;
         }
         if changed.contains(&true) {
-            edges = points(&params);
+            *edges = points(params);
             // Bisection near a cusp breaks its matching; restore it.
-            let rematched = match_cusps(brep, &cusps, &mut params, &edges, tol.linear);
-            if rematched.contains(&true) {
-                edges = points(&params);
-                for (c, r) in changed.iter_mut().zip(rematched) {
-                    *c |= r;
-                }
+            for (c, r) in changed.iter_mut().zip(rematch(params, edges)) {
+                *c |= r;
             }
-        } else {
+        }
+        changed
+    };
+    // The faces whose loops use an edge that changed.
+    let touched = |changed: &[bool]| -> Vec<usize> {
+        (0..brep.faces.len())
+            .filter(|&i| {
+                brep.faces[i]
+                    .loops
+                    .iter()
+                    .flat_map(|lp| &lp.coedges)
+                    .any(|c| changed[c.edge.idx()])
+            })
+            .collect()
+    };
+    for _ in 0..REFINE_ROUNDS {
+        if params.iter().map(Vec::len).sum::<usize>() > budget {
             break;
         }
-        for (face, l) in brep.faces.iter().zip(&mut loops) {
-            let touched = face
-                .loops
-                .iter()
-                .flat_map(|lp| &lp.coedges)
-                .any(|c| changed[c.edge.idx()]);
-            if touched {
-                *l = loops_uv(face, &edges);
+        let runs: Vec<CuspRuns> = cusps
+            .iter()
+            .map(|c| cusp_runs(brep, c, &params, &edges, tol.linear))
+            .collect();
+        let mut split: Vec<Vec<usize>> = vec![Vec::new(); brep.edges.len()];
+        for (fi, (face, l)) in brep.faces.iter().zip(&loops).enumerate() {
+            let matched: Vec<&CuspRuns> = cusps_of_face[fi].iter().map(|&k| &runs[k]).collect();
+            for (e, i) in boundary_conflicts(brep, face, l, &params, &matched) {
+                split[e].push(i);
             }
         }
+        let changed = bisect(&mut split, &mut params, &mut edges);
+        if !changed.contains(&true) {
+            break;
+        }
+        for i in touched(&changed) {
+            loops[i] = face_loops(i, &edges)?;
+        }
     }
-    let mut faces = Vec::with_capacity(brep.faces.len());
-    for (i, (face, l)) in brep.faces.iter().zip(loops).enumerate() {
-        faces.push(
-            tessellate_face(face, l, opts)
-                .map_err(|e| KernelError::Tessellation(format!("face {i}: {e}")))?,
-        );
+    // The faces, each meshed again after an edge of it is bisected where
+    // its triangles cannot face the way the surface does (design note 0002
+    // §5).
+    let mut faces: Vec<FaceTess> = vec![FaceTess::default(); brep.faces.len()];
+    let mut todo: Vec<usize> = (0..brep.faces.len()).collect();
+    for round in 0.. {
+        let mut split: Vec<Vec<usize>> = vec![Vec::new(); brep.edges.len()];
+        // The faces that asked, with the edges they asked to bisect.
+        let mut asked: Vec<(usize, Vec<usize>)> = Vec::new();
+        for &i in &todo {
+            match tessellate_face(&brep.faces[i], loops[i].clone(), opts, tol.linear) {
+                Ok(t) => faces[i] = t,
+                Err(Unmeshed::Split(segs)) => {
+                    asked.push((i, segs.iter().map(|&(e, _)| e).collect()));
+                    for (e, k) in segs {
+                        split[e].push(k);
+                    }
+                }
+                Err(Unmeshed::Failed(m)) => {
+                    return Err(KernelError::Tessellation(format!("face {i}: {m}")))
+                }
+            }
+        }
+        if asked.is_empty() {
+            break;
+        }
+        let refuse = |i: usize, why: &str| {
+            KernelError::Tessellation(format!(
+                "face {i}: triangles beside its boundary face against the surface, and {why}"
+            ))
+        };
+        if round == REFINE_ROUNDS || params.iter().map(Vec::len).sum::<usize>() > budget {
+            return Err(refuse(
+                asked[0].0,
+                "bisecting the boundary did not settle them",
+            ));
+        }
+        let changed = bisect(&mut split, &mut params, &mut edges);
+        for (i, wanted) in &asked {
+            if !wanted.iter().any(|&e| changed[e]) {
+                return Err(refuse(*i, "its segments there are too short to bisect"));
+            }
+        }
+        todo = touched(&changed);
+        for &i in &todo {
+            loops[i] = face_loops(i, &edges)?;
+        }
     }
     Ok(BrepTess {
         faces,
         edges,
         seams: seams(brep),
     })
+}
+
+/// Why a face was not meshed.
+enum Unmeshed {
+    /// These edge segments (edge, index of the segment's first sample)
+    /// are to be bisected first: triangles beside them face against the
+    /// surface, and cannot be made to face along it inside the face.
+    Split(Vec<(usize, usize)>),
+    /// Refused, for this reason.
+    Failed(String),
+}
+
+impl From<String> for Unmeshed {
+    fn from(m: String) -> Self {
+        Unmeshed::Failed(m)
+    }
+}
+
+/// How a triangle of a face's refinement fares.
+enum Judged {
+    /// Within the tolerances.
+    Fine,
+    /// To be split at this point (in the face's parameters).
+    Insert(DVec2),
+    /// Beside this edge segment (edge, index of its first sample), to be
+    /// bisected first.
+    Bisect((usize, usize)),
+    /// Too small to split, and facing against the surface: to be unfolded
+    /// once refinement is done.
+    Folded,
 }
 
 /// A vertex of a face's loop at which the two boundary curves leave in
@@ -500,16 +635,24 @@ struct Cusp {
     face: usize,
     /// The vertex.
     v: DVec3,
-    /// Unit direction halfway between the two curves' directions there.
+    /// Unit direction along which both sides are matched: halfway between
+    /// the two curves' directions there, or, for cusps that share a side
+    /// (a vertex where the edges of several faces leave together), the
+    /// mean direction of all their sides, one for the whole group.
     dir: DVec3,
     /// The two edges leaving the vertex, each with `true` if the vertex is
     /// at the edge's start.
     sides: [(usize, bool); 2],
+    /// Per side, `true` if its edge also has a cusp at its other end: its
+    /// run then stops at the edge's parameter midpoint.
+    half: [bool; 2],
 }
 
 /// The cusps of every face of `brep`.
 fn find_cusps(brep: &Brep, max_angle: f64) -> Vec<Cusp> {
     let mut out = Vec::new();
+    // Each cusp's sides with the directions they leave in.
+    let mut leaves: Vec<[((usize, bool), DVec3); 2]> = Vec::new();
     for (fi, f) in brep.faces.iter().enumerate() {
         for lp in &f.loops {
             let n = lp.coedges.len();
@@ -539,30 +682,81 @@ fn find_cusps(brep: &Brep, max_angle: f64) -> Vec<Cusp> {
                     v: brep.vertex(v).point,
                     dir: (a + b).normalize(),
                     sides: [sp, sn],
+                    half: [false; 2],
                 });
+                leaves.push([(sp, a), (sn, b)]);
             }
         }
+    }
+    // Cusps sharing a side are matched along one direction: along their
+    // own, the samples one adds to the side they share are at distances
+    // the other has not matched, and matching around a vertex where three
+    // faces' edges leave together never settles.
+    let mut group: Vec<usize> = (0..out.len()).collect();
+    fn root(group: &mut [usize], mut k: usize) -> usize {
+        while group[k] != k {
+            group[k] = group[group[k]];
+            k = group[k];
+        }
+        k
+    }
+    let mut sides: Vec<((usize, bool), usize, DVec3)> = leaves
+        .iter()
+        .enumerate()
+        .flat_map(|(k, l)| l.map(|(s, d)| (s, k, d)))
+        .collect();
+    sides.sort_by_key(|&(s, k, _)| (s, k));
+    for w in sides.windows(2) {
+        if w[0].0 == w[1].0 {
+            let (r0, r1) = (root(&mut group, w[0].1), root(&mut group, w[1].1));
+            group[r0.max(r1)] = r0.min(r1);
+        }
+    }
+    let mut sum = vec![DVec3::ZERO; out.len()];
+    for (i, &(s, k, d)) in sides.iter().enumerate() {
+        if i == 0 || sides[i - 1].0 != s {
+            sum[root(&mut group, k)] += d;
+        }
+    }
+    // An edge with cusps at both ends is matched from each end to its
+    // middle only, so the two ends' matchings never meet.
+    let mut ends = vec![0u8; brep.edges.len()];
+    for &(s, _, _) in &sides {
+        ends[s.0] |= if s.1 { 1 } else { 2 };
+    }
+    for (k, c) in out.iter_mut().enumerate() {
+        let dir = sum[root(&mut group, k)].normalize_or_zero();
+        if dir != DVec3::ZERO {
+            c.dir = dir;
+        }
+        c.half = c.sides.map(|(e, _)| ends[e] == 3);
     }
     out
 }
 
 /// The samples of one side of a cusp over which its curve runs away from
 /// the vertex as a graph over the cusp's direction: (sample index, distance
-/// along the direction), outward, the vertex itself excluded.
+/// along the direction), outward, the vertex itself excluded; with `half`,
+/// only those before the edge's parameter midpoint (from its end: those at
+/// or after it).
 fn cusp_run(
     brep: &Brep,
     c: &Cusp,
-    (e, at_start): (usize, bool),
+    ((e, at_start), half): ((usize, bool), bool),
     params: &[f64],
     pts: &[DVec3],
 ) -> Vec<(usize, f64)> {
     let curve = &brep.edges[e].curve;
     let n = pts.len();
     let sign = if at_start { 1.0 } else { -1.0 };
+    let mid = 0.5 * (params[0] + params[n - 1]);
     let mut out = Vec::new();
     let mut last = 0.0;
     for k in 1..n {
         let j = if at_start { k } else { n - 1 - k };
+        if half && (params[j] >= mid) == at_start {
+            break;
+        }
         let d = (pts[j] - c.v).dot(c.dir);
         // Each segment turns by less than the angle tolerance, so tangents
         // within 60° of the direction at both ends keep it monotonic.
@@ -604,8 +798,11 @@ impl CuspRuns {
 /// The matched runs of a cusp: each side's samples out to where the
 /// shorter of the two runs ends.
 fn cusp_runs(brep: &Brep, c: &Cusp, params: &[Vec<f64>], pts: &[Vec<DVec3>], tol: f64) -> CuspRuns {
-    let run = |s: (usize, bool)| cusp_run(brep, c, s, &params[s.0], &pts[s.0]);
-    let (ra, rb) = (run(c.sides[0]), run(c.sides[1]));
+    let run = |k: usize| {
+        let e = c.sides[k].0;
+        cusp_run(brep, c, (c.sides[k], c.half[k]), &params[e], &pts[e])
+    };
+    let (ra, rb) = (run(0), run(1));
     let dmax = match (ra.last(), rb.last()) {
         (Some(a), Some(b)) => a.1.min(b.1) + tol,
         _ => 0.0,
@@ -639,9 +836,10 @@ fn match_cusps(
 ) -> Vec<bool> {
     let mut add: Vec<Vec<f64>> = vec![Vec::new(); params.len()];
     for c in cusps {
-        let runs = c
-            .sides
-            .map(|s| cusp_run(brep, c, s, &params[s.0], &pts[s.0]));
+        let runs = [0, 1].map(|k| {
+            let e = c.sides[k].0;
+            cusp_run(brep, c, (c.sides[k], c.half[k]), &params[e], &pts[e])
+        });
         let (Some(la), Some(lb)) = (runs[0].last(), runs[1].last()) else {
             continue;
         };
@@ -1106,10 +1304,19 @@ fn unwrap_closure(s: &Surface, samples: &mut [Sample]) {
 }
 
 /// The boundary loops of `face` in its parameter space, each sample tagged
-/// with the edge segment that starts at it.
-fn loops_uv(face: &Face, edges: &[Vec<DVec3>]) -> Vec<Vec<Sample>> {
+/// with the edge segment that starts at it. A singular point (a cone's
+/// apex, a sphere's pole) becomes a run along the ambiguous parameter, on
+/// a surface of revolution split into steps of at most `max_angle` (and
+/// π/4) of its angle: the triangles meeting there
+/// then span no more of it than their neighbours do (two points spanning
+/// half a turn made fans the refinement took tens of passes to resolve).
+/// Fails past [`VERTEX_BUDGET`] samples (a tiny `max_angle` asks for
+/// hundreds of millions at a pole: found by review, as an allocation
+/// that aborted the process).
+fn loops_uv(face: &Face, edges: &[Vec<DVec3>], max_angle: f64) -> Result<Vec<Vec<Sample>>, String> {
     let s = &face.surface;
     let mut out = Vec::new();
+    let mut count = 0usize;
     for lp in &face.loops {
         let mut pts: Vec<(DVec3, (usize, usize))> = Vec::new();
         for c in &lp.coedges {
@@ -1151,11 +1358,24 @@ fn loops_uv(face: &Face, edges: &[Vec<DVec3>]) -> Vec<Vec<Sample>> {
                         (DVec2::new(cur.uv.x, prev.y), DVec2::new(cur.uv.x, next.y))
                     };
                     if (a - b).length() > 1e-12 {
-                        fixed.push(Sample {
-                            uv: a,
-                            p: cur.p,
-                            seg: None,
-                        });
+                        // On a surface of revolution u is the angle.
+                        let steps = if u_ambiguous && matches!(s, Surface::Revolution { .. }) {
+                            ((b.x - a.x).abs() / max_angle.min(FRAC_PI_4))
+                                .ceil()
+                                .max(1.0)
+                        } else {
+                            1.0
+                        };
+                        if !(steps + (count + fixed.len()) as f64 <= VERTEX_BUDGET as f64) {
+                            return Err("tessellation exceeded the vertex budget".into());
+                        }
+                        for k in 0..steps as usize {
+                            fixed.push(Sample {
+                                uv: a + (b - a) * (k as f64 / steps),
+                                p: cur.p,
+                                seg: None,
+                            });
+                        }
                         fixed.push(Sample { uv: b, ..cur });
                     } else {
                         fixed.push(Sample { uv: a, ..cur });
@@ -1163,9 +1383,43 @@ fn loops_uv(face: &Face, edges: &[Vec<DVec3>]) -> Vec<Vec<Sample>> {
                 }
             }
         }
+        count += fixed.len();
         out.push(fixed);
     }
-    out
+    if count > VERTEX_BUDGET {
+        return Err("tessellation exceeded the vertex budget".into());
+    }
+    Ok(out)
+}
+
+/// The scale of a face's parameters for its triangulation on a cylinder
+/// or a cone of revolution, straight along `v`, given `param_scale`'s and
+/// the face's extent `dv` in `v`: there a triangle's chord error depends
+/// only on its width across `u` (an arc of radius at most `su`, the
+/// scale of `u`), which the tolerance holds to `h = √(8 tol su)`, so `v`
+/// is shrunk until a triangle `h` wide spans the face along `v` (at most
+/// 256 times). The triangulation then follows the rulings, as on a face
+/// bounded by its parameter lines, instead of filling a face cut across
+/// them (by an ellipse, a conic or a line off the rulings) with
+/// triangles `h` wide each way. The refinement measures the error in
+/// space, so the mesh meets the tolerance either way.
+fn ruled_scale(s: &Surface, scale: DVec2, dv: f64, tol: f64) -> DVec2 {
+    let ruled = matches!(
+        s,
+        Surface::Revolution {
+            profile: Curve3::Line { .. },
+            ..
+        } | Surface::Extrusion {
+            curve: Curve3::Circle { .. },
+            ..
+        }
+    );
+    if !ruled || dv.is_nan() || dv <= 0.0 {
+        return scale;
+    }
+    let h = (8.0 * tol * scale.x).sqrt();
+    let shrink = (h / (scale.y * dv)).clamp(1.0 / 256.0, 1.0);
+    DVec2::new(scale.x, scale.y * shrink)
 }
 
 /// Parameter-space scaling for a roughly isometric triangulation: the
@@ -1329,6 +1583,147 @@ pub(crate) fn balanced(n: usize) -> Vec<[usize; 3]> {
     out
 }
 
+/// The points of the quartic Lagrange triangle other than its corners, in
+/// quarters of their barycentric coordinates: a quarter, half and three
+/// quarters of the way along each edge `01`, `12` and `20`, then the three
+/// inside, halfway from the centroid to each corner.
+const QUARTERS: [[usize; 3]; 12] = [
+    [3, 1, 0],
+    [2, 2, 0],
+    [1, 3, 0],
+    [0, 3, 1],
+    [0, 2, 2],
+    [0, 1, 3],
+    [1, 0, 3],
+    [2, 0, 2],
+    [3, 0, 1],
+    [2, 1, 1],
+    [1, 2, 1],
+    [1, 1, 2],
+];
+
+/// No quartic that is zero at a triangle's corners is larger anywhere in it
+/// than this many times its largest value at the [`QUARTERS`] (the sum of
+/// the magnitudes of their Lagrange functions peaks at 3.3536, near the
+/// corners; checked by a test).
+const LEBESGUE: f64 = 3.36;
+
+/// The quartic Lagrange functions of the [`QUARTERS`] at barycentric
+/// coordinates `l`: products of `ℓₘ(x) = ∏_{a<m} (4x − a)/(a + 1)`, one
+/// for each coordinate.
+fn quartic_basis(l: [f64; 3]) -> [f64; 12] {
+    let f = l.map(|x| {
+        let y = 4.0 * x;
+        let mut v = [1.0; 5];
+        for m in 1..5 {
+            v[m] = v[m - 1] * (y - (m - 1) as f64) / m as f64;
+        }
+        v
+    });
+    QUARTERS.map(|[i, j, k]| f[0][i] * f[1][j] * f[2][k])
+}
+
+/// The steps along each side of [`GRID`], and its points.
+const STEPS: usize = 12;
+const POINTS: usize = (STEPS + 1) * (STEPS + 2) / 2;
+
+/// A point of [`GRID`]: its barycentric coordinates, the quartic Lagrange
+/// functions there, and its neighbours' indices.
+type GridPoint = ([f64; 3], [f64; 12], Vec<usize>);
+
+/// A grid of twelfths over a triangle (twelfths hold the thirds, where a
+/// cubic error along an edge peaks, and the quarters).
+static GRID: std::sync::LazyLock<Vec<GridPoint>> = std::sync::LazyLock::new(|| {
+    let n = STEPS as i32;
+    let index = |i: i32, j: i32| -> Option<usize> {
+        (i >= 0 && j >= 0 && i + j <= n).then(|| {
+            // Rows of `i` hold `n + 1 - i` points.
+            (0..i).map(|r| (n + 1 - r) as usize).sum::<usize>() + j as usize
+        })
+    };
+    let mut out = Vec::new();
+    for i in 0..=n {
+        for j in 0..=n - i {
+            let l = [i, j, n - i - j].map(|x| x as f64 / n as f64);
+            let near = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1)]
+                .into_iter()
+                .filter_map(|(a, b)| index(i + a, j + b))
+                .collect();
+            out.push((l, quartic_basis(l), near));
+        }
+    }
+    out
+});
+
+/// The value of largest magnitude, over a triangle, of the quartic that is
+/// zero at its corners and `at` the [`QUARTERS`] (the quartic Lagrange
+/// interpolant of the distance to the surface, the estimate between the
+/// points tested; after R. E. Bank and R. K. Smith, "Mesh smoothing using a
+/// posteriori error estimates", SIAM J. Numer. Anal. 34, 1997, who estimate
+/// a linear element's error from the quadratic one), and where it is, in
+/// barycentric coordinates. The edges `01`, `12` and `20` that `skip`
+/// marks are left out. Found on a grid of twelfths, then by a local
+/// search, down to 1/384, from each of the grid's local peaks within a
+/// tenth of its largest (design note 0002 §4). Given `stop`, the search
+/// ends at the first point found past it, and is not refined when the
+/// grid's largest is under it by more than a tenth.
+fn peak(at: &[f64; 12], skip: [bool; 3], stop: Option<f64>) -> (f64, [f64; 3]) {
+    let refine = |top: f64| stop.is_none_or(|s| top * 1.1 >= s);
+    let stop = stop.unwrap_or(f64::INFINITY);
+    let value = |b: &[f64; 12]| b.iter().zip(at).map(|(x, y)| x * y).sum::<f64>();
+    let left_out = |l: &[f64; 3]| (0..3).any(|e| skip[e] && l[(e + 2) % 3] < 1e-9);
+    let grid = &*GRID;
+    let mut v = [0.0f64; POINTS];
+    let mut top = 0.0f64;
+    for (k, (l, b, _)) in grid.iter().enumerate() {
+        if !left_out(l) {
+            v[k] = value(b);
+            if v[k].abs() > stop {
+                return (v[k], *l);
+            }
+            top = top.max(v[k].abs());
+        }
+    }
+    let mut best = (0.0f64, [1.0 / 3.0; 3]);
+    if top == 0.0 {
+        return best;
+    }
+    for (k, (l, _, near)) in grid.iter().enumerate() {
+        if v[k].abs() * 1.1 < top || near.iter().any(|&m| v[m].abs() > v[k].abs()) {
+            continue;
+        }
+        let mut here = (v[k], *l);
+        if refine(top) {
+            let mut step = 1.0 / 24.0;
+            for _ in 0..5 {
+                let (_, l0) = here;
+                for (i, j) in [(0, 1), (1, 0), (1, 2), (2, 1), (2, 0), (0, 2)] {
+                    let mut l = l0;
+                    l[i] += step;
+                    l[j] -= step;
+                    if l[j] > -1e-12 {
+                        l[j] = l[j].max(0.0);
+                        if !left_out(&l) {
+                            let x = value(&quartic_basis(l));
+                            if x.abs() > here.0.abs() {
+                                here = (x, l);
+                                if x.abs() > stop {
+                                    return here;
+                                }
+                            }
+                        }
+                    }
+                }
+                step *= 0.5;
+            }
+        }
+        if here.0.abs() > best.0.abs() {
+            best = here;
+        }
+    }
+    best
+}
+
 /// Triangles inside the constrained boundary, found by flood fill from the
 /// outer face, toggling inside/outside each time a constraint edge is
 /// crossed. Purely topological, so robust to nearly collinear boundaries.
@@ -1375,10 +1770,13 @@ fn tessellate_face(
     face: &Face,
     loops: Vec<Vec<Sample>>,
     opts: &TessellationOptions,
-) -> Result<FaceTess, String> {
+    linear: f64,
+) -> Result<FaceTess, Unmeshed> {
     let s = &face.surface;
     if loops.iter().any(|l| l.len() < 3) {
-        return Err("loop has fewer than three boundary samples".into());
+        return Err(Unmeshed::Failed(
+            "loop has fewer than three boundary samples".into(),
+        ));
     }
     let (mut lo, mut hi) = (DVec2::splat(f64::MAX), DVec2::splat(f64::MIN));
     for l in &loops {
@@ -1387,7 +1785,12 @@ fn tessellate_face(
             hi = hi.max(smp.uv);
         }
     }
-    let scale = param_scale(s, &loops)?;
+    let scale = ruled_scale(
+        s,
+        param_scale(s, &loops)?,
+        hi.y - lo.y,
+        opts.chord_tolerance,
+    );
 
     let is_planar = matches!(s, Surface::Plane(_));
     // Spade rejects non-zero coordinates below ~1e-42; such values are
@@ -1402,9 +1805,13 @@ fn tessellate_face(
     // Per CDT vertex of a curved face: its surface point and normal,
     // evaluated once.
     let mut at: Vec<(DVec3, Option<DVec3>)> = Vec::new();
+    // At a singular point (an apex, a pole, a disc's centre) `S_u × S_v`
+    // is the rounding of a vanishing derivative and can point either way:
+    // such a point has no normal of its own.
     let evaluate = |uv: DVec2, p: Option<DVec3>| {
         let sp = p.unwrap_or_else(|| s.point(uv.x, uv.y));
-        (sp, s.normal(uv.x, uv.y))
+        let n = singular_dir(s, uv).is_none().then(|| s.normal(uv.x, uv.y));
+        (sp, n.flatten())
     };
     let placed: Vec<Vec<DVec2>> = loops
         .iter()
@@ -1414,6 +1821,7 @@ fn tessellate_face(
     // the boundary's runs: no point is added on a flat face, every
     // triangulation of a convex polygon on its own vertices is valid (no
     // three of them are on a line), and this one needs no search.
+    let mut unfolded = 0;
     let tris = if is_planar && placed.len() == 1 && convexity(&placed[0]) == Some(true) {
         verts = loops[0].iter().map(|smp| (smp.uv, Some(smp.p))).collect();
         balanced(placed[0].len())
@@ -1459,91 +1867,409 @@ fn tessellate_face(
         };
 
         let boundary_constraints = cdt.num_constraints();
-        if !is_planar {
+        if is_planar {
+            inside_triangles(&cdt)
+        } else {
             let min_area = (opts.chord_tolerance * 0.01).powi(2);
-            // Triangles found fine (or too small to refine) in an earlier pass:
-            // the test depends only on their vertices, so it is not repeated.
-            let mut settled: FxHashSet<[usize; 3]> = FxHashSet::default();
-            for _pass in 0..12 {
-                let tris = inside_triangles(&cdt);
-                let mut new_pts: Vec<(DVec2, usize)> = Vec::new();
-                for t in &tris {
-                    let mut key = *t;
-                    key.sort_unstable();
-                    if settled.contains(&key) {
-                        continue;
+            // The boundary's segments, each with the edge segment it is
+            // (`None` between the points a singular point is split into).
+            // The edges' samples hold their chords to the tolerance, so
+            // their midpoints are not tested (no point added inside the
+            // face would change them). Refinement adds no constraint, so
+            // they are found once.
+            let mut boundary: FxHashMap<[usize; 2], Option<(usize, usize)>> = FxHashMap::default();
+            let mut start = 0;
+            for l in &loops {
+                for (j, smp) in l.iter().enumerate() {
+                    let (a, b) = (index[start + j], index[start + (j + 1) % l.len()]);
+                    if a != b {
+                        boundary.entry([a.min(b), a.max(b)]).or_insert(smp.seg);
                     }
-                    let uv = t.map(|i| verts[i].0);
-                    let q = uv.map(|x| x * scale);
-                    let area = 0.5 * (q[1] - q[0]).perp_dot(q[2] - q[0]).abs();
-                    let longest = (q[1] - q[0])
-                        .length_squared()
-                        .max((q[2] - q[1]).length_squared())
-                        .max((q[0] - q[2]).length_squared());
-                    // Skip tiny triangles and slivers (whose centroid could
-                    // land on a boundary constraint within round-off).
-                    if area < min_area || 2.0 * area < 1e-8 * longest {
-                        settled.insert(key);
-                        continue;
+                }
+                start += l.len();
+            }
+            // How triangle `t` fares (design note 0002 §4): fine, to be
+            // split at a point, or beside a boundary segment to bisect
+            // first.
+            let judge = |t: [usize; 3],
+                         verts: &[(DVec2, Option<DVec3>)],
+                         at: &[(DVec3, Option<DVec3>)],
+                         boundary: &FxHashMap<[usize; 2], Option<(usize, usize)>>,
+                         min_area: f64|
+             -> Result<Judged, Unmeshed> {
+                let uv = t.map(|i| verts[i].0);
+                let q = uv.map(|x| x * scale);
+                let area = 0.5 * (q[1] - q[0]).perp_dot(q[2] - q[0]).abs();
+                let lens = [0, 1, 2].map(|e| (q[(e + 1) % 3] - q[e]).length_squared());
+                let longest = lens[0].max(lens[1]).max(lens[2]);
+                let side = |e: usize| {
+                    let (a, b) = (t[e], t[(e + 1) % 3]);
+                    boundary.get(&[a.min(b), a.max(b)])
+                };
+                let p = t.map(|i| at[i].0);
+                let tri_n = (p[1] - p[0]).cross(p[2] - p[0]);
+                if tri_n.length() <= 0.0 {
+                    return Ok(Judged::Fine);
+                }
+                // Its corners in a line within the model tolerance, a
+                // triangle has no side to face (by an apex, three points
+                // on nearly one ruling).
+                let side_3d = [0, 1, 2].map(|e| (p[(e + 1) % 3] - p[e]).length());
+                let thin = tri_n.length() < linear * side_3d[0].max(side_3d[1]).max(side_3d[2]);
+                let tri_n = tri_n.normalize();
+                let c = (uv[0] + uv[1] + uv[2]) / 3.0;
+                // A triangle facing away from the surface (a long sliver
+                // folded over), or a normal turning too far.
+                let nc = s.normal(c.x, c.y);
+                let folded = !thin && nc.is_some_and(|nc| tri_n.dot(nc) <= 0.0);
+                let turned = folded
+                    || nc.is_some_and(|nc| {
+                        t.iter().any(|&i| {
+                            at[i]
+                                .1
+                                .is_some_and(|nw| nw.angle_between(nc) > opts.max_angle)
+                        })
+                    });
+                if turned {
+                    // Beside a boundary segment that is its longest side,
+                    // points added inside close in on the segment's middle
+                    // in the parameters, which can lie off its chord: the
+                    // segment is bisected (a segment Delaunay refinement
+                    // splits rather than crowd: J. Ruppert, "A Delaunay
+                    // refinement algorithm for quality 2-dimensional mesh
+                    // generation", J. Algorithms 18, 1995; found by review,
+                    // as triangles folded over by a cut near a ball's pole
+                    // and by an apex, settled once too small to split).
+                    let e = (0..3)
+                        .max_by(|&a, &b| lens[a].total_cmp(&lens[b]))
+                        .unwrap_or(0);
+                    if let Some(Some(seg)) = side(e) {
+                        return Ok(Judged::Bisect(*seg));
                     }
-                    let p = t.map(|i| at[i].0);
-                    let tri_n = (p[1] - p[0]).cross(p[2] - p[0]);
-                    if tri_n.length() <= 0.0 {
-                        settled.insert(key);
-                        continue;
+                }
+                // Tiny triangles and slivers are not split (their centroid
+                // could land on a boundary constraint within round-off).
+                // One folded over is unfolded once refinement is done; one
+                // whose normals turn too far is refused.
+                if area < min_area || 2.0 * area < 1e-8 * longest {
+                    if folded {
+                        return Ok(Judged::Folded);
                     }
-                    let tri_n = tri_n.normalize();
-                    // Chord error: distance of the surface from the triangle's
-                    // plane at the centroid and at interior-edge midpoints.
-                    let c = (uv[0] + uv[1] + uv[2]) / 3.0;
-                    let off = |w: DVec2| (s.point(w.x, w.y) - p[0]).dot(tri_n).abs();
-                    let mut refine = off(c) > opts.chord_tolerance
-                        || (0..3).any(|e| {
-                            let (a, b) = (t[e], t[(e + 1) % 3]);
-                            (verts[a].1.is_none() || verts[b].1.is_none())
-                                && off((verts[a].0 + verts[b].0) * 0.5) > opts.chord_tolerance
-                        });
-                    if !refine {
-                        if let Some(nc) = s.normal(c.x, c.y) {
-                            refine = t.iter().any(|&i| {
-                                at[i]
-                                    .1
-                                    .map(|nw| nw.angle_between(nc) > opts.max_angle)
-                                    .unwrap_or(false)
-                            });
+                    if turned {
+                        return Err(
+                            "a triangle's normals turn past the angle tolerance where it is \
+                             too small to split"
+                                .to_string()
+                                .into(),
+                        );
+                    }
+                    return Ok(Judged::Fine);
+                }
+                // Chord error: the distance to the surface from the
+                // triangle's centroid, the points halfway from it to the
+                // corners, and the points at a quarter, half and three
+                // quarters of its edges, and the largest value inside it of
+                // the quartic through those points (zero at the corners).
+                // The worst failing edge is split at its midpoint if it is
+                // the triangle's longest (Rivara's bisection); otherwise
+                // the centroid is added. Estimated, not bounded: where the
+                // surface bends faster than a quartic between the points,
+                // the mesh can stray a little further (design note 0002
+                // §4).
+                let tol = opts.chord_tolerance;
+                // The distance from `q`, a point of the triangle, to the
+                // surface, from the surface point at `w` under it: along
+                // the surface's normal there (an offset along the surface
+                // is the parameters' slack, not the mesh's error), signed
+                // by the side of the triangle it is on.
+                let gap = |w: DVec2, q: DVec3| {
+                    let off = s.point(w.x, w.y) - q;
+                    match s.normal(w.x, w.y) {
+                        Some(n) => off.dot(n) * n.dot(tri_n).signum(),
+                        None => off.dot(tri_n),
+                    }
+                };
+                // The parameter of a corner that is free: at an apex or a
+                // pole, always a boundary sample.
+                let free = |i: usize| verts[i].1.and_then(|_| singular_dir(s, verts[i].0));
+                // The parameters under the point `f` of the way along the
+                // chord from `a` to `b`: those as far between theirs,
+                // except that from an apex or a pole the chord runs along
+                // the other end's ruling or meridian, so the free
+                // parameter is that end's (the parameters as far between
+                // are a point beside the chord, where the distance along
+                // the normal overstates the chord's: review measured a
+                // polar cap at 10,424 triangles that way, against 7,262).
+                let under = |a: usize, b: usize, f: f64| {
+                    let (x, y) = (verts[a].0, verts[b].0);
+                    let m = x.lerp(y, f);
+                    match (free(a), free(b)) {
+                        (Some(true), None) => DVec2::new(y.x, m.y),
+                        (Some(false), None) => DVec2::new(m.x, y.y),
+                        (None, Some(true)) => DVec2::new(x.x, m.y),
+                        (None, Some(false)) => DVec2::new(m.x, x.y),
+                        _ => m,
+                    }
+                };
+                // The centroid and the points halfway from it to the
+                // corners.
+                let inner = [
+                    [1.0 / 3.0; 3],
+                    [0.5, 0.25, 0.25],
+                    [0.25, 0.5, 0.25],
+                    [0.25, 0.25, 0.5],
+                ]
+                .map(|w| {
+                    let x = uv[0] * w[0] + uv[1] * w[1] + uv[2] * w[2];
+                    gap(x, p[0] * w[0] + p[1] * w[1] + p[2] * w[2])
+                });
+                let mut split = inner.iter().any(|x| x.abs() > tol).then_some(c);
+                // The distances at the quartic triangle's points
+                // ([`QUARTERS`]).
+                let mut d = [0.0; 12];
+                d[9..].copy_from_slice(&inner[1..]);
+                let mut worst = tol;
+                for e in 0..3 {
+                    let (a, b) = (t[e], t[(e + 1) % 3]);
+                    let along =
+                        [0.25, 0.5, 0.75].map(|f| gap(under(a, b, f), at[a].0.lerp(at[b].0, f)));
+                    if side(e).is_some() {
+                        // The edges' samples hold a boundary chord to the
+                        // tolerance; the parameters between its ends only
+                        // approximate the curve's, so the distances are
+                        // capped there and not tested.
+                        for (x, y) in d[3 * e..3 * e + 3].iter_mut().zip(along) {
+                            *x = y.clamp(-tol, tol);
                         }
+                        continue;
                     }
-                    if refine {
-                        new_pts.push((c, t[0]));
-                    } else {
-                        settled.insert(key);
+                    d[3 * e..3 * e + 3].copy_from_slice(&along);
+                    let far = along.into_iter().fold(0.0f64, |m, x| m.max(x.abs()));
+                    if far > worst {
+                        worst = far;
+                        let m = (verts[a].0 + verts[b].0) * 0.5;
+                        split = Some(if lens[e] >= longest { m } else { c });
                     }
+                }
+                // Between the points: the quartic through them, searched
+                // only when it could pass the tolerance, and not on the
+                // boundary's segments (no point added inside moves them).
+                // Past it on an edge that is the triangle's longest, that
+                // edge is bisected; elsewhere the centroid is added.
+                let large = d.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+                if std::env::var_os("NOPEAK").is_none() && split.is_none() && large * LEBESGUE > tol
+                {
+                    let on = |e: usize, l: [f64; 3]| l[(e + 2) % 3] < 1e-9;
+                    let (v, l) = peak(&d, [0, 1, 2].map(|e| side(e).is_some()), Some(tol));
+                    if v.abs() > tol {
+                        split = Some(match (0..3).find(|&e| on(e, l)) {
+                            Some(e) if lens[e] >= longest => {
+                                (verts[t[e]].0 + verts[t[(e + 1) % 3]].0) * 0.5
+                            }
+                            _ => c,
+                        });
+                    }
+                }
+                if split.is_none() && turned {
+                    split = Some(c);
+                }
+                Ok(split.map_or(Judged::Fine, Judged::Insert))
+            };
+            // Whether triangle `t` (counter-clockwise) is still one of the
+            // triangulation's.
+            let present = |cdt: &Cdt, t: [usize; 3]| {
+                let h = spade::handles::FixedVertexHandle::from_index;
+                cdt.get_edge_from_neighbors(h(t[0]), h(t[1]))
+                    .and_then(|e| e.face().as_inner())
+                    .is_some_and(|f| f.vertices().iter().any(|v| v.fix().index() == t[2]))
+            };
+            // Each pass tests the triangles made by the last (around the
+            // points it added: inserting a point re-triangulates only the
+            // triangles about it) and splits those that fail, until none
+            // does: a triangle's test depends only on its corners. A pass
+            // that adds no point while triangles fail, or a mesh past the
+            // vertex budget, is refused.
+            let mut work = inside_triangles(&cdt);
+            let mut splits: Vec<(usize, usize)> = Vec::new();
+            let mut folded: Vec<[usize; 3]> = Vec::new();
+            while !work.is_empty() {
+                let mut new_pts: Vec<(DVec2, usize)> = Vec::new();
+                let mut failing: Vec<[usize; 3]> = Vec::new();
+                for &t in &work {
+                    if !present(&cdt, t) {
+                        continue;
+                    }
+                    match judge(t, &verts, &at, &boundary, min_area)? {
+                        Judged::Fine => {}
+                        Judged::Insert(w) => {
+                            new_pts.push((w, t[0]));
+                            failing.push(t);
+                        }
+                        Judged::Bisect(seg) => splits.push(seg),
+                        Judged::Folded => folded.push(t),
+                    }
+                }
+                if !splits.is_empty() {
+                    splits.sort_unstable();
+                    splits.dedup();
+                    return Err(Unmeshed::Split(splits));
                 }
                 if new_pts.is_empty() {
                     break;
                 }
-                if verts.len() + new_pts.len() > 2_000_000 {
-                    return Err("tessellation exceeded the vertex budget".into());
+                if verts.len() + new_pts.len() > VERTEX_BUDGET {
+                    return Err("tessellation exceeded the vertex budget".to_string().into());
                 }
+                let before = verts.len();
                 for (c, hint) in new_pts {
                     insert(&mut cdt, &mut verts, &mut at, c, hint)?;
                 }
+                if verts.len() == before {
+                    return Err("refining the mesh added no point where triangles fail"
+                        .to_string()
+                        .into());
+                }
+                // The triangles about the new points, and any that failed
+                // and are still there; each once, from its least corner (in
+                // order, so the result does not depend on a hash table's).
+                let mut next: Vec<[usize; 3]> = Vec::new();
+                for v in before..verts.len() {
+                    let h = spade::handles::FixedVertexHandle::from_index(v);
+                    for e in cdt.vertex(h).out_edges() {
+                        if let Some(f) = e.face().as_inner() {
+                            next.push(f.vertices().map(|x| x.fix().index()));
+                        }
+                    }
+                }
+                next.extend(failing.into_iter().filter(|&t| present(&cdt, t)));
+                for t in &mut next {
+                    let m = (0..3).min_by_key(|&i| t[i]).unwrap_or(0);
+                    t.rotate_left(m);
+                }
+                next.sort_unstable();
+                next.dedup();
+                work = next;
             }
             if cdt.num_constraints() != boundary_constraints {
-                return Err("refinement split a boundary edge".into());
+                return Err("refinement split a boundary edge".to_string().into());
             }
+            // Unfolding: a sliver too small to split can face against the
+            // surface (three points nearly in a line in the parameters,
+            // the surface's bend carrying the middle one across the chord
+            // of the others in space; found by the near-tangent apex fuzz,
+            // design note 0002 §4). The triangle and the one across its
+            // longest edge that allows it are re-split along their other
+            // diagonal (an edge flip, as in C. L. Lawson, "Software for C¹
+            // surface interpolation", 1977), kept only if both new
+            // triangles turn counter-clockwise in the parameters and pass
+            // the test above; one that no flip mends is refused.
+            let mut tris = inside_triangles(&cdt);
+            if !folded.is_empty() {
+                let canon = |t: [usize; 3]| {
+                    let m = (0..3).min_by_key(|&i| t[i]).unwrap_or(0);
+                    let mut t = t;
+                    t.rotate_left(m);
+                    t
+                };
+                let mut slot: FxHashMap<[usize; 3], usize> = FxHashMap::default();
+                let mut across: FxHashMap<(usize, usize), usize> = FxHashMap::default();
+                for (i, &t) in tris.iter().enumerate() {
+                    slot.insert(canon(t), i);
+                    for e in 0..3 {
+                        across.insert((t[e], t[(e + 1) % 3]), i);
+                    }
+                }
+                folded.sort_unstable();
+                folded.dedup();
+                let ccw = |t: [usize; 3]| {
+                    let q = t.map(|i| verts[i].0 * scale);
+                    (q[1] - q[0]).perp_dot(q[2] - q[0]) > 0.0
+                };
+                for f in folded {
+                    let Some(&i) = slot.get(&canon(f)) else {
+                        continue;
+                    };
+                    let t = tris[i];
+                    if !matches!(judge(t, &verts, &at, &boundary, min_area)?, Judged::Folded) {
+                        continue;
+                    }
+                    let length = |e: usize| {
+                        (verts[t[(e + 1) % 3]].0 * scale - verts[t[e]].0 * scale).length_squared()
+                    };
+                    let mut order = [0, 1, 2];
+                    order.sort_by(|&a, &b| length(b).total_cmp(&length(a)));
+                    let mut mended = false;
+                    for e in order {
+                        let (x, y, z) = (t[e], t[(e + 1) % 3], t[(e + 2) % 3]);
+                        if boundary.contains_key(&[x.min(y), x.max(y)]) {
+                            continue;
+                        }
+                        let Some(&j) = across.get(&(y, x)) else {
+                            continue;
+                        };
+                        let u = tris[j];
+                        let Some(&d) = u.iter().find(|&&w| w != x && w != y) else {
+                            continue;
+                        };
+                        let (a, b) = ([x, d, z], [d, y, z]);
+                        let fine = |n: [usize; 3]| -> Result<bool, Unmeshed> {
+                            Ok(ccw(n)
+                                && matches!(
+                                    judge(n, &verts, &at, &boundary, min_area)?,
+                                    Judged::Fine
+                                ))
+                        };
+                        if fine(a)? && fine(b)? {
+                            for (k, old) in [(i, t), (j, u)] {
+                                slot.remove(&canon(old));
+                                for e in 0..3 {
+                                    across.remove(&(old[e], old[(e + 1) % 3]));
+                                }
+                                let new = if k == i { a } else { b };
+                                tris[k] = new;
+                                slot.insert(canon(new), k);
+                            }
+                            for k in [i, j] {
+                                let n = tris[k];
+                                for e in 0..3 {
+                                    across.insert((n[e], n[(e + 1) % 3]), k);
+                                }
+                            }
+                            mended = true;
+                            unfolded += 1;
+                            break;
+                        }
+                    }
+                    if !mended {
+                        return Err(
+                            "a triangle faces against the surface where it is too small \
+                                    to split or flip"
+                                .to_string()
+                                .into(),
+                        );
+                    }
+                }
+            }
+            tris
         }
-
-        inside_triangles(&cdt)
     };
 
     // Emit vertices. Boundary vertices with identical 3D points (split
     // singular points) are welded.
-    let mut out = FaceTess::default();
+    let mut out = FaceTess {
+        unfolded,
+        ..FaceTess::default()
+    };
     let mut index_of: Vec<Option<u32>> = vec![None; verts.len()];
     let mut by_pos: FxHashMap<[u64; 3], u32> = FxHashMap::default();
     let center = (lo + hi) * 0.5;
     let sign = if face.forward { 1.0 } else { -1.0 };
+    // A singular point has no normal of its own: each of its points in the
+    // parameters takes the normal a step from it toward the middle of the
+    // face, along its meridian or ruling, and the welded vertex their mean
+    // (an apex's normal was one meridian's, facing away from triangles
+    // across a half-turn face of a slender cone: found by review).
+    let mut singular: Vec<u32> = Vec::new();
     for t in &tris {
         for &i in t {
             if index_of[i].is_some() {
@@ -1557,27 +2283,35 @@ fn tessellate_face(
                     at[i].0
                 }
             });
-            let key = [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
-            if exact.is_some() {
-                if let Some(&j) = by_pos.get(&key) {
-                    index_of[i] = Some(j);
-                    continue;
-                }
-            }
             let mut n = if is_planar {
                 s.normal(uv.x, uv.y)
             } else {
                 at[i].1
             };
+            let stepped = n.is_none();
             let mut k = 1e-6;
             while n.is_none() && k < 0.5 {
                 let w = uv + (center - uv) * k;
                 n = s.normal(w.x, w.y);
                 k *= 4.0;
             }
+            let n = n.unwrap_or(DVec3::Z) * sign;
+            let key = [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+            if exact.is_some() {
+                if let Some(&j) = by_pos.get(&key) {
+                    if stepped {
+                        out.normals[j as usize] += n;
+                    }
+                    index_of[i] = Some(j);
+                    continue;
+                }
+            }
             let j = out.positions.len() as u32;
             out.positions.push(p);
-            out.normals.push(n.unwrap_or(DVec3::Z) * sign);
+            out.normals.push(n);
+            if stepped {
+                singular.push(j);
+            }
             if exact.is_some() {
                 by_pos.insert(key, j);
             }
@@ -1595,8 +2329,12 @@ fn tessellate_face(
             out.triangles.push([a, c, b]);
         }
     }
+    for j in singular {
+        let n = &mut out.normals[j as usize];
+        *n = n.try_normalize().unwrap_or(DVec3::Z * sign);
+    }
     if out.triangles.is_empty() {
-        return Err("face produced no triangles".into());
+        return Err(Unmeshed::Failed("face produced no triangles".into()));
     }
     Ok(out)
 }
@@ -1604,6 +2342,706 @@ fn tessellate_face(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Body, BooleanOp, BrepKernel, ExtrudeSpec, Kernel, Profile, ProfileCurve};
+    use crate::{Frame, RevolveSpec};
+    use std::f64::consts::{FRAC_PI_2, PI, TAU};
+
+    fn k() -> BrepKernel {
+        BrepKernel::default()
+    }
+
+    /// A solid turned a whole turn about z from `(ρ, z)` points.
+    fn turned(curves: Vec<ProfileCurve>) -> Body {
+        turned_by(curves, TAU)
+    }
+
+    /// A solid turned by `angle` about z from `(ρ, z)` points.
+    fn turned_by(curves: Vec<ProfileCurve>, angle: f64) -> Body {
+        let plane = Frame {
+            origin: DVec3::ZERO,
+            x: DVec3::X,
+            y: DVec3::Z,
+            z: -DVec3::Y,
+        };
+        k().revolve(
+            &Profile { plane, curves },
+            &RevolveSpec {
+                axis_origin: DVec2::ZERO,
+                axis_dir: DVec2::Y,
+                angle,
+            },
+        )
+        .expect("a revolve")
+    }
+
+    fn polygon(pts: &[(f64, f64)]) -> Vec<ProfileCurve> {
+        (0..pts.len())
+            .map(|i| {
+                let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+                ProfileCurve::Line {
+                    start: DVec2::new(a.0, a.1),
+                    end: DVec2::new(b.0, b.1),
+                }
+            })
+            .collect()
+    }
+
+    /// A box `across` square and very deep on the side of the plane
+    /// through `point` that `normal` points to.
+    fn slab(point: DVec3, normal: DVec3) -> Body {
+        let f = Frame::from_normal(point, normal, DVec3::Y);
+        k().make_box(
+            &Frame {
+                origin: point - (f.x + f.y) * 500.0,
+                ..f
+            },
+            DVec3::splat(1000.0),
+        )
+        .expect("a box")
+    }
+
+    /// The farthest a curved face's mesh strays from its surface, in chord
+    /// tolerances, over a grid of fifteen points of each triangle (its
+    /// corners, the quarter points of its sides and three inside), against
+    /// the surface's closest points; and the triangles facing against their
+    /// vertices' normals.
+    fn strays(body: &Body, opts: &TessellationOptions) -> (f64, usize) {
+        let mesh = tessellate(&body.brep, opts, &Tolerance::default()).expect("a mesh");
+        let (mut worst, mut folded) = (0.0f64, 0);
+        for (f, m) in body.brep.faces.iter().zip(&mesh.faces) {
+            if matches!(f.surface, Surface::Plane(_)) {
+                continue;
+            }
+            for t in &m.triangles {
+                let p = t.map(|i| m.positions[i as usize]);
+                for i in 0..=4 {
+                    for j in 0..=4 - i {
+                        let (a, b) = (0.25 * i as f64, 0.25 * j as f64);
+                        let q = p[0] * (1.0 - a - b) + p[1] * a + p[2] * b;
+                        let (u, v) = f.surface.project(q);
+                        worst =
+                            worst.max((f.surface.point(u, v) - q).length() / opts.chord_tolerance);
+                    }
+                }
+                let n = (p[1] - p[0]).cross(p[2] - p[0]);
+                folded += t
+                    .iter()
+                    .filter(|&&i| n.dot(m.normals[i as usize]) < 0.0)
+                    .count()
+                    .min(1);
+            }
+        }
+        (worst, folded)
+    }
+
+    /// Meshes of cones, a ball and faces cut across their rulings stay
+    /// within the chord tolerance and face out, sampled at fifteen points
+    /// of every triangle (its corners, the quarter points of its sides and
+    /// three inside) against the surface's closest points (found by
+    /// review, design note 0002 §4: refinement stopped after twelve passes,
+    /// leaving a pointed cone's mesh 16 tolerances off by its apex at the
+    /// defaults and 159 at a chord of 1e-5; it never tested a diagonal
+    /// between two boundary samples, which faces meshed along their rulings
+    /// are made of, so cut faces strayed by up to a quarter more; long
+    /// slivers on a frustum folded over; and a ball strayed 5.2%, 8.2% at
+    /// a chord of 1e-5, mostly 10° to 30° from its poles, and a polar cap
+    /// 45% at 1e-5).
+    #[test]
+    fn meshes_stay_within_the_chord_tolerance() {
+        let tilt = 79.3f64.to_radians();
+        let cut = |body: Body, point: DVec3, normal: DVec3| {
+            k().boolean(
+                &body,
+                &slab(point, normal.normalize()),
+                BooleanOp::Intersect,
+            )
+            .expect("a cut")
+        };
+        let ball = turned(vec![
+            ProfileCurve::Arc {
+                center: DVec2::ZERO,
+                radius: 1.0,
+                start_angle: -FRAC_PI_2,
+                sweep_angle: PI,
+            },
+            ProfileCurve::Line {
+                start: DVec2::new(0.0, 1.0),
+                end: DVec2::new(0.0, -1.0),
+            },
+        ]);
+        // The finest tolerance meshes a polar cap of the ball, not all of
+        // it (over a million triangles).
+        let cap = cut(ball.clone(), DVec3::new(0.0, 0.0, 0.9), DVec3::Z);
+        let mut bodies = vec![
+            turned(polygon(&[(0.0, 0.0), (0.5, 0.0), (0.0, 1.0)])),
+            turned(polygon(&[(0.0, -1.0), (1.0, 0.0), (0.0, 1.0)])),
+            cap,
+            cut(
+                turned(polygon(&[(0.0, 0.0), (0.5, 0.0), (0.025, 1.0), (0.0, 1.0)])),
+                DVec3::new(0.065, 0.0, 0.37),
+                DVec3::new(tilt.sin(), 0.31 * tilt.sin(), tilt.cos()),
+            ),
+            cut(
+                turned(polygon(&[(0.0, 0.0), (2.0, 0.0), (0.1, 1.0), (0.0, 1.0)])),
+                DVec3::new(0.26, 0.0, 0.37),
+                DVec3::new(0.8984, 0.2785, 0.3395),
+            ),
+            cut(
+                k().extrude(
+                    &Profile::circle(Frame::WORLD, DVec2::ZERO, 2.0),
+                    &ExtrudeSpec {
+                        distance: 1.0,
+                        symmetric: false,
+                    },
+                )
+                .expect("a cylinder"),
+                DVec3::new(0.26, 0.0, 0.37),
+                DVec3::new(0.954, 0.296, 0.045),
+            ),
+        ];
+        // Frustums cut by planes at any angle.
+        let mut rng = crate::boolean::testing::Rng(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..40 {
+            let rad = rng.range(0.3, 2.0);
+            let (top, h) = (rad * rng.range(0.02, 0.8), rng.range(0.3, 1.5));
+            let (a, b) = (rng.range(0.0, TAU), rng.range(0.05, 1.5));
+            let n = DVec3::new(b.sin() * a.cos(), b.sin() * a.sin(), b.cos());
+            let point = DVec3::new(
+                rng.range(-0.3, 0.3) * rad,
+                rng.range(-0.3, 0.3) * rad,
+                rng.range(0.2, 0.8) * h,
+            );
+            let frustum = turned(polygon(&[(0.0, 0.0), (rad, 0.0), (top, h), (0.0, h)]));
+            if let Ok(x) = k().boolean(&frustum, &slab(point, n), BooleanOp::Intersect) {
+                bodies.push(x);
+            }
+        }
+        assert!(bodies.len() > 40, "{}", bodies.len());
+        for opts in [
+            TessellationOptions::default(),
+            TessellationOptions {
+                chord_tolerance: 1e-3,
+                max_angle: 0.5,
+            },
+            TessellationOptions {
+                chord_tolerance: 1e-5,
+                max_angle: 0.5,
+            },
+        ] {
+            let fine = opts.chord_tolerance < 1e-4;
+            for (i, b) in bodies.iter().chain((!fine).then_some(&ball)).enumerate() {
+                let (worst, folded) = strays(b, &opts);
+                assert!(
+                    worst <= 1.0 + 1e-6,
+                    "body {i} {opts:?}: {worst} tolerances off"
+                );
+                assert_eq!(folded, 0, "body {i} {opts:?}");
+            }
+        }
+    }
+
+    /// A ball of radius `r` about the origin.
+    fn ball(r: f64) -> Body {
+        turned(vec![
+            ProfileCurve::Arc {
+                center: DVec2::ZERO,
+                radius: r,
+                start_angle: -FRAC_PI_2,
+                sweep_angle: PI,
+            },
+            ProfileCurve::Line {
+                start: DVec2::new(0.0, r),
+                end: DVec2::new(0.0, -r),
+            },
+        ])
+    }
+
+    /// Faces whose boundary runs where the parameters' straight segments
+    /// lie far off the chords (a cut passing a ball's pole, a cone cut
+    /// steeply near its apex) mesh without a triangle facing against the
+    /// surface: the segment is bisected (found by review: refinement drew a
+    /// triangle's free corner to the segment's middle in the parameters,
+    /// beside the chord, and settled it folded over once too small to
+    /// split; 2 triangles of a polar cap at the defaults, 3.96e-3 m² on a
+    /// ball of radius 0.928 at a chord of 1e-2).
+    #[test]
+    fn triangles_by_a_pole_or_an_apex_face_out() {
+        let o = |chord_tolerance: f64, max_angle: f64| TessellationOptions {
+            chord_tolerance,
+            max_angle,
+        };
+        let tilted = DVec3::new(1.4f64.sin(), 0.2 * 1.4f64.sin(), 1.4f64.cos()).normalize();
+        let cap = k()
+            .boolean(
+                &ball(1.0),
+                &slab(DVec3::Z - tilted * 0.01, tilted),
+                BooleanOp::Intersect,
+            )
+            .expect("a cap");
+        let piece = k()
+            .boolean(
+                &ball(0.927_848_640_067_481_9),
+                &slab(
+                    DVec3::new(
+                        -0.187_570_959_161_979_9,
+                        0.243_362_344_506_771_45,
+                        -0.820_777_160_938_975,
+                    ),
+                    DVec3::new(
+                        -0.586_601_633_680_040_9,
+                        0.780_907_379_632_937_2,
+                        0.214_667_621_682_280_57,
+                    )
+                    .normalize(),
+                ),
+                BooleanOp::Intersect,
+            )
+            .expect("a piece of a ball");
+        let frustum = k()
+            .boolean(
+                &turned(polygon(&[
+                    (0.0, 0.0),
+                    (0.475_446_144_542_218_06, 0.0),
+                    (0.095_854_760_067_169_53, 0.789_033_539_859_123_3),
+                    (0.0, 0.789_033_539_859_123_3),
+                ])),
+                &slab(
+                    DVec3::new(
+                        0.118_846_628_415_245_27,
+                        -0.052_971_486_938_529_475,
+                        0.306_540_880_015_415_13,
+                    ),
+                    DVec3::new(
+                        0.527_975_390_656_859_4,
+                        -0.674_893_649_018_185,
+                        0.515_519_688_640_167_8,
+                    )
+                    .normalize(),
+                ),
+                BooleanOp::Intersect,
+            )
+            .expect("a cut frustum");
+        for (name, body, opts) in [
+            ("cap", &cap, TessellationOptions::default()),
+            ("cap", &cap, o(1e-4, 0.3)),
+            ("cap", &cap, o(1e-4, 1.0)),
+            ("piece", &piece, o(1e-2, 1.0)),
+            ("frustum", &frustum, o(1e-3, 0.05)),
+        ] {
+            let (worst, folded) = strays(body, &opts);
+            assert_eq!(folded, 0, "{name} {opts:?}");
+            assert!(worst <= 1.0, "{name} {opts:?}: {worst}");
+        }
+    }
+
+    /// Thin wedges of a ball and a torus mesh within the tolerance: their
+    /// refinement moves in from the boundary a row at a time, and needed
+    /// up to 186 passes where a limit of 64 refused them (found by review).
+    #[test]
+    fn thin_wedges_of_a_ball_and_a_torus_mesh() {
+        let wedge = |r: f64, degrees: f64| {
+            turned_by(
+                vec![
+                    ProfileCurve::Arc {
+                        center: DVec2::ZERO,
+                        radius: r,
+                        start_angle: -FRAC_PI_2,
+                        sweep_angle: PI,
+                    },
+                    ProfileCurve::Line {
+                        start: DVec2::new(0.0, r),
+                        end: DVec2::new(0.0, -r),
+                    },
+                ],
+                degrees.to_radians(),
+            )
+        };
+        let fine = TessellationOptions {
+            chord_tolerance: 1e-5,
+            max_angle: 0.5,
+        };
+        let ring = turned_by(
+            vec![ProfileCurve::Circle {
+                center: DVec2::new(1.0, 0.0),
+                radius: 0.3,
+            }],
+            0.5f64.to_radians(),
+        );
+        for (name, body, opts) in [
+            ("unit, 1°", wedge(1.0, 1.0), fine),
+            (
+                "radius 10, 1°",
+                wedge(10.0, 1.0),
+                TessellationOptions::default(),
+            ),
+            (
+                "radius 3, 1.7°",
+                wedge(3.0, 1.7),
+                TessellationOptions::default(),
+            ),
+            ("torus, 0.5°", ring, fine),
+        ] {
+            let (worst, folded) = strays(&body, &opts);
+            assert!(worst <= 1.0, "{name}: {worst}");
+            assert_eq!(folded, 0, "{name}");
+        }
+    }
+
+    /// Angle tolerances asking for hundreds of millions of samples are
+    /// refused at once (found by review: a pole's run of samples was
+    /// allocated whole and aborted the process).
+    #[test]
+    fn tiny_angle_tolerances_are_refused() {
+        for body in [
+            turned(polygon(&[(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)])),
+            turned(polygon(&[(0.0, 0.0), (1.0, 0.0), (1.0, 0.1), (0.0, 0.1)])),
+        ] {
+            for max_angle in [1e-6, 1e-8] {
+                let opts = TessellationOptions {
+                    chord_tolerance: 1e-4,
+                    max_angle,
+                };
+                match tessellate(&body.brep, &opts, &Tolerance::default()) {
+                    Err(KernelError::Tessellation(m)) => assert!(m.contains("more than"), "{m}"),
+                    r => panic!("{max_angle}: {:?}", r.map(|m| m.faces.len())),
+                }
+            }
+        }
+    }
+
+    /// A slender pin's apex takes the mean of its face's normals there,
+    /// which faces along every triangle at the apex (found by review: it
+    /// took one meridian's normal, 128° from a triangle across the face).
+    #[test]
+    fn a_slender_pins_apex_normal_faces_its_triangles() {
+        let pin = |at: DVec3| {
+            let plane = Frame {
+                origin: at,
+                x: DVec3::X,
+                y: DVec3::Z,
+                z: -DVec3::Y,
+            };
+            k().revolve(
+                &Profile {
+                    plane,
+                    curves: polygon(&[(0.0, 0.0), (0.05, 0.0), (0.0, 1.0)]),
+                },
+                &RevolveSpec {
+                    axis_origin: DVec2::ZERO,
+                    axis_dir: DVec2::Y,
+                    angle: TAU,
+                },
+            )
+            .expect("a pin")
+        };
+        for (at, opts) in [
+            (
+                DVec3::new(10.0, 3.0, 0.0),
+                TessellationOptions {
+                    chord_tolerance: 1e-5,
+                    max_angle: 0.5,
+                },
+            ),
+            (DVec3::ZERO, TessellationOptions::default()),
+        ] {
+            let body = pin(at);
+            let mesh = tessellate(&body.brep, &opts, &Tolerance::default()).expect("a mesh");
+            let apex = at + DVec3::Z;
+            let mut seen = 0;
+            for m in &mesh.faces {
+                for t in &m.triangles {
+                    let p = t.map(|i| m.positions[i as usize]);
+                    let n = (p[1] - p[0]).cross(p[2] - p[0]).normalize();
+                    for &i in t {
+                        if (m.positions[i as usize] - apex).length() < 1e-12 {
+                            seen += 1;
+                            let d = n.dot(m.normals[i as usize]);
+                            assert!(d > 0.0, "{at}: {d}");
+                        }
+                    }
+                }
+            }
+            assert!(seen > 0);
+        }
+    }
+
+    /// A sliver too small to split that faces against the surface is
+    /// unfolded by an edge flip, not refused: a frustum a plane cuts near
+    /// its apex, nearly tangent to it (the near-tangent apex fuzz's case 19,
+    /// whose cut failed validation: "a triangle faces against the surface
+    /// where it is too small to split"). Its coarse validation mesh flips
+    /// slivers and has no triangle facing against its corners' normals.
+    #[test]
+    fn folded_slivers_are_unfolded() {
+        let axis = Frame::from_normal(DVec3::ZERO, DVec3::ONE.normalize(), DVec3::X);
+        let (za, zt) = (1.0, 0.999);
+        let plane = Frame {
+            origin: axis.origin,
+            x: axis.x,
+            y: axis.z,
+            z: -axis.y,
+        };
+        let pts =
+            [(0.0, 0.0), (1.0, 0.0), (1.0 - zt, zt), (0.0, zt)].map(|(x, y)| DVec2::new(x, y));
+        let frustum = k()
+            .revolve(
+                &Profile::polygon(plane, &pts),
+                &RevolveSpec {
+                    axis_origin: DVec2::ZERO,
+                    axis_dir: DVec2::Y,
+                    angle: TAU,
+                },
+            )
+            .expect("a frustum");
+        let psi = FRAC_PI_4 * (1.0 + 1e-5);
+        let n = axis.x * psi.cos() + axis.z * psi.sin();
+        let q = axis.origin + axis.z * za - n * 1e-6;
+        let f = Frame::from_normal(q, n, DVec3::Y);
+        let block = k()
+            .make_box(
+                &Frame {
+                    origin: q - (f.x + f.y) * 6.0,
+                    ..f
+                },
+                DVec3::splat(12.0),
+            )
+            .expect("a slab");
+        let cut = k()
+            .boolean(&frustum, &block, BooleanOp::Subtract)
+            .expect("a cut");
+        let opts = TessellationOptions {
+            chord_tolerance: crate::check::bounding_size(&cut.brep) * 1e-2,
+            max_angle: 0.6,
+        };
+        let mesh = tessellate(&cut.brep, &opts, &Tolerance::default()).expect("a mesh");
+        let unfolded: usize = mesh.faces.iter().map(|f| f.unfolded).sum();
+        assert!(unfolded > 0);
+        assert_eq!(strays(&cut, &opts).1, 0);
+    }
+
+    /// Meshes stay within the chord tolerance between the points refinement
+    /// tests, against exact distances over a grid of 24ths of every
+    /// triangle: a ball (`|1 − |q||`), polar caps of it, a nearly closed
+    /// torus, and solids turned from S-shaped splines (the distance to the
+    /// profile in the plane through the axis). Found by review: the error
+    /// between the points peaks off them (a cubic along an edge at a third
+    /// of it); tested at the points and by the quadratic through the edges'
+    /// midpoints, an S-curve's mesh strayed 3.6% and a torus's 1.3%, and
+    /// without that quadratic a ball's 2.4% (sampled on a grid of
+    /// twelfths).
+    #[test]
+    fn meshes_stay_within_the_tolerance_between_the_points_tested() {
+        let o = |c: f64, a: f64| TessellationOptions {
+            chord_tolerance: c,
+            max_angle: a,
+        };
+        let worst = |body: &Body, opts: TessellationOptions, dist: &dyn Fn(DVec3) -> f64| {
+            let mesh = tessellate(&body.brep, &opts, &Tolerance::default()).expect("a mesh");
+            let mut worst = 0.0f64;
+            for (f, m) in body.brep.faces.iter().zip(&mesh.faces) {
+                // Flat faces (a turned profile's ends are surfaces of
+                // revolution) are exact and left out.
+                let z = m.positions[0].z;
+                if matches!(f.surface, Surface::Plane(_)) || m.positions.iter().all(|p| p.z == z) {
+                    continue;
+                }
+                for t in &m.triangles {
+                    let p = t.map(|i| m.positions[i as usize]);
+                    let n = 24;
+                    for i in 0..=n {
+                        for j in 0..=n - i {
+                            let (a, b) = (i as f64 / n as f64, j as f64 / n as f64);
+                            let q = p[0] * (1.0 - a - b) + p[1] * a + p[2] * b;
+                            worst = worst.max(dist(q) / opts.chord_tolerance);
+                        }
+                    }
+                }
+            }
+            worst
+        };
+        let sphere = |q: DVec3| (1.0 - q.length()).abs();
+        let tilted = DVec3::new(1.4f64.sin(), 0.2 * 1.4f64.sin(), 1.4f64.cos()).normalize();
+        let caps = [
+            k().boolean(
+                &ball(1.0),
+                &slab(DVec3::new(0.0, 0.0, 0.9), DVec3::Z),
+                BooleanOp::Intersect,
+            ),
+            k().boolean(
+                &ball(1.0),
+                &slab(DVec3::Z - tilted * 0.01, tilted),
+                BooleanOp::Intersect,
+            ),
+        ]
+        .map(|c| c.expect("a cap"));
+        let mut cases: Vec<(String, f64)> = vec![
+            ("ball".into(), worst(&ball(1.0), o(1e-3, 0.5), &sphere)),
+            ("cap".into(), worst(&caps[0], o(1e-3, 0.5), &sphere)),
+            ("tilted cap".into(), worst(&caps[1], o(1e-3, 0.5), &sphere)),
+        ];
+        let torus = turned(vec![ProfileCurve::Circle {
+            center: DVec2::new(1.0, 0.0),
+            radius: 0.999,
+        }]);
+        let ring = |q: DVec3| (DVec2::new(q.truncate().length() - 1.0, q.z).length() - 0.999).abs();
+        cases.push(("torus".into(), worst(&torus, o(1e-2, 0.3), &ring)));
+        // S-shaped profiles, their height rising along them: the distance
+        // to a polyline of 20,000 points of the curve (off it by under
+        // 1e-6), searched out from the point's height.
+        let k5 = [0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0];
+        for pts in [
+            [(0.5, 0.0), (1.2, 0.2), (0.1, 0.5), (1.0, 0.8), (0.5, 1.0)],
+            [(0.5, 0.0), (1.5, 0.2), (0.1, 0.5), (1.5, 0.8), (0.5, 1.0)],
+        ] {
+            let points: Vec<DVec2> = pts.iter().map(|&(x, y)| DVec2::new(x, y)).collect();
+            let curve = opendatum_nurbs::NurbsCurve::new(
+                3,
+                k5.to_vec(),
+                points.iter().map(|p| p.extend(0.0)).collect(),
+                None,
+            )
+            .expect("a spline");
+            let line: Vec<DVec2> = (0..=20_000)
+                .map(|i| curve.point(i as f64 / 20_000.0).truncate())
+                .collect();
+            assert!(line.windows(2).all(|w| w[1].y > w[0].y));
+            let along = |r: DVec2, k: usize| {
+                let (a, b) = (line[k], line[k + 1]);
+                let t = ((r - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+                (a + (b - a) * t - r).length()
+            };
+            let profile = |q: DVec3| {
+                let r = DVec2::new(q.truncate().length(), q.z);
+                let i = line.partition_point(|p| p.y < r.y).clamp(1, line.len() - 1) - 1;
+                let mut best = f64::INFINITY;
+                for k in (0..=i).rev() {
+                    best = best.min(along(r, k));
+                    if r.y - line[k].y > best {
+                        break;
+                    }
+                }
+                for k in i..line.len() - 1 {
+                    best = best.min(along(r, k));
+                    if line[k].y - r.y > best {
+                        break;
+                    }
+                }
+                best
+            };
+            let mut curves = vec![ProfileCurve::Line {
+                start: DVec2::new(0.0, 0.0),
+                end: DVec2::new(0.5, 0.0),
+            }];
+            curves.push(ProfileCurve::Spline {
+                degree: 3,
+                knots: k5.to_vec(),
+                points,
+                weights: None,
+            });
+            curves.extend(
+                polygon(&[(0.5, 1.0), (0.0, 1.0), (0.0, 0.0)])
+                    .into_iter()
+                    .take(2),
+            );
+            cases.push((
+                format!("S {pts:?}"),
+                worst(&turned(curves), o(1e-2, 1.0), &profile),
+            ));
+        }
+        for (name, w) in &cases {
+            eprintln!("{name}: {w:.4}");
+            assert!(*w <= 1.0, "{name}: {w} tolerances off");
+        }
+    }
+
+    /// The quartic's peak, the estimate between the points tested (found by
+    /// review to have no test of its own), against known peaks and a fine
+    /// grid of its values; and the bound that decides when it is searched.
+    #[test]
+    fn the_quartics_peak_is_its_largest_value() {
+        let at = |g: &dyn Fn([f64; 3]) -> f64| QUARTERS.map(|q| g(q.map(|x| x as f64 / 4.0)));
+        // A cubic error along an edge peaks at a third of it, 4/27, above
+        // all the points tested (9/64 at three quarters).
+        let edge = at(&|l| l[1] * l[1] * l[0]);
+        let (v, l) = peak(&edge, [false; 3], None);
+        assert!(
+            (v - 4.0 / 27.0).abs() < 1e-15 && l[2] == 0.0,
+            "{v} at {l:?}"
+        );
+        assert!(edge.iter().all(|&x| x <= 9.0 / 64.0));
+        // Left out, the edge's points give way to the largest off it,
+        // found by the search within 1/384 of it.
+        let (v, l) = peak(&edge, [true, false, false], None);
+        assert!(l[2] > 0.0 && v < 4.0 / 27.0 && v > 0.146, "{v} at {l:?}");
+        // The bubble peaks at the centroid; a quadratic's equal midpoints
+        // at four thirds of them; nothing anywhere is zero.
+        let (v, _) = peak(&at(&|l| 27.0 * l[0] * l[1] * l[2]), [false; 3], None);
+        assert!((v - 1.0).abs() < 1e-15);
+        let (v, _) = peak(
+            &at(&|l| 4.0 * (l[0] * l[1] + l[1] * l[2] + l[2] * l[0])),
+            [false; 3],
+            None,
+        );
+        assert!((v - 4.0 / 3.0).abs() < 1e-12);
+        assert_eq!(peak(&[0.0; 12], [false; 3], None).0, 0.0);
+        assert_eq!(GRID.len(), POINTS);
+        // Asked whether it passes a value, it stops at a point past it.
+        let (v, _) = peak(&edge, [false; 3], Some(0.147));
+        assert!(v > 0.147);
+        // Random quartics: against the largest on a grid of 150ths (itself
+        // a little under the peak), above it by no more than that grid
+        // misses, and below it by no more than 0.1% for cubic errors and 5%
+        // for random data (several peaks of nearly one height).
+        let fine = |at: &[f64; 12]| {
+            let n = 150;
+            let mut best = 0.0f64;
+            for i in 0..=n {
+                for j in 0..=n - i {
+                    let l = [i, j, n - i - j].map(|x| x as f64 / n as f64);
+                    let x: f64 = quartic_basis(l).iter().zip(at).map(|(b, y)| b * y).sum();
+                    best = best.max(x.abs());
+                }
+            }
+            best
+        };
+        let mut rng = crate::boolean::testing::Rng(0x0BEA_C0DE);
+        for k in 0..60 {
+            let at = if k % 2 == 0 {
+                let c: Vec<f64> = (0..10).map(|_| rng.range(-1.0, 1.0)).collect();
+                at(&|[a, b, d]: [f64; 3]| {
+                    c[0] * a * b
+                        + c[1] * b * d
+                        + c[2] * d * a
+                        + c[3] * a * a * b
+                        + c[4] * a * b * b
+                        + c[5] * b * b * d
+                        + c[6] * b * d * d
+                        + c[7] * d * d * a
+                        + c[8] * d * a * a
+                        + c[9] * a * b * d
+                })
+            } else {
+                std::array::from_fn(|_| rng.range(-1.0, 1.0))
+            };
+            let (v, _) = peak(&at, [false; 3], None);
+            let best = fine(&at);
+            let floor = if k % 2 == 0 { 0.999 } else { 0.95 };
+            assert!(v.abs() <= best * 1.001, "{k}: {v} > {best}");
+            assert!(v.abs() >= best * floor, "{k}: {v} < {best}");
+        }
+        // The bound: the magnitudes of the Lagrange functions sum to no
+        // more than LEBESGUE anywhere (their peak, 3.3536, is near the
+        // corners).
+        let n = 240;
+        let mut most = 0.0f64;
+        for i in 0..=n {
+            for j in 0..=n - i {
+                let l = [i, j, n - i - j].map(|x| x as f64 / n as f64);
+                most = most.max(quartic_basis(l).iter().map(|x| x.abs()).sum());
+            }
+        }
+        assert!(most < LEBESGUE && most > 3.35, "{most}");
+    }
 
     fn poly(pts: &[(f64, f64)]) -> Vec<DVec2> {
         pts.iter().map(|&(x, y)| DVec2::new(x, y)).collect()

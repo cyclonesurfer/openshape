@@ -331,7 +331,7 @@ fn golden_cases_at_millimetre_and_kilometre_scales() {
 }
 
 #[test]
-fn planes_across_a_cone_off_its_axis_are_not_supported_yet() {
+fn a_plane_through_a_cones_apex_is_not_supported_yet() {
     // A cone: a right triangle revolved about its upright side.
     let cone = k()
         .revolve(
@@ -346,35 +346,26 @@ fn planes_across_a_cone_off_its_axis_are_not_supported_yet() {
             },
         )
         .unwrap();
-    // Planes parallel to the axis (a hyperbola), across it at a slant (an
-    // ellipse) and through the apex (two lines).
-    let cuts = [
-        k().make_box(
-            &Frame {
-                origin: DVec3::new(0.1, -1.0, -1.0),
-                ..Frame::WORLD
-            },
-            DVec3::new(1.0, 3.0, 2.0),
-        ),
-        k().make_box(
-            &Frame::from_normal(
-                DVec3::new(-1.0, 0.5, -1.0),
-                DVec3::new(0.3, 1.0, 0.0),
-                DVec3::Z,
-            ),
-            DVec3::new(2.0, 2.0, 2.0),
-        ),
-        k().make_box(
+    // A box whose side runs through the apex along the axis: the plane
+    // crosses the cone in two rulings from its apex, which lies in faces
+    // of both bodies, so the result's edges would meet at the cone's
+    // singular point (design note 0012 §15). Planes across the cone
+    // elsewhere meet it in conics, and planes through the apex of a cone
+    // whose faces stop short of it in rays (tests/curved.rs).
+    let cut = k()
+        .make_box(
             &Frame {
                 origin: DVec3::new(0.0, -1.0, -1.0),
                 ..Frame::WORLD
             },
             DVec3::new(1.0, 3.0, 2.0),
-        ),
-    ];
-    for cut in cuts {
-        match k().boolean(&cone, &cut.unwrap(), BooleanOp::Union) {
-            Err(KernelError::Unsupported(m)) => assert!(m.contains("conic"), "{m}"),
+        )
+        .unwrap();
+    for op in [BooleanOp::Union, BooleanOp::Intersect, BooleanOp::Subtract] {
+        match k().boolean(&cone, &cut, op) {
+            Err(KernelError::Unsupported(m)) => {
+                assert!(m.contains("a plane through a cone's apex"), "{m}")
+            }
             other => panic!("{:?}", other.map(|_| ())),
         }
     }
