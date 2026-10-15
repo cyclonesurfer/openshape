@@ -1938,7 +1938,10 @@ mod tests {
     /// at four floors, as other bounds are, chords whose floors were over a
     /// quarter of the sixteenth (from 220 km) could stop over it, and from
     /// 0.58 of it (500 km) always did, refusing booleans that more halving
-    /// resolves (found by review).
+    /// resolves (found by review). Every stretch whose reach meet accepts
+    /// stops under the sixteenth, swept across meet's limit: without its
+    /// margin ([`meet::too_far`]), those within a thousandth of the limit
+    /// stopped over it (found by the fifth review).
     #[test]
     fn conic_sags_settle_on_their_floors() {
         let fine = 1e-7 / 16.0;
@@ -1987,6 +1990,28 @@ mod tests {
                 );
             }
         }
+        // Every stretch of a conic meet accepts, its reach at most meet's
+        // (the vertex at the origin), stops under the sixteenth: without
+        // meet's margin, those within a thousandth of its limit stopped
+        // over it (found by the fifth review).
+        let limit = fine / (CONIC_ROUNDING * f64::EPSILON);
+        let (mut accepted, mut refused) = (0, 0);
+        for k in 0..=400 {
+            let reach = limit * (0.997 + 0.004 * k as f64 / 400.0);
+            if meet::too_far(reach, 1e-7) {
+                refused += 1;
+                continue;
+            }
+            accepted += 1;
+            let t1 = (2.0 * ((1.0 + reach * reach).sqrt() - 1.0)).sqrt();
+            let mut t0 = 0.98 * t1;
+            while halvable(tr.sag(t0, t1), t0, t1, fine) {
+                t0 = 0.5 * (t0 + t1);
+            }
+            let stop = tr.sag(t0, t1);
+            assert!(stop.bound <= fine, "{reach}: stopped at {stop:?}");
+        }
+        assert!(accepted > 100 && refused > 100, "{accepted} {refused}");
     }
 
     /// The hyperbola of a cone (radius 1 cm to 10 cm at its point, slope

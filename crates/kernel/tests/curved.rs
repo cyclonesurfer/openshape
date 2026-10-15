@@ -3718,9 +3718,9 @@ fn upright_cone(at: DVec3, s: f64) -> Body {
 /// `10⁻¹³` of its reach, held cones from 20 km tall over a sixteenth of
 /// the tolerance and refused them (found by the third review); it is now
 /// 32 ε of the reach, from measurement, and halving its chords stopped at
-/// four times that refused cones from about 300 km tall, though their
-/// bounds settle on it under the sixteenth (found by the fourth review;
-/// design note 0012 §16.2).
+/// four times that could refuse cones from about 235 km tall (it refused
+/// the one 400 km tall), though their bounds settle on it under the
+/// sixteenth (found by the fourth review; design note 0012 §16.2).
 #[test]
 fn first_cuts_of_large_cones_finish() {
     let ops = [BooleanOp::Intersect, BooleanOp::Subtract, BooleanOp::Union];
@@ -3752,6 +3752,73 @@ fn first_cuts_of_large_cones_finish() {
                 unit[i] = v;
             }
             assert!((v - unit[i]).abs() <= 1e-12 * unit[i], "{s} {op:?}: {v}");
+        }
+    }
+}
+
+/// A needle cone (radius a hundredth of its distance from the apex) 877
+/// km to 880 km long, cut lengthwise by a box's top a metre under its axis,
+/// the hyperbola's vertex at the origin, all three operations: cut, valid
+/// and true to the volume identities to 877.8 km, refused by meet as the
+/// vertex too far away to compute from 879 km (design note 0012 §14; from
+/// about 877.9 km here), one or the other between, and never refused as
+/// too far from the origin. Halving the hyperbola's chords, which settles
+/// within a thousandth of their allowance for rounding, stopped over a
+/// sixteenth of the tolerance on cones meet accepted 879 km to 879.6 km
+/// long, refusing them as too far from the origin (found by the fifth
+/// review; meet now refuses with a margin, §16.2).
+#[test]
+fn needle_cones_at_the_far_limit() {
+    let lo = DVec3::new(-200.0, -1e4, -1e4);
+    let tool = cuboid(lo, DVec3::new(9e5, 1e4, 0.0));
+    for l in [
+        877e3, 877.8e3, 878e3, 878.5e3, 879e3, 879.3e3, 879.5e3, 879.62e3,
+    ] {
+        // The apex 100 m behind the origin and a metre above it, the axis
+        // along x: the cone's radius is a metre at the origin.
+        let plane = Frame {
+            origin: DVec3::new(0.0, 0.0, 1.0),
+            ..Frame::WORLD
+        };
+        let pts = [
+            DVec2::new(-100.0, 0.0),
+            DVec2::new(l - 100.0, 0.0),
+            DVec2::new(l - 100.0, 0.01 * l),
+        ];
+        let cone = k()
+            .revolve(
+                &Profile::polygon(plane, &pts),
+                &RevolveSpec {
+                    axis_origin: DVec2::ZERO,
+                    axis_dir: DVec2::X,
+                    angle: TAU,
+                },
+            )
+            .expect("a cone");
+        let mut v = Vec::new();
+        for op in [BooleanOp::Intersect, BooleanOp::Subtract, BooleanOp::Union] {
+            let start = std::time::Instant::now();
+            let r = k().boolean(&cone, &tool, op);
+            let took = start.elapsed().as_secs_f64();
+            assert!(took < 5.0, "{l} {op:?}: {took} s");
+            match r {
+                Ok(b) => {
+                    assert_eq!(k().validate(&b), Vec::<String>::new(), "{l} {op:?}");
+                    v.push(volume(&b));
+                }
+                Err(KernelError::Unsupported(m)) if m.contains("vertex is too far away") => {}
+                r => panic!("{l} {op:?}: {r:?}"),
+            }
+        }
+        match v[..] {
+            [i, s, u] => {
+                assert!(l < 879e3, "{l}: cut");
+                let (a, b) = (volume(&cone), volume(&tool));
+                assert!((i + s - a).abs() <= 1e-9 * a, "{l}: {v:?} {a}");
+                assert!((u + i - a - b).abs() <= 1e-9 * b, "{l}: {v:?} {a} {b}");
+            }
+            [] => assert!(l > 877.8e3, "{l}: refused"),
+            _ => panic!("{l}: only some cut: {v:?}"),
         }
     }
 }

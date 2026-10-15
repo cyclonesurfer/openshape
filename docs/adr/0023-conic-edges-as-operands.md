@@ -74,12 +74,14 @@ case.
   contact, the boolean is refused as too far from the origin (from about
   36 km at the default tolerance for an evenly weighted conic on a
   cylinder; for the conic where a plane cuts a cone, first cuts
-  included, not before its vertex is refused as too far away to compute,
-  about 880 km out). The allowances were set by measurement against
-  double-double references after the third review found two of them
-  refusing booleans that halving resolves exactly, and the stop for
+  included, never: its vertex is refused first as too far away to
+  compute, about 878 km out). The allowances were set by measurement
+  against double-double references after the third review found two of
+  them refusing booleans that halving resolves exactly, the stop for
   conic tracks after the fourth found halving stopped at four floors
-  doing the same.
+  doing the same, and the margin in that vertex's refusal after the
+  fifth found conics within a thousandth of it refused as too far from
+  the origin.
 * Two curved segments between the same points are one when points of
   each, a quarter, half and three quarters of the way along it by its
   parameter and by its tangent's turning, lie within the tolerance of

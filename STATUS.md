@@ -823,12 +823,12 @@ name open unchanged.
   refused on main, but for two unions now done and correct. The fuzz
   found a fault in a first cut (a slab through a frustum's apex nearly
   along its seam failed with an internal error where a refusal
-  belonged), now refused (0012 §17). Four adversarial reviews, each
-  finding confirmed by at least two of three skeptics (0012 §17): the
-  first corrected the rules of §16; the second had six findings, the
-  third six and the fourth six, every code fix with a test that fails
-  without it, five of them false claims in the documentation,
-  corrected. The third review's rounding findings were settled by
+  belonged), now refused (0012 §17). Five adversarial reviews (0012
+  §17), each finding confirmed by at least two of three skeptics or
+  checked against the code: the first corrected the rules of §16; the
+  second, third, fourth and fifth had six findings each, every code fix
+  with a test that fails without it, nine of them false claims in the
+  documentation and one an unfilled test count, corrected. The third review's rounding findings were settled by
   measurement against double-double references: a conic track's
   allowance is now 32 ε of
   its reach (was 10⁻¹³, which refused first cuts of cones 20 km tall
@@ -840,9 +840,14 @@ name open unchanged.
   allowance, floor or term (ten mutations checked). The fourth found
   halving a conic track's chords stopped at four times its allowance,
   as other bounds' do, though its bound settles on the allowance itself:
-  that refused first cuts of cones from about 300 km tall that more
-  halving resolves, and it now halves to within a thousandth of the
-  allowance. The validator's check of edges against a turned face's
+  that could refuse first cuts of cones from about 235 km tall that
+  more halving resolves (it refused one 400 km tall), and it now halves
+  to within a thousandth of the allowance. The fifth found that meet
+  accepted conics whose allowance came within that thousandth of a
+  sixteenth of the tolerance, where the halving can stop over it: needle
+  cones 879 km to 879.6 km long were refused as too far from the origin
+  where meet should refuse them first; meet now refuses with two
+  thousandths to spare, from about 878 km of reach. The validator's check of edges against a turned face's
   axis now takes
   closed forms first: validating the tilted countersunk plate fell from
   14.3 ms to 4.2 ms and cutting its holes in one boolean from 41.1 ms to
@@ -1207,12 +1212,13 @@ name open unchanged.
   cylinders and cones (a rod cut twice is cut at 30 km and refused at
   300 km; a cone's hyperbola cut again is cut at 30 km and refused at
   100 km); for the conic where a plane cuts a cone, which applies to
-  first cuts too, only where the conic's vertex is too far away to
-  compute within the tolerance, which is refused first (design note 0012
-  §14: from about 880 km of the vertex's coordinates, its distance from
-  where the faces meet and that region's size; a cone 400 km tall at
-  the origin is cut by a plane parallel to its axis, one 600 km tall
-  refused); and, by the formula for its allowance, from about 160 km
+  first cuts too, never: its vertex is refused first as too far away to
+  compute within the tolerance (design note 0012 §14: from about 878 km
+  of the vertex's coordinates, its distance from where the faces meet
+  and that region's size; a cone 400 km tall at the origin is cut by a
+  plane parallel to its axis, one 600 km tall refused; needle cones
+  whose hyperbolas' vertices are at the origin are cut to 877.9 km long
+  and refused from there); and, by the formula for its allowance, from about 160 km
   (degree five) to 310 km (a conic) for a small NURBS edge on a plane
   whose chart is anchored near the world's origin (farther when it is
   anchored near the edge), less for a large edge whose weights are very

@@ -27,6 +27,7 @@ use std::f64::consts::{FRAC_PI_2, PI};
 use glam::{DVec2, DVec3};
 use opendatum_nurbs::NurbsCurve;
 
+use super::planar::SETTLED;
 use super::quadric::Quadric;
 use crate::geom::Curve3;
 use crate::KernelError;
@@ -1107,7 +1108,7 @@ fn plane_cone(
     // Points are found from the vertex: refuse where its distance could
     // make their rounding a sixty-fourth of the tolerance (§14).
     let reach = vertex.abs().max_element() + (vertex - region.center).length() + region.radius;
-    if 8.0 * f64::EPSILON * reach > eps / 64.0 {
+    if too_far(reach, eps) {
         return Meet::Unsupported(
             "a plane across a cone meets it in a conic whose vertex is too far away to compute \
              it within the tolerance (design note 0012 §14)",
@@ -1129,7 +1130,7 @@ fn plane_cone(
         // face reaches it.
         let far = o + x * if opens > 0.0 { greater() } else { lesser() };
         let reach = far.abs().max_element() + (far - region.center).length() + region.radius;
-        if far.is_finite() && 8.0 * f64::EPSILON * reach <= eps / 64.0 {
+        if far.is_finite() && !too_far(reach, eps) {
             curves.push(Track::Conic {
                 vertex: far,
                 x: x * -opens,
@@ -1140,6 +1141,23 @@ fn plane_cone(
         }
     }
     Meet::Curves(curves)
+}
+
+/// Whether points of a conic found from its vertex, `reach` the vertex's
+/// largest coordinate plus its distance from the region's centre plus the
+/// region's radius, could round by a sixty-fourth of the tolerance `eps`
+/// (§14), with two thousandths to spare. The bound on a stretch's sag
+/// allows 32 `ε` of the stretch's reach from the vertex for rounding (the
+/// chart's `CONIC_ROUNDING`), a sixteenth of the tolerance at the reach
+/// refused here, and its chords are halved to within a thousandth of
+/// that floor (`Sag::settles`): without the margin, a stretch within a
+/// thousandth of that reach could stop over the sixteenth and refuse the
+/// boolean as too far from the origin (found by the fifth review; design
+/// note 0012 §16.2). Every stretch lies in the region, so its reach is at
+/// most this one; the margin is twice the thousandth, so that rounding in
+/// either reach cannot tip it.
+pub(super) fn too_far(reach: f64, eps: f64) -> bool {
+    8.0 * f64::EPSILON * reach * (1.0 + 2.0 * SETTLED) > eps / 64.0
 }
 
 /// A plane within `eps / 16` of a cone's apex, which lies outside the

@@ -1065,7 +1065,9 @@ for a long branch (a slight taper cut nearly along its axis) can lie
 far from the region; rounding is then about `ε` times the vertex's
 distance. A track whose rounding could exceed a sixty-fourth of the
 tolerance (a vertex some 10⁶ m away at the default tolerance) is
-refused rather than computed loosely.
+refused rather than computed loosely, with two thousandths to spare
+since the fifth review, so that halving the chords of any stretch it
+accepts ends under a sixteenth of the tolerance (§16.2, §17).
 
 **Tests.** As §12.4 item 3: the meeting's curves on both surfaces to
 rounding and none missed (random cones and planes, planes near a ruling's
@@ -1616,10 +1618,14 @@ allowance between `ε/24` and `ε/16`; review), and is gone. At the
 default tolerance four floors first pass the sixteenth about 36 km from
 the origin for an evenly weighted conic on a cylinder (a rod is cut
 twice 30 km from the origin and refused at 300 km; §16.5); a conic
-track's floor passes it at about 880 km of reach, where meet already
-refuses the conic's vertex as too far away to compute (§14: a cone at
-the origin 400 km tall is cut by a plane parallel to its axis, one
-600 km tall refused, a first cut); and
+track's floor would pass it at about 880 km of reach, but meet refuses
+the conic's vertex as too far away to compute from about 878 km of its
+reach, the vertex's coordinates, its distance from where the faces meet
+and that region's size (§14), which bounds every stretch's: two
+thousandths short of the floor's limit, so that the halving, settling
+within a thousandth of the floor, always ends under the sixteenth
+(fifth review, §17; a cone at the origin 400 km tall is cut by a plane
+parallel to its axis, one 600 km tall refused, a first cut); and
 for a small NURBS curve on a plane, by its allowance's formula, from
 about 160 km (degree five) to 310 km (a conic) from the origin where its
 chart's origin is near the world's, farther where it is near the
@@ -1747,7 +1753,8 @@ boundary leaves point location undecided and the edge was kept.
   the hyperbolas to 10⁴ m, the Bézier pieces at the origin, up to 4 m
   across), and a conic track's wherever its floor is under it by a
   thousandth (parabolas 260 km to 880 km from their vertices, one just
-  past that held over it); the exact courses of conic tracks in planes'
+  past that held over it), and so for every reach meet accepts, swept
+  across its limit; the exact courses of conic tracks in planes'
   and cones' charts (the anchor up to 10⁴ m from the vertex, stretches
   1 m to 10⁷ m from it, half ellipses to their ends, where `w` is under
   10⁻⁸) lie within their bands, as do those of NURBS arcs in cylinders'
@@ -1780,7 +1787,10 @@ boundary leaves point location undecided and the edge was kept.
   100 km from it, within 2·10⁻⁹ in volume of the cut at the origin to
   30 km; and, first cuts, cones 1 m to 400 km tall cut by a plane
   parallel to their axis, within 10⁻¹² in volume over size cubed, and
-  one 600 km tall refused (its hyperbola's vertex too far away, §14).
+  one 600 km tall refused (its hyperbola's vertex too far away, §14);
+  needle cones, their hyperbolas' vertices at the origin, cut to
+  877.8 km long and refused by meet from 879 km, never as too far from
+  the origin.
 * Fuzz: second cuts of random cut cones and cut rods, and chains of
   three or four cuts, with the volume identities and point membership,
   at 50 times their size, asserting that no refusal names a free-form
@@ -1980,3 +1990,24 @@ it. Besides them:
   or a conic's halving to its floor now fails one of the rounding
   tests or the halving tests, and without that halving the golden test
   of large cones fails, its cone 400 km tall refused.
+
+* **The fifth review** (2026-10-15), of the settling stop, its tests and
+  the corrected documentation, had six findings, every one checked
+  against the code:
+  * meet accepted a conic whose stretches' floors came within a
+    thousandth of the sixteenth, where the settling stop can end over
+    it: needle cones 879 km to 879.6 km long, their hyperbolas'
+    vertices at the origin, were refused as too far from the origin,
+    though §16.2 and the ADR said meet refused first. meet now refuses
+    with two thousandths to spare (§14; `meet::too_far`); the halving
+    test sweeps every reach meet accepts across its limit, and
+    `needle_cones_at_the_far_limit` cuts them to 877.8 km and has meet
+    refuse them from 879 km, both failing without the margin;
+  * four were false claims in documentation: the halving test's Bézier
+    pieces are up to 4 m across, not 2 m; the conic band test's least
+    `w` was claimed to 10⁻⁹ where it asserted 10⁻⁷ (it now asserts
+    10⁻⁸, the default runs reaching 3·10⁻⁹ and 9·10⁻¹⁰); a scaling
+    check compares four times the holes counting the one cut, not the
+    holes before it; and a test helper's cone was described at twice its
+    size. The sixth, the record's unfilled test count, was filled in
+    with the commit.
