@@ -38,6 +38,30 @@ proptest! {
         prop_assert!(got <= dense + 1e-9, "closest {} > dense {}", got, dense);
     }
 
+    /// Within a range of the parameter, the closest point keeps to it and
+    /// is as near as dense samples of that part.
+    #[test]
+    fn closest_point_in_a_range_beats_dense_sampling_there(
+        curve in arb_curve(),
+        r0 in 0.0..=1.0f64,
+        r1 in 0.0..=1.0f64,
+        x in -20.0..20.0f64,
+        y in -20.0..20.0f64,
+        z in -20.0..20.0f64,
+    ) {
+        let p = DVec3::new(x, y, z);
+        let (a, b) = curve.domain();
+        let (t0, t1) = (a + (b - a) * r0, a + (b - a) * r1);
+        let (t, q) = curve.closest_point_in(p, t0, t1);
+        prop_assert!(t >= t0.min(t1) && t <= t0.max(t1), "{t} outside [{t0}, {t1}]");
+        prop_assert!((curve.point(t) - q).length() <= 1e-12 * q.length().max(1.0));
+        let dense = (0..2000)
+            .map(|i| curve.point(t0 + (t1 - t0) * i as f64 / 1999.0).distance(p))
+            .fold(f64::INFINITY, f64::min);
+        let got = q.distance(p);
+        prop_assert!(got <= dense + 1e-9, "closest {} > dense {}", got, dense);
+    }
+
     #[test]
     fn points_on_the_curve_map_back(curve in arb_curve(), rel in 0.0..=1.0f64) {
         let (a, b) = curve.domain();

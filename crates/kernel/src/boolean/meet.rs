@@ -27,6 +27,7 @@ use std::f64::consts::{FRAC_PI_2, PI};
 use glam::{DVec2, DVec3};
 use opendatum_nurbs::NurbsCurve;
 
+use super::planar::SETTLED;
 use super::quadric::Quadric;
 use crate::geom::Curve3;
 use crate::KernelError;
@@ -254,7 +255,11 @@ impl Track {
     /// from the parameter of `p` (its eccentric angle, or its position
     /// across the conic's axis), which for a point near the curve is near
     /// the foot (the questions asked of it are about points within a few
-    /// tolerances of the curve).
+    /// tolerances of the curve). On half an ellipse also by its eccentric
+    /// angle, the nearer foot taken: near the ends of the half, on its
+    /// minor axis, a conic's parameter runs ever faster (`ξ' = p t / w`,
+    /// `w → 0`) and Newton's method in it can stop short of the foot
+    /// (found by review: 360 times the distance, 10⁻⁸ from an end).
     pub fn nearest(&self, p: DVec3) -> (f64, f64) {
         let t = match *self {
             Track::Line { origin, dir } => (p - origin).dot(dir),
@@ -266,7 +271,13 @@ impl Track {
                 let d = p - center;
                 wrap(self.foot(p, (d.dot(y) / b).atan2(d.dot(x) / a), 0.25, f64::INFINITY))
             }
-            Track::Conic { c, .. } => {
+            Track::Conic {
+                vertex,
+                x,
+                y,
+                p: semi,
+                c,
+            } => {
                 // On half an ellipse, within its half.
                 let limit = if c > 0.0 {
                     (1.0 - 1e-12) / c.sqrt()
@@ -274,7 +285,36 @@ impl Track {
                     f64::INFINITY
                 };
                 let t = self.param(p).clamp(-limit, limit);
-                self.foot(p, t, 0.25 * (1.0 + t.abs()), limit)
+                let t = self.foot(p, t, 0.25 * (1.0 + t.abs()), limit);
+                if c <= 0.0 {
+                    t
+                } else {
+                    // The whole ellipse, `ξ = a (1 − cos θ)`, `η = b sin θ`
+                    // with `a = p / c` and `b = p / √c`, so `t = sin θ / √c`;
+                    // a foot on the other half (`cos θ < 0`) puts the
+                    // nearest point of this half at its end on that side.
+                    let (a, b) = (semi / c, semi / c.sqrt());
+                    let whole = Track::Ellipse {
+                        center: vertex + x * a,
+                        x: -x,
+                        y,
+                        a,
+                        b,
+                    };
+                    let (theta, _) = whole.nearest(p);
+                    let (sin, cos) = theta.sin_cos();
+                    let end = 1.0 / c.sqrt();
+                    let s = if cos >= 0.0 {
+                        (sin * end).clamp(-end, end)
+                    } else {
+                        end.copysign(sin)
+                    };
+                    if (self.point(s) - p).length() < (self.point(t) - p).length() {
+                        s
+                    } else {
+                        t
+                    }
+                }
             }
         };
         (t, (self.point(t) - p).length())
@@ -1068,7 +1108,7 @@ fn plane_cone(
     // Points are found from the vertex: refuse where its distance could
     // make their rounding a sixty-fourth of the tolerance (§14).
     let reach = vertex.abs().max_element() + (vertex - region.center).length() + region.radius;
-    if 8.0 * f64::EPSILON * reach > eps / 64.0 {
+    if too_far(reach, eps) {
         return Meet::Unsupported(
             "a plane across a cone meets it in a conic whose vertex is too far away to compute \
              it within the tolerance (design note 0012 §14)",
@@ -1090,7 +1130,7 @@ fn plane_cone(
         // face reaches it.
         let far = o + x * if opens > 0.0 { greater() } else { lesser() };
         let reach = far.abs().max_element() + (far - region.center).length() + region.radius;
-        if far.is_finite() && 8.0 * f64::EPSILON * reach <= eps / 64.0 {
+        if far.is_finite() && !too_far(reach, eps) {
             curves.push(Track::Conic {
                 vertex: far,
                 x: x * -opens,
@@ -1101,6 +1141,23 @@ fn plane_cone(
         }
     }
     Meet::Curves(curves)
+}
+
+/// Whether points of a conic found from its vertex, `reach` the vertex's
+/// largest coordinate plus its distance from the region's centre plus the
+/// region's radius, could round by a sixty-fourth of the tolerance `eps`
+/// (§14), with two thousandths to spare. The bound on a stretch's sag
+/// allows 32 `ε` of the stretch's reach from the vertex for rounding (the
+/// chart's `CONIC_ROUNDING`), a sixteenth of the tolerance at the reach
+/// refused here, and its chords are halved to within a thousandth of
+/// that floor (`Sag::settles`): without the margin, a stretch within a
+/// thousandth of that reach could stop over the sixteenth and refuse the
+/// boolean as too far from the origin (found by the fifth review; design
+/// note 0012 §16.2). Every stretch lies in the region, so its reach is at
+/// most this one; the margin is twice the thousandth, so that rounding in
+/// either reach cannot tip it.
+pub(super) fn too_far(reach: f64, eps: f64) -> bool {
+    8.0 * f64::EPSILON * reach * (1.0 + 2.0 * SETTLED) > eps / 64.0
 }
 
 /// A plane within `eps / 16` of a cone's apex, which lies outside the
@@ -2093,6 +2150,54 @@ mod tests {
         match *q {
             Quadric::Plane { normal, .. } => normal,
             _ => unreachable!(),
+        }
+    }
+
+    /// The foot of a point near half an ellipse, near the ends of the
+    /// half (on its minor axis), where the conic's parameter runs ever
+    /// faster: the distance found is the point's distance from the curve
+    /// (found by review: 360 times it, Newton's method in the parameter
+    /// stopping short, 10⁻⁸ from an end).
+    #[test]
+    fn nearest_holds_at_the_ends_of_half_an_ellipse() {
+        let mut rng = Rng(0x3EE7_0007);
+        let mut cases: Vec<(f64, f64, f64, f64)> = vec![(0.158, 0.002, 10f64.powf(-11.9), -4.8e-7)];
+        for _ in 0..4000 {
+            let c = 10f64.powf(rng.range(-3.0, 0.0));
+            let semi = 10f64.powf(rng.range(-3.0, -1.0));
+            let gap = 10f64.powf(rng.range(-14.0, -1.0));
+            let off = 10f64.powf(rng.range(-9.0, -6.0)) * if rng.next() < 0.5 { -1.0 } else { 1.0 };
+            cases.push((c, semi, gap, off));
+        }
+        for (k, &(c, semi, gap, off)) in cases.iter().enumerate() {
+            let track = Track::Conic {
+                vertex: DVec3::ZERO,
+                x: DVec3::X,
+                y: DVec3::Y,
+                p: semi,
+                c,
+            };
+            let end = 1.0 / c.sqrt();
+            for t in [end * (1.0 - gap), -end * (1.0 - gap)] {
+                // Off the curve in its plane, square to it, by less than
+                // its least radius of curvature (`p`): the foot is `t`.
+                let normal = DVec3::Z.cross(track.deriv(t)).normalize();
+                let q = track.point(t) + normal * off;
+                let (u, d) = track.nearest(q);
+                // Near the end a step of the parameter's last bits moves
+                // the point `h` along the curve, which puts the nearest
+                // representable foot up to `h² / 2d` farther.
+                let h = 4.0 * f64::EPSILON * end * track.deriv(u).length();
+                let allowed = 1e-13 * (1.0 + semi / c) + h * h / off.abs();
+                assert!(
+                    (d - off.abs()).abs() <= allowed,
+                    "case {k}: c {c}, p {semi}, {gap} from the end: {d} for {off}"
+                );
+                assert!(
+                    (track.point(u) - track.point(t)).length() <= 1e-6 * semi,
+                    "case {k}"
+                );
+            }
         }
     }
 

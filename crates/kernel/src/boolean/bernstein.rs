@@ -28,17 +28,28 @@ pub(super) struct Bernstein {
     n: usize,
 }
 
-/// `C(n, k)` for `n < 2 · MAX`, exact in `f64`.
+/// `C(n, k)` for `n < MAX` (zero for `k > n`), by Pascal's rule: whole
+/// numbers below 2⁵³, so exact. A table, as products of polynomials are
+/// made in the hot loops of the bands of curved edges (design note 0012
+/// §16.2).
+const BINOMIAL: [[f64; MAX]; MAX] = {
+    let mut t = [[0.0; MAX]; MAX];
+    let mut n = 0;
+    while n < MAX {
+        t[n][0] = 1.0;
+        let mut k = 1;
+        while k <= n {
+            t[n][k] = t[n - 1][k - 1] + t[n - 1][k];
+            k += 1;
+        }
+        n += 1;
+    }
+    t
+};
+
+/// `C(n, k)` for `n < MAX`.
 fn binomial(n: usize, k: usize) -> f64 {
-    if k > n {
-        return 0.0;
-    }
-    let k = k.min(n - k);
-    let mut b = 1.0;
-    for i in 0..k {
-        b = b * (n - i) as f64 / (i + 1) as f64;
-    }
-    b.round()
+    BINOMIAL[n][k]
 }
 
 impl Bernstein {
@@ -170,6 +181,28 @@ impl Bernstein {
         p
     }
 
+    /// The coefficients.
+    pub fn coefficients(&self) -> &[f64] {
+        &self.c[..self.n]
+    }
+
+    /// The magnitudes of the terms of the derivative's coefficients, `d
+    /// (|cᵢ₊₁| + |cᵢ|)`: carried with [`Bernstein::mul`] and
+    /// [`Bernstein::add_scaled`] (with `k ≥ 0`) through a computation from
+    /// bounds on its inputs' errors, it bounds the errors of its results
+    /// (Higham, *Accuracy and Stability of Numerical Algorithms*, §3.1).
+    pub fn deriv_of_magnitudes(&self) -> Bernstein {
+        if self.n == 1 {
+            return Bernstein::constant(0.0);
+        }
+        let d = self.degree() as f64;
+        let mut c = [0.0; MAX];
+        for (i, ci) in c.iter_mut().enumerate().take(self.n - 1) {
+            *ci = d * (self.c[i + 1].abs() + self.c[i].abs());
+        }
+        Bernstein { c, n: self.n - 1 }
+    }
+
     /// Sets to zero every coefficient of magnitude at most `floor`: those
     /// that are rounding noise of a computation whose terms were about
     /// `floor / 1e-12` in size, so that a polynomial that is zero but for
@@ -288,6 +321,21 @@ mod tests {
     /// The same polynomial evaluated from its power form, for comparison.
     fn power_eval(roots: &[f64], k: f64, s: f64) -> f64 {
         roots.iter().fold(k, |v, r| v * (s - r))
+    }
+
+    /// The table of binomials against the product formula.
+    #[test]
+    fn binomials_are_exact() {
+        for n in 0..MAX {
+            for k in 0..MAX {
+                let want = if k > n {
+                    0
+                } else {
+                    (0..k as u64).fold(1u64, |b, i| b * (n as u64 - i) / (i + 1))
+                };
+                assert_eq!(binomial(n, k), want as f64, "C({n}, {k})");
+            }
+        }
     }
 
     #[test]

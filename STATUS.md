@@ -16,9 +16,11 @@ meet in lines, circles and conics (design note 0012 §9, §11, §13 and
 §15, ADR 0020): union, intersection and difference, with planes across
 cones at any angle (ellipses, parabolas, hyperbolas, and the rulings of
 a plane through a frustum's apex), checked by the volume identities and
-point membership on tens of thousands of random pairs. Next: bodies with
-those conic edges as operands of further booleans, then tangent
-contacts, then the features that use booleans.
+point membership on tens of thousands of random pairs. Bodies with
+those conic edges on cylinders and cones are operands of further
+booleans (a second countersink beside a tilted one, a pin flattened
+twice, chains of cuts; §16, §17, ADR 0023). Next: tangent contacts,
+then the features that use booleans.
 The product is now named OpenDatum (ADR 0017): packages `opendatum-*`,
 binary `opendatum`, documents `.odatum`; documents saved under the old
 name open unchanged.
@@ -107,8 +109,8 @@ name open unchanged.
     the topology and right by an independent geometric check, on tilted
     planes, symmetric extrudes, and partial and full revolves either way
     round, and that they follow the curves, not their order.
-  - Booleans (`Kernel::boolean`, design note 0012 §9, §11 and §13, ADR
-    0020): union, intersection and difference of solids bounded by
+  - Booleans (`Kernel::boolean`, design note 0012 §9, §11, §13, §15
+    and §17, ADR 0020): union, intersection and difference of solids bounded by
     planes and circular cylinders (boxes, extrudes of profiles with
     lines, arcs and circles, holes included, at any orientation), with
     coincident faces, edges and vertices, voids and several solids; and
@@ -120,7 +122,11 @@ name open unchanged.
     (tilted countersinks, drafted pins flattened along their axes,
     sections through a countersink's axis), and in two rulings where a
     plane passes through the apex of a cone whose faces stop short of
-    it. Where a plane
+    it. Bodies such cuts left are operands again: their conic edges,
+    stored as exact rational quadratic NURBS curves, are followed as
+    stored in the charts of cylinders and cones, with a band bounded
+    from the curve's own derivatives and their rounding (ADR 0023,
+    design note 0012 §16). Where a plane
     or a cylinder meets another surface the curve is found in closed form
     (lines, circles, ellipses, conics in vertex form with rational
     quadratic edges), once per pair of surfaces, and faces are
@@ -140,9 +146,8 @@ name open unchanged.
     tolerance, slivers, faces running within the tolerance of the other
     surface, a plane through a pointed cone's apex where both bodies
     reach it); spheres and cones with cylinders or cones off their axes,
-    cylinders at an angle to each other, tangent contacts and a second
-    boolean on a conic edge left on a curved face fail as not supported
-    yet.
+    cylinders at an angle to each other and tangent contacts fail as not
+    supported yet.
 - **Features** (`opendatum-features`): regenerates a Part Studio through the
   kernel with per-feature status (ok, warning, suppressed, failed with
   message). A failing feature never blocks the others. Sketch features are
@@ -790,6 +795,69 @@ name open unchanged.
   from 3.6 times main's time on a ball to 2.1 times (docs/PERFORMANCE.md,
   fifth pass), with new time guards for the tilted countersinks, the
   flattened pins and the creased revolve.
+- Operands with conic edges on curved faces (design note 0012 §16 and
+  §17, ADR 0023), 2026-10-15, on Mesa lavapipe: fmt, clippy with `-D
+  warnings`, 1,011 tests and `cargo deny` pass, and the release time
+  guards pass as CI runs them. Golden second cuts with all four
+  operations, exact in volume, with topology and origins: a conic-edged
+  body against a box far away, a rod cut by a tilted plane and again by
+  a plane across its ellipse, a pointed cone under a ridge, the tilted
+  countersink plate halved by its mirror plane and cut beside its hole,
+  a flattened pin halved through its hyperbola's vertex and flattened
+  again on its other side, cuts repeated in the same plane and with the
+  same cone, and a cut leaving a void beside an ellipse. Far from the
+  origin: a rod cut twice at the origin, 1 km and 30 km from it, within
+  a millionth in volume, and refused as too far at 300 km and 3,000 km;
+  a cone's hyperbola a millimetre off its axis cut again up to 30 km
+  from the origin, within 2·10⁻⁹ in volume of the same cuts at the
+  origin, and refused at 100 km; and cones 1 m to 400 km tall cut by a
+  plane parallel to their axis (first cuts), within 10⁻¹² in volume
+  over size cubed, one 600 km tall refused (the hyperbola's vertex too
+  far away to compute within the tolerance, 0012 §14). A fuzz of second
+  cuts at 50 times its size: on rods cut by a slab and again by a box,
+  slab or rod,
+  all 25,020 operations done, valid and correct by the volume identities
+  and point membership; on cut cones 137 in 1,000 refused, nearly all
+  at a pointed cone's apex or tangent contacts; in chains of three or
+  four cuts 38 in 1,000, likewise. The fuzzes main ran refuse what they
+  refused on main, but for two unions now done and correct. The fuzz
+  found a fault in a first cut (a slab through a frustum's apex nearly
+  along its seam failed with an internal error where a refusal
+  belonged), now refused (0012 §17). Five adversarial reviews (0012
+  §17), each finding confirmed by at least two of three skeptics or
+  checked against the code: the first corrected the rules of §16; the
+  second, third, fourth and fifth had six findings each, every code fix
+  with a test that fails without it, nine of them false claims in the
+  documentation and one an unfilled test count, corrected. The third review's rounding findings were settled by
+  measurement against double-double references: a conic track's
+  allowance is now 32 ε of
+  its reach (was 10⁻¹³, which refused first cuts of cones 20 km tall
+  that main did), a NURBS course on a plane carries a bound derived from
+  its degree, size and weights (its floor in proportion to the weights'
+  ratio times its whole size refused second cuts across uneven
+  hyperbolas from 1 km), and every course's positional allowance counts
+  the chart's size; tests against those references fail without each
+  allowance, floor or term (ten mutations checked). The fourth found
+  halving a conic track's chords stopped at four times its allowance,
+  as other bounds' do, though its bound settles on the allowance itself:
+  that could refuse first cuts of cones from about 235 km tall that
+  more halving resolves (it refused one 400 km tall), and it now halves
+  to within a thousandth of the allowance. The fifth found that meet
+  accepted conics whose allowance came within that thousandth of a
+  sixteenth of the tolerance, where the halving can stop over it: needle
+  cones 879 km to 879.6 km long were refused as too far from the origin
+  where meet should refuse them first; meet now refuses with two
+  thousandths to spare, from about 878 km of reach. The validator's check of edges against a turned face's
+  axis now takes
+  closed forms first: validating the tilted countersunk plate fell from
+  14.3 ms to 4.2 ms and cutting its holes in one boolean from 41.1 ms to
+  24.3 ms, medians against main (docs/PERFORMANCE.md, sixth pass); a cut
+  one at a time into conic-edged cones takes about twice as long as one
+  into straight countersinks (16 take 197 ms against 102 ms). The scan
+  that keeps the kernel's sources from reading the environment now
+  leaves out modules built only for tests (the rounding tests read
+  their sample sizes from it) and also catches variables read when the
+  kernel is built (`crates/kernel/tests/sources.rs`).
 - Geometry for booleans of curved solids (design note 0012 §10.7, item
   1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   915 tests and `cargo deny` pass. Tested on its own; the boolean stages
@@ -1128,12 +1196,33 @@ name open unchanged.
   ruling through or near its apex, where the cone stays within the
   tolerance of the plane out to the faces (the cone fuzz tilts them
   10⁻⁴ to 10⁻⁷ rad from tangent: 220 of its 20,000 operations on
-  frustums); and a
-  second boolean on a body an earlier cut left
-  with a conic edge on a curved face (an elliptical edge on a cylinder
-  or a cone, a parabola or a hyperbola on a cone), which is stored as a
-  NURBS curve the stages do not recognise, even where the bodies are
-  apart. So a half section of a drafted pin cannot be cut again yet.
+  frustums). An operand's NURBS edge on a sphere, or of degree above
+  five on any curved face, is refused (no operation makes one yet:
+  planes meet spheres in circles, and the conics cuts leave are
+  quadratic). The fuzz of second cuts at 50 times refuses none of
+  25,020 operations on cut rods and 137 in 1,000 on cut cones, four
+  fifths of those through or near a pointed cone's apex and most of the
+  rest tangent contacts, and 38 in 1,000 in chains of three or four
+  cuts, likewise (design note 0012 §17).
+- Far from the origin: a boolean is refused as too far from the origin
+  for the tolerance where the rounding of the bound on a curved edge's
+  course keeps a chord that could hide a contact wider than a sixteenth
+  of the tolerance (design note 0012 §16.2). At the default tolerance:
+  from about 36 km from the origin for the conics cuts leave on
+  cylinders and cones (a rod cut twice is cut at 30 km and refused at
+  300 km; a cone's hyperbola cut again is cut at 30 km and refused at
+  100 km); for the conic where a plane cuts a cone, which applies to
+  first cuts too, never: its vertex is refused first as too far away to
+  compute within the tolerance (design note 0012 §14: from about 878 km
+  of the vertex's coordinates, its distance from where the faces meet
+  and that region's size; a cone 400 km tall at the origin is cut by a
+  plane parallel to its axis, one 600 km tall refused; needle cones
+  whose hyperbolas' vertices are at the origin are cut to 877.9 km long
+  and refused from there); and, by the formula for its allowance, from about 160 km
+  (degree five) to 310 km (a conic) for a small NURBS edge on a plane
+  whose chart is anchored near the world's origin (farther when it is
+  anchored near the edge), less for a large edge whose weights are very
+  uneven.
 - At a cone's apex: a plane through a pointed cone's apex, or whose
   curve comes within 128 tolerances of the axis there, is refused where
   the apex lies near where faces of both bodies can be, which takes in
@@ -1195,11 +1284,9 @@ name open unchanged.
 1. Check the new title bar on GNOME (on Pat's desktop).
 2. Phase 3, in the order the design notes give (0012 §12.4 item 3:
    balls and coaxial cones, item 3a, §13; planes across cones, item 3b,
-   §15, are done). Next: bodies with conic edges on curved faces as
-   operands (a second cut of a tilted countersink or a flattened pin:
-   recognise the rational quadratic edges the booleans write as their
-   conics, so the stages can split and classify along them), then
-   tangent contacts (the largest share of the curved refusals), then the
+   §15, and operands with conic edges on cylinders and cones, §17, are
+   done). Next: tangent contacts (the largest share of the curved
+   refusals), then the
    apex left refused (a plane through a pointed cone's apex where both
    bodies reach it: edges meeting at the cone's singular point), naming
    through booleans (design note 0013 §10 step 4), and extrude and

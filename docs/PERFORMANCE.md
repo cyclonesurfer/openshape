@@ -44,7 +44,11 @@ room for them.
 Release builds, best of 2–3 runs, measured 2026-10-13 on the reference
 machine (the rows that mesh curved faces, and the new rows from the
 tilted countersunk holes to the creased revolve's validation, on
-2026-10-15, after the fifth pass). The limit is what the test enforces.
+2026-10-15, after the fifth pass). The booleans and validations of the
+dimpled, countersunk, tilted and flattened plates, and the cuts one at a
+time, were measured again after the sixth pass (2026-10-15): the lowest
+and the median of 12 runs interleaved with main's. The limit is what the
+test enforces.
 
 | Operation | Measured | Limit |
 |---|---|---|
@@ -60,21 +64,23 @@ tilted countersunk holes to the creased revolve's validation, on
 | Cut 64 holes into a box, one boolean each | 225–265 ms | 3,000 ms |
 | Drill 64 round holes into a plate, one boolean each | 860–1,050 ms | 10,000 ms |
 | Intersect or subtract a plate with 100 round holes and a box across them | 52–55 ms | 600 ms |
-| Dimple a plate with 16 balls, one boolean each | 113–125 ms | 1,200 ms |
+| Dimple a plate with 16 balls, one boolean each | 73–89 ms | 900 ms |
 | Mesh it (173,680 triangles) | 382–406 ms | 4,000 ms |
-| Validate it | 5.3–8 ms | 80 ms |
+| Validate it | 2.2–2.5 ms | 40 ms |
 | Its mass properties to 1e-9 | 14–17 ms | 150 ms |
-| Cut 16 countersunk holes (a shank and a cone each) into a plate, one boolean each | 220–245 ms | 2,500 ms |
+| Cut 16 countersunk holes (a shank and a cone each) into a plate, one boolean each | 96–102 ms | 1,200 ms |
 | Mesh it (9,612 triangles) | 31–37 ms | 300 ms |
-| Validate it | 14.4–14.8 ms | 150 ms |
+| Validate it | 3.4–4.0 ms | 50 ms |
 | Its mass properties to 1e-9 | 22–24 ms | 250 ms |
-| Cut 16 countersunk holes leaning 10° into a plate in one boolean (ellipses) | 39–42 ms | 450 ms |
+| Cut 16 countersunk holes leaning 10° into a plate in one boolean (ellipses) | 21–24 ms | 350 ms |
+| The same holes one at a time (each cut's cones carry the ellipses of the cuts before) | 176–197 ms | 2,500 ms |
 | Mesh it (12,956 triangles) | 44–59 ms | 600 ms |
-| Validate it | 14–17 ms | 150 ms |
+| Validate it | 3.4–4.2 ms | 60 ms |
 | Its mass properties to 1e-9 | 17–20 ms | 200 ms |
-| Flatten 16 pins of 5° draft along their axes in one boolean (hyperbolas) | 32–38 ms | 400 ms |
+| Flatten 16 pins of 5° draft along their axes in one boolean (hyperbolas) | 18–22 ms | 350 ms |
+| The same pins one at a time (each cut's cones carry the hyperbolas of the cuts before) | 175–197 ms | 2,500 ms |
 | Mesh it (9,868 triangles) | 26–35 ms | 350 ms |
-| Validate it | 9–11 ms | 100 ms |
+| Validate it | 3.1–3.8 ms | 60 ms |
 | Its mass properties to 1e-9 | 13 ms | 150 ms |
 | Revolve a rational cubic bending nearly to a crease (validation meshes it) | 12–15 ms | 150 ms |
 | Mesh it (108,486 triangles) | 446–482 ms | 5,000 ms |
@@ -93,6 +99,14 @@ factor):
 | Mesh a plate, 16 to 121 holes (7.6 times) | 6.8–8.2 times |
 | Cut a box across a plate's round holes, 16 to 121 holes (7.6 times) | 7.8–8.4 times |
 | Mesh a ball, 13,964 to 105,556 triangles (7.6 times) | 8.6–9.6 times |
+
+One more checks the cut of a plate's 4th hole against that of its 16th,
+four times the holes counting the one cut (bound: 12, three times the
+factor):
+
+| Operation | Measured growth |
+|---|---|
+| Cut the 4th or the 16th countersunk hole leaning 10° into a plate | 3.1–3.6 times |
 
 The union is scaled on regular prisms, whose result grows with their
 size. Two star prisms overlap in a band where many faces of each meet
@@ -338,6 +352,73 @@ the creased revolve.) On these four bodies a triangle now costs 1.6 to
 incircle tests that bisecting edges on a regular grid brings (slow spots
 below).
 
+### Sixth pass: operands with conic edges (design note 0012 §16)
+
+A second cut of a body whose cones and cylinders carry conic edges
+follows each edge's NURBS curve in its face's chart, with a band from the
+curve's derivatives (design note 0012 §16.2). Profiled with callgrind
+and compared with main by wall clock:
+
+* **Edges near an axis were sampled at 65 points, with an 80-step
+  search at each local least.** Validation and the booleans' last check
+  ask whether an edge of a turned face passes through its axis
+  (`check::through_axis`). Along a line parallel to the axis, as the
+  straight edges of a turned cylinder run, the distance is the same but
+  for rounding, so many samples were local leasts, each starting its own
+  search: 30% of the instructions of building, cutting, validating,
+  meshing and measuring the tilted countersink and flattened-pin plates
+  were spent there. A line now takes the closed form (its
+  least distance from the axis, clamped to its ends), a circle a test of
+  its least distance, and a NURBS curve is cleared when the control
+  points of each Bézier piece, whose convex hull holds the piece (Piegl
+  & Tiller §4.2), all lie farther than the tolerance from the axis; only
+  what these cannot clear is sampled as before. Counted on those two
+  plates: 2.44 billion instructions in the check before, 2.0 million
+  now; validating each once, 216 million before, 76 million now; the 48
+  booleans that build and cut them, 6.62 billion before, 4.52 billion
+  now.
+* **The band of a NURBS course in a plane's chart split the whole curve
+  into its Bézier pieces again for every chord**: 9.8% of the
+  instructions of cutting the tilted countersunk holes one at a time.
+  It now uses the pieces its trace split once, with the same arithmetic:
+  1.89 billion instructions before, 1.70 billion now.
+* **Binomials from a table.** The products of Bernstein polynomials made
+  in the bands' innermost loops computed each binomial as a product; a
+  table built by Pascal's rule at compile time, exact, replaces it (not
+  measured on its own).
+* **Solids with voids:** the check of which outer shell holds each void
+  builds the shells' outlines once, and only when there is a void.
+
+Meshing and mass properties are unchanged: the same instruction counts
+on the tilted and flattened plates (745 and 746 million for meshing,
+369 million for mass properties, before and after). Against main, the
+median of 12 runs of each build interleaved, on the reference machine
+(2026-10-15):
+
+| Operation | main | now |
+|---|---|---|
+| Cut 16 countersunk holes leaning 10° into a plate in one boolean | 41.1 ms | 24.3 ms |
+| Flatten 16 drafted pins in one boolean | 33.2 ms | 22.1 ms |
+| Cut 16 countersunk holes, one boolean each | 262.3 ms | 101.6 ms |
+| Dimple a plate with 16 balls, one boolean each | 122.2 ms | 89.4 ms |
+| Validate the tilted countersunk plate | 14.3 ms | 4.2 ms |
+| Validate the flattened pins' plate | 9.6 ms | 3.8 ms |
+| Validate the countersunk plate | 11.4 ms | 4.0 ms |
+| Validate the dimpled plate | 4.1 ms | 2.5 ms |
+| Drill 64 round holes into a plate, one boolean each | 813.6 ms | 745.8 ms |
+
+Cutting the tilted holes or flattening the pins one at a time was
+refused on main (a NURBS edge on a curved face). Drilling the round
+holes runs as many instructions as on main: 7.851 billion under
+callgrind for the test that drills them and cuts a box across the
+plate, against 7.833 billion (0.24% more); its medians swing with the
+machine's noise (an earlier set of 12 runs had it 5% slower than main,
+this one 8% faster). The guard of the solids' meshes and mass
+properties likewise: 660.4 million instructions, against 660.5 million
+on main, though some of its medians here differ by up to 8% (the
+1024-sided prism's mass properties, 71.0 ms against 65.7 ms; 2% in the
+earlier set).
+
 ## Known slow spots
 
 Measured by wall clock, not yet fixed; each is a candidate for a later
@@ -379,6 +460,15 @@ pass.
   within a cone about its first chord, which a bound on the segments'
   turning would show; that needs the turning of each course in its
   chart (design note 0012 §11).
+* **Bands of NURBS courses on cones and cylinders** (design note 0012
+  §16.2) are made afresh for every chord, from products of Bernstein
+  polynomials of the curve's piece clipped to the chord's stretch: 31%
+  of the instructions of cutting the tilted countersunk holes one at a
+  time (the products alone 11%), whose cuts take about twice as long
+  each as the straight countersinks' (197 ms for 16 against 102 ms,
+  medians). The products could be subdivided with the
+  chords (de Casteljau's algorithm on their coefficients) instead of
+  made again.
 * **Validation meshes the result** to check each shell's orientation by
   its volume, and to check that every face can be meshed: about a fifth
   of a 256-sided union (8 ms of 43) and a quarter of each of the 64 cuts,

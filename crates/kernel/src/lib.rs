@@ -29,7 +29,7 @@ pub use arrangement::{
     ArrangementEdge, ArrangementVertex, CurvatureSample, CurveContact, ProfileEdge, Region,
     RegionLoop, SketchArrangement,
 };
-pub use geom::SurfaceKind;
+pub use geom::{CurveKind, SurfaceKind};
 pub use glam::{DMat4, DVec2, DVec3};
 pub use math::{Frame, Tolerance};
 pub use origin::{
@@ -232,15 +232,18 @@ pub trait Kernel: Send + Sync {
     /// operands' faces, edges and vertices. Fails with
     /// [`KernelError::InvalidInput`] when the result would be empty or
     /// non-manifold (the bodies touching only along an edge or at a
-    /// point), and with [`KernelError::Unsupported`] for what is not
+    /// point), or the bodies lie too far from the origin for the tolerance
+    /// (rounding keeps a curved edge's course from being resolved within
+    /// it), and with [`KernelError::Unsupported`] for what is not
     /// handled yet: faces other than planes, circular cylinders, spheres
     /// and cones; faces that meet in a quartic curve (cylinders, cones and
     /// spheres off each other's axes); faces that touch without crossing
     /// (tangent contacts); a plane through or very near the apex of a
     /// cone where faces reach it; a result with an edge passing within the
     /// tolerance of a turned face's centre, a cone's apex or a sphere's
-    /// pole; and an operand with an edge on a curved face that is neither
-    /// a line nor a circle (a conic an earlier cut left).
+    /// pole; and an operand with a NURBS edge of degree above five, or one
+    /// on a sphere. Conics an earlier cut left on cylinders and cones are
+    /// followed as stored (ADR 0023).
     fn boolean(
         &self,
         a: &Self::Body,
@@ -279,6 +282,9 @@ pub trait Kernel: Send + Sync {
 
     /// Analytic kinds of the body's faces, in face order.
     fn face_kinds(&self, body: &Self::Body) -> Vec<SurfaceKind>;
+
+    /// Kinds of the curves of the body's edges, in edge order.
+    fn edge_kinds(&self, body: &Self::Body) -> Vec<CurveKind>;
 
     /// How each face, edge and vertex of the body arose from the inputs of
     /// the operation that made it, in handle order (ADR 0018): the raw
@@ -476,6 +482,10 @@ impl Kernel for BrepKernel {
 
     fn face_kinds(&self, body: &Body) -> Vec<SurfaceKind> {
         body.brep.faces.iter().map(|f| f.surface.kind()).collect()
+    }
+
+    fn edge_kinds(&self, body: &Body) -> Vec<CurveKind> {
+        body.brep.edges.iter().map(|e| e.curve.kind()).collect()
     }
 
     fn origins<'a>(&self, body: &'a Body) -> &'a Origins {

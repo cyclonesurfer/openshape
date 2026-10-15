@@ -503,6 +503,36 @@ fn drafted_pin(x: f64, y: f64) -> Body {
     .expect("a drafted pin")
 }
 
+/// The 4 by 4 plate with the first `n` of its 16 countersunk holes
+/// leaning 10°, cut one at a time.
+fn sunk_plate(n: usize) -> Body {
+    let plate = k()
+        .make_box(&Frame::WORLD, DVec3::new(4.0, 4.0, 0.4))
+        .expect("a plate");
+    (0..n).fold(plate, |body, i| {
+        k().boolean(&body, &sunk_tool(i), BooleanOp::Subtract)
+            .expect("a tilted countersunk hole")
+    })
+}
+
+/// The tool of the `i`th of [`sunk_plate`]'s holes, in a 4 by 4 grid.
+fn sunk_tool(i: usize) -> Body {
+    tilted_countersink((i / 4) as f64 + 0.5, (i % 4) as f64 + 0.5)
+}
+
+/// A box whose face runs along the axis of the drafted pin at `(x, y)`,
+/// 0.1 to its side, cutting a flat on it.
+fn flattener(x: f64, y: f64) -> Body {
+    k().make_box(
+        &Frame {
+            origin: DVec3::new(x + 0.1, y - 0.4, 0.5),
+            ..Frame::WORLD
+        },
+        DVec3::new(0.3, 0.8, 1.5),
+    )
+    .expect("a box")
+}
+
 #[test]
 fn planes_across_cones() {
     let plate = || {
@@ -510,8 +540,7 @@ fn planes_across_cones() {
             .expect("a plate")
     };
     let grid = || (0..16).map(|n| ((n / 4) as f64 + 0.5, (n % 4) as f64 + 0.5));
-    // Disjoint solids made one body, which a body with conic edges on
-    // its curved faces cannot be an operand of yet (STATUS.md).
+    // Disjoint solids made one body, to cut them in one boolean.
     let all = |solids: Vec<Body>| {
         solids
             .into_iter()
@@ -532,24 +561,24 @@ fn planes_across_cones() {
         t,
         LIMIT.tilted_sink_16,
     );
+    // The same holes one at a time: each cut's operand carries the
+    // ellipses of the cuts before it on its cones (design note 0012 §16).
+    let (each, t) = best(1, || sunk_plate(16));
+    assert_eq!(k().topology(&each), topology);
+    let volume = |b: &Body| k().mass_properties(b, 1e-12).expect("mass").volume;
+    assert!((volume(&each) - volume(&sunk)).abs() <= 1e-12 * volume(&sunk));
+    within(
+        "cut 16 countersunk holes leaning 10° into a plate one at a time",
+        t,
+        LIMIT.tilted_sink_16_each,
+    );
     // 16 pins of 5° draft on a plate, flattened on one side by boxes whose
     // faces run along their axes, in one boolean: hyperbolas.
     let pins = grid().fold(plate(), |body, (x, y)| {
         k().boolean(&body, &drafted_pin(x, y), BooleanOp::Union)
             .expect("a pin")
     });
-    let boxes = all(grid()
-        .map(|(x, y)| {
-            k().make_box(
-                &Frame {
-                    origin: DVec3::new(x + 0.1, y - 0.4, 0.5),
-                    ..Frame::WORLD
-                },
-                DVec3::new(0.3, 0.8, 1.5),
-            )
-            .expect("a box")
-        })
-        .collect());
+    let boxes = all(grid().map(|(x, y)| flattener(x, y)).collect());
     let (flat, t) = best(3, || {
         k().boolean(&pins, &boxes, BooleanOp::Subtract)
             .expect("flattened pins")
@@ -560,6 +589,21 @@ fn planes_across_cones() {
         "flatten 16 drafted pins along their axes in one boolean",
         t,
         LIMIT.flatten_16,
+    );
+    // The same pins flattened one at a time: each cut's operand carries
+    // the hyperbolas of the cuts before it on its cones.
+    let (each, t) = best(1, || {
+        grid().fold(pins.clone(), |body, (x, y)| {
+            k().boolean(&body, &flattener(x, y), BooleanOp::Subtract)
+                .expect("a flattened pin")
+        })
+    });
+    assert_eq!(k().topology(&each), topology);
+    assert!((volume(&each) - volume(&flat)).abs() <= 1e-12 * volume(&flat));
+    within(
+        "flatten 16 drafted pins along their axes one at a time",
+        t,
+        LIMIT.flatten_16_each,
     );
     let opts = TessellationOptions::default();
     for (name, body, [mesh, validate, mass]) in [
@@ -730,6 +774,26 @@ fn scaling() {
         || k().tessellate(&p11, &opts).expect("a mesh"),
     );
 
+    // The 4th or the 16th countersunk hole leaning 10° cut into a plate,
+    // the cones of the holes before carrying the ellipses of their cuts
+    // (design note 0012 §16): every boolean reads both whole bodies, so
+    // the cut grows with the holes, no faster.
+    let (few, many) = (sunk_plate(3), sunk_plate(15));
+    let (tool3, tool15) = (sunk_tool(3), sunk_tool(15));
+    scales(
+        "cut the 4th or the 16th tilted countersunk hole into a plate",
+        4.0,
+        5,
+        || {
+            k().boolean(&few, &tool3, BooleanOp::Subtract)
+                .expect("a cut")
+        },
+        || {
+            k().boolean(&many, &tool15, BooleanOp::Subtract)
+                .expect("a cut")
+        },
+    );
+
     // A ball meshed eight times as finely: on a doubly curved face the
     // triangles grow as the tolerance shrinks.
     let b = ball(DVec3::ZERO, 1.0);
@@ -771,7 +835,9 @@ struct Limits {
     /// The same of the countersunk plate.
     countersunk: [f64; 3],
     tilted_sink_16: f64,
+    tilted_sink_16_each: f64,
     flatten_16: f64,
+    flatten_16_each: f64,
     /// Meshing, validation and mass properties of the plate with tilted
     /// countersunk holes.
     tilted: [f64; 3],
@@ -796,14 +862,16 @@ const LIMIT: Limits = Limits {
     pins_64: 3000.0,
     drill_64: 10000.0,
     plate_box: 600.0,
-    dimple_16: 1200.0,
-    sink_16: 2500.0,
-    dimpled: [4000.0, 80.0, 150.0],
-    countersunk: [300.0, 150.0, 250.0],
-    tilted_sink_16: 450.0,
-    flatten_16: 400.0,
-    tilted: [600.0, 150.0, 200.0],
-    flattened: [350.0, 100.0, 150.0],
+    dimple_16: 900.0,
+    sink_16: 1200.0,
+    dimpled: [4000.0, 40.0, 150.0],
+    countersunk: [300.0, 50.0, 250.0],
+    tilted_sink_16: 350.0,
+    tilted_sink_16_each: 2500.0,
+    flatten_16: 350.0,
+    flatten_16_each: 2500.0,
+    tilted: [600.0, 60.0, 200.0],
+    flattened: [350.0, 60.0, 150.0],
     mesh_ball: 3500.0,
     creased: [150.0, 5000.0, 4000.0, 150.0],
     regions_122: 1200.0,

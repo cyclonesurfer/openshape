@@ -14,6 +14,8 @@
 
 use glam::{DVec3, DVec4};
 
+use opendatum_nurbs::BezierSegment;
+
 use super::bernstein::Bernstein;
 use crate::geom::{Curve3, Surface, SurfaceKind};
 use crate::KernelError;
@@ -98,6 +100,11 @@ struct Along {
     k: f64,
     /// Size of the terms `n` is computed from, for its rounding.
     scale: f64,
+    /// A bound on how far each coefficient of `n` is from the exact one
+    /// for the piece and the surface as stored: the rounding of the
+    /// reference, of the control points' offsets from it and of `n`'s own
+    /// products.
+    error: f64,
 }
 
 /// Bisection steps after which a crossing is taken as found (a parameter
@@ -366,6 +373,18 @@ impl Quadric {
         }
     }
 
+    /// The size of the numbers the surface is stored as (its reference
+    /// point's length and its radius), for their rounding.
+    fn size(&self) -> f64 {
+        match *self {
+            Quadric::Plane { point, .. } => point.length(),
+            Quadric::Cylinder { point, radius, .. } | Quadric::Cone { point, radius, .. } => {
+                point.length() + radius.abs()
+            }
+            Quadric::Sphere { center, radius } => center.length() + radius.abs(),
+        }
+    }
+
     /// The same surface with its reference point moved near `p` (a plane's
     /// foot of `p`, an axis's point nearest `p`), so that the implicit
     /// function near `p` is computed from small numbers.
@@ -418,6 +437,23 @@ impl Quadric {
         let wmax = weights.iter().fold(0.0f64, |m, x| m.max(x.abs()));
         let rel: Vec<DVec3> = pw.iter().map(|p| p.truncate() - reference * p.w).collect();
         let reach = rel.iter().fold(0.0f64, |m, x| m.max(x.length()));
+        // Anchoring rounds the reference off the stored axis or plane (and
+        // a cone's radius there), and the offsets round at a few ε of the
+        // coordinates they are computed from, not of their own size: each
+        // offset is within `moved` of the exact one (8ε over about five
+        // roundings).
+        let moved = 8.0
+            * f64::EPSILON
+            * (pw.iter().fold(0.0f64, |m, p| m.max(p.truncate().length()))
+                + (first.length() + self.size() + q.size()) * wmax);
+        // How far a coefficient of `|v|² − (v·a)² − (R w + k v·a)²` moves
+        // when each offset `v` moves by `moved` (and `R w` by `moved` at
+        // most): `2|v||e| + |e|²` for the first terms and `2|r||Δr| + Δr²`
+        // with `|Δr| ≤ (1 + k) moved` for the last.
+        let quadratic = |slope: f64, radius: f64| {
+            let grow = (1.0 + slope) * (1.0 + slope);
+            2.0 * moved * grow * (reach + radius.abs() * wmax) + 2.0 * moved * moved * grow
+        };
         let coords = |f: &dyn Fn(DVec3) -> f64| {
             let c: Vec<f64> = rel.iter().map(|x| f(*x)).collect();
             Bernstein::new(&c)
@@ -439,17 +475,20 @@ impl Quadric {
                 w,
                 k: 1.0,
                 scale: reach,
+                error: moved + ROUNDING * reach,
             },
             Quadric::Cylinder { axis, radius, .. } => {
                 let h = coords(&|v| v.dot(axis))?;
                 let n = squared()?
                     .add_scaled(-1.0, &h.mul(&h)?)
                     .add_scaled(-radius * radius, &w.mul(&w)?);
+                let scale = (reach + radius * wmax).powi(2);
                 Along {
                     n,
                     w,
                     k: 2.0,
-                    scale: (reach + radius * wmax).powi(2),
+                    scale,
+                    error: quadratic(0.0, radius) + ROUNDING * scale,
                 }
             }
             Quadric::Cone {
@@ -463,19 +502,25 @@ impl Quadric {
                 let n = squared()?
                     .add_scaled(-1.0, &h.mul(&h)?)
                     .add_scaled(-1.0, &r.mul(&r)?);
+                let scale = ((reach + radius.abs() * wmax) * (1.0 + slope)).powi(2);
                 Along {
                     n,
                     w,
                     k: 2.0,
-                    scale: ((reach + radius.abs() * wmax) * (1.0 + slope)).powi(2),
+                    scale,
+                    error: quadratic(slope, radius) + ROUNDING * scale,
                 }
             }
-            Quadric::Sphere { radius, .. } => Along {
-                n: squared()?.add_scaled(-radius * radius, &w.mul(&w)?),
-                w,
-                k: 2.0,
-                scale: (reach + radius * wmax).powi(2),
-            },
+            Quadric::Sphere { radius, .. } => {
+                let scale = (reach + radius * wmax).powi(2);
+                Along {
+                    n: squared()?.add_scaled(-radius * radius, &w.mul(&w)?),
+                    w,
+                    k: 2.0,
+                    scale,
+                    error: quadratic(0.0, radius) + ROUNDING * scale,
+                }
+            }
         })
     }
 
@@ -639,21 +684,259 @@ fn pieces(curve: &Curve3, t0: f64, t1: f64) -> Option<Vec<Piece>> {
             if n.degree() > 5 {
                 return None;
             }
-            n.bezier_segments()
-                .into_iter()
-                .filter(|seg| seg.b > t0 && seg.a < t1)
-                .map(|seg| {
-                    let (a, b) = (seg.a.max(t0), seg.b.min(t1));
-                    let len = seg.b - seg.a;
-                    let pw = clip(&seg.points, (a - seg.a) / len, (b - seg.a) / len);
-                    Piece {
-                        pw,
-                        map: Map::Linear(a, b),
-                    }
+            spans(&n.bezier_segments(), t0, t1)
+                .map(|(a, b, pw)| Piece {
+                    pw,
+                    map: Map::Linear(a, b),
                 })
                 .collect()
         }
     })
+}
+
+/// The parts on `[t0, t1]` (`t0 ≤ t1`) of the Bézier segments of a NURBS
+/// curve, in order, each as its range of the curve's parameter and its
+/// homogeneous control points reparameterised to `[0, 1]`.
+pub(super) fn spans(
+    segments: &[BezierSegment],
+    t0: f64,
+    t1: f64,
+) -> impl Iterator<Item = (f64, f64, Vec<DVec4>)> + '_ {
+    segments
+        .iter()
+        .filter(move |seg| seg.b > t0 && seg.a < t1)
+        .map(move |seg| {
+            let (a, b) = (seg.a.max(t0), seg.b.min(t1));
+            let len = seg.b - seg.a;
+            (
+                a,
+                b,
+                clip(&seg.points, (a - seg.a) / len, (b - seg.a) / len),
+            )
+        })
+}
+
+/// Relative bound on the rounding of a coefficient computed by the
+/// Bernstein operations here, as a fraction of the magnitudes of the terms
+/// it sums (carried by [`Bernstein::deriv_of_magnitudes`] and the products
+/// of magnitudes): a few dozen roundings of `2⁻⁵³` at most, with a wide
+/// margin.
+const ROUNDING: f64 = 1e-12;
+
+/// A bound on the second derivative, by the piece's parameter `s ∈ [0,
+/// 1]`, of the course of the rational Bézier piece `pw` (homogeneous
+/// control points) in the chart of the cylinder or cone `surface` (design
+/// note 0012 §16.2). The chart keeps lengths on the surface, so the course
+/// bends by at most the curve's acceleration; off the surface, by its
+/// distance `δ` from it, terms in `δ`, `δ'` and the speed are added:
+///
+/// `|Y''| ≤ (1 + δ/ρ) |X''| + 3 δ |X'|² / ρ² + 2 (1 + δ/ρ) |δ'| |X'| / ρ`,
+///
+/// `ρ` the least distance from the axis. `None` where no bound is found
+/// ([`derivative_bounds`], [`off_surface`]). Every term is a bound with
+/// its rounding allowed for; the formula's own few dozen roundings of
+/// positive numbers are covered by raising the result by [`ROUNDING`].
+///
+/// With the bound comes its floor, the part of `k |X''|` that the
+/// allowances for rounding make ([`derivative_bounds`]): halving the piece
+/// shrinks every other term (the acceleration by the parameter's
+/// length squared, the terms in `δ` with the speed), not this.
+pub(super) fn developed_bend(surface: &Quadric, pw: &[DVec4]) -> Option<(f64, f64)> {
+    let (d1, d2, floor) = derivative_bounds(pw)?;
+    let (rho, delta, ddelta) = off_surface(surface, pw, d1)?;
+    let k = 1.0 + delta / rho;
+    let bend = k * d2 + 3.0 * delta * d1 * d1 / (rho * rho) + 2.0 * k * ddelta * d1 / rho;
+    let bend = bend * (1.0 + ROUNDING);
+    let floor = k * floor * (1.0 + ROUNDING);
+    (bend.is_finite() && floor.is_finite()).then_some((bend, floor))
+}
+
+/// Bounds on the speed `|X'|` and the acceleration `|X''|`, by the
+/// piece's parameter `s ∈ [0, 1]`, of the rational Bézier piece `pw`
+/// (homogeneous control points, degree at most five): `X' = R / W²` and
+/// `X'' = Q / W³` with `R = P'W − PW'` and `Q = R'W − 2RW'`, bounded by
+/// the largest of their Bernstein coefficients (vectors, whose convex hull
+/// holds the polynomial) over the least weight, each coefficient's error
+/// added: its inputs' rounding carried through, and its own from the
+/// magnitudes of the terms it sums. The third bound is the part of the
+/// second those errors make (the largest error vector's length over the
+/// least weight cubed), which halving the piece does not narrow: the
+/// control points' rounding is of the coordinates, however short the
+/// piece. `None` for a weight that is not positive or a degree above
+/// five.
+pub(super) fn derivative_bounds(pw: &[DVec4]) -> Option<(f64, f64, f64)> {
+    let weights: Vec<f64> = pw.iter().map(|q| q.w).collect();
+    let least = weights.iter().copied().fold(f64::INFINITY, f64::min);
+    if least.is_nan() || least <= 0.0 || pw.len() > 6 {
+        return None;
+    }
+    let w = Bernstein::new(&weights)?;
+    let dw = w.deriv();
+    let dw_terms = w.deriv_of_magnitudes();
+    // X − X(0) = P / W with P = Pʰ − X(0) W: small numbers, R and Q
+    // unchanged. Each coordinate of P rounds by at most 2ε of the numbers
+    // it is computed from (taken twice over).
+    let first = pw[0].truncate() / pw[0].w;
+    let moved = 4.0
+        * f64::EPSILON
+        * pw.iter().fold(0.0f64, |m, q| {
+            m.max(q.truncate().abs().max_element() + first.abs().max_element() * q.w)
+        });
+    let mut speed = [0.0f64; super::bernstein::MAX];
+    let mut accel = [0.0f64; super::bernstein::MAX];
+    let mut accel_errors = [0.0f64; super::bernstein::MAX];
+    for k in 0..3 {
+        let c: Vec<f64> = pw.iter().map(|q| (q.truncate() - first * q.w)[k]).collect();
+        let p = Bernstein::new(&c)?;
+        // The error of each coefficient of P (its input's rounding, and
+        // ROUNDING of it for the products that follow), carried through
+        // R = P'W − PW' and Q = R'W − 2RW' by the magnitudes of the terms.
+        let errors: Vec<f64> = c.iter().map(|c| moved + ROUNDING * c.abs()).collect();
+        let errors = Bernstein::new(&errors)?;
+        let r = p.deriv().mul(&w)?.add_scaled(-1.0, &p.mul(&dw)?);
+        let r_error = errors
+            .deriv_of_magnitudes()
+            .mul(&w)?
+            .add_scaled(1.0, &errors.mul(&dw_terms)?);
+        let q = r.deriv().mul(&w)?.add_scaled(-2.0, &r.mul(&dw)?);
+        let q_error = r_error
+            .deriv_of_magnitudes()
+            .mul(&w)?
+            .add_scaled(2.0, &r_error.mul(&dw_terms)?);
+        for (sum, (c, e)) in speed
+            .iter_mut()
+            .zip(r.coefficients().iter().zip(r_error.coefficients()))
+        {
+            *sum += (c.abs() + e).powi(2);
+        }
+        for ((sum, error), (c, e)) in accel
+            .iter_mut()
+            .zip(accel_errors.iter_mut())
+            .zip(q.coefficients().iter().zip(q_error.coefficients()))
+        {
+            *sum += (c.abs() + e).powi(2);
+            *error += e * e;
+        }
+    }
+    let largest = |a: &[f64]| a.iter().fold(0.0f64, |m, x| m.max(*x)).sqrt();
+    let cube = least * least * least;
+    Some((
+        largest(&speed) / (least * least),
+        largest(&accel) / cube,
+        largest(&accel_errors) / cube,
+    ))
+}
+
+/// For the rational Bézier piece `pw` near the cylinder or cone `surface`,
+/// with `speed` a bound on its speed: a lower bound on its distance `ρ`
+/// from the axis, and bounds on its distance `|δ|` from the surface and on
+/// `|δ'|`, through the surface's implicit function along it, `G = n / W²`
+/// and `G' = (n'W − 2nW') / W³` (the cylinder's `ρ² − r² = δ (ρ + r)`, the
+/// cone's `ρ² − R(h)² = (ρ − R)(ρ + R)` with `δ = (ρ − R) cos α`). `None`
+/// for a weight that is not positive, a degree above five, a piece that may
+/// reach the axis or whose control points' hull reaches past the apex, or
+/// a plane or a sphere.
+pub(super) fn off_surface(surface: &Quadric, pw: &[DVec4], speed: f64) -> Option<(f64, f64, f64)> {
+    let least = pw.iter().map(|q| q.w).fold(f64::INFINITY, f64::min);
+    if least.is_nan() || least <= 0.0 || pw.len() > 6 {
+        return None;
+    }
+    let along = surface.along(pw)?;
+    let dw = along.w.deriv();
+    let g = (along.n.bound() + along.error) / (least * least);
+    let dg_poly = along
+        .n
+        .deriv()
+        .mul(&along.w)?
+        .add_scaled(-2.0, &along.n.mul(&dw)?);
+    // Each coefficient of n errs by at most `along.error`, so each of
+    // n'W − 2nW' by 2 deg(n) times that times the weights' bound and twice
+    // it times their derivative's; its own rounding, from terms of n's
+    // size, is less than as much again.
+    let dg_error =
+        4.0 * (along.n.degree() + 1) as f64 * (along.w.bound() + dw.bound()) * along.error;
+    let dg = (dg_poly.bound() + dg_error) / (least * least * least);
+    // Lower bounds lose a few ε of the numbers they are computed from
+    // (8ε, over at most six roundings).
+    let tiny = 8.0 * f64::EPSILON;
+    // The distance from the axis is 1-Lipschitz, so it is least within
+    // half the piece's length of its middle. De Casteljau's averages round
+    // by ε of the control points at each of at most five steps.
+    let middle = {
+        let mut b = pw.to_vec();
+        for r in 1..b.len() {
+            for i in 0..b.len() - r {
+                b[i] = (b[i] + b[i + 1]) * 0.5;
+            }
+        }
+        b[0].truncate() / b[0].w
+    };
+    let largest = pw.iter().fold(0.0f64, |m, q| m.max(q.truncate().length()));
+    let wmax = pw.iter().fold(0.0f64, |m, q| m.max(q.w));
+    let off_axis = |point: DVec3, axis: DVec3| {
+        let v = middle - point;
+        (v - axis * v.dot(axis)).length()
+            - 0.5 * speed
+            - tiny
+                * ((largest + middle.length() * wmax) / least
+                    + middle.length()
+                    + point.length()
+                    + speed)
+    };
+    match *surface {
+        Quadric::Cylinder {
+            point,
+            axis,
+            radius,
+        } => {
+            if radius.is_nan() || radius <= 0.0 {
+                return None;
+            }
+            // |ρ − r| = |G| / (ρ + r) ≤ |G| / r.
+            let rho =
+                (radius - g / radius - tiny * (radius + g / radius)).max(off_axis(point, axis));
+            if rho.is_nan() || rho <= 0.0 {
+                return None;
+            }
+            let delta = g / (rho + radius);
+            // δ' = (G' − δ ρ') / (ρ + r), |ρ'| ≤ |X'|.
+            Some((rho, delta, (dg + delta * speed) / (rho + radius)))
+        }
+        Quadric::Cone {
+            point,
+            axis,
+            radius,
+            slope,
+        } => {
+            // R(h) is least at a control point: their hull holds the piece.
+            let r_least = pw
+                .iter()
+                .map(|q| {
+                    let c = q.truncate() / q.w;
+                    radius + slope * (c - point).dot(axis)
+                        - tiny * (radius.abs() + slope * (c.length() + point.length()))
+                })
+                .fold(f64::INFINITY, f64::min);
+            if r_least.is_nan() || r_least <= 0.0 {
+                return None;
+            }
+            let sec = (1.0 + slope * slope).sqrt();
+            let cos = 1.0 / sec;
+            // |ρ − R| = |G| / (ρ + R) ≤ |G| / R, and R − g / R grows with R.
+            let rho =
+                (r_least - g / r_least - tiny * (r_least + g / r_least)).max(off_axis(point, axis));
+            if rho.is_nan() || rho <= 0.0 {
+                return None;
+            }
+            let delta = cos * g / (rho + r_least);
+            // δ' = (G' cos α − δ (ρ + R)') / (ρ + R), and |(ρ + R)'| ≤
+            // |ρ'| + tan α |h'| ≤ sec α |X'|, ρ' and h' being orthogonal
+            // components of X'.
+            let ddelta = (cos * dg + delta * sec * speed) / (rho + r_least);
+            Some((rho, delta, ddelta))
+        }
+        Quadric::Plane { .. } | Quadric::Sphere { .. } => None,
+    }
 }
 
 /// The part of the Bézier curve with control points `pw` on `[sa, sb]`,
@@ -697,6 +980,8 @@ mod tests {
     use glam::DVec2;
     use opendatum_nurbs::NurbsCurve;
 
+    use super::super::dd::Dd;
+    use super::super::meet::{self, Track};
     use super::super::testing::Rng;
     use super::*;
     use crate::math::Frame;
@@ -1331,5 +1616,320 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert!((turns[0].t - 1.5 * PI).abs() < 1e-7);
         assert!(floor.distance(half.point(turns[0].t)).abs() < 1e-15);
+    }
+
+    /// The bounds on a rational Bézier piece's speed and acceleration, and
+    /// on its distance from a cylinder or a cone, its rate and its distance
+    /// from the axis, hold at dense samples of random pieces near random
+    /// surfaces, of degrees two to five, with uneven weights.
+    #[test]
+    fn derivative_and_off_surface_bounds_hold_at_samples() {
+        let mut rng = Rng(0x0FF5_0001);
+        let mut bounded = [0usize; 2];
+        let mut tight = [0.0f64; 4];
+        for case in 0..3000 {
+            let kind = case % 2;
+            let (point, axis) = (rng.point(0.5), rng.unit());
+            let radius = rng.range(0.2, 1.0);
+            let surface = if kind == 0 {
+                Quadric::Cylinder {
+                    point,
+                    axis,
+                    radius,
+                }
+            } else {
+                Quadric::Cone {
+                    point,
+                    axis,
+                    radius,
+                    slope: 10f64.powf(rng.range(-1.5, 1.0)),
+                }
+            };
+            // Control points along a random curve on the surface's side,
+            // each pushed off it by up to `off` of the radius.
+            let off = [0.0, 1e-6, 1e-3, 0.1][rng.below(4)];
+            let degree = 2 + rng.below(4);
+            let across = {
+                let v = rng.unit();
+                (v - axis * v.dot(axis)).normalize()
+            };
+            let side = axis.cross(across);
+            let (h0, a0) = (rng.range(-0.5, 0.5), rng.range(-1.0, 1.0));
+            let (dh, da) = (rng.range(-0.5, 0.5), rng.range(-1.0, 1.0));
+            let pts: Vec<DVec4> = (0..=degree)
+                .map(|i| {
+                    let f = i as f64 / degree as f64;
+                    let (h, a) = (h0 + dh * f, a0 + da * f);
+                    let r = match surface {
+                        Quadric::Cone { slope, .. } => radius + slope * h,
+                        _ => radius,
+                    }
+                    .max(0.05);
+                    let x = point
+                        + axis * h
+                        + (across * a.cos() + side * a.sin()) * (r * (1.0 + rng.range(-off, off)));
+                    let w = rng.range(0.3, 3.0);
+                    (x * w).extend(w)
+                })
+                .collect();
+            let curve = opendatum_nurbs::NurbsCurve::from_homogeneous(
+                degree,
+                [vec![0.0; degree + 1], vec![1.0; degree + 1]].concat(),
+                pts.clone(),
+            )
+            .unwrap();
+            let (d1, d2, _) = derivative_bounds(&pts).unwrap();
+            let scale = 1.0 + curve.bounding_box().1.abs().max_element();
+            let mut speed = 0.0f64;
+            let mut accel = 0.0f64;
+            for k in 0..=400 {
+                let d = curve.derivatives(k as f64 / 400.0, 2);
+                speed = speed.max(d[1].length());
+                accel = accel.max(d[2].length());
+            }
+            assert!(
+                speed <= d1 * (1.0 + 1e-9),
+                "case {case}: speed {speed} > {d1}"
+            );
+            assert!(
+                accel <= d2 * (1.0 + 1e-9),
+                "case {case}: accel {accel} > {d2}"
+            );
+            tight[0] = tight[0].max(speed / d1);
+            tight[1] = tight[1].max(accel / d2);
+            let Some((rho, delta, ddelta)) = off_surface(&surface, &pts, d1) else {
+                continue;
+            };
+            bounded[kind] += 1;
+            let (p0, u) = match surface {
+                Quadric::Cylinder { point, axis, .. } | Quadric::Cone { point, axis, .. } => {
+                    (point, axis)
+                }
+                _ => unreachable!(),
+            };
+            let h = 1e-6;
+            let dist = |s: f64| surface.distance(curve.point(s));
+            for k in 0..=400 {
+                let s = k as f64 / 400.0;
+                let x = curve.point(s);
+                let v = x - p0;
+                let r = (v - u * v.dot(u)).length();
+                assert!(r >= rho * (1.0 - 1e-12), "case {case}: ρ {r} below {rho}");
+                let d = dist(s);
+                assert!(
+                    d.abs() <= delta * (1.0 + 1e-9) + 1e-15 * scale,
+                    "case {case}: δ {d} beyond {delta}"
+                );
+                tight[2] = tight[2].max(d.abs() / delta.max(1e-300));
+                let (a, b) = ((s - h).max(0.0), (s + h).min(1.0));
+                let dd = (dist(b) - dist(a)) / (b - a);
+                assert!(
+                    dd.abs() <= ddelta * (1.0 + 1e-6) + 1e-9 * scale,
+                    "case {case}: δ' {dd} beyond {ddelta}"
+                );
+                tight[3] = tight[3].max(dd.abs() / ddelta.max(1e-300));
+            }
+        }
+        assert!(bounded[0] > 1000 && bounded[1] > 700, "{bounded:?}");
+        // The bounds are reached within a modest factor somewhere.
+        assert!(tight.iter().all(|&t| t > 0.1), "{tight:?}");
+    }
+
+    type V = [Dd; 3];
+
+    fn v_of(v: DVec3) -> V {
+        [Dd::of(v.x), Dd::of(v.y), Dd::of(v.z)]
+    }
+
+    fn v_sub(a: V, b: V) -> V {
+        [a[0].sub(b[0]), a[1].sub(b[1]), a[2].sub(b[2])]
+    }
+
+    fn v_scale(a: V, k: Dd) -> V {
+        [a[0].mul(k), a[1].mul(k), a[2].mul(k)]
+    }
+
+    fn v_dot(a: V, b: V) -> Dd {
+        a[0].mul(b[0]).add(a[1].mul(b[1])).add(a[2].mul(b[2]))
+    }
+
+    /// The point, velocity and acceleration of the rational Bézier piece
+    /// with homogeneous control points `pw` at `s`, in double-double.
+    fn exact_jet(pw: &[DVec4], s: f64) -> (V, V, V) {
+        let p = pw.len() - 1;
+        let (s, t) = (Dd::of(s), Dd::of(1.0).sub(Dd::of(s)));
+        let choose =
+            |n: usize, k: usize| (0..k).fold(1.0, |c, i| c * (n - i) as f64 / (i + 1) as f64);
+        // Σ cᵢ Bᵢ,ₙ(s) of homogeneous points `c`.
+        let sum = |c: &[[Dd; 4]]| {
+            let n = c.len() - 1;
+            let mut out = [Dd::of(0.0); 4];
+            for (i, ci) in c.iter().enumerate() {
+                let mut b = Dd::of(choose(n, i));
+                for _ in 0..i {
+                    b = b.mul(s);
+                }
+                for _ in 0..n - i {
+                    b = b.mul(t);
+                }
+                for k in 0..4 {
+                    out[k] = out[k].add(ci[k].mul(b));
+                }
+            }
+            out
+        };
+        let diff = |c: &[[Dd; 4]], k: f64| -> Vec<[Dd; 4]> {
+            c.windows(2)
+                .map(|w| std::array::from_fn(|j| w[1][j].sub(w[0][j]).mul(Dd::of(k))))
+                .collect()
+        };
+        let h: Vec<[Dd; 4]> = pw
+            .iter()
+            .map(|q| [Dd::of(q.x), Dd::of(q.y), Dd::of(q.z), Dd::of(q.w)])
+            .collect();
+        let h1 = diff(&h, p as f64);
+        let h2 = diff(&h1, (p - 1) as f64);
+        let (a, b, c) = (sum(&h), sum(&h1), sum(&h2));
+        let x: V = std::array::from_fn(|k| a[k].div(a[3]));
+        // X' = (P' − X W') / W, X'' = (P'' − 2 X' W' − X W'') / W.
+        let dx: V = std::array::from_fn(|k| b[k].sub(x[k].mul(b[3])).div(a[3]));
+        let ddx: V = std::array::from_fn(|k| {
+            c[k].sub(dx[k].mul(b[3]).mul(Dd::of(2.0)))
+                .sub(x[k].mul(c[3]))
+                .div(a[3])
+        });
+        (x, dx, ddx)
+    }
+
+    /// Conic edges cut from thin cylinders and cones far from the origin,
+    /// whose stored control points lie off the surface only by their
+    /// rounding there, and stretches of them: the bounds on speed,
+    /// acceleration, distance from the axis and from the surface and its
+    /// rate hold against references in double-double at samples, with no
+    /// tolerance. Without the allowances for the rounding of the reference
+    /// and of the control points' offsets from it (design note 0012
+    /// §16.2), the distance's bound falls short.
+    #[test]
+    fn bounds_hold_against_exact_references_far_from_the_origin() {
+        let mut rng = Rng(0xD0B1_E001);
+        let mut checked = [0usize; 2];
+        let mut tight = [0.0f64; 3];
+        for case in 0..600 {
+            let kind = case % 2;
+            let far = 10f64.powf(rng.range(0.0, 4.0));
+            let centre = rng.unit() * far;
+            let axis = rng.unit();
+            let radius = 10f64.powf(rng.range(-3.0, -1.0));
+            // The surface's stored point near the piece, or far along its
+            // axis.
+            let along = if rng.below(2) == 0 {
+                0.0
+            } else {
+                1e3 * radius.max(far * 1e-3)
+            };
+            let surface = if kind == 0 {
+                Quadric::Cylinder {
+                    point: centre - axis * along,
+                    axis,
+                    radius,
+                }
+            } else {
+                let slope = 10f64.powf(rng.range(-1.5, 1.0));
+                Quadric::Cone {
+                    point: centre + axis * along,
+                    axis,
+                    radius: radius + slope * along,
+                    slope,
+                }
+            };
+            let normal = (rng.unit() + axis * rng.range(-2.0, 2.0)).normalize();
+            let plane = Quadric::Plane {
+                point: centre,
+                normal,
+            };
+            let size = 4.0 * radius;
+            let region =
+                meet::Region::of_box(centre - DVec3::splat(size), centre + DVec3::splat(size));
+            let meet::Meet::Curves(tracks) = meet::meet(&plane, &surface, &region, 1e-7 * radius)
+            else {
+                continue;
+            };
+            for track in tracks
+                .iter()
+                .filter(|t| matches!(t, Track::Ellipse { .. } | Track::Conic { .. }))
+            {
+                let (lo, hi) = track.ends();
+                let (lo, hi) = (lo.max(-3.0), hi.min(3.0));
+                if hi.is_nan() || lo.is_nan() || hi <= lo {
+                    continue;
+                }
+                let Ok((Curve3::Nurbs(n), _, _)) = track.edge(lo, hi) else {
+                    continue;
+                };
+                let segments = n.bezier_segments();
+                let (u, v) = (rng.next(), rng.next());
+                let (t0, t1) = if rng.below(2) == 0 {
+                    (0.0, 1.0)
+                } else {
+                    (u.min(v), u.max(v))
+                };
+                for (_, _, pw) in spans(&segments, t0, t1) {
+                    let Some((d1, d2, _)) = derivative_bounds(&pw) else {
+                        continue;
+                    };
+                    let Some((rho, delta, ddelta)) = off_surface(&surface, &pw, d1) else {
+                        continue;
+                    };
+                    checked[kind] += 1;
+                    let (point, axis, radius, slope) = match surface {
+                        Quadric::Cylinder {
+                            point,
+                            axis,
+                            radius,
+                        } => (point, axis, radius, 0.0),
+                        Quadric::Cone {
+                            point,
+                            axis,
+                            radius,
+                            slope,
+                        } => (point, axis, radius, slope),
+                        _ => unreachable!(),
+                    };
+                    let a = v_of(axis);
+                    let a = v_scale(a, Dd::of(1.0).div(v_dot(a, a).sqrt()));
+                    let cos =
+                        Dd::of(1.0).div(Dd::of(1.0).add(Dd::of(slope).mul(Dd::of(slope))).sqrt());
+                    for k in 0..=100 {
+                        let (x, dx, ddx) = exact_jet(&pw, k as f64 / 100.0);
+                        let speed = v_dot(dx, dx).sqrt();
+                        let accel = v_dot(ddx, ddx).sqrt();
+                        assert!(speed.le(d1), "case {case}: speed {} > {d1}", speed.0);
+                        assert!(accel.le(d2), "case {case}: accel {} > {d2}", accel.0);
+                        let v = v_sub(x, v_of(point));
+                        let h = v_dot(v, a);
+                        let off = v_sub(v, v_scale(a, h));
+                        let r = v_dot(off, off).sqrt();
+                        assert!(Dd::of(rho).le(r.0), "case {case}: ρ {} below {rho}", r.0);
+                        // δ = (ρ − R(h)) cos α, δ' = (ρ' − tan α h') cos α.
+                        let d = r.sub(Dd::of(radius)).sub(Dd::of(slope).mul(h)).mul(cos);
+                        let dd = v_dot(off, dx)
+                            .div(r)
+                            .sub(Dd::of(slope).mul(v_dot(dx, a)))
+                            .mul(cos);
+                        let (d, dd) = (
+                            Dd(d.0.abs(), d.1 * d.0.signum()),
+                            Dd(dd.0.abs(), dd.1 * dd.0.signum()),
+                        );
+                        assert!(d.le(delta), "case {case}: δ {} beyond {delta}", d.0);
+                        assert!(dd.le(ddelta), "case {case}: δ' {} beyond {ddelta}", dd.0);
+                        tight[0] = tight[0].max(accel.0 / d2);
+                        tight[1] = tight[1].max(d.0 / delta);
+                        tight[2] = tight[2].max(dd.0 / ddelta);
+                    }
+                }
+            }
+        }
+        assert!(checked[0] > 300 && checked[1] > 300, "{checked:?}");
+        eprintln!("checked {checked:?}, tightest {tight:?}");
     }
 }
