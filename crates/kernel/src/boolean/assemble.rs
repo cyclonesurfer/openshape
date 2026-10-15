@@ -21,8 +21,8 @@ use crate::math::Frame;
 use crate::origin::{
     EdgeIx, EdgeOrigin, FaceIx, FaceOrigin, Merged, Operand, Origins, VertexIx, VertexOrigin,
 };
-use crate::tess;
 use crate::topo::{Brep, Coedge, EdgeId, Loop, ShellId, VertexId};
+use crate::{check, tess};
 use crate::{BooleanOp, KernelError, Tolerance};
 
 /// The geometry the assembly reads: the operands, the curves where their
@@ -163,6 +163,7 @@ pub(super) fn assemble(
         None
     };
     let (mut brep, org, shell_ids) = build(geometry, pts, &segs, &faces, &shells)?;
+    check_axes(&brep, tol)?;
     let solids = match solids {
         Some(s) => s,
         None => curved_solids(&brep, &shell_ids, tol)?,
@@ -563,6 +564,34 @@ fn merge_edges(
         }
     }
     faces
+}
+
+/// Refuses a result with an edge passing near the axis of its face's
+/// surface of revolution between its ends, within the tolerance the
+/// validator holds edges to: a flat cap's centre, a cone's apex or a
+/// sphere's pole, where the surface is singular and a face keeps a vertex
+/// (design note 0012 §15). A plane a few tolerances off a turned rod's
+/// axis cuts its ends so; a plane through the axis meets it there, where
+/// the edges keep a vertex.
+fn check_axes(brep: &Brep, tol: &Tolerance) -> Result<(), KernelError> {
+    let near = check::on_tolerance(tol);
+    for f in &brep.faces {
+        let Surface::Revolution { frame, .. } = &f.surface else {
+            continue;
+        };
+        for c in f.loops.iter().flat_map(|l| &l.coedges) {
+            let e = brep.edge(c.edge);
+            if let Some(p) = check::through_axis(&e.curve, e.t0, e.t1, frame, near) {
+                return Err(KernelError::Unsupported(format!(
+                    "booleans whose result has an edge passing within the tolerance of a turned \
+                     face's centre, a cone's apex or a sphere's pole (design note 0012 §15), \
+                     near {}",
+                    show(p)
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// True if `p` lies within `eps` of the axis of the surface of `f`'s

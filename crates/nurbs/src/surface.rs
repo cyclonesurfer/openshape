@@ -382,22 +382,23 @@ impl NurbsSurface {
         let (p, q) = (self.degree_u, self.degree_v);
         let du = d.min(p);
         let dv = d.min(q);
-        let nu = self.knots_u.ders_basis_funs(uspan, u, p, du);
-        let nv = self.knots_v.ders_basis_funs(vspan, v, q, dv);
+        let nu = self.knots_u.derivative_rows(uspan, u, p, du);
+        let nv = self.knots_v.derivative_rows(vspan, v, q, dv);
         let mut skl: SmallVec<[SmallVec<[DVec4; 4]>; 4]> =
             (0..=d).map(|k| smallvec![DVec4::ZERO; d + 1 - k]).collect();
         let mut temp: SmallVec<[DVec4; 8]> = smallvec![DVec4::ZERO; q + 1];
         for k in 0..=du {
+            let nuk = nu.row(k);
             for (s, t) in temp.iter_mut().enumerate() {
                 *t = (0..=p).fold(DVec4::ZERO, |acc, r| {
-                    acc + self.hp(uspan - p + r, vspan - q + s) * nu[k][r]
+                    acc + self.hp(uspan - p + r, vspan - q + s) * nuk[r]
                 });
             }
             let dd = (d - k).min(dv);
             for l in 0..=dd {
                 skl[k][l] = temp
                     .iter()
-                    .zip(&nv[l])
+                    .zip(nv.row(l))
                     .fold(DVec4::ZERO, |acc, (&t, &n)| acc + t * n);
             }
         }

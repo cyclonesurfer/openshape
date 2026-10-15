@@ -182,32 +182,72 @@ impl Points {
     ) -> Result<&[Station], KernelError> {
         let key = (op, e, surface);
         if !self.stations.contains_key(&key) {
-            let shape = pair.get(op);
-            let q = self.surfaces[slot(op)][surface];
-            let (va, vb) = shape.edges[e];
-            let (curve, t0, t1) = shape.curve(e);
-            let mut list = vec![Station {
-                t: t0,
-                sign: self.sign(op, va, surface),
-                turn: false,
-            }];
-            if !(shape.straight[e] && matches!(q, Quadric::Plane { .. })) {
-                for split in q.splits(curve, t0, t1)? {
-                    list.push(Station {
-                        t: split.t,
-                        sign: self.side(q.distance(curve.point(split.t))),
-                        turn: split.turn,
-                    });
-                }
-            }
-            list.push(Station {
-                t: t1,
-                sign: self.sign(op, vb, surface),
-                turn: false,
-            });
+            let list = self.station_list(pair, op, e, surface)?;
             self.stations.insert(key, list);
         }
         Ok(&self.stations[&key])
+    }
+
+    /// The stations of edge `e` of `op` against `surface`, as
+    /// [`Points::stations`] finds them.
+    fn station_list(
+        &self,
+        pair: &Pair,
+        op: Operand,
+        e: usize,
+        surface: usize,
+    ) -> Result<Vec<Station>, KernelError> {
+        let shape = pair.get(op);
+        let q = self.surfaces[slot(op)][surface];
+        let (va, vb) = shape.edges[e];
+        let (curve, t0, t1) = shape.curve(e);
+        let mut list = vec![Station {
+            t: t0,
+            sign: self.sign(op, va, surface),
+            turn: false,
+        }];
+        if !(shape.straight[e] && matches!(q, Quadric::Plane { .. })) {
+            for split in q.splits(curve, t0, t1)? {
+                list.push(Station {
+                    t: split.t,
+                    sign: self.side(q.distance(curve.point(split.t))),
+                    turn: split.turn,
+                });
+            }
+        }
+        list.push(Station {
+            t: t1,
+            sign: self.sign(op, vb, surface),
+            turn: false,
+        });
+        Ok(list)
+    }
+
+    /// The side of `surface` (of the other operand) that edge `e` of `op`
+    /// leaves its start (or, if `!from_start`, its end) to: the sign of its
+    /// next station (the implicit function is monotone between stations),
+    /// 0 if that is on the surface.
+    pub fn leaving(
+        &self,
+        pair: &Pair,
+        op: Operand,
+        e: usize,
+        surface: usize,
+        from_start: bool,
+    ) -> Result<i8, KernelError> {
+        let found;
+        let st = match self.cached_stations(op, e, surface) {
+            Some(st) => st,
+            None => {
+                found = self.station_list(pair, op, e, surface)?;
+                &found
+            }
+        };
+        Ok(if from_start {
+            st[1].sign
+        } else {
+            st[st.len() - 2].sign
+        })
     }
 
     /// The stations of edge `e` of `op` against `surface`, if made.
@@ -659,11 +699,12 @@ impl Points {
         &self.on_params[slot(op)][e]
     }
 
-    /// The clusters on the closed track `track` strictly between parameters
+    /// The clusters on the curved track `track` strictly between parameters
     /// `ta` (cluster `lo`) and `tb > ta` (cluster `hi`), less than a turn
-    /// apart: those within the tolerance of it there, in order, each with
-    /// its parameter (unrolled from `ta`), both ends included. Two within
-    /// the tolerance of each other along it are refused.
+    /// apart on a closed track: those within the tolerance of it there, in
+    /// order, each with its parameter (unrolled from `ta`), both ends
+    /// included. Two within the tolerance of each other along it are
+    /// refused.
     pub fn on_track(
         &self,
         track: &Track,
@@ -671,21 +712,8 @@ impl Points {
         (hi, tb): (usize, f64),
     ) -> Result<Vec<(usize, f64)>, KernelError> {
         let eps = self.eps;
-        // A box holding the track: its stretch for a line, the whole curve
-        // for a closed one.
-        let (box_lo, box_hi) = match *track {
-            Track::Line { .. } => {
-                let (p, q) = (track.point(ta), track.point(tb));
-                (p.min(q), p.max(q))
-            }
-            Track::Circle { center, radius, .. } => {
-                (center - DVec3::splat(radius), center + DVec3::splat(radius))
-            }
-            Track::Ellipse { center, a, b, .. } => (
-                center - DVec3::splat(a.max(b)),
-                center + DVec3::splat(a.max(b)),
-            ),
-        };
+        // A box holding the track's stretch.
+        let (box_lo, box_hi) = track.bounds(ta, tb);
         let mut near = Vec::new();
         self.index.overlapping(
             box_lo - DVec3::splat(eps),

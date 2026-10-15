@@ -346,17 +346,18 @@ impl NurbsCurve {
     ) -> SmallVec<[DVec4; 4]> {
         let p = self.degree;
         let du = d.min(p);
-        let nders = self.knots.ders_basis_funs(span, u, p, du);
+        let nders = self.knots.derivative_rows(span, u, p, du);
         let active = &self.points[span - p..=span];
         let polynomial = active.iter().all(|pw| pw.w == active[0].w);
         let mut ck: SmallVec<[DVec4; 4]> = smallvec![DVec4::ZERO; d + 1];
-        for (k, ders_k) in nders.iter().enumerate().take(du + 1) {
-            ck[k] = ders_k
+        for (k, c) in ck.iter_mut().enumerate().take(du + 1) {
+            *c = nders
+                .row(k)
                 .iter()
                 .zip(active)
                 .fold(DVec4::ZERO, |acc, (&n, &pw)| acc + pw * n);
             if polynomial && k > 0 {
-                ck[k].w = 0.0;
+                c.w = 0.0;
             }
         }
         ck

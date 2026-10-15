@@ -233,9 +233,14 @@ pub trait Kernel: Send + Sync {
     /// [`KernelError::InvalidInput`] when the result would be empty or
     /// non-manifold (the bodies touching only along an edge or at a
     /// point), and with [`KernelError::Unsupported`] for what is not
-    /// handled yet: faces other than planes and circular cylinders, faces
-    /// that touch without crossing (tangent contacts), and cylinders that
-    /// meet at an angle.
+    /// handled yet: faces other than planes, circular cylinders, spheres
+    /// and cones; faces that meet in a quartic curve (cylinders, cones and
+    /// spheres off each other's axes); faces that touch without crossing
+    /// (tangent contacts); a plane through or very near the apex of a
+    /// cone where faces reach it; a result with an edge passing within the
+    /// tolerance of a turned face's centre, a cone's apex or a sphere's
+    /// pole; and an operand with an edge on a curved face that is neither
+    /// a line nor a circle (a conic an earlier cut left).
     fn boolean(
         &self,
         a: &Self::Body,

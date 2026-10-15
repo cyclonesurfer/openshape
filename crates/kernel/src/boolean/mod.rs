@@ -51,7 +51,7 @@ mod points;
 mod quadric;
 mod shape;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 
 use chart::Chart;
 use classify::Class;
@@ -152,8 +152,8 @@ enum Course {
         ta: f64,
         tb: f64,
     },
-    /// Along closed track `id`, from parameter `ta` at `a` to `tb` at `b`,
-    /// less than a turn apart.
+    /// Along curved track `id`, from parameter `ta` at `a` to `tb` at `b`
+    /// (less than a turn apart on a closed track).
     Track { id: usize, ta: f64, tb: f64 },
 }
 
@@ -367,7 +367,7 @@ fn boolean_within(
         whole.extend(full.into_iter().map(|id| (fa, fb, id)));
         for st in parts {
             let track = contacts.tracks[st.track];
-            if !track.closed() {
+            if track.straight() {
                 for w in pts.split_segment(st.lo.0, st.hi.0)?.windows(2) {
                     imprint(segs.add(w[0], w[1], Course::Straight, Source::Meet(fa, fb)));
                 }

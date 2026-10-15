@@ -158,9 +158,26 @@ pub(super) struct Shape<'a> {
     pub edge_boxes: Vec<(DVec3, DVec3)>,
     /// Vertex positions.
     pub points: Vec<DVec3>,
+    /// The edges at each vertex: those at vertex `v` are
+    /// `incident[first[v]..first[v + 1]]`.
+    first: Vec<usize>,
+    incident: Vec<usize>,
+    /// Per vertex, the surface all its faces lie on, if they lie on one
+    /// (a cap's centre, where its halves meet).
+    one_surface: Vec<Option<usize>>,
 }
 
 impl Shape<'_> {
+    /// The edges that start or end at vertex `v`.
+    pub fn edges_at(&self, v: usize) -> &[usize] {
+        &self.incident[self.first[v]..self.first[v + 1]]
+    }
+
+    /// The surface all faces at vertex `v` lie on, if they lie on one.
+    pub fn one_surface(&self, v: usize) -> Option<usize> {
+        self.one_surface[v]
+    }
+
     /// The ends of edge `e` (straight or not).
     pub fn edge_points(&self, e: usize) -> (DVec3, DVec3) {
         let (a, b) = self.edges[e];
@@ -443,6 +460,39 @@ pub(super) fn shape<'a>(b: &'a Brep, which: &str) -> Result<Shape<'a>, KernelErr
             starts,
         });
     }
+    // Each vertex's edges, by counting them and placing each.
+    let mut first = vec![0; points.len() + 1];
+    for &(v0, v1) in &edges {
+        first[v0 + 1] += 1;
+        first[v1 + 1] += 1;
+    }
+    for v in 0..points.len() {
+        first[v + 1] += first[v];
+    }
+    // Each vertex's surface while its faces agree on one.
+    let mut seen: Vec<Option<usize>> = vec![None; points.len()];
+    let mut mixed = vec![false; points.len()];
+    for f in &faces {
+        for &v in f.verts.iter().flatten() {
+            match seen[v] {
+                None => seen[v] = Some(f.surface),
+                Some(s) => mixed[v] |= s != f.surface,
+            }
+        }
+    }
+    let one_surface = seen
+        .into_iter()
+        .zip(mixed)
+        .map(|(s, m)| s.filter(|_| !m))
+        .collect();
+    let mut next = first.clone();
+    let mut incident = vec![0; 2 * edges.len()];
+    for (e, &(v0, v1)) in edges.iter().enumerate() {
+        for v in [v0, v1] {
+            incident[next[v]] = e;
+            next[v] += 1;
+        }
+    }
     Ok(Shape {
         brep: b,
         faces,
@@ -451,5 +501,8 @@ pub(super) fn shape<'a>(b: &'a Brep, which: &str) -> Result<Shape<'a>, KernelErr
         straight,
         edge_boxes,
         points,
+        first,
+        incident,
+        one_surface,
     })
 }

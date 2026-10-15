@@ -960,3 +960,375 @@ agree on thousands of points. With the meshes shared by the origins
 check, the sphere and cone fuzz's own checks fell from about 8 to 2.4
 times the time of its booleans (meshing, at a thousandth of the unit,
 is most of what is left).
+
+## 14. Item 3b: planes across cones (design, 2026-10-13)
+
+§12.2 named the conics' tracks by their centres: the parabola
+`vertex + a t² x + 2 a t y` and the hyperbola's branch `centre + a cosh t
+x + b sinh t y`, with a configuration near a parabola snapped to one so
+that no centre is far. Worked through before building, that leaves two
+faults. Near the parabola the snap's boundary still allows centres up to
+`R² / (eps/16)` away (`R` the region's radius): at a metre, a centre
+1.6 × 10⁸ m off, whose rounding (about 2 × 10⁻⁸ m) is a fifth of the
+tolerance. And the hyperbola's band grows with `cosh T` while the curve
+straightens: the bound is loose exactly where the branch is followed
+furthest. This revision replaces them; the rest of §12 stands.
+
+**Literature.** The vertex equation of a conic, `η² = 2pξ − (1 − e²)ξ²`
+(`ξ` along its axis from a vertex, `p` the semi-latus rectum, `e` the
+eccentricity), one equation for the ellipse, the parabola and the
+hyperbola, continuous through `e = 1` (G. Salmon, *A Treatise on Conic
+Sections*, 6th ed., 1879; any text on conics). The rational
+parametrisation of a conic by the lines through one of its points
+(here the vertex), which is the rational quadratic Bézier form of
+Piegl & Tiller, *The NURBS Book*, 2nd ed., §7.2–7.3, and E. T. Y. Lee,
+"The rational Bézier representation for conics", 1987 (cited in design
+note 0009). Apollonius for the section of the cone (§12.2).
+
+**The conic in the plane.** In the plane's frame of §12.2 (`x` along
+the axis's direction in the plane, `y` square to the axis, origin `O`
+the foot of the cone's reference point `P`, which is kept near the
+faces), with `γ = n · u`, `g = |u − γ n|`, `d = (P − Q) · n` (`Q` on the
+plane), `r` the cone's radius at `P` and `k = tan α`, the nappe's
+section is `A ξ² + η² − 2Bξ + C = 0` with
+
+  A = γ² − g² k²,  B = g (r k − (1 + k²) γ d),
+  C = (d g)² − (r − k γ d)²,
+
+each a product or difference of numbers of the size of the faces, so
+none loses precision to a far apex. Its discriminant is exact:
+`B² − AC = σ²` with `σ = d k − γ r = k δ`, `δ` the apex's distance from
+the plane. So `σ = 0` is the plane through the apex; else the semi-latus
+rectum is `p = |σ|` and, for `A ≠ 0`, the centre is at `ξ = B/A` with
+semi-axes `|σ|/|A|` along `x` and `|σ|/√|A|` along `y`. The plane
+meets the nappe (not its mirror) when `A < 0` (the branch at larger
+`ξ`, where the radius `r + k h` grows, `h = gξ − γd`), and when `A ≥ 0`
+exactly when `σγ < 0` (the axis, from the apex along `u`, reaches the
+plane).
+
+**Tracks.** An ellipse whose centre lies within 16 radii of the region's
+disk (the plane's section of the region) is the closed track of §10.3,
+`centre + a cos t x + b sin t y`; there no coordinate is large and the
+whole curve may lie in one face (a cone through a plate at an angle).
+Every other section is an open *conic* track in the vertex form
+
+  vertex + x · p t² / (1 + w) + y · p t,  w = √(1 − c t²),  c = A,
+
+with `x` the way it opens from the vertex: the branch of a hyperbola or
+a parabola (opening along `+x`), or the half of an ellipse at the vertex
+nearer the region (an ellipse much larger than the region, or one near
+a parabola). The vertex is the root of `A ξ² − 2Bξ + C` at that end,
+taken as `C / (B + |σ|)` or `(B − |σ|)/A`, whichever has no
+cancellation, so it is exact to rounding through `A = 0`, where it is
+the parabola's vertex: no snap to a parabola is needed. `t = η / p`, so
+the parameter resolves positions to the rounding of `η`; its first and
+second derivatives are `p (t/w, 1)` and `p (1/w³, 0)`, so `|C''| = p/w³`:
+at most `p` on a parabola or a hyperbola, the greatest at the stretch's
+`|t|` nearest zero (where `w` is least for `c > 0` it is the greatest
+`|t|`). That is the band's bound on a plane's chart and on a cone's
+(an isometry, §12.1), now per stretch, tight where the branch straightens.
+The first division of a stretch is by equal turning of its tangent,
+`φ = atan2(t, w)`, at most an eighth of a half turn each: a conic turns
+less than a half turn on a branch or a half ellipse, so at most eight.
+A stretch's box is exact: each coordinate is convex or concave in `t`,
+its one turning point where `t/w` is a ratio of the frame's components.
+
+**Edges.** With `s = t / (1 + w)` the conic is
+`vertex + 2p (s² x + s y) / (1 + c s²)`, a rational quadratic in `s`
+(lines through the vertex), so a stretch is exactly a rational quadratic
+B-spline: per piece `[s₀, s₁]` the weights `1 + c s₀², 1 + c s₀ s₁,
+1 + c s₁²` and control points `vertex + 2p (X x + Y y)/W` with
+`X = s₀², s₀ s₁, s₁²` and `Y = s₀, (s₀ + s₁)/2, s₁`. Pieces turn at
+most a quarter turn, which keeps the middle weight positive (it is
+`1 + c s₀ s₁`, positive on a hyperbola or a parabola always). Far along
+a branch `1 + c s²` cancels (`s` nears `1/√|c|`; found by the edge test,
+2000 times the rounding), so the weights are computed in `t`:
+`1 + c s² = 2/(1 + w)` exactly, and the middle weight is
+`N / ((1 + w₀)(1 + w₁))` with `N = 1 + w₀ + w₁ + (w₀w₁ + c t₀t₁)`, the
+bracket taken as `(1 − c t₀² − c t₁²)/(w₀w₁ − c t₀t₁)` on a hyperbola
+where its terms have opposite signs; the ends are the track's own
+points.
+
+**The apex.** A plane within the tolerance of the apex where the apex is
+in the region is refused: "a plane through a cone's apex" where it
+crosses the cone in two rulings (`A < 0`), and as a tangent contact
+otherwise (only the apex, or along a ruling). A plane within `eps/16`
+of the apex otherwise (the apex outside the region, as for a frustum
+far from its apex) is taken as through it: two rulings (lines, exact on
+the cone at the region's height, within `eps/16` of the plane), or a
+tangent contact along the ruling `ξ`-ward when the plane is within the
+tolerance of the tangent plane there over the region, or apart. Rulings
+from an apex in a face, with the apex as an end of both, remain to do.
+
+**Precision.** A conic track's points are found from its vertex, which
+for a long branch (a slight taper cut nearly along its axis) can lie
+far from the region; rounding is then about `ε` times the vertex's
+distance. A track whose rounding could exceed a sixty-fourth of the
+tolerance (a vertex some 10⁶ m away at the default tolerance) is
+refused rather than computed loosely.
+
+**Tests.** As §12.4 item 3: the meeting's curves on both surfaces to
+rounding and none missed (random cones and planes, planes near a ruling's
+direction, near the apex, nearly along the axis), parameters and edges
+exact, golden cases for each conic with volumes in closed form (a solid
+cone cut by a plane is `(1/3) Σ hᵢ Aᵢ` over its flat faces, `hᵢ` their
+distances from the apex, since the conical face's tangent planes pass
+through it: the areas of elliptical, parabolic (Archimedes) and
+hyperbolic segments are closed forms), and a fuzz of turned solids with
+boxes at any angle, with planes set along a ruling's direction.
+
+## 15. As built: item 3b, planes across cones (2026-10-15)
+
+Faces on cones now meet planes at any angle: the closed ellipses, the
+open conic tracks of §14 in vertex form (halves of ellipses, parabolas,
+branches of hyperbolas, continuous through the parabola with no snap),
+and the rulings of a plane through the apex of a frustum whose apex lies
+outside both bodies. The tracks, their exact stretch boxes, bands and
+rational quadratic edges are §14's. What changed while building it, each
+handled and tested:
+
+* **Rays, not lines.** A plane through the apex within `eps/16` crosses
+  the cone (one nappe) in two rulings that start at the apex. As lines,
+  their halves on the mirror nappe cut a face the apex lies in (a slab
+  through the apex of a frustum: the slab's face was cut along a line
+  that does not lie on the cone, and the boolean failed as "meets the
+  other body's surface inconsistently"). They are rays now,
+  `origin + t dir` for `t ≥ start` with the apex at `start`, `dir` away
+  from it. Their origin is on the cone at the height of the region's
+  centre; where that centre lies below the apex (beside an oblique axis,
+  the apex still outside the region), at the same distance beyond it
+  instead, since below the apex is the other nappe (found by review: the
+  rays ran down the mirror nappe and every operation was refused as
+  meeting at too shallow an angle; a unit test now puts regions there).
+* **Every crossing on a track.** A cut, where a face's boundary crosses
+  the other surface, must lie within 16 tolerances of exactly one track,
+  or the boolean refuses ("too shallow an angle", "nearly touch"). The
+  region bounds where faces on *both* surfaces can be, but one face's
+  boundary can cross the other surface well outside it, where that face's
+  box reaches further. So both rays are returned when either comes near
+  the region (a slab through a frustum's apex along one ruling: the
+  frustum's base crossed the other), and an open half ellipse comes with
+  its far half, from its other vertex (a tool 0.1 wide on a frustum 8
+  high: the base and seams crossed the far half); both were refused
+  until then (found by probing the fuzz's refusals, and by review).
+* **The apex against the faces' box.** The region's ball holds the
+  common box of the faces on both surfaces with room to spare, and the
+  apex rules asked whether the apex was in the ball: a countersink's
+  apex, in the hole a little below its cone's face, was, and every half
+  section through the hole's axis was refused as a plane through a
+  pointed cone's apex. The rules now ask whether the apex (or a small
+  circle about the axis) is in the common box, where faces on both can
+  be (`Region` keeps the box). The box is square to the world's axes,
+  and beside a leaning axis it can hold the apex of a frustum whose
+  faces stop well short of it (a frustum leaning along (1, 1, 1), its
+  apex half a unit beyond its top, cut by a plane through the apex:
+  refused, found by review). So the region also keeps the least height
+  of the cone's faces above its apex along its axis (`Region::lift`),
+  from the control points of their edges' Bézier pieces: a face on a
+  cone lies in the convex hull of its boundary (each of its rulings ends
+  on it), and that in the hull of those points (exact for the circles
+  square to the axis that bound a frustum). The apex rules apply only
+  where that height is within their margin too. A plane through an apex
+  out of reach gives rays, from the apex where that is near the region.
+* **Rays from the region, not the apex.** A ray now starts where it
+  comes within `CLIP` = 256 tolerances of the region (`Track::Ray`'s
+  `from_apex` is false), or at the apex where the apex is that near; a
+  ray that stays farther starts at infinity. Cuts on a ray's line before
+  its start are skipped: no point there is in faces on both surfaces,
+  and near the apex they lie on both rays, which refused every section
+  of a frustum by a box whose edge runs along the axis past the apex (a
+  section view of a countersink, whose apex lies in the hole). The face's
+  side at the start is found by locating the start in it, so a cut
+  within `CLIP/2` tolerances of the start, where it could lie on either
+  side, is refused, as is a start on a face's boundary (a pointed
+  cone's seam running along the ray).
+* **Open tracks that end inside a face.** A ray's apex, and a half
+  ellipse's ends on its minor axis (`t = ±1/√c`), lie beyond the region
+  where both faces can be, but can lie inside one face. The cuts of such
+  a face no longer pair up: its spans gain an end at `±∞` (a sentinel
+  cluster, no point of the result) where the track's end lies inside it,
+  decided by locating the end in the face. A stretch with such an end
+  inside both faces cannot occur and is refused as an invalid result; an
+  end on a face's boundary within the tolerance is refused ("a curve
+  where faces meet ends on an edge"). The same rule made a half ellipse
+  wholly inside a slab 1,000 wide work (it has no cuts at all, and was
+  refused). Where a face's ends then fail to alternate, the refusal
+  names a cut's point, never the sentinel's (review found it indexed
+  the points with the sentinel and panicked).
+* **A plane near a pointed cone's apex.** A plane `δ` from the apex
+  meets the cone no nearer its axis than `k |δ| / (|γ| + k g)` (`k |δ|`
+  for a circle, `|δ|` for a plane along the axis; `γ` and `g` the cosine
+  and sine of the axis's angle to the plane's normal); when that comes
+  within the hundred tolerances by which validation keeps edges off a
+  surface's singular points, the edge it leaves on a face reaching the
+  apex is refused by validation, or the face's mass properties do not
+  converge (planes 0.5–0.9 µm from the apex in the fuzz). Such a plane,
+  its curve within 128 tolerances of the axis, where the apex is within
+  `128 eps √(1 + k²) / k` of the region and the plane crosses the nappe
+  (`A < 0` or `σγ < 0`), is refused: "a plane passes so near a cone's
+  apex that their curve comes within the tolerance of its axis". The
+  rule first held `|δ|` itself to that bound, the largest over all
+  angles: planes along a slender cone's axis 0.2–0.35 mm from it (2°
+  half-angle), their curves thousands of tolerances off the axis, were
+  refused (found by review). With a plane within `eps` of the apex there
+  (two rulings through it), these are the remaining apex refusals.
+* **Circles about one axis within the tolerance of it.** Surfaces about
+  one axis meeting in a circle of radius between `eps` (a point contact)
+  and 128 tolerances, where faces on both can be (a box's face 16 µm
+  below a pointed cone's apex), are refused: "surfaces about one axis
+  meet in a circle within the tolerance of the axis" (found by review:
+  the result's circle passed the cone's apex within the validator's
+  hundred tolerances, and the kernel's own check of the result caught
+  it as invalid).
+* **Edges through an axis, refused by name.** Any result whose edge
+  passes within the validator's hundred tolerances of the axis of its
+  face's surface of revolution between its ends is refused before the
+  result is checked, with a message naming a turned face's centre, a
+  cone's apex or a sphere's pole (`assemble::check_axes`, with the
+  validator's own test). A box whose face runs 0.5–5 µm off a turned
+  rod's axis cuts its flat ends so; the kernel's check of its result
+  caught it, but as an invalid result, a bug's error.
+* **A plane nearly square to the axis** was taken as coaxial (a circle)
+  when its normal's sine times the cone's radius at the axis was within
+  the snap; near the apex that radius is small while the section, at a
+  slant, is far from a circle (a plane through the apex crosses the cone
+  in two rulings, not a point). The section of a plane tilted by `θ`
+  lies within `2 ρ₀ tan θ (1 + k)` of the circle of radius `ρ₀` where it
+  crosses the axis while `k tan θ ≤ 1/2`; that bound, not the radius, is
+  held to the snap now.
+* **Meshes of faces cut across their rulings** grew to tens of thousands
+  of triangles (design note 0002 §3, 2026-10-15): a ruled face is now
+  triangulated along its rulings.
+* **Matching at cusps never settled** where three faces' edges leave one
+  vertex together, as at the point where a box's edge pierces a cone:
+  design note 0002 §5, "Groups of cusps".
+* **Planes nearly tangent along a ruling, by the apex** (found by review
+  of item 3b). Along the cone's ruling nearest a plane through its apex
+  within the tolerance, the cone leaves the plane by `μ = cos α |A| /
+  (|γ| + k g)` per unit of length (`α` the half-angle), so it stays within
+  the tolerance of the plane out to `reach = (eps + |δ|) / μ` from the
+  apex, the further the more nearly the plane is tangent. Where faces on
+  both bodies can come within that reach of the apex (the region's box,
+  and the faces' least height above the apex along the axis), the
+  tolerance cannot decide how they meet: two rulings are refused, a
+  plane on one side is a touch. The apex rules had been skipped wherever
+  the cone's faces stop short of its apex by more than the tolerance (a
+  frustum's top a thousandth of its height below it), and a plane that
+  nearly touched the top rim made a union of two solids a nanometre
+  apart, or a cut the other body's surface met inconsistently.
+* **A rim touching a plane off the apex.** The nearest ruling runs from
+  the apex along `r̂ = cos α u − sign(γ) sin α n⊥ / g` (`n⊥ = n − γu`),
+  leaving the plane at `m = sign(γ) cos α (|γ| − k g)` per unit of
+  length: `f(s) = δ + s m`. Where `γδ > 0`, every other ruling leaves
+  toward the apex's side faster, or comes toward the plane more slowly,
+  so the cone lies on the apex's side of the plane wherever this ruling
+  does, and is nearest the plane on it. Along it, from the faces' least
+  height above the apex, through the region's box: where it stays on
+  the apex's side and comes within the tolerance of the plane, the
+  surfaces touch (a tangent contact, refused). A frustum's rim within
+  the tolerance of a plane nearly tangent along this ruling had given
+  two solids a few hundredths of a micrometre apart.
+* **Touches read along whole loops.** A face's boundary that runs within
+  the tolerance of the other surface without crossing it (a run of
+  stations on the surface between stations on one side) is a tangent
+  contact and refused; the stations are read along each loop as a whole,
+  across its vertices, where edge by edge a run spanning a vertex was
+  missed. A run that holds a whole edge is that edge lying on the
+  surface (a rim on a plate), not a touch. Nor is a run through a vertex
+  that another edge leaves to the other side, by its first station past
+  the vertex: there the body crosses the surface and the curve where they
+  meet passes through the vertex (a box's corner on a cylinder with two
+  edges going in and one out; a cylinder crossing a turned rod along its
+  seam, touching one half of the rod's cap at the seam's end and entering
+  the other). Read face by face, on an intermediate version, these had
+  been refused as touches: 202 operations of 40,000 in the
+  planes-and-cylinders fuzz at 50 times, every one of which the code
+  before the rule did correctly (found by diffing the fuzz's refusals
+  against it). Read along whole loops, the final code refuses 52
+  operations there that the code before the rule did, and 11 of 20,000
+  in the fuzz of solids at an angle (counted operation by operation
+  against the code before item 3b): edges that touch a face without
+  crossing it, genuine tangent contacts, which the code before the rule
+  got right but which the rule refuses with the near-tangent planes that
+  had given two solids a nanometre apart. They wait for tangent contacts to
+  be handled, which comes after operands with conic edges (STATUS.md).
+* **Closed tracks with no cuts.** Whether such a track lies in both faces
+  was decided at one point of it, which could lie where only one of the
+  faces is (an ellipse grazing a slab's edge metres from the frustum, an
+  invalid result found by review). It is decided now at its quarter
+  points within the box where faces of both bodies can be and at its
+  point nearest the box's centre, and at all four quarter points when
+  none of those decides.
+* **Meshes of the results** (design note 0002 §4): slivers too small to
+  split that face against the surface by an apex are unfolded by edge
+  flips, or else split at their centroid, and needles at a pointed
+  cone's apex whose corners lie in a line within the model tolerance are
+  not tested for a side; both made the kernel's own check refuse valid
+  results as "too small to split" (23 of 300 unions of a frustum with a
+  slab nearly tangent to it by its apex, before the centroid split).
+  Review measured meshes against the surfaces' closest points and found
+  them far past the chord tolerance by apexes and poles (16 tolerances
+  by a pointed cone's apex), and a sliver standing on edge across a cone
+  0.45 mm high in a validation mesh; meshing was rebuilt to hold the
+  tolerance, as estimated between the points it measures, and judges
+  facing at the corners too (0002 §4).
+
+**Tests.** Golden cases (`crates/kernel/tests/curved.rs`), each with all
+four operations, volumes exact to 1e-9 against derivations from the
+rulings and chords (the area of each flat face cut from the cone in
+closed form: elliptical, parabolic and hyperbolic segments), topology,
+validity, origins and one solid of genus 0: a pointed cone under a
+roof tilted 20° (a whole ellipse), a countersink leaning 15° into a
+plate, a cone cut along a ruling (a parabola) and a thousandth of a
+radian either side (a long ellipse, also by a slab 1,000 wide, and a
+hyperbola close to a parabola), a cone cut parallel to its axis (a
+hyperbola, its area also integrated), a slight taper (1°) cut along its
+axis (also by slicing), and a frustum cut by a plane through its apex
+(two rays). Then, for the rules above: sections of a frustum by boxes
+whose edges run along its axis past the apex, a micron either way;
+halves and a quarter of a countersunk plate through the hole's axis;
+frustums leaning along (1, 1, 1) cut through their apexes, at a slant
+and along the axis; a box beside a leaning frustum in a plane through
+its apex; small tools across large cones (both halves of an ellipse); a
+slender cone (2°) cut along its axis 0.2–0.35 mm off it, exact, and a
+box 13 µm off refused by name; a box across a cone just below its apex,
+square and tilted, refused by name; and boxes a hair off a turned rod's
+axis, exact or refused by name. Unit tests in `meet.rs` put every track on both surfaces to
+rounding and miss none, near the parabola, the apex and the axis. A
+fuzz of tapered solids (cones pointing up and down, frustums, tubes with
+tapered bores, double cones) about turned axes, each with a box turned
+any way, a slab along a ruling's direction (tilted by 0 to 0.1 rad, often
+by 10⁻³ to 10⁻⁹), a slab through or near the apex, or a slab within
+10⁻⁴ to 10⁻⁷ rad of tangent along a ruling, through the apex or within
+a micrometre of it. At 50 times its default size (5,000 pairs, 20,000
+operations; 2026-10-15, on the final code) every result is valid with
+its origins on its operands' surfaces, every volume identity holds
+where the results exist, and point membership agrees. 5,672 operations
+are refused (284 in 1,000), none with a box or a slab across the
+rulings. Through or near the apex, 2,856, all on pointed cones: 2,256
+planes through the apex where both bodies reach it (two rulings), 596
+whose curve comes within the tolerance of the axis, 4 faces nearly
+touching. Nearly tangent along a ruling, 2,596 on pointed cones (724
+two rulings, 1,088 near the axis, 784 faces touching) and 220 on
+frustums, where the cone stays within the tolerance of the plane, or
+between two rulings closer than it, out to the frustum's faces, so the
+tolerance cannot decide how they meet (the near-tangent bullets above):
+96 refused as two rulings, 100 as tangent contacts, 24 as slivers,
+shallow angles or a face running within the tolerance of the other
+surface. The other fuzzes at scale on the final code, against the code
+before item 3b: polyhedra at 100 times refuse the same 47 of 120,000
+operations, and the same in the tolerance motions; solids about one
+axis the same 1,122 of 20,000; planes and cylinders at 50 times 879 of
+40,000 (827 before) and at an angle 9,609 of 20,000 (9,598, quartics),
+the additions (52 and 11) all edges touching a face (above), and none
+dropped.
+
+**Left refused.** A plane through a pointed cone's apex, or whose curve
+comes within 128 tolerances of its axis, where the apex is near where
+faces of both bodies can be: the result's edges would meet at the
+cone's singular point, which the validator keeps edges away from
+(nearly every section of a pointed cone through its axis). A second
+boolean on a body whose conic edge lies on a curved face: the edge is
+stored as a rational quadratic NURBS curve, which the stages do not yet
+recognise as a conic, so they refuse it even where the bodies are apart.
+Cones with cylinders, cones or spheres off their axes (quartics, §10.3).
