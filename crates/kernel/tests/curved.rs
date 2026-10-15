@@ -3686,8 +3686,8 @@ fn second_cuts_far_from_the_origin_finish() {
     assert!(cut >= 3, "{cut}");
 }
 
-/// A cone 2 units tall over a base of radius 1 (scaled by `s`), turned
-/// about the vertical through `at`.
+/// A cone `s` tall over a base of radius `s / 2`, turned about the
+/// vertical through `at`.
 fn upright_cone(at: DVec3, s: f64) -> Body {
     let plane = Frame {
         origin: at,

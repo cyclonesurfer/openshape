@@ -1744,13 +1744,13 @@ boundary leaves point location undecided and the edge was kept.
   from it, and the hyperbolas of cones cut a millimetre off their axes,
   to 5·10⁵ m (meet refuses conics farther out); where it stops the sags
   are under a sixteenth of the tolerance near the origin (within 10² m;
-  the hyperbolas to 10⁴ m, the Bézier pieces at the origin, up to 2 m
+  the hyperbolas to 10⁴ m, the Bézier pieces at the origin, up to 4 m
   across), and a conic track's wherever its floor is under it by a
   thousandth (parabolas 260 km to 880 km from their vertices, one just
   past that held over it); the exact courses of conic tracks in planes'
   and cones' charts (the anchor up to 10⁴ m from the vertex, stretches
   1 m to 10⁷ m from it, half ellipses to their ends, where `w` is under
-  10⁻⁷) lie within their bands, as do those of NURBS arcs in cylinders'
+  10⁻⁸) lie within their bands, as do those of NURBS arcs in cylinders'
   and cones' charts whose point lies up to 10⁶ m from them along the
   axis, and the hull distances of NURBS curves in planes' charts
   (degrees two to five, weights' ratios to 10⁴, 1 m to 10¹⁰ m from the
@@ -1968,8 +1968,9 @@ it. Besides them:
     (`developed_courses_lie_within_their_bands`);
   * the conic band test's points near a half ellipse's end were never
     checked below `w` of about 3·10⁻⁷, its stretch there being under the
-    parameter's last bit; they are now taken by the last bits, `w` to
-    10⁻⁹ and less;
+    parameter's last bit; they are now taken by the last bits, `w`
+    under 10⁻⁸ (3·10⁻⁹ in the default debug run, 9·10⁻¹⁰ in the
+    release one);
   * §16.5 and the halving test's documentation claimed the off-axis
     hyperbolas to 10⁸ m from the origin (they are tested to 5·10⁵ m) and
     large Bézier pieces down to the sixteenth (none was checked); the

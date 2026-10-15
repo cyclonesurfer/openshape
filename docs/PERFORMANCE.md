@@ -100,8 +100,9 @@ factor):
 | Cut a box across a plate's round holes, 16 to 121 holes (7.6 times) | 7.8–8.4 times |
 | Mesh a ball, 13,964 to 105,556 triangles (7.6 times) | 8.6–9.6 times |
 
-One more checks a cut against four times the holes before it (bound: 12,
-three times the factor):
+One more checks the cut of a plate's 4th hole against that of its 16th,
+four times the holes counting the one cut (bound: 12, three times the
+factor):
 
 | Operation | Measured growth |
 |---|---|

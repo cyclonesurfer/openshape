@@ -797,7 +797,7 @@ name open unchanged.
   flattened pins and the creased revolve.
 - Operands with conic edges on curved faces (design note 0012 §16 and
   §17, ADR 0023), 2026-10-15, on Mesa lavapipe: fmt, clippy with `-D
-  warnings`, TESTS tests and `cargo deny` pass, and the release time
+  warnings`, 1,010 tests and `cargo deny` pass, and the release time
   guards pass as CI runs them. Golden second cuts with all four
   operations, exact in volume, with topology and origins: a conic-edged
   body against a box far away, a rod cut by a tilted plane and again by
@@ -848,7 +848,11 @@ name open unchanged.
   14.3 ms to 4.2 ms and cutting its holes in one boolean from 41.1 ms to
   24.3 ms, medians against main (docs/PERFORMANCE.md, sixth pass); a cut
   one at a time into conic-edged cones takes about twice as long as one
-  into straight countersinks (16 take 197 ms against 102 ms).
+  into straight countersinks (16 take 197 ms against 102 ms). The scan
+  that keeps the kernel's sources from reading the environment now
+  leaves out modules built only for tests (the rounding tests read
+  their sample sizes from it) and also catches variables read when the
+  kernel is built (`crates/kernel/tests/sources.rs`).
 - Geometry for booleans of curved solids (design note 0012 §10.7, item
   1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   915 tests and `cargo deny` pass. Tested on its own; the boolean stages

@@ -391,7 +391,7 @@ fn t_of_reach(p: f64, c: f64, reach: f64) -> Option<f64> {
 }
 
 /// Conic tracks' courses in planes' and cones' charts lie within their
-/// bands: hyperbolas, parabolas and half ellipses (to `w` under 10⁻⁷ at
+/// bands: hyperbolas, parabolas and half ellipses (to `w` under 10⁻⁸ at
 /// a half's ends, taken by the parameter's last bits; checked below) cut
 /// from real cones by [`meet`], stretches from 1 m to 10⁷ m from their
 /// vertices whose bend is from a thousandth of `ε` times that reach to a
@@ -566,9 +566,11 @@ fn conic_courses_lie_within_their_bands() {
         most[0].value, most[0].case, most[1].value, most[1].case, most[2].value, most[2].case
     );
     assert!(off <= 1e-9, "points off the cone or the plane: {off:e}");
-    // Stretches reach the ends of half ellipses, where `w` is least.
+    // Stretches reach the ends of half ellipses, where `w` is least
+    // (2.9·10⁻⁹ in the default run of a debug build, 9.3·10⁻¹⁰ in a
+    // release one).
     eprintln!("least w on a half ellipse: {least_w:e}");
-    assert!(least_w < 1e-7, "{least_w:e}");
+    assert!(least_w < 1e-8, "{least_w:e}");
     // Both parts of the band are needed: without either, some course
     // leaves its band.
     assert!(

@@ -1697,7 +1697,7 @@ mod tests {
     /// parameter's last bit far from the origin, the chords doubling
     /// (found by review). Where it stops, the sags are under the sixteenth
     /// near the origin: within 10² m of it, all but the Bézier pieces,
-    /// which are at the origin (up to 2 m across), and the hyperbolas up to
+    /// which are at the origin (up to 4 m across), and the hyperbolas up to
     /// 10⁴ m from it (a floor in proportion to the weights' ratio held them
     /// over it from 10² m, found by the third review); and a conic track's
     /// wherever its floor is under it by a thousandth.
