@@ -45,6 +45,8 @@ mod assemble;
 mod bernstein;
 mod chart;
 mod classify;
+#[cfg(test)]
+mod dd;
 mod imprint;
 mod meet;
 mod planar;
@@ -396,7 +398,10 @@ fn within_half_turn(pw: &[glam::DVec4]) -> bool {
     let p: Vec<DVec3> = pw.iter().map(|q| q.truncate() / q.w).collect();
     let n = p.len() - 1;
     let first = (1..=n).map(|j| p[j] - p[0]).find(|d| *d != DVec3::ZERO);
-    let last = (0..n).rev().map(|i| p[n] - p[i]).find(|d| *d != DVec3::ZERO);
+    let last = (0..n)
+        .rev()
+        .map(|i| p[n] - p[i])
+        .find(|d| *d != DVec3::ZERO);
     let (Some(first), Some(last)) = (first, last) else {
         // A point.
         return true;
@@ -1189,6 +1194,7 @@ mod tests {
             planar::Sag {
                 bound: 1e-8,
                 floor: 1e-8,
+                settles: false,
             }
         }
         fn slack(&self) -> f64 {

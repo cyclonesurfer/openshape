@@ -84,8 +84,14 @@ pub(super) struct Sag {
     /// rounding make, which halving the chord does not narrow: as the chord
     /// shrinks, the bound comes to at most about three times this (the
     /// allowances, and as much again of rounding in the terms they allow
-    /// for). Zero where the bound narrows to nothing.
+    /// for), or to this itself where it [`Sag::settles`]. Zero where the
+    /// bound narrows to nothing.
     pub floor: f64,
+    /// Whether the bound comes down to its floor itself as the chord
+    /// shrinks: its other part is computed from the chord's parameters
+    /// with rounding only in proportion to it, and narrows to nothing (a
+    /// conic track's, design note 0012 §16.2).
+    pub settles: bool,
 }
 
 impl Sag {
@@ -93,15 +99,27 @@ impl Sag {
     pub const ZERO: Sag = Sag {
         bound: 0.0,
         floor: 0.0,
+        settles: false,
     };
 
     /// Whether halving the chord can still narrow the bound toward `fine`:
     /// it is over `fine` and over four times its floor (an unbounded one
-    /// is, to be halved toward a bound).
+    /// is, to be halved toward a bound). A bound that settles on its floor
+    /// is halved while it is over `fine` and over its floor by more than
+    /// [`SETTLED`] of it: each halving quarters that part, so the chord
+    /// comes within `fine` wherever the floor is under it by that much.
     pub fn wide(self, fine: f64) -> bool {
-        self.bound > fine.max(4.0 * self.floor)
+        if self.settles {
+            self.bound > fine && self.bound > self.floor * (1.0 + SETTLED)
+        } else {
+            self.bound > fine.max(4.0 * self.floor)
+        }
     }
 }
+
+/// How far over its floor a bound that settles on it ([`Sag::settles`])
+/// is halved: a thousandth of it, about six halvings past four floors.
+pub(super) const SETTLED: f64 = 1.0 / 1024.0;
 
 /// Whether the chord of a course on `[t0, t1]` with `sag` is to be halved
 /// toward `fine`: [`Sag::wide`], and its parameters have a middle between

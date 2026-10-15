@@ -148,6 +148,21 @@ impl Chart {
         }
     }
 
+    /// Size of the numbers [`Chart::map`] subtracts and scales by (the
+    /// plane's origin, the surface's point plus its radius, a sphere's
+    /// centre plus four radii, as far as a face's chart reaches): with the
+    /// size of the point mapped, this sets the rounding of its chart point,
+    /// as [`Curve3::magnitude`] does a curve's points'.
+    pub fn magnitude(&self) -> f64 {
+        match *self {
+            Chart::Plane(f) => f.origin.abs().max_element(),
+            Chart::Cylinder { point, radius, .. } | Chart::Cone { point, radius, .. } => {
+                point.abs().max_element() + radius
+            }
+            Chart::Sphere { center, radius, .. } => center.abs().max_element() + 4.0 * radius,
+        }
+    }
+
     /// The point of the surface at chart point `q`.
     pub fn unmap(&self, q: DVec2) -> DVec3 {
         match *self {
@@ -493,11 +508,64 @@ pub(super) struct Trace<'a> {
     /// A bound on the rounding of chart points and of the bounds' terms,
     /// added to every band.
     slack: f64,
-    /// For a NURBS curve in a plane's chart, the floor of its bend
-    /// ([`Sag::floor`]): what the rounding of its clipped control points,
-    /// of its chord's ends and of their distances makes of it however
-    /// short the stretch. Zero for a track.
+    /// For a NURBS curve in a plane's chart, the allowance in its bend and
+    /// the bend's floor ([`Sag::floor`]): a bound on what the rounding of
+    /// its clipped control points, of its chord's ends and of their
+    /// distances adds to the distances computed, however short the stretch
+    /// ([`hull_rounding`]). Zero otherwise.
     rounding: f64,
+}
+
+/// The allowance for the rounding of a conic's chart points across its
+/// course, in units of `ε` times the stretch's reach from the vertex: at
+/// least the first-order bounds (7.5 in a plane's chart, 27.2 in a
+/// cone's; design note 0012 §16.2), and 16 times the most measured.
+const CONIC_ROUNDING: f64 = 32.0;
+
+/// A bound, to first order, on what rounding adds to the distances of a
+/// NURBS curve's clipped control points from a chord in the plane chart
+/// with origin `origin` ([`Trace::bend`]), however short the stretch
+/// (design note 0012 §16.2). With `R` the control points' largest distance
+/// from the world's origin, `D` their diameter, `d` their largest distance
+/// from the chart's origin, `p` the degree and `ρ` the ratio of the largest
+/// weight to the least, in units of ε:
+///
+/// - the clipped pieces' points, two runs of de Casteljau's `p` steps:
+///   the products and sums in each step round by ε of the terms, which
+///   the hull bounds by `R` times the weight (the weight cancels when the
+///   point is divided by it), and `1 − s` by ε/2 of the coefficient, which
+///   moves the point by at most that part of `D`: `(4p + ½) R + p D`;
+/// - the clip's parameters, rounded before `1 − s` is taken from them:
+///   moving a split by `δ` moves a point by up to `(1 + ρ) D δ`, for at
+///   most `2p (1 + ρ) D`;
+/// - splitting the curve into its pieces: `2p R + 2p D` the same way, and
+///   (sketched, not derived) `1.5p (1 + ρ) D` for its parameters;
+/// - the chord's ends, evaluated: `(p + 3/2) R + 3p D`;
+/// - mapping the points to the chart and their distances from the chord:
+///   `4.5 √2 d`.
+///
+/// In all `(7p + 2) R + (6p + 3.5p (1 + ρ)) D + 6.4 d`; measured at most
+/// 0.47 of it over ten million stretches (degrees 2 to 5, weights' ratios
+/// to 10⁴, from 1 m to 10¹⁰ m from the origin, down to 10⁻¹² of a knot
+/// span; `hull_rounding`).
+fn hull_rounding(n: &opendatum_nurbs::NurbsCurve, origin: DVec3) -> f64 {
+    let points = n.control_points();
+    let weights = n.weights();
+    let (least, most) = weights
+        .iter()
+        .fold((f64::INFINITY, 0.0f64), |(l, m), &w| (l.min(w), m.max(w)));
+    let (lo, hi) = points.iter().fold(
+        (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
+        |(lo, hi), q| (lo.min(*q), hi.max(*q)),
+    );
+    // The box's diagonal bounds the diameter.
+    let diameter = (hi - lo).length();
+    let (r, d) = points.iter().fold((0.0f64, 0.0f64), |(r, d), q| {
+        (r.max(q.length()), d.max((*q - origin).length()))
+    });
+    let p = n.degree() as f64;
+    let rho = most / least;
+    f64::EPSILON * ((7.0 * p + 2.0) * r + (6.0 * p + 3.5 * p * (1.0 + rho)) * diameter + 6.4 * d)
 }
 
 impl Trace<'_> {
@@ -668,13 +736,28 @@ impl Trace<'_> {
     /// points ([`Trace::slack`]), with the part of it that halving does not
     /// narrow ([`Sag::floor`]).
     fn bend(&self, t0: f64, t1: f64) -> Sag {
-        let exact = |bound| Sag { bound, floor: 0.0 };
+        let exact = |bound| Sag {
+            bound,
+            floor: 0.0,
+            settles: false,
+        };
         match self.path {
             Path::Track(_, Bound::Steady(m)) => exact(m * (t1 - t0) * (t1 - t0) / 8.0),
             Path::Track(track, Bound::Conic { p, c }) => {
                 // w is least at the greatest |t| on half an ellipse, else at
-                // the |t| nearest zero; the rounding of chart points grows
-                // with the stretch's reach from the vertex.
+                // the |t| nearest zero. The rounding of chart points grows
+                // with the stretch's reach from the vertex (the part that
+                // grows with the vertex's and the chart's coordinates is the
+                // slack's): across the course, by at most 7.5 ε reach in a
+                // plane's chart and 27.2 ε reach in a cone's, to first order
+                // (design note 0012 §16.2); measured at most 1.9 ε reach
+                // where the reach is a metre or more (1.4 million points,
+                // 2026-10-15; `rounding::conic_courses_lie_within_their_bands`
+                // checks the bands). The allowance is 32 ε reach, reach the
+                // farthest the stretch's ends are from the vertex (the
+                // distance grows with |t|). The other term is a product of
+                // the stretch's parameters, rounded only in proportion to
+                // it: the bound settles on the allowance ([`Sag::settles`]).
                 let (lo, hi) = (t0.min(t1), t0.max(t1));
                 let t = if c > 0.0 {
                     lo.abs().max(hi.abs())
@@ -687,10 +770,11 @@ impl Trace<'_> {
                 let reach = (track.point(t0) - track.point(0.0))
                     .length()
                     .max((track.point(t1) - track.point(0.0)).length());
-                let floor = 1e-13 * reach;
+                let floor = CONIC_ROUNDING * f64::EPSILON * reach;
                 Sag {
                     bound: p / (w * w * w) * (t1 - t0) * (t1 - t0) / 8.0 + floor,
                     floor,
+                    settles: true,
                 }
             }
             Path::Track(_, Bound::Arc(kappa)) => {
@@ -708,14 +792,17 @@ impl Trace<'_> {
                     // bounds the course's. The pieces are the trace's own,
                     // split from the curve once ([`quadric::hull_points`]
                     // split it again on every call).
+                    // The distances are computed from rounded points; the
+                    // allowance [`Trace::rounding`] bounds what that adds.
                     let (p, q) = (self.at(t0), self.at(t1));
-                    let bound = quadric::spans(&self.segments, t0.min(t1), t0.max(t1))
+                    let hull = quadric::spans(&self.segments, t0.min(t1), t0.max(t1))
                         .flat_map(|(_, _, pw)| pw)
                         .map(|w| point_segment(self.chart.map(w.truncate() / w.w), p, q))
                         .fold(0.0, f64::max);
                     Sag {
-                        bound,
+                        bound: hull + self.rounding,
                         floor: self.rounding,
+                        settles: false,
                     }
                 }
                 Some(surface) => self.developed_bend(&surface, t0, t1),
@@ -747,6 +834,7 @@ impl Trace<'_> {
                 return Sag {
                     bound: f64::INFINITY,
                     floor: 0.0,
+                    settles: false,
                 };
             };
             bend.bound = bend.bound.max(m / 8.0);
@@ -804,29 +892,16 @@ pub(super) fn trace<'a>(
                              (design note 0012 §16.2)"
                             .into(),
                     )),
-                    _ => {
-                        // Clipping a piece of degree p takes two runs of de
-                        // Casteljau's p steps, each rounding by 2ε of the
-                        // homogeneous coordinates (at most the largest weight
-                        // times the coordinates' size), and the division by
-                        // a weight at least the least weight; the chord's
-                        // ends, evaluated, round alike, and moving the points
-                        // to the chart by ε of the size: about (6p + 2) ε ρ M
-                        // in all (ρ the weights' ratio), within 32 ε ρ M for
-                        // p ≤ 5. Measured at most 8 ε M (p = 2, ρ up to 11).
-                        let weights = n.weights();
-                        let (least, most) = weights
-                            .iter()
-                            .fold((f64::INFINITY, 0.0f64), |(l, m), &w| (l.min(w), m.max(w)));
-                        let size = 1.0 + c.magnitude();
-                        Ok(Some(Trace {
-                            chart: *chart,
-                            path: Path::Nurbs(c),
-                            segments: n.bezier_segments(),
-                            slack: 1e-13 * size,
-                            rounding: 32.0 * f64::EPSILON * (most / least) * size,
-                        }))
-                    }
+                    _ => Ok(Some(Trace {
+                        chart: *chart,
+                        path: Path::Nurbs(c),
+                        segments: n.bezier_segments(),
+                        slack: 1e-13 * (1.0 + c.magnitude() + chart.magnitude()),
+                        rounding: match chart {
+                            Chart::Plane(f) => hull_rounding(n, f.origin),
+                            _ => 0.0,
+                        },
+                    })),
                 };
             }
         },
@@ -930,7 +1005,7 @@ pub(super) fn trace<'a>(
         chart: *chart,
         path: Path::Track(track, bound),
         segments: Vec::new(),
-        slack: 1e-13 * (1.0 + size),
+        slack: 1e-13 * (1.0 + size + chart.magnitude()),
         rounding: 0.0,
     }))
 }
@@ -1105,6 +1180,7 @@ impl<'a> Outline<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::planar::SETTLED;
     use super::super::testing::Rng;
     use super::*;
 
@@ -1607,24 +1683,38 @@ mod tests {
     }
 
     /// Halving a stretch of a curved course narrows its sag to under four
-    /// times its floor, the part its rounding makes, before the
-    /// parameter's last bit, so that halving toward a sixteenth of the
-    /// tolerance stops ([`halvable`]) wherever the course lies: NURBS
-    /// ellipses in planes and on cylinders, NURBS circles on cones, and
-    /// conic tracks, unevenly weighted, from the origin to 10⁸ m from it.
-    /// Without the floors the halving went on to the parameter's last bit
-    /// far from the origin, the chords doubling (found by review). Near
-    /// the origin the sags come down to the sixteenth.
+    /// times its floor, the part its rounding makes (a conic track's, which
+    /// settles on its floor, to within a thousandth of it, [`Sag::settles`]),
+    /// before the parameter's last bit, so that halving toward a sixteenth
+    /// of the tolerance stops ([`halvable`]) wherever the course lies:
+    /// NURBS ellipses in planes and on cylinders, NURBS circles on cones,
+    /// conic tracks (some stretches 10⁶ m and more from their vertices) and
+    /// rational Bézier pieces as large as their distance from the origin,
+    /// with weights' ratios up to 10⁴, from the origin to 10⁸ m from it,
+    /// and the hyperbolas of cones cut a millimetre off their axes
+    /// (weights' ratios in the hundreds) to 5·10⁵ m (meet refuses conics
+    /// farther out). Without the floors the halving went on to the
+    /// parameter's last bit far from the origin, the chords doubling
+    /// (found by review). Where it stops, the sags are under the sixteenth
+    /// near the origin: within 10² m of it, all but the Bézier pieces,
+    /// which are at the origin (up to 2 m across), and the hyperbolas up to
+    /// 10⁴ m from it (a floor in proportion to the weights' ratio held them
+    /// over it from 10² m, found by the third review); and a conic track's
+    /// wherever its floor is under it by a thousandth.
     #[test]
     fn sags_narrow_to_their_floors() {
         let fine = 1e-7 / 16.0;
         let mut rng = Rng(0xC4A2_7010);
         // Per kind, the most a sag is of its floor once its stretch is
         // tiny, and of the coordinates' size times ε.
-        let mut most = [[0.0f64; 2]; 4];
-        for case in 0..800 {
+        let mut most = [[0.0f64; 2]; 6];
+        for case in 0..1200 {
             let far = [0.0, 1e2, 1e4, 1e5, 1e6, 1e7, 1e8][case % 7];
-            let kind = (case / 7) % 4;
+            let kind = (case / 7) % 6;
+            // Whether the stretch is far from where its course is small
+            // enough to resolve to the sixteenth (far from a conic's
+            // vertex, or on a large unevenly weighted piece).
+            let mut distant = false;
             let shift = rng.unit() * far;
             let (delta, c) = (rng.range(0.2, 2.5), rng.range(0.3, 3.0));
             // A rational quadratic arc of `delta` about `center`, the
@@ -1703,7 +1793,7 @@ mod tests {
                     };
                     (trace(&chart, TraceOf::Curve(&curve)), 0.0, 1.0)
                 }
-                _ => {
+                3 => {
                     let z = rng.unit();
                     let x = across(&mut rng, z);
                     let frame = Frame {
@@ -1721,14 +1811,74 @@ mod tests {
                         p,
                         c: cc,
                     };
-                    let reach = if cc > 0.0 { 0.9 / cc.sqrt() } else { 3.0 };
-                    let t0 = rng.range(-reach, 0.0);
                     let chart = Chart::Plane(frame);
-                    (
-                        trace(&chart, TraceOf::Track(track)),
-                        t0,
-                        t0 + rng.range(0.1, reach),
-                    )
+                    let (t0, t1) = if cc <= 0.0 && rng.below(2) == 0 {
+                        // A stretch 1 m to 10⁸ m from the vertex, where
+                        // the allowance for rounding that grows with the
+                        // reach is over the sixteenth from about 10⁶ m.
+                        distant = true;
+                        let t = if cc < 0.0 {
+                            10f64.powf(rng.range(2.0, 8.0))
+                        } else {
+                            10f64.powf(rng.range(1.0, 4.5))
+                        };
+                        let (a, b) = (t, t * (1.0 + rng.range(0.01, 0.5)));
+                        if rng.below(2) == 0 {
+                            (a, b)
+                        } else {
+                            (-b, -a)
+                        }
+                    } else {
+                        let reach = if cc > 0.0 { 0.9 / cc.sqrt() } else { 3.0 };
+                        let t0 = rng.range(-reach, 0.0);
+                        (t0, t0 + rng.range(0.1, reach))
+                    };
+                    (trace(&chart, TraceOf::Track(track)), t0, t1)
+                }
+                4 => {
+                    // Up to 5·10⁵ m from the origin (meet refuses conics
+                    // whose vertices lie 9·10⁵ m out, §14).
+                    let shift = shift * (5e5 / far.max(5e5));
+                    let (c, frame, t0, t1) = off_axis_hyperbola(&mut rng, shift);
+                    curve = c;
+                    let chart = Chart::Plane(frame);
+                    (trace(&chart, TraceOf::Curve(&curve)), t0, t1)
+                }
+                _ => {
+                    // A rational Bézier piece of degree 2 to 5 as large
+                    // as its distance from the origin, its weights'
+                    // ratio up to 10⁴, on a span of the parameter
+                    // anywhere to ±10³ of length 10⁻³ to 10³.
+                    distant = far > 0.0;
+                    let z = rng.unit();
+                    let x = across(&mut rng, z);
+                    let frame = Frame {
+                        origin: rng.point(2.0) + shift,
+                        x,
+                        y: z.cross(x),
+                        z,
+                    };
+                    let p = 2 + rng.below(4);
+                    let size = (1.0 + far) * rng.range(0.1, 2.0);
+                    let rho = 10f64.powf(rng.range(0.0, 4.0));
+                    let points: Vec<DVec3> = (0..=p)
+                        .map(|_| {
+                            frame.point2(DVec2::new(rng.range(-size, size), rng.range(-size, size)))
+                        })
+                        .collect();
+                    let mut weights: Vec<f64> = (0..=p)
+                        .map(|_| 10f64.powf(rng.range(0.0, rho.log10())))
+                        .collect();
+                    weights[rng.below(p + 1)] = rho;
+                    let k0 = rng.range(-1e3, 1e3);
+                    let len = 10f64.powf(rng.range(-3.0, 3.0));
+                    let mut knots = vec![k0; p + 1];
+                    knots.extend(vec![k0 + len; p + 1]);
+                    curve = Curve3::Nurbs(
+                        opendatum_nurbs::NurbsCurve::new(p, knots, points, Some(weights)).unwrap(),
+                    );
+                    let chart = Chart::Plane(frame);
+                    (trace(&chart, TraceOf::Curve(&curve)), k0, k0 + len)
                 }
             };
             let trace = trace.unwrap().unwrap();
@@ -1744,10 +1894,10 @@ mod tests {
                         "case {case}: {far} kind {kind}: halved to the parameter's last bit, \
                          sag {s:?}"
                     );
-                    stopped = Some(k);
+                    stopped = Some((k, s));
                 }
                 if hi - lo <= 1e-9 * (t1 - t0) {
-                    let k = kind.min(3);
+                    let k = kind;
                     if s.floor > 0.0 {
                         most[k][0] = most[k][0].max(s.bound / s.floor);
                     }
@@ -1763,15 +1913,121 @@ mod tests {
                     lo = m;
                 }
             }
-            let k = stopped.expect("halving stops");
+            let (k, s) = stopped.expect("halving stops");
             assert!(k <= 50, "case {case}: {far} kind {kind}: {k} halvings");
-            if far <= 1e2 {
-                assert!(trace.sag(lo, hi).bound <= fine, "case {case}: kind {kind}");
+            let near = (far <= 1e2 || kind == 4 && far <= 1e4) && !distant;
+            if near || s.settles && s.floor * (1.0 + SETTLED) < fine {
+                assert!(
+                    s.bound <= fine,
+                    "case {case}: {far} kind {kind}: stopped at {s:?}"
+                );
             }
         }
         eprintln!("bound over floor, over size ε, at tiny stretches: {most:?}");
         for [floor, _] in most {
             assert!(floor <= 3.0, "{most:?}");
+        }
+    }
+
+    /// A conic track's sag settles on its floor, the allowance for rounding
+    /// that grows with the stretch's reach from the vertex, so halving
+    /// brings a chord within a sixteenth of the tolerance wherever the
+    /// floor is under it by a thousandth ([`Sag::settles`]): parabolas
+    /// 260 km to 890 km from their vertices, with floors from 0.3 to 1.01
+    /// of the sixteenth; the last is held over it, to be refused. Stopped
+    /// at four floors, as other bounds are, chords whose floors were over a
+    /// quarter of the sixteenth (from 220 km) could stop over it, and from
+    /// 0.58 of it (500 km) always did, refusing booleans that more halving
+    /// resolves (found by review).
+    #[test]
+    fn conic_sags_settle_on_their_floors() {
+        let fine = 1e-7 / 16.0;
+        let frame = Frame {
+            origin: DVec3::new(0.5, -0.25, 0.0),
+            x: DVec3::X,
+            y: DVec3::Y,
+            z: DVec3::Z,
+        };
+        let track = Track::Conic {
+            vertex: DVec3::ZERO,
+            x: DVec3::X,
+            y: DVec3::Y,
+            p: 1.0,
+            c: 0.0,
+        };
+        let tr = trace(&Chart::Plane(frame), TraceOf::Track(track))
+            .unwrap()
+            .unwrap();
+        for ratio in [0.3, 0.6, 0.8, 0.95, 0.999, 1.01] {
+            // The point at `reach` from the vertex: (t²/2, t), so t² = 2
+            // (√(1 + reach²) − 1).
+            let reach = ratio * fine / (CONIC_ROUNDING * f64::EPSILON);
+            let t1 = (2.0 * ((1.0 + reach * reach).sqrt() - 1.0)).sqrt();
+            let (mut t0, mut halvings) = (0.98 * t1, 0);
+            let stop = loop {
+                let s = tr.sag(t0, t1);
+                if !halvable(s, t0, t1, fine) {
+                    break s;
+                }
+                t0 = 0.5 * (t0 + t1);
+                halvings += 1;
+            };
+            assert!(stop.settles, "{stop:?}");
+            assert!(
+                (stop.floor / (ratio * fine) - 1.0).abs() < 1e-6,
+                "{ratio}: {stop:?}"
+            );
+            assert!(!stop.wide(fine) && halvings <= 50, "{ratio}: {halvings}");
+            if ratio < 1.0 {
+                assert!(stop.bound <= fine, "{ratio}: stopped at {stop:?}");
+            } else {
+                assert!(
+                    stop.bound <= stop.floor * (1.0 + SETTLED),
+                    "{ratio}: {stop:?}"
+                );
+            }
+        }
+    }
+
+    /// The hyperbola of a cone (radius 1 cm to 10 cm at its point, slope
+    /// 0.1 to 3) cut by a plane parallel to its axis a millimetre off it,
+    /// at `shift` (at most 5·10⁵ m from the origin), as a NURBS curve (its weights' ratio in the hundreds),
+    /// with the plane's frame and the curve's parameter range.
+    fn off_axis_hyperbola(rng: &mut Rng, shift: DVec3) -> (Curve3, Frame, f64, f64) {
+        loop {
+            let axis = rng.unit();
+            let radius = 10f64.powf(rng.range(-2.0, -1.0));
+            let cone = Quadric::Cone {
+                point: shift,
+                axis,
+                radius,
+                slope: 10f64.powf(rng.range(-1.0, 0.5)),
+            };
+            let x = across(rng, axis);
+            let point = shift + x * 1e-3;
+            let plane = Quadric::Plane { point, normal: x };
+            let r = DVec3::splat(4.0 * radius);
+            let m = meet::meet(
+                &plane,
+                &cone,
+                &meet::Region::of_box(shift - r, shift + r),
+                1e-7,
+            );
+            let meet::Meet::Curves(tracks) = m else {
+                continue;
+            };
+            for track in tracks.iter().filter(|t| matches!(t, Track::Conic { .. })) {
+                let (lo, hi) = track.ends();
+                let reach = 10f64.powf(rng.range(-1.0, 4.0));
+                let (lo, hi) = (lo.max(-reach), hi.min(reach));
+                if lo.partial_cmp(&hi) != Some(std::cmp::Ordering::Less) {
+                    continue;
+                }
+                if let Ok((curve @ Curve3::Nurbs(_), t0, t1)) = track.edge(lo, hi) {
+                    let frame = Frame::from_normal(point, x, x.any_orthonormal_vector());
+                    return (curve, frame, t0, t1);
+                }
+            }
         }
     }
 
@@ -2004,3 +2260,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "chart_rounding.rs"]
+mod rounding;

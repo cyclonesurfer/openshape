@@ -805,10 +805,17 @@ name open unchanged.
   countersink plate halved by its mirror plane and cut beside its hole,
   a flattened pin halved through its hyperbola's vertex and flattened
   again on its other side, cuts repeated in the same plane and with the
-  same cone, and a cut leaving a void beside an ellipse; and a rod cut
-  twice at the origin and up to 3,000 km from it, within a millionth in
-  volume. A fuzz of second cuts at 50
-  times its size: on rods cut by a slab and again by a box, slab or rod,
+  same cone, and a cut leaving a void beside an ellipse. Far from the
+  origin: a rod cut twice at the origin, 1 km and 30 km from it, within
+  a millionth in volume, and refused as too far at 300 km and 3,000 km;
+  a cone's hyperbola a millimetre off its axis cut again up to 30 km
+  from the origin, within 2·10⁻⁹ in volume of the same cuts at the
+  origin, and refused at 100 km; and cones 1 m to 400 km tall cut by a
+  plane parallel to their axis (first cuts), within 10⁻¹² in volume
+  over size cubed, one 600 km tall refused (the hyperbola's vertex too
+  far away to compute within the tolerance, 0012 §14). A fuzz of second
+  cuts at 50 times its size: on rods cut by a slab and again by a box,
+  slab or rod,
   all 25,020 operations done, valid and correct by the volume identities
   and point membership; on cut cones 137 in 1,000 refused, nearly all
   at a pointed cone's apex or tangent contacts; in chains of three or
@@ -816,13 +823,32 @@ name open unchanged.
   refused on main, but for two unions now done and correct. The fuzz
   found a fault in a first cut (a slab through a frustum's apex nearly
   along its seam failed with an internal error where a refusal
-  belonged), now refused (0012 §17). REVIEWS The
-  validator's check of edges against a turned face's axis now takes
+  belonged), now refused (0012 §17). Four adversarial reviews, each
+  finding confirmed by at least two of three skeptics (0012 §17): the
+  first corrected the rules of §16; the second had six findings, the
+  third six and the fourth six, every code fix with a test that fails
+  without it, five of them false claims in the documentation,
+  corrected. The third review's rounding findings were settled by
+  measurement against double-double references: a conic track's
+  allowance is now 32 ε of
+  its reach (was 10⁻¹³, which refused first cuts of cones 20 km tall
+  that main did), a NURBS course on a plane carries a bound derived from
+  its degree, size and weights (its floor in proportion to the weights'
+  ratio times its whole size refused second cuts across uneven
+  hyperbolas from 1 km), and every course's positional allowance counts
+  the chart's size; tests against those references fail without each
+  allowance, floor or term (ten mutations checked). The fourth found
+  halving a conic track's chords stopped at four times its allowance,
+  as other bounds' do, though its bound settles on the allowance itself:
+  that refused first cuts of cones from about 300 km tall that more
+  halving resolves, and it now halves to within a thousandth of the
+  allowance. The validator's check of edges against a turned face's
+  axis now takes
   closed forms first: validating the tilted countersunk plate fell from
-  13.8 ms to 4.9 ms and cutting its holes in one boolean from 41.7 ms to
-  25.7 ms, medians against main (docs/PERFORMANCE.md, sixth pass); a cut
-  one at a time into conic-edged cones takes TWICE as long as one into
-  straight countersinks.
+  14.3 ms to 4.2 ms and cutting its holes in one boolean from 41.1 ms to
+  24.3 ms, medians against main (docs/PERFORMANCE.md, sixth pass); a cut
+  one at a time into conic-edged cones takes about twice as long as one
+  into straight countersinks (16 take 197 ms against 102 ms).
 - Geometry for booleans of curved solids (design note 0012 §10.7, item
   1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   915 tests and `cargo deny` pass. Tested on its own; the boolean stages
@@ -1169,15 +1195,24 @@ name open unchanged.
   fifths of those through or near a pointed cone's apex and most of the
   rest tangent contacts, and 38 in 1,000 in chains of three or four
   cuts, likewise (design note 0012 §17).
-- Far from the origin: a boolean on an operand whose conic edge lies on
-  a cylinder or a cone is refused as too far from the origin for the
-  tolerance where the rounding of the bound on that edge's course keeps
-  a chord that could hide a contact wider than a sixteenth of the
-  tolerance (design note 0012 §16.2): at the default tolerance from
-  about 36 km from the origin for the evenly weighted conics cuts leave
-  (a rod cut twice is cut at 30 km and refused at 300 km), about 155 km
-  for such an edge on a plane, and 15.6 km along a conic track from its
-  vertex.
+- Far from the origin: a boolean is refused as too far from the origin
+  for the tolerance where the rounding of the bound on a curved edge's
+  course keeps a chord that could hide a contact wider than a sixteenth
+  of the tolerance (design note 0012 §16.2). At the default tolerance:
+  from about 36 km from the origin for the conics cuts leave on
+  cylinders and cones (a rod cut twice is cut at 30 km and refused at
+  300 km; a cone's hyperbola cut again is cut at 30 km and refused at
+  100 km); for the conic where a plane cuts a cone, which applies to
+  first cuts too, only where the conic's vertex is too far away to
+  compute within the tolerance, which is refused first (design note 0012
+  §14: from about 880 km of the vertex's coordinates, its distance from
+  where the faces meet and that region's size; a cone 400 km tall at
+  the origin is cut by a plane parallel to its axis, one 600 km tall
+  refused); and, by the formula for its allowance, from about 160 km
+  (degree five) to 310 km (a conic) for a small NURBS edge on a plane
+  whose chart is anchored near the world's origin (farther when it is
+  anchored near the edge), less for a large edge whose weights are very
+  uneven.
 - At a cone's apex: a plane through a pointed cone's apex, or whose
   curve comes within 128 tolerances of the axis there, is refused where
   the apex lies near where faces of both bodies can be, which takes in

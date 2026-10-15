@@ -3669,7 +3669,6 @@ fn second_cuts_far_from_the_origin_finish() {
         let twice =
             once.and_then(|b| k().boolean(&b, &slab(ridge, n2, 0.3, 0.2), BooleanOp::Subtract));
         let took = start.elapsed().as_secs_f64();
-        eprintln!("FAR {far}: ok={} {:?}", twice.is_ok(), twice.as_ref().err());
         assert!(took < 5.0, "{far}: {took} s");
         match twice {
             Ok(b) => {
@@ -3685,4 +3684,133 @@ fn second_cuts_far_from_the_origin_finish() {
         }
     }
     assert!(cut >= 3, "{cut}");
+}
+
+/// A cone 2 units tall over a base of radius 1 (scaled by `s`), turned
+/// about the vertical through `at`.
+fn upright_cone(at: DVec3, s: f64) -> Body {
+    let plane = Frame {
+        origin: at,
+        x: DVec3::X,
+        y: DVec3::Z,
+        z: -DVec3::Y,
+    };
+    let pts = [DVec2::ZERO, DVec2::new(0.5 * s, 0.0), DVec2::new(0.0, s)];
+    k().revolve(
+        &Profile::polygon(plane, &pts),
+        &RevolveSpec {
+            axis_origin: DVec2::ZERO,
+            axis_dir: DVec2::Y,
+            angle: TAU,
+        },
+    )
+    .expect("a cone")
+}
+
+/// A cone `s` tall over a base of radius `s / 2`, cut by a box whose
+/// side is a plane parallel to its axis at a tenth of `s` from it (a
+/// hyperbola reaching `0.94 s` from its vertex), all three operations, for
+/// cones from 1 m to 400 km tall: each is done, valid, and its volume over
+/// `s³` the same within 10⁻¹²; one 600 km tall is refused, the
+/// hyperbola's vertex too far from the origin to compute it within the
+/// tolerance (design note 0012 §14; from about 485 km tall here). The
+/// allowance for the rounding of the hyperbola's chart points, first
+/// `10⁻¹³` of its reach, held cones from 20 km tall over a sixteenth of
+/// the tolerance and refused them (found by the third review); it is now
+/// 32 ε of the reach, from measurement, and halving its chords stopped at
+/// four times that refused cones from about 300 km tall, though their
+/// bounds settle on it under the sixteenth (found by the fourth review;
+/// design note 0012 §16.2).
+#[test]
+fn first_cuts_of_large_cones_finish() {
+    let ops = [BooleanOp::Intersect, BooleanOp::Subtract, BooleanOp::Union];
+    let mut unit = [0.0; 3];
+    for s in [1.0, 1e3, 3e4, 1e5, 3e5, 4e5, 6e5] {
+        let cone = upright_cone(DVec3::ZERO, s);
+        let side = cuboid(
+            DVec3::new(0.1 * s, -0.6 * s, -0.1 * s),
+            DVec3::new(0.6 * s, 0.6 * s, 1.1 * s),
+        );
+        for (i, op) in ops.into_iter().enumerate() {
+            let start = std::time::Instant::now();
+            let r = k().boolean(&cone, &side, op);
+            let took = start.elapsed().as_secs_f64();
+            assert!(took < 5.0, "{s} {op:?}: {took} s");
+            if s > 4e5 {
+                match r {
+                    Err(KernelError::Unsupported(m)) => {
+                        assert!(m.contains("vertex is too far away"), "{s} {op:?}: {m}")
+                    }
+                    r => panic!("{s} {op:?}: {r:?}"),
+                }
+                continue;
+            }
+            let b = r.unwrap_or_else(|e| panic!("{s} {op:?}: {e}"));
+            assert_eq!(k().validate(&b), Vec::<String>::new(), "{s} {op:?}");
+            let v = volume(&b) / (s * s * s);
+            if s == 1.0 {
+                unit[i] = v;
+            }
+            assert!((v - unit[i]).abs() <= 1e-12 * unit[i], "{s} {op:?}: {v}");
+        }
+    }
+}
+
+/// A cone of base radius 1 cut by a plane parallel to its axis a
+/// millimetre or a centimetre off it (a hyperbola whose NURBS curve's
+/// weights differ by a factor of hundreds), and again by a plane across
+/// that hyperbola, at distances from the origin up to 100 km: done,
+/// valid and within 2·10⁻⁹ in volume of the same cuts at the origin up to
+/// 30 km (each volume computed to 10⁻⁹; so far out the integrals do not
+/// converge to 10⁻¹²), at 100 km cut alike or refused as too far from the
+/// origin, and
+/// soon either way. The floor of the hyperbola's sag in the first plane's
+/// chart, first in proportion to its weights' ratio, refused the second
+/// cut from 1 km (found by the third review; design note 0012 §16.2).
+#[test]
+fn second_cuts_of_uneven_hyperbolas_far_from_the_origin() {
+    for d in [1e-3, 1e-2] {
+        let mut at_origin = 0.0;
+        for far in [0.0, 1e2, 1e3, 1e4, 3e4, 1e5] {
+            let at = DVec3::new(far, 0.3 * far, 0.7 * far);
+            let start = std::time::Instant::now();
+            let once = k().boolean(
+                &upright_cone(at, 2.0),
+                &cuboid(
+                    at + DVec3::new(d, -2.0, -1.0),
+                    at + DVec3::new(2.0, 2.0, 3.0),
+                ),
+                BooleanOp::Subtract,
+            );
+            let twice = once.and_then(|b| {
+                k().boolean(
+                    &b,
+                    &cuboid(
+                        at + DVec3::new(-2.0, 0.3, -1.0),
+                        at + DVec3::new(2.0, 2.0, 3.0),
+                    ),
+                    BooleanOp::Subtract,
+                )
+            });
+            let took = start.elapsed().as_secs_f64();
+            assert!(took < 5.0, "{d} {far}: {took} s");
+            match twice {
+                Ok(b) => {
+                    assert_eq!(k().validate(&b), Vec::<String>::new(), "{d} {far}");
+                    let v = k()
+                        .mass_properties(&b, 1e-9)
+                        .expect("mass properties")
+                        .volume;
+                    if far == 0.0 {
+                        at_origin = v;
+                    }
+                    assert!((v - at_origin).abs() <= 2e-9 * at_origin, "{d} {far}: {v}");
+                }
+                Err(KernelError::InvalidInput(m)) if far > 3e4 => {
+                    assert!(m.contains("too far from the origin"), "{d} {far}: {m}");
+                }
+                Err(e) => panic!("{d} {far}: {e}"),
+            }
+        }
+    }
 }

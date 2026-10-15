@@ -64,23 +64,23 @@ test enforces.
 | Cut 64 holes into a box, one boolean each | 225–265 ms | 3,000 ms |
 | Drill 64 round holes into a plate, one boolean each | 860–1,050 ms | 10,000 ms |
 | Intersect or subtract a plate with 100 round holes and a box across them | 52–55 ms | 600 ms |
-| Dimple a plate with 16 balls, one boolean each | 82–89 ms | 900 ms |
+| Dimple a plate with 16 balls, one boolean each | 73–89 ms | 900 ms |
 | Mesh it (173,680 triangles) | 382–406 ms | 4,000 ms |
-| Validate it | 2.4–2.6 ms | 40 ms |
+| Validate it | 2.2–2.5 ms | 40 ms |
 | Its mass properties to 1e-9 | 14–17 ms | 150 ms |
-| Cut 16 countersunk holes (a shank and a cone each) into a plate, one boolean each | 100–116 ms | 1,200 ms |
+| Cut 16 countersunk holes (a shank and a cone each) into a plate, one boolean each | 96–102 ms | 1,200 ms |
 | Mesh it (9,612 triangles) | 31–37 ms | 300 ms |
-| Validate it | 3.6–3.8 ms | 50 ms |
+| Validate it | 3.4–4.0 ms | 50 ms |
 | Its mass properties to 1e-9 | 22–24 ms | 250 ms |
-| Cut 16 countersunk holes leaning 10° into a plate in one boolean (ellipses) | 20–26 ms | 350 ms |
-| The same holes one at a time (each cut's cones carry the ellipses of the cuts before) | ONE_SINK | 2,500 ms |
+| Cut 16 countersunk holes leaning 10° into a plate in one boolean (ellipses) | 21–24 ms | 350 ms |
+| The same holes one at a time (each cut's cones carry the ellipses of the cuts before) | 176–197 ms | 2,500 ms |
 | Mesh it (12,956 triangles) | 44–59 ms | 600 ms |
-| Validate it | 4.0–4.9 ms | 60 ms |
+| Validate it | 3.4–4.2 ms | 60 ms |
 | Its mass properties to 1e-9 | 17–20 ms | 200 ms |
-| Flatten 16 pins of 5° draft along their axes in one boolean (hyperbolas) | 17–24 ms | 350 ms |
-| The same pins one at a time (each cut's cones carry the hyperbolas of the cuts before) | ONE_FLAT | 2,500 ms |
+| Flatten 16 pins of 5° draft along their axes in one boolean (hyperbolas) | 18–22 ms | 350 ms |
+| The same pins one at a time (each cut's cones carry the hyperbolas of the cuts before) | 175–197 ms | 2,500 ms |
 | Mesh it (9,868 triangles) | 26–35 ms | 350 ms |
-| Validate it | 3.7–4.5 ms | 60 ms |
+| Validate it | 3.1–3.8 ms | 60 ms |
 | Its mass properties to 1e-9 | 13 ms | 150 ms |
 | Revolve a rational cubic bending nearly to a crease (validation meshes it) | 12–15 ms | 150 ms |
 | Mesh it (108,486 triangles) | 446–482 ms | 5,000 ms |
@@ -105,7 +105,7 @@ three times the factor):
 
 | Operation | Measured growth |
 |---|---|
-| Cut the 4th or the 16th countersunk hole leaning 10° into a plate | GROWTH |
+| Cut the 4th or the 16th countersunk hole leaning 10° into a plate | 3.1–3.6 times |
 
 The union is scaled on regular prisms, whose result grows with their
 size. Two star prisms overlap in a band where many faces of each meet
@@ -396,18 +396,27 @@ median of 12 runs of each build interleaved, on the reference machine
 
 | Operation | main | now |
 |---|---|---|
-| Cut 16 countersunk holes leaning 10° into a plate in one boolean | 41.7 ms | 25.7 ms |
-| Flatten 16 drafted pins in one boolean | 33.4 ms | 23.7 ms |
-| Cut 16 countersunk holes, one boolean each | 273.7 ms | 116.2 ms |
-| Dimple a plate with 16 balls, one boolean each | 124.5 ms | 89.1 ms |
-| Validate the tilted countersunk plate | 13.8 ms | 4.9 ms |
-| Validate the flattened pins' plate | 9.6 ms | 4.5 ms |
-| Validate the countersunk plate | 11.8 ms | 3.8 ms |
-| Validate the dimpled plate | 4.2 ms | 2.6 ms |
-| Drill 64 round holes into a plate, one boolean each | DRILL_BASE | DRILL_NEW |
+| Cut 16 countersunk holes leaning 10° into a plate in one boolean | 41.1 ms | 24.3 ms |
+| Flatten 16 drafted pins in one boolean | 33.2 ms | 22.1 ms |
+| Cut 16 countersunk holes, one boolean each | 262.3 ms | 101.6 ms |
+| Dimple a plate with 16 balls, one boolean each | 122.2 ms | 89.4 ms |
+| Validate the tilted countersunk plate | 14.3 ms | 4.2 ms |
+| Validate the flattened pins' plate | 9.6 ms | 3.8 ms |
+| Validate the countersunk plate | 11.4 ms | 4.0 ms |
+| Validate the dimpled plate | 4.1 ms | 2.5 ms |
+| Drill 64 round holes into a plate, one boolean each | 813.6 ms | 745.8 ms |
 
 Cutting the tilted holes or flattening the pins one at a time was
-refused on main (a NURBS edge on a curved face). DRILL_NOTE
+refused on main (a NURBS edge on a curved face). Drilling the round
+holes runs as many instructions as on main: 7.851 billion under
+callgrind for the test that drills them and cuts a box across the
+plate, against 7.833 billion (0.24% more); its medians swing with the
+machine's noise (an earlier set of 12 runs had it 5% slower than main,
+this one 8% faster). The guard of the solids' meshes and mass
+properties likewise: 660.4 million instructions, against 660.5 million
+on main, though some of its medians here differ by up to 8% (the
+1024-sided prism's mass properties, 71.0 ms against 65.7 ms; 2% in the
+earlier set).
 
 ## Known slow spots
 
@@ -454,8 +463,9 @@ pass.
   §16.2) are made afresh for every chord, from products of Bernstein
   polynomials of the curve's piece clipped to the chord's stretch: 31%
   of the instructions of cutting the tilted countersunk holes one at a
-  time (the products alone 11%), whose cuts take TWICE as long each as
-  the straight countersinks'. The products could be subdivided with the
+  time (the products alone 11%), whose cuts take about twice as long
+  each as the straight countersinks' (197 ms for 16 against 102 ms,
+  medians). The products could be subdivided with the
   chords (de Casteljau's algorithm on their coefficients) instead of
   made again.
 * **Validation meshes the result** to check each shell's orientation by

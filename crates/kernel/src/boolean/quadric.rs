@@ -980,6 +980,7 @@ mod tests {
     use glam::DVec2;
     use opendatum_nurbs::NurbsCurve;
 
+    use super::super::dd::Dd;
     use super::super::meet::{self, Track};
     use super::super::testing::Rng;
     use super::*;
@@ -1732,62 +1733,6 @@ mod tests {
         assert!(bounded[0] > 1000 && bounded[1] > 700, "{bounded:?}");
         // The bounds are reached within a modest factor somewhere.
         assert!(tight.iter().all(|&t| t > 0.1), "{tight:?}");
-    }
-
-    /// Double-double numbers (Dekker 1971, "A floating-point technique for
-    /// extending the available precision"): about 106 bits, for references
-    /// that the rounding of `f64` does not reach.
-    #[derive(Clone, Copy)]
-    struct Dd(f64, f64);
-
-    impl Dd {
-        fn of(a: f64) -> Dd {
-            Dd(a, 0.0)
-        }
-
-        fn fast(a: f64, b: f64) -> Dd {
-            let s = a + b;
-            Dd(s, b - (s - a))
-        }
-
-        fn add(self, o: Dd) -> Dd {
-            // Knuth's two-sum of the leading parts, then the rest.
-            let s = self.0 + o.0;
-            let v = s - self.0;
-            let e = (self.0 - (s - v)) + (o.0 - v);
-            Dd::fast(s, e + self.1 + o.1)
-        }
-
-        fn sub(self, o: Dd) -> Dd {
-            self.add(Dd(-o.0, -o.1))
-        }
-
-        fn mul(self, o: Dd) -> Dd {
-            let p = self.0 * o.0;
-            let e = self.0.mul_add(o.0, -p);
-            Dd::fast(p, e + (self.0 * o.1 + self.1 * o.0))
-        }
-
-        fn div(self, o: Dd) -> Dd {
-            let q1 = self.0 / o.0;
-            let r = self.sub(o.mul(Dd::of(q1)));
-            let q2 = r.0 / o.0;
-            let r = r.sub(o.mul(Dd::of(q2)));
-            Dd::fast(q1, q2).add(Dd::of(r.0 / o.0))
-        }
-
-        fn sqrt(self) -> Dd {
-            if self.0 <= 0.0 {
-                return Dd::of(0.0);
-            }
-            let x = Dd::of(self.0.sqrt());
-            x.add(self.sub(x.mul(x)).div(x.add(x)))
-        }
-
-        /// Whether this is at most `b`.
-        fn le(self, b: f64) -> bool {
-            self.sub(Dd::of(b)).0 <= 0.0
-        }
     }
 
     type V = [Dd; 3];

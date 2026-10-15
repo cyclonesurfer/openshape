@@ -68,10 +68,18 @@ case.
 * Every bound carries an allowance for its own rounding (design note
   0012 §16.2), checked against double-double references, and with it
   its floor, the part of the bound that rounding makes and halving the
-  chord does not narrow. Halving stops at four floors; where that is
-  over a sixteenth of the tolerance and the chord could hide a contact,
-  the boolean is refused as too far from the origin (from about 36 km
-  at the default tolerance for an evenly weighted conic on a cylinder).
+  chord does not narrow. Halving stops at four floors (a conic track's
+  bound, which settles on its floor, within a thousandth of it); where
+  that is over a sixteenth of the tolerance and the chord could hide a
+  contact, the boolean is refused as too far from the origin (from about
+  36 km at the default tolerance for an evenly weighted conic on a
+  cylinder; for the conic where a plane cuts a cone, first cuts
+  included, not before its vertex is refused as too far away to compute,
+  about 880 km out). The allowances were set by measurement against
+  double-double references after the third review found two of them
+  refusing booleans that halving resolves exactly, and the stop for
+  conic tracks after the fourth found halving stopped at four floors
+  doing the same.
 * Two curved segments between the same points are one when points of
   each, a quarter, half and three quarters of the way along it by its
   parameter and by its tangent's turning, lie within the tolerance of

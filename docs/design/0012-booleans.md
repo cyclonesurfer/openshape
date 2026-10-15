@@ -1497,7 +1497,14 @@ subdivision make by convex combinations (the weights being positive),
 each within a few `pε` of the coordinates. Moving the curve by `η`
 moves its course by about `η` (the chart's Lipschitz constant, about
 `1 + |δ| / ρ`, is close to one for an edge on its face), so to each band
-is added `10⁻¹³ (1 + size)`, as for tracks (§12.1).
+is added `10⁻¹³ (1 + size + the chart's size)`, as for tracks (§12.1):
+the curve's size, and the size of the numbers the chart subtracts and
+scales by (a plane's origin; a cylinder's or a cone's stored point plus
+its radius; a sphere's centre plus four radii). The curve's size alone,
+as first built, missed a chart anchored far from the curve: measured
+against double-double references, a conic's chart points strayed up to
+26 times that allowance with the chart's anchor 10⁴ m from the conic's
+vertex (§16.5).
 
 **Division.** The first chords of such a course are, as on a plane,
 two per Bézier piece, so that no chord spans a knot: the conic edges
@@ -1519,8 +1526,7 @@ piece's chord differs from the whole chord by a function affine in the
 parameter, so most at the piece's ends.
 
 **Halving and rounding.** Every band is a sag, which halving the chord
-narrows, plus the positional allowance `10⁻¹³ (1 + size)`, which
-nothing narrows. The planar graph's refinement (§11), the search for a
+narrows, plus the positional allowance above, which nothing narrows. The planar graph's refinement (§11), the search for a
 point inside a piece and point location halve a chord while its sag, not
 its band, is over a sixteenth of the tolerance. Halving by the band never
 ended where the allowance was over that, more than 62.5 km from the
@@ -1540,24 +1546,59 @@ their own rounding make, which halving does not narrow either:
   times what a draft of this note estimated (`10⁻¹⁵`); the unit test
   below measured up to about `2.7 × 10⁻¹³` with weights uneven by up to
   a factor of 11.
-* A NURBS course on a plane: `32 ε ρ (1 + size)`, `ρ` the ratio of the
-  curve's largest weight to its least. Clipping a piece of degree `p`
-  takes two runs of de Casteljau's `p` steps, each rounding by `2ε` of
-  the homogeneous coordinates (at most the largest weight times the
-  coordinates' size), then the division by a weight at least the least;
-  the chord's ends, evaluated, round alike, and moving the points to the
-  chart rounds by `ε` of the size: about `(6p + 2) ε ρ` of the size in
-  all, within `32 ε ρ` for `p ≤ 5`. Measured at most `8ε` of the size
-  (`p = 2`, `ρ` up to 11).
-* A conic track: the allowance `10⁻¹³` of the stretch's reach from the
-  vertex that its sag carries.
+* A NURBS course on a plane: the allowance its bound carries for the
+  rounding of the distances it is computed from, `ε ((7p + 2) R + (6p +
+  3.5p (1 + ρ)) D + 6.4 d)` for degree `p`, `R` the control points'
+  largest distance from the world's origin, `D` their diameter (the
+  diagonal of their box), `d` their largest distance from the chart's
+  origin and `ρ` the ratio of the curve's largest weight to its least.
+  The weights cancel from the arithmetic of de Casteljau's steps: with
+  positive weights and coefficients every term a step sums is at most
+  `R` times its weight, and the division by the weight undoes it,
+  `(4p + ½) R` for the two runs of `p` steps a clip takes and `p D` for
+  rounding `1 − s`. They enter through the clip's parameters, rounded
+  before `1 − s` is taken from them: moving a split by `δ` moves a point
+  by up to `(1 + ρ) D δ`, at most `2p (1 + ρ) D` for the clip. Splitting
+  the curve into its pieces adds `2p R + 2p D`, and `1.5p (1 + ρ) D` for
+  its parameters (sketched, not derived; measured a hundredth of it);
+  the chord's ends, evaluated, `(p + 3/2) R + 3p D`; the chart and the
+  distances `4.5 √2 d`. Against double-double references (§16.5), over
+  ten million stretches of rational curves of degrees two to five with
+  weights' ratios up to 10⁴, 1 m to 10¹⁰ m from the origin and down to
+  10⁻¹² of a piece, the rounding was at most 0.47 of the allowance.
+  First built as `32 ε ρ (1 + size)`, the weights' ratio times the whole
+  size: it held the sags of the hyperbolas of cones cut a millimetre off
+  their axes (weights' ratios in the hundreds) over a sixteenth of the
+  tolerance from 1 km from the origin, refusing their second cuts there
+  (third review), though their rounding grows with their own size, not
+  their distance; and it was not carried in the bound, whose rounding
+  then only the positional allowance covered, and too little of it where
+  `ρ D` is large (measured up to `1.2 × 10⁴ ε (1 + size)`).
+* A conic track: the allowance `32 ε` of the stretch's reach from the
+  vertex that its sag carries. To first order the rounding of a conic's
+  chart points across its course is at most `7.5 ε` of the reach in a
+  plane's chart and `27.2 ε` in a cone's, plus a part that grows with
+  the vertex's coordinates, its distance from the chart's anchor and a
+  cone's radius there, which the positional allowance covers; measured
+  against double-double references, at most `1.9 ε` of the reach over
+  1.4 million points of conics cut from cones by planes (§16.5). First
+  built as `10⁻¹³` of the reach (450 ε), which refused the first cut of
+  a cone 20 km tall by a plane parallel to its axis (third review).
 * Lines, circles and ellipses, whose bounds narrow to nothing: none.
 
 As its chord shrinks a sag comes down to its floor: on stretches a
-billionth of a course's parameter, every kind measured at most 1.01
-times its floor (a NURBS course on a plane 0.08 times). So every halving
+billionth of a course's parameter, every kind measured at most 1.21
+times its floor. So every halving
 stops at four times the floor as well as at a sixteenth of the
-tolerance: a chord is halved while its sag is over both. A chord whose
+tolerance: a chord is halved while its sag is over both. A conic
+track's bound settles on its floor itself (its other term is a product
+of the stretch's parameters, rounded only in proportion to it, and
+narrows to nothing), so its chord is halved while its sag is over the
+sixteenth and over its floor by more than a thousandth of it, about six
+halvings past four floors; stopped at four floors as the others are,
+chords from 220 km of reach could stop over the sixteenth, and from
+500 km always did, refusing booleans that more halving resolves
+(fourth review, §17). A chord whose
 sag is held over the sixteenth that way, where it could hide a contact
 (the refinement) or where it leaves a piece's point within the
 tolerance of the piece's boundary (the search), refuses the boolean,
@@ -1573,9 +1614,16 @@ the search refused a round that did not halve its widest sag, a rule
 that could also refuse a refinement a round from done (a conic track's
 allowance between `ε/24` and `ε/16`; review), and is gone. At the
 default tolerance four floors first pass the sixteenth about 36 km from
-the origin for an evenly weighted conic on a cylinder (a rod there is
-cut twice, at 300 km refused; §17), about 155 km for a conic on a plane
-(`ρ = √2`), and at 15.6 km of reach along a conic track.
+the origin for an evenly weighted conic on a cylinder (a rod is cut
+twice 30 km from the origin and refused at 300 km; §16.5); a conic
+track's floor passes it at about 880 km of reach, where meet already
+refuses the conic's vertex as too far away to compute (§14: a cone at
+the origin 400 km tall is cut by a plane parallel to its axis, one
+600 km tall refused, a first cut); and
+for a small NURBS curve on a plane, by its allowance's formula, from
+about 160 km (degree five) to 310 km (a conic) from the origin where its
+chart's origin is near the world's, farther where it is near the
+curve.
 
 **Spheres.** No conic lies on a sphere (a plane meets it in a circle,
 stored as a circle), so a NURBS edge on a sphere's face stays refused,
@@ -1623,7 +1671,7 @@ coefficients of the differences of its control points (by the quotient
 rule), so a piece all of whose differences lie on one side of a plane
 through the origin turns less than a half turn. A rational quadratic
 piece of a conic passes at once (its legs are not opposite); a cubic
-can turn further, and the final review wrote an arc of 238° of an
+can turn further, and the third review wrote an arc of 238° of an
 ellipse as one cubic span with positive weights, whose probes crowded
 as before. The angles between each piece's end tangents are summed,
 and the fraction found by bisection in its piece. The angle from the
@@ -1657,10 +1705,11 @@ boundary leaves point location undecided and the edge was kept.
   comes back near it).
 * The check of solids with voids builds the outer shells' outlines once,
   and only when a void is found, not once per void.
-* A NURBS course in a plane's chart gets the tracks' rounding allowance,
-  `10⁻¹³ (1 + size)`, instead of `10⁻¹⁵`: it has not run in a boolean
-  before (every plane face bounded by a conic also borders a curved
-  face, which refused first).
+* A NURBS course in a plane's chart gets the tracks' positional
+  allowance, `10⁻¹³ (1 + size + the chart's size)` (§16.2), instead of
+  `10⁻¹⁵`: it has not run in a boolean before (every plane face bounded
+  by a conic also borders a curved face, which refused first). Every
+  course's allowance now counts the chart's size as well as its own.
 * The foot of a point on half an ellipse is also found by the ellipse's
   eccentric angle, and the nearer of the two taken: near the ends of the
   half, on its minor axis, the conic's parameter runs ever faster (`ξ' =
@@ -1686,12 +1735,35 @@ boundary leaves point location undecided and the edge was kept.
   a sphere is refused, naming the sphere; the foot of a point near the
   ends of half an ellipse; two hyperbolas apart only at their vertices
   make two segments; a sag that halving does not narrow is refused;
-  halving every kind of course from the origin to 10⁸ m from it narrows
-  its sag below four times its floor before the parameter's last bit,
-  and near the origin below a sixteenth of the tolerance; points on the
-  ellipse a cut leaves on a rod 1 m to 3,000 km from the origin are
-  located at once; the probes by turning sit at their fractions along
-  an ellipse's and a NURBS ellipse's stretches past a half turn.
+  halving every kind of course stops before the parameter's last bit,
+  its sag below four times its floor (a conic track's within a
+  thousandth of it): NURBS ellipses on planes and cylinders, circles on
+  cones, conic tracks (some stretches 10⁶ m and more from their
+  vertices) and rational Bézier pieces as large as their distance from
+  the origin with weights' ratios up to 10⁴, from the origin to 10⁸ m
+  from it, and the hyperbolas of cones cut a millimetre off their axes,
+  to 5·10⁵ m (meet refuses conics farther out); where it stops the sags
+  are under a sixteenth of the tolerance near the origin (within 10² m;
+  the hyperbolas to 10⁴ m, the Bézier pieces at the origin, up to 2 m
+  across), and a conic track's wherever its floor is under it by a
+  thousandth (parabolas 260 km to 880 km from their vertices, one just
+  past that held over it); the exact courses of conic tracks in planes'
+  and cones' charts (the anchor up to 10⁴ m from the vertex, stretches
+  1 m to 10⁷ m from it, half ellipses to their ends, where `w` is under
+  10⁻⁷) lie within their bands, as do those of NURBS arcs in cylinders'
+  and cones' charts whose point lies up to 10⁶ m from them along the
+  axis, and the hull distances of NURBS curves in planes' charts
+  (degrees two to five, weights' ratios to 10⁴, 1 m to 10¹⁰ m from the
+  origin, stretches down to 10⁻¹² of a piece) round within their
+  allowance, against double-double references (`chart_rounding.rs`);
+  each of these fails without its allowance, its floor, its weights'
+  term, the chart's part of the slack of a track or of a NURBS course,
+  or a conic's halving to its floor (ten mutations checked); points on
+  the ellipse a cut leaves on a rod 1 m to
+  3,000 km from the origin are located at once; the probes by turning,
+  through the stages' own entry, sit at their fractions along stretches
+  past a half turn of an ellipse, of a NURBS ellipse in quarters, and of
+  one cubic piece holding an arc of 238° of an ellipse.
 * Golden second cuts, all four operations with exact volumes, counts
   and origins: a conic-edged body against a box far away; a rod cut by
   a tilted plane and then by a second plane crossing the first ellipse
@@ -1701,9 +1773,14 @@ boundary leaves point location undecided and the edge was kept.
   the hyperbola's vertex and flattened again on its other side; re-cuts
   in the same plane and with the same cone (a stored edge and the track
   where faces meet coincide, §16.3); a cut that leaves a void beside
-  an ellipse; and a rod cut twice at the origin and from 1 km to
-  3,000 km from it, its volume within a millionth where it is cut,
-  refused as too far beyond, and soon either way.
+  an ellipse; a rod cut twice at the origin and from 1 km to 3,000 km
+  from it, its volume within a millionth where it is cut (to 30 km),
+  refused as too far beyond, and soon either way; a cone's hyperbola a
+  millimetre or a centimetre off its axis cut again from the origin to
+  100 km from it, within 2·10⁻⁹ in volume of the cut at the origin to
+  30 km; and, first cuts, cones 1 m to 400 km tall cut by a plane
+  parallel to their axis, within 10⁻¹² in volume over size cubed, and
+  one 600 km tall refused (its hyperbola's vertex too far away, §14).
 * Fuzz: second cuts of random cut cones and cut rods, and chains of
   three or four cuts, with the volume identities and point membership,
   at 50 times their size, asserting that no refusal names a free-form
@@ -1780,16 +1857,18 @@ it. Besides them:
   points, with a search at each local least, many of them along a line
   parallel to the axis; lines and circles now take closed forms and
   NURBS curves the convex hulls of their pieces first. Validating the
-  tilted countersunk plate fell from 13.8 ms to 4.9 ms, the median of
+  tilted countersunk plate fell from 14.3 ms to 4.2 ms, the median of
   12 runs interleaved with main's, and cutting its holes in one boolean
-  from 41.7 ms to 25.7 ms. The band of a NURBS course in a plane's chart
+  from 41.1 ms to 24.3 ms. The band of a NURBS course in a plane's chart
   uses its trace's pieces instead of splitting the curve again for every
-  chord. A cut one at a time into conic-edged cones takes TWICE as long
-  as one into the straight countersinks, most of it in the bands of
-  their courses (a known slow spot there).
+  chord. A cut one at a time into conic-edged cones takes about twice as
+  long as one into the straight countersinks (16 take 197 ms against
+  102 ms), most of it in the bands of their courses (a known slow spot
+  there).
 * **The second review** (of the fixes and the speed work above) had six
-  findings confirmed by at least two of three skeptics, each fixed with
-  a test that fails without the fix:
+  findings confirmed by at least two of three skeptics: five fixed, each
+  with a test that fails without the fix, and a false claim in the
+  code's documentation corrected:
   * the validator's quick test of a circle against its face's axis took
     the least singular value of its frame as the square root of a
     difference of eigenvalues, which loses about `√ε` where the circle's
@@ -1808,7 +1887,8 @@ it. Besides them:
     that turns past a half turn (§16.3,
     `probes_by_turning_follow_stretches_past_a_half_turn`);
   * a claim in the code's documentation that every halving quarters a
-    sag, false for a NURBS course on a plane (§16.2).
+    sag, false for a NURBS course on a plane (§16.2; a second copy of
+    it, on the refinement's rounds, survived until the third review).
 
   Three more were not confirmed, and were acted on all the same: a
   broken link in the code's documentation; a conic track's rounding
@@ -1817,3 +1897,85 @@ it. Besides them:
   though sampling finds its least at an end. Such an edge runs along
   the axis within the tolerance all its length, and the closed form for
   lines now says so (`line_through_axis`).
+* **The third review** (of everything above) had six findings confirmed
+  by at least two of three skeptics:
+  * the probes by turning broke a NURBS course only at its knots, but a
+    piece of degree three or more can turn past a half turn within a
+    span (an arc of 238° of an ellipse as one cubic piece), and the
+    probes crowded as before; a piece is now halved until its control
+    points' differences show it turns less (§16.3);
+  * the test of the probes by turning called the helpers itself for a
+    NURBS course, so it could not fail when the stages' own entry
+    changed; it now goes through that entry
+    (`probes_by_turning_follow_stretches_past_a_half_turn`);
+  * a conic track's allowance for rounding, `10⁻¹³` of its reach,
+    refused first cuts main did: a cone 20 km tall cut by a plane
+    parallel to its axis, though both operands sat at the origin. The
+    allowance is now 32 ε of the reach, set by measurement against
+    double-double references (§16.2), and STATUS no longer says such
+    refusals need a conic edge on an operand
+    (`first_cuts_of_large_cones_finish`);
+  * the halving test could not fail without the conic track's floor or
+    the NURBS courses' on planes, only the floor of NURBS courses on
+    cylinders and cones; it now covers far conic stretches, the
+    hyperbolas of cones cut off their axes and large unevenly weighted
+    pieces, and fails without either floor
+    (`sags_narrow_to_their_floors`);
+  * STATUS said a rod was cut twice up to 3,000 km from the origin; it is
+    cut to 30 km and refused at 300 km, as its test allows;
+  * the documentation of the refinement's rounds still said each round
+    quarters the bands it halves, and the second review's entry above
+    said all six of its findings were fixed with tests; both corrected.
+
+  One finding fell short of a majority of the skeptics (the refusal it
+  found was new, not a regression from main) and was acted on: the floor of a
+  NURBS course on a plane, in proportion to its weights' ratio times its
+  whole size, refused second cuts across a cone's hyperbola a
+  millimetre off its axis from 1 km from the origin, where halving
+  further resolves them exactly. Measured against double-double
+  references, the weights' ratio enters only through the rounding of the
+  clip's parameters, in proportion to the curve's own size; the floor
+  is now the derived bound of §16.2, carried in the sag's bound as its
+  allowance, and such cuts are done to 30 km
+  (`second_cuts_of_uneven_hyperbolas_far_from_the_origin`). The same
+  measurements found the positional allowance missing the chart's own
+  size: a conic's chart points strayed up to 26 times it with the
+  chart's anchor 10⁴ m from the conic's vertex; it now includes it
+  (§16.2). The tests of both measurements stay
+  (`conic_courses_lie_within_their_bands`,
+  `hull_distances_round_within_their_allowance`), and each of the seven
+  ways of dropping an allowance, a floor or a term of either fails one
+  of them or the halving test.
+* **The fourth review** (of the retuned allowances and their tests) had
+  six findings confirmed by at least two of three skeptics:
+  * halving stopped at four floors, though a conic track's bound settles
+    on its floor itself: with the floor between a quarter of the
+    sixteenth and the sixteenth (220 km to 880 km of reach) a chord
+    could stop over the sixteenth and refuse a boolean that more halving
+    resolves, a cone 400 km tall cut by a plane parallel to its axis
+    among them. A sag now says whether it settles on its floor, and
+    such a chord is halved to within a thousandth of the floor (§16.2;
+    `conic_sags_settle_on_their_floors`, and the cone 400 km tall is
+    now cut in `first_cuts_of_large_cones_finish`);
+  * that test required the cone 300 km tall to be cut, which it was by
+    0.5% (its end chord stopped at 0.995 of the sixteenth), and its
+    documentation put the hyperbola's reach at 200 km where it is 281 km;
+    it now holds a margin, and asserts the refusal of a cone 600 km
+    tall by meet (two findings);
+  * no test failed without the chart's part of a NURBS course's slack:
+    the course in a cylinder's or a cone's chart whose point lies far
+    along the axis is now checked against double-double references
+    (`developed_courses_lie_within_their_bands`);
+  * the conic band test's points near a half ellipse's end were never
+    checked below `w` of about 3·10⁻⁷, its stretch there being under the
+    parameter's last bit; they are now taken by the last bits, `w` to
+    10⁻⁹ and less;
+  * §16.5 and the halving test's documentation claimed the off-axis
+    hyperbolas to 10⁸ m from the origin (they are tested to 5·10⁵ m) and
+    large Bézier pieces down to the sixteenth (none was checked); the
+    claims are corrected and the pieces at the origin now checked.
+
+  Each of ten ways of dropping an allowance, a floor, a term of either,
+  or a conic's halving to its floor now fails one of the rounding
+  tests or the halving tests, and without that halving the golden test
+  of large cones fails, its cone 400 km tall refused.
