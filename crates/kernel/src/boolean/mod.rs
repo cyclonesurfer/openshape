@@ -57,6 +57,33 @@ mod shape;
 #[cfg(test)]
 pub(crate) mod testing;
 
+/// Counts of the work of stages whose cost the crate's tests check grows
+/// in proportion to their input, in the thread that does it.
+#[cfg(test)]
+pub(crate) mod work {
+    use std::cell::Cell;
+    use std::thread::LocalKey;
+
+    thread_local! {
+        /// Coedges looked at in finding a face's runs lying on a plane
+        /// (`imprint::lying_runs`).
+        pub static RUNS: Cell<usize> = const { Cell::new(0) };
+        /// Sides of a region's outer cycle looked at in placing a point in
+        /// it (`planar::regions`).
+        pub static SIDES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Adds `n` to `counter`.
+    pub fn add(counter: &'static LocalKey<Cell<usize>>, n: usize) {
+        counter.with(|c| c.set(c.get() + n));
+    }
+
+    /// The count of `counter`, which is set to zero.
+    pub fn take(counter: &'static LocalKey<Cell<usize>>) -> usize {
+        counter.with(|c| c.replace(0))
+    }
+}
+
 use chart::Chart;
 use classify::Class;
 use imprint::Relation;
@@ -65,18 +92,20 @@ use points::Points;
 use shape::Shape;
 
 /// Work limits (docs/PERFORMANCE.md): pairs of faces that meet, pairs of
-/// edges near each other, candidate points, and segments of the result's
-/// edges. Every stage takes time in proportion to these (times a
-/// logarithm), so the limits bound a boolean's time and memory whatever its
-/// input. The defaults are far above any part a person models (a result of
-/// a million faces); a boolean past one is refused rather than left to run
-/// for minutes.
+/// edges near each other, candidate points, segments of the result's
+/// edges, and steps of the strip checks of design note 0012 §20
+/// ([`imprint::STRIP_STEPS`]). Every stage takes time in proportion to
+/// these (times a logarithm), so the limits bound a boolean's time and
+/// memory whatever its input. The defaults are far above any part a
+/// person models (a result of a million faces); a boolean past one is
+/// refused rather than left to run for minutes.
 #[derive(Clone, Copy, Debug)]
 struct Limits {
     face_pairs: usize,
     edge_pairs: usize,
     points: usize,
     segments: usize,
+    strip_steps: usize,
 }
 
 const LIMITS: Limits = Limits {
@@ -84,6 +113,7 @@ const LIMITS: Limits = Limits {
     edge_pairs: 8_000_000,
     points: 4_000_000,
     segments: 8_000_000,
+    strip_steps: imprint::STRIP_STEPS,
 };
 
 fn too_large(what: &str, limit: usize) -> KernelError {
@@ -494,7 +524,7 @@ fn boolean_within(
     ];
     // What the strip checks share: the flat faces' outlines, built when a
     // strip first needs one, and the steps left for them.
-    let mut strips = imprint::StripSearch::new();
+    let mut strips = imprint::StripSearch::new(limits.strip_steps);
     // Each face's chart: its plane's frame, or its outline's.
     let charts: [Vec<Chart>; 2] = [Operand::First, Operand::Second].map(|op| {
         pair.get(op)
@@ -621,7 +651,9 @@ fn boolean_within(
             face_segs[1][fb].push(FaceSeg { seg: s, side: None });
         };
         if planes {
-            for (lo, hi) in imprint::plane_meeting(&pair, &pts, &mut strips, fa, fb, zero)? {
+            for (lo, hi) in
+                imprint::plane_meeting(&pair, &pts, &outlines, &mut strips, fa, fb, zero)?
+            {
                 for w in pts.split_segment(lo, hi)?.windows(2) {
                     imprint(segs.add(w[0], w[1], Course::Straight, Source::Meet(fa, fb)));
                 }
@@ -2470,6 +2502,185 @@ mod tests {
             "{} vs {ring}",
             signed[thin[0]]
         );
+    }
+
+    /// A block from x = −0.25 to 2`k` − 0.75 and y = −1 to 1 under z = 0,
+    /// with `k` notches through it from x = 2i to 2i + 1 back to y = 0, and
+    /// a prism on the plane through the x axis leaning 10° whose face's
+    /// edge lies 5 tolerances off the axis over each notch, turning away
+    /// from the axis between them: `k` strips over gaps, each searched in
+    /// full and none held (the touching goldens' golden 35, `k` times).
+    fn notches_and_runs(k: usize) -> (Brep, Brep) {
+        use crate::{ExtrudeSpec, Profile};
+        let kernel = BrepKernel::default();
+        let w = 5.0 * kernel.tolerance().linear;
+        let extrude = |frame: Frame, pts: Vec<(f64, f64)>, distance: f64| {
+            let pts: Vec<DVec2> = pts.into_iter().map(|(x, y)| DVec2::new(x, y)).collect();
+            let body = kernel
+                .extrude(
+                    &Profile::polygon(frame, &pts),
+                    &ExtrudeSpec {
+                        distance,
+                        symmetric: false,
+                    },
+                )
+                .expect("a prism");
+            (*body.brep).clone()
+        };
+        let end = 2.0 * k as f64;
+        let mut block = vec![(-0.25, -1.0)];
+        let mut prism = vec![(-0.5, -0.5)];
+        for i in 0..k {
+            let x = 2.0 * i as f64;
+            block.extend([(x, -1.0), (x, 0.0), (x + 1.0, 0.0), (x + 1.0, -1.0)]);
+            prism.extend([(x, -w), (x + 1.0, -w), (x + 1.5, -0.5)]);
+        }
+        block.extend([(end - 0.75, -1.0), (end - 0.75, 1.0), (-0.25, 1.0)]);
+        prism.extend([(end, -0.5), (end, 0.5), (-0.5, 0.5)]);
+        let t = 10f64.to_radians();
+        let tilted = Frame {
+            origin: DVec3::ZERO,
+            x: DVec3::X,
+            y: DVec3::new(0.0, t.cos(), t.sin()),
+            z: DVec3::new(0.0, -t.sin(), t.cos()),
+        };
+        let below = Frame {
+            origin: DVec3::new(0.0, 0.0, -1.0),
+            ..Frame::WORLD
+        };
+        (extrude(below, block, 1.0), extrude(tilted, prism, 0.5))
+    }
+
+    /// The strip checks of one boolean draw on one budget of steps
+    /// (`Limits::strip_steps`): the fewest steps within which the
+    /// intersection of [`notches_and_runs`] is answered, refused as too
+    /// large below them, is at least `k` times that of one strip for `k`
+    /// strips; with a budget of its own for each strip, it would be about
+    /// that of one.
+    #[test]
+    fn the_strip_checks_of_one_boolean_share_their_steps() {
+        let tol = Tolerance::default();
+        let fewest = |k: usize| {
+            let (a, b) = notches_and_runs(k);
+            let within = |strip_steps: usize| {
+                let limits = Limits {
+                    strip_steps,
+                    ..LIMITS
+                };
+                match boolean_within(&a, &b, BooleanOp::Intersect, &tol, &limits) {
+                    Ok(_) => true,
+                    Err(KernelError::TooLarge(m)) if m.contains(imprint::STRIP_WORK) => false,
+                    Err(e) => panic!("{k} strips, {strip_steps} steps: {e:?}"),
+                }
+            };
+            // Answered within `hi` steps, refused within `lo`.
+            let (mut lo, mut hi) = (0, LIMITS.strip_steps);
+            assert!(within(hi) && !within(lo));
+            while hi - lo > 1 {
+                let mid = lo + (hi - lo) / 2;
+                if within(mid) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            hi
+        };
+        let one = fewest(1);
+        for k in [2, 4] {
+            assert!(fewest(k) >= k * one, "{k} strips");
+        }
+    }
+
+    /// A prism of thickness 0.5 on the plane through the x axis leaning 10°
+    /// toward +y, its profile `pts` in that plane (x along the axis).
+    fn leaning(pts: impl IntoIterator<Item = (f64, f64)>) -> Brep {
+        use crate::{ExtrudeSpec, Profile};
+        let t = 10f64.to_radians();
+        let frame = Frame {
+            origin: DVec3::ZERO,
+            x: DVec3::X,
+            y: DVec3::new(0.0, t.cos(), t.sin()),
+            z: DVec3::new(0.0, -t.sin(), t.cos()),
+        };
+        let pts: Vec<DVec2> = pts.into_iter().map(|(x, y)| DVec2::new(x, y)).collect();
+        let body = BrepKernel::default()
+            .extrude(
+                &Profile::polygon(frame, &pts),
+                &ExtrudeSpec {
+                    distance: 0.5,
+                    symmetric: false,
+                },
+            )
+            .expect("a prism");
+        (*body.brep).clone()
+    }
+
+    /// [`leaning`] with its face's edge from x = 0 to 1 in `n` segments
+    /// whose corners lie `w(i)` off the axis, between the profile's corners
+    /// at (−0.5, −0.5), (0, −0.5), (1, −0.5), (2, −0.5), (2, 0.5) and
+    /// (−0.5, 0.5) (`tests/timing.rs`' zigzag and comb).
+    fn teeth(n: usize, w: impl Fn(usize) -> f64) -> Brep {
+        let mut pts = vec![(-0.5, -0.5), (0.0, -0.5)];
+        pts.extend((0..=n).map(|i| (i as f64 / n as f64, w(i))));
+        pts.extend([(1.0, -0.5), (2.0, -0.5), (2.0, 0.5), (-0.5, 0.5)]);
+        leaning(pts)
+    }
+
+    /// The strip checks of an edge of `n` segments zigzagging between 4 and
+    /// 2 tolerances off the axis over a notch in a block's top (`tests/
+    /// timing.rs`' zigzag: a run and an apex at every other corner, each a
+    /// chain) take steps in proportion to `n`: the intersection is answered
+    /// within 300 steps a segment, at 256 and 1,024 segments. Searching
+    /// every edge near the plane for each chain, rather than those near
+    /// its strip, takes about n² / 2.
+    #[test]
+    fn the_strip_checks_of_a_long_edge_take_steps_in_proportion_to_it() {
+        let tol = Tolerance::default();
+        let eps = tol.linear;
+        let notched = notches_and_runs(1).0;
+        for n in [256, 1024] {
+            let zigzag = teeth(n, |i| if i % 2 == 0 { -4.0 * eps } else { -2.0 * eps });
+            let limits = Limits {
+                strip_steps: 300 * n,
+                ..LIMITS
+            };
+            let r = boolean_within(&notched, &zigzag, BooleanOp::Intersect, &tol, &limits);
+            assert!(r.is_ok(), "{n}: {:?}", r.map(|_| ()));
+        }
+    }
+
+    /// A face crossing a block's top `n` times along one line (`tests/
+    /// timing.rs`' comb): the coedges looked at in finding the faces' runs
+    /// lying on the other's plane, and the sides of regions' cycles looked
+    /// at in placing points in them, grow in proportion to `n`, not to its
+    /// square (found by profiling, where the runs were found again for
+    /// each stretch of the meeting and long cycles were walked whole for
+    /// each point).
+    #[test]
+    fn a_face_crossing_another_many_times_costs_in_proportion() {
+        let tol = Tolerance::default();
+        let block = {
+            let frame = Frame {
+                origin: DVec3::new(-0.25, -1.0, -1.0),
+                ..Frame::WORLD
+            };
+            let body = BrepKernel::default()
+                .make_box(&frame, DVec3::new(1.5, 2.0, 1.0))
+                .expect("a block");
+            (*body.brep).clone()
+        };
+        let work = |n: usize| {
+            let comb = teeth(n, |i| if i % 2 == 0 { -1e-3 } else { 1e-3 });
+            work::take(&work::RUNS);
+            work::take(&work::SIDES);
+            boolean_within(&block, &comb, BooleanOp::Intersect, &tol, &LIMITS).expect("the teeth");
+            [work::take(&work::RUNS), work::take(&work::SIDES)]
+        };
+        let (small, large) = (work(256), work(1024));
+        for (s, l) in small.into_iter().zip(large) {
+            assert!(s > 0 && l <= 6 * s, "{s} to {l}");
+        }
     }
 
     #[test]

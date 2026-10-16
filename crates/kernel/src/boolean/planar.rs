@@ -898,6 +898,8 @@ pub(super) fn regions(
     let in_cycle = |i: usize, q: DVec2, cells: &[Cell]| -> bool {
         let c = &cells[i].cycle;
         if c.len() <= LONG_LOOP {
+            #[cfg(test)]
+            super::work::add(&super::work::SIDES, c.len());
             return contains(c, q, p, &from);
         }
         let outline = outlines[i].get_or_init(|| {
@@ -905,7 +907,11 @@ pub(super) fn regions(
             let sides = (0..c.len()).map(|k| (corner(k), corner(k + 1))).collect();
             FlatOutline::new(sides, vec![0, c.len()])
         });
-        outline.inside(q, &mut 0)
+        let mut seen = 0;
+        let inside = outline.inside(q, &mut seen);
+        #[cfg(test)]
+        super::work::add(&super::work::SIDES, seen);
+        inside
     };
     // The smallest cell around `q` (farther than its reach from every
     // chord), other than of component `skip`.

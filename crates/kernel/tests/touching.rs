@@ -13,10 +13,12 @@
 //! same as with the touching body moved clear of the other
 //! (`as_if_apart`).
 
+use std::f64::consts::{FRAC_PI_2, PI};
+
 use opendatum_kernel::{
     Body, BooleanOp, BrepKernel, CurveKind, DVec2, DVec3, EdgeOrigin, ExtrudeSpec, FaceIx,
-    FaceOrigin, Frame, Kernel, KernelError, Merged, Operand, Origins, Profile, TessellationOptions,
-    Tolerance, VertexOrigin,
+    FaceOrigin, Frame, Kernel, KernelError, Merged, Operand, Origins, Profile, ProfileCurve,
+    TessellationOptions, Tolerance, VertexOrigin,
 };
 
 mod self_contact;
@@ -161,14 +163,15 @@ fn counts(b: &Body) -> (usize, usize, usize, usize) {
 }
 
 /// The outcome of `a op b`: a refusal's text, "empty", or the result's
-/// counts, volume over `s`³ and area over `s`²; a result must validate and
-/// have origins that agree with the operands.
-fn outcome(a: &Body, b: &Body, o: BooleanOp, s: f64) -> String {
+/// counts, volume over `s`³ and area over `s`²; a result must validate,
+/// have origins that agree with the operands, and not touch itself, as
+/// measured on a mesh within `chord` of it ([`alone_meshed`]).
+fn outcome_meshed(a: &Body, b: &Body, o: BooleanOp, s: f64, chord: f64) -> String {
     match k().boolean(a, b, o) {
         Ok(r) => {
             assert_eq!(k().validate(&r), Vec::<String>::new(), "{o:?}");
             origins_agree(a, b, &r, o).unwrap_or_else(|e| panic!("{o:?}: {e}"));
-            alone(&r, o);
+            alone_meshed(&r, o, chord);
             format!(
                 "{:?} V={:.9} A={:.9}",
                 counts(&r),
@@ -178,20 +181,26 @@ fn outcome(a: &Body, b: &Body, o: BooleanOp, s: f64) -> String {
         }
         Err(KernelError::InvalidInput(m)) if m == "the result would be empty" => "empty".into(),
         Err(KernelError::InvalidInput(m)) => format!("refused: {m}"),
+        Err(KernelError::Unsupported(m)) => format!("unsupported: {m}"),
         Err(e) => panic!("{o:?}: {e:?}"),
     }
 }
 
 /// The outcomes of A ∪ B, B ∪ A, A ∩ B, B ∩ A, A − B and B − A.
 fn six(a: &Body, b: &Body, s: f64) -> [String; 6] {
+    six_meshed(a, b, s, CHORD)
+}
+
+/// [`six`] with [`outcome_meshed`].
+fn six_meshed(a: &Body, b: &Body, s: f64, chord: f64) -> [String; 6] {
     use BooleanOp::*;
     [
-        outcome(a, b, Union, s),
-        outcome(b, a, Union, s),
-        outcome(a, b, Intersect, s),
-        outcome(b, a, Intersect, s),
-        outcome(a, b, Subtract, s),
-        outcome(b, a, Subtract, s),
+        outcome_meshed(a, b, Union, s, chord),
+        outcome_meshed(b, a, Union, s, chord),
+        outcome_meshed(a, b, Intersect, s, chord),
+        outcome_meshed(b, a, Intersect, s, chord),
+        outcome_meshed(a, b, Subtract, s, chord),
+        outcome_meshed(b, a, Subtract, s, chord),
     ]
 }
 
@@ -220,11 +229,24 @@ fn run(a: &Body, b: &Body, o: BooleanOp) -> Body {
     r
 }
 
+/// How far the meshes the self-contact oracle measures may be from a
+/// result's curves and surfaces, unless a test says otherwise.
+const CHORD: f64 = 1e-4;
+
 /// Asserts that a result does not touch itself
 /// ([`self_contact::touches_itself`]).
 fn alone(r: &Body, o: BooleanOp) {
+    alone_meshed(r, o, CHORD);
+}
+
+/// [`alone`], measured on a mesh within `chord` of the result. The oracle
+/// takes a point within `chord` and half the tolerance of a face with
+/// curved edges or a curved face for a contact if it is on the face's
+/// surface, so a finer mesh tells a point just outside such a face from
+/// one on it.
+fn alone_meshed(r: &Body, o: BooleanOp, chord: f64) {
     let opts = TessellationOptions {
-        chord_tolerance: 1e-4,
+        chord_tolerance: chord,
         max_angle: 0.5,
     };
     let found =
@@ -1644,17 +1666,22 @@ fn a_blade_whose_section_by_a_face_is_a_sliver() {
 /// (u along x, w across, whether w is in tolerances).
 fn tilted(t: f64, pts: &[(f64, f64, bool)]) -> Body {
     let eps = k().tolerance().linear;
+    let p: Vec<DVec2> = (pts.iter())
+        .map(|&(u, w, tol)| DVec2::new(u, if tol { w * eps } else { w }))
+        .collect();
+    prism(tilted_frame(t), &p, 0.5)
+}
+
+/// [`tilted`]'s frame: its x along the x axis, its y up the plane through
+/// the x axis tilted `t` degrees toward +y.
+fn tilted_frame(t: f64) -> Frame {
     let t = t.to_radians();
-    let frame = Frame {
+    Frame {
         origin: DVec3::ZERO,
         x: DVec3::X,
         y: DVec3::new(0.0, t.cos(), t.sin()),
         z: DVec3::new(0.0, -t.sin(), t.cos()),
-    };
-    let p: Vec<DVec2> = (pts.iter())
-        .map(|&(u, w, tol)| DVec2::new(u, if tol { w * eps } else { w }))
-        .collect();
-    prism(frame, &p, 0.5)
+    }
 }
 
 /// Golden 28: a prism tilted 10° about the x axis whose bottom face's
@@ -2816,6 +2843,211 @@ fn a_corner_beside_the_line_that_is_no_apex() {
             [both, both, common, common, less, rest].map(String::from)
         );
     }
+}
+
+/// A body extruded 3 up from z = −2 by a circle in the xy plane.
+fn rod(c: DVec2, r: f64) -> Body {
+    let frame = Frame {
+        origin: DVec3::new(0.0, 0.0, -2.0),
+        ..Frame::WORLD
+    };
+    k().extrude(
+        &Profile::circle(frame, c, r),
+        &ExtrudeSpec {
+            distance: 3.0,
+            symmetric: false,
+        },
+    )
+    .expect("a rod")
+}
+
+/// Golden 41: golden 32's prism, its edge 5 tolerances off the axis,
+/// against faces with curved edges (design note 0012 §20). A round bar
+/// whose top holds the strip, as golden 32's box does: every operation is
+/// refused. A slab whose round hole lies under the strip, which nothing
+/// then holds: answered as the contact, A ∩ B the two wedges. (Placed by
+/// their outlines in their planes, which take an arc by its chord, the
+/// bar's top held no point and the hole every point the slab's top did:
+/// the bar's A ∩ B was the wedges joined by the fin, and the hole was
+/// refused; found by review.) The prism's face turning away from the axis
+/// past the edge's end along a quarter circle instead of a line, which
+/// leaves the strip: refused as golden 32's box is. A round hole in the
+/// box's top whose rim passes 0.9 tolerances from the strip's far side:
+/// with the box first, its strip check refuses it as not supported; with
+/// the prism first the rim is refused first as a tangent contact; 1.5
+/// tolerances off, it is refused as golden 32's box is. A round hole of
+/// the prism's face whose rim dips 2 tolerances across the axis into the
+/// strip, over a gap in the slab's top under the whole strip: refused as
+/// not supported in every operation; dipping half a tolerance across, it
+/// stays within the band of the line, outside the strip, and is answered
+/// as the plain prism is over the gap.
+#[test]
+fn a_face_with_curved_edges_beside_the_line_where_the_faces_cross() {
+    let eps = k().tolerance().linear;
+    let b = beside(5.0);
+    let at = band_refusal("(500.000000, -0.000492, -0.000087) mm");
+    let bar = {
+        let frame = Frame {
+            origin: DVec3::new(0.0, 0.0, -1.0),
+            ..Frame::WORLD
+        };
+        k().extrude(
+            &Profile::circle(frame, DVec2::new(0.5, 0.0), 0.8),
+            &ExtrudeSpec {
+                distance: 1.0,
+                symmetric: false,
+            },
+        )
+        .expect("a bar")
+    };
+    assert_eq!(six(&bar, &b, 1.0), [at.as_str(); 6]);
+    let slab = cuboid(DVec3::new(-1.0, -1.0, -1.0), DVec3::new(3.0, 1.0, 0.0));
+    let holed = op(&slab, &rod(DVec2::new(0.5, 0.1), 0.75), BooleanOp::Subtract);
+    let both = "(17, 53, 36, 1) V=7.090039217 A=35.326561698";
+    let wedges = "(11, 23, 16, 2) V=0.017815290 A=1.058643475";
+    assert_eq!(
+        six_meshed(&holed, &b, 1.0, 1e-7),
+        [
+            both,
+            both,
+            wedges,
+            wedges,
+            "(15, 41, 28, 1) V=6.215038842 A=29.305379246",
+            "(13, 35, 24, 1) V=0.857185085 A=7.079825927",
+        ]
+        .map(String::from)
+    );
+    // The face's boundary past the edge's end at x = 1 a quarter circle.
+    let w = 5.0 * eps;
+    let line = |a: (f64, f64), b: (f64, f64)| ProfileCurve::Line {
+        start: DVec2::new(a.0, a.1),
+        end: DVec2::new(b.0, b.1),
+    };
+    let curves = vec![
+        line((-0.5, -0.5), (0.0, -w)),
+        line((0.0, -w), (1.0, -w)),
+        ProfileCurve::Arc {
+            center: DVec2::new(1.5, -w),
+            radius: 0.5,
+            start_angle: PI,
+            sweep_angle: FRAC_PI_2,
+        },
+        line((1.5, -0.5 - w), (2.0, -0.5 - w)),
+        line((2.0, -0.5 - w), (2.0, 0.5)),
+        line((2.0, 0.5), (-0.5, 0.5)),
+        line((-0.5, 0.5), (-0.5, -0.5)),
+    ];
+    let rounded = k()
+        .extrude(
+            &Profile {
+                plane: tilted_frame(10.0),
+                curves,
+            },
+            &ExtrudeSpec {
+                distance: 0.5,
+                symmetric: false,
+            },
+        )
+        .expect("a prism");
+    let boxed = cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(1.25, 1.0, 0.0));
+    assert_eq!(six(&boxed, &rounded, 1.0), [at.as_str(); 6]);
+    // The box with a round hole whose rim passes `d` tolerances beyond the
+    // strip's far side, at x = 0.5.
+    let far = w * 10f64.to_radians().cos();
+    let rim = |d: f64| {
+        let r = 0.2;
+        op(
+            &boxed,
+            &rod(DVec2::new(0.5, -far - d * eps - r), r),
+            BooleanOp::Subtract,
+        )
+    };
+    let curved = |at: &str| {
+        format!(
+            "unsupported: booleans where a face of one body runs within the tolerance of the \
+             other's surface beside a curved edge (design note 0012 §20) near {at}"
+        )
+    };
+    let (beside_rim, tangent) = (
+        curved("(1000.000000, -0.000492, -0.000087) mm"),
+        "unsupported: booleans where an edge of one body touches a face of the other without \
+         crossing it (a tangent contact; design note 0011 §4.4) near (500.000000, -0.000492, \
+         -0.000087) mm",
+    );
+    assert_eq!(
+        six(&rim(0.9), &b, 1.0),
+        [
+            &beside_rim,
+            tangent,
+            &beside_rim,
+            tangent,
+            &beside_rim,
+            tangent
+        ]
+        .map(String::from)
+    );
+    assert_eq!(six(&rim(1.5), &b, 1.0), [at.as_str(); 6]);
+    // The prism's face with a round hole whose rim dips `dip` tolerances
+    // across the axis, over a gap in a slab's top under the whole strip.
+    let gap = cuboid(DVec3::new(-0.2, -0.6, -2.0), DVec3::new(1.2, 0.6, 1.0));
+    let gapped = op(&slab, &gap, BooleanOp::Subtract);
+    let pierced = |dip: f64| {
+        let r = 0.1;
+        let frame = tilted_frame(10.0);
+        let pts = [
+            (-0.5, -0.5),
+            (0.0, -w),
+            (1.0, -w),
+            (1.5, -0.5),
+            (2.0, -0.5),
+            (2.0, 0.5),
+            (-0.5, 0.5),
+        ]
+        .map(|(x, y)| DVec2::new(x, y));
+        k().extrude(
+            &Profile::polygon(frame, &pts).with(Profile::circle(
+                frame,
+                DVec2::new(0.5, r - dip * eps),
+                r,
+            )),
+            &ExtrudeSpec {
+                distance: 0.5,
+                symmetric: false,
+            },
+        )
+        .expect("a pierced prism")
+    };
+    let (both, wedges, less) = (
+        "(19, 57, 38, 1) V=7.177103182 A=35.972428476",
+        "(11, 23, 16, 2) V=0.017897193 A=1.074679434",
+        "(17, 45, 30, 1) V=6.302102807 A=29.966380585",
+    );
+    assert_eq!(
+        six(&gapped, &b, 1.0),
+        [
+            both,
+            both,
+            wedges,
+            wedges,
+            less,
+            "(13, 35, 24, 1) V=0.857103182 A=7.080727325",
+        ]
+        .map(String::from)
+    );
+    assert_eq!(six(&gapped, &pierced(2.0), 1.0), [beside_rim.as_str(); 6]);
+    let both = "(21, 63, 42, 1) V=7.161395218 A=36.223755888";
+    assert_eq!(
+        six(&gapped, &pierced(0.5), 1.0),
+        [
+            both,
+            both,
+            wedges,
+            wedges,
+            less,
+            "(15, 41, 28, 1) V=0.841395218 A=7.332054737",
+        ]
+        .map(String::from)
+    );
 }
 
 /// A kernel a hundred times finer than the default, which builds bodies

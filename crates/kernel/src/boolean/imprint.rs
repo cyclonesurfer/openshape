@@ -815,10 +815,12 @@ struct Interval {
 /// boundary lying on the other's plane are checked ([`held_strips`]), for
 /// each face whose `zero` ([`Relation::Crossing`]) says its boundary has a
 /// mark within the tolerance of the other's plane: a face with none has no
-/// chain. The checks of one boolean share `strips`.
+/// chain. The checks of one boolean share `strips`, and place points in a
+/// face with curved edges by its chart's outline in `outlines`.
 pub(super) fn plane_meeting(
     pair: &Pair,
     pts: &Points,
+    outlines: &[Vec<Option<Outline>>; 2],
     strips: &mut StripSearch,
     fa: usize,
     fb: usize,
@@ -897,6 +899,7 @@ pub(super) fn plane_meeting(
     held_strips(
         pair,
         pts,
+        outlines,
         strips,
         dir,
         [
@@ -915,43 +918,50 @@ pub(super) fn plane_meeting(
 /// and far above rounding.
 const DEEP: f64 = 1.0 / 1024.0;
 
-/// Steps of the strip searches of one boolean, at most ([`held_strip`]):
-/// a stretch, an edge or a cut taken, a box tested, a clip of a segment or
-/// of a curve's piece against a piece of a strip, and a side or a loop of
-/// a face's outline met in placing a point are each one step, and building
-/// a face's outline is one for each of its sides.
-const STRIP_STEPS: usize = 1 << 22;
+/// Steps of the strip searches of one boolean, at most, by default
+/// ([`held_strip`]; `Limits::strip_steps`): a stretch, an edge or a cut
+/// taken, a box tested, a clip of a segment or of a curve's piece against
+/// a piece of a strip, and a side, a loop or a chord of a face's outline
+/// met in placing a point are each one step, and building a flat face's
+/// outline is one for each of its sides.
+pub(super) const STRIP_STEPS: usize = 1 << 22;
 
 /// What [`STRIP_STEPS`] counts, for the refusal.
-const STRIP_WORK: &str = "steps to test where a face runs within the tolerance of the other \
-                          body's surface (design note 0012 §20)";
+pub(super) const STRIP_WORK: &str = "steps to test where a face runs within the tolerance of \
+                                     the other body's surface (design note 0012 §20)";
 
-/// The steps the strip searches may still take ([`STRIP_STEPS`]).
-struct Budget(usize);
+/// The steps the strip searches may still take, of `limit`.
+struct Budget {
+    left: usize,
+    limit: usize,
+}
 
 impl Budget {
+    fn new(limit: usize) -> Budget {
+        Budget { left: limit, limit }
+    }
+
     fn spend(&mut self, n: usize) -> Result<(), KernelError> {
-        self.0 =
-            (self.0.checked_sub(n)).ok_or_else(|| super::too_large(STRIP_WORK, STRIP_STEPS))?;
+        self.left =
+            (self.left.checked_sub(n)).ok_or_else(|| super::too_large(STRIP_WORK, self.limit))?;
         Ok(())
     }
 }
 
-/// What the strip checks of one boolean share: the faces' outlines, each
-/// built when a strip first needs it, and the steps left
-/// ([`STRIP_STEPS`]), so the searches of all its strips together are
-/// bounded.
+/// What the strip checks of one boolean share: the flat faces' outlines,
+/// each built when a strip first needs it, and the steps left, so the
+/// searches of all its strips together are bounded.
 pub(super) struct StripSearch {
-    outlines: FlatOutlines,
+    flat: FlatOutlines,
     budget: Budget,
 }
 
 impl StripSearch {
-    /// No outline built and no step taken yet.
-    pub(super) fn new() -> StripSearch {
+    /// No outline built and no step taken yet, of `steps` at most.
+    pub(super) fn new(steps: usize) -> StripSearch {
         StripSearch {
-            outlines: FlatOutlines::new(),
-            budget: Budget(STRIP_STEPS),
+            flat: FlatOutlines::new(),
+            budget: Budget::new(steps),
         }
     }
 }
@@ -965,6 +975,7 @@ impl StripSearch {
 fn held_strips(
     pair: &Pair,
     pts: &Points,
+    outlines: &[Vec<Option<Outline>>; 2],
     strips: &mut StripSearch,
     dir: DVec3,
     sides: [(Operand, usize, &[Interval], bool); 2],
@@ -1005,6 +1016,7 @@ fn held_strips(
             held_strip(
                 pair,
                 pts,
+                outlines,
                 strips,
                 dir,
                 [(op, f), (them, g)],
@@ -1144,10 +1156,12 @@ fn strip_runs(
 /// to its foot there, which is linear and keeps straight edges straight.
 /// It does not take curved edges: one of `g` that may come within the
 /// search's reach of the strip, or one of `f` that may enter it, refuses
-/// the boolean as not supported.
+/// the boolean as not supported. A face with curved edges farther away
+/// places its points by its chart's outline in `outlines` ([`place`]).
 fn held_strip(
     pair: &Pair,
     pts: &Points,
+    outlines: &[Vec<Option<Outline>>; 2],
     strips: &mut StripSearch,
     dir: DVec3,
     [(op, f), (them, g)]: [(Operand, usize); 2],
@@ -1187,7 +1201,7 @@ fn held_strip(
     let in_p = |p: DVec3| DVec2::new((p - o).dot(dir), (p - o).dot(up));
     let on_f = |v: DVec2| o + dir * v.x + across * (v.y / cos);
     let on_g = |v: DVec2| o + dir * v.x + up * v.y;
-    let (outlines, budget) = (&strips.outlines, &mut strips.budget);
+    let (flat, budget) = (&strips.flat, &mut strips.budget);
     let feet: Vec<DVec2> = chain.points.iter().map(|&p| foot(p)).collect();
     // A point of f's plane `t` across L lies `t sin` off P along `ng`, so
     // the layer between it and P runs from it along −sign(t sin) `ng`, and
@@ -1288,17 +1302,28 @@ fn held_strip(
             return Err(curved_beside(on_f(strip.pieces[0].corners[0])));
         }
     }
-    // The faces' outlines, for where a point lies against each (a step for
-    // each side, once, when one is first built).
-    let (outline_f, outline_g) = (outlines.get(pair, op, f), outlines.get(pair, them, g));
-    for (o, fresh) in [outline_f, outline_g] {
-        if fresh {
-            budget.spend(o.len())?;
+    // How a point is placed against each face: a flat face by its loops
+    // in its plane (a step for each side, once, when its outline is first
+    // built), a face with curved edges by its chart's outline, which
+    // follows them (found by review: a flat face's outline takes a curved
+    // edge by its chord, so a round cap held no point, and a round hole
+    // every point its outer loop did).
+    let mut against = |op: Operand, f: usize| -> Result<Against, KernelError> {
+        match &outlines[slot(op)][f] {
+            Some(o) => Ok(Against::Chart(o)),
+            None => {
+                let (o, fresh) = flat.get(pair, op, f);
+                if fresh {
+                    budget.spend(o.len())?;
+                }
+                Ok(Against::Flat(o))
+            }
         }
-    }
+    };
+    let (against_f, against_g) = (against(op, f)?, against(them, g)?);
     let found = held_point(&strip, &cuts, &near, rho, budget, |v, budget| {
-        Ok(place(outline_g.0, gf, on_g(v), eps, budget)? == Some(true)
-            && place(outline_f.0, face, on_f(v), eps, budget)? != Some(false))
+        Ok(place(&against_g, gf, on_g(v), eps, budget)? == Some(true)
+            && place(&against_f, face, on_f(v), eps, budget)? != Some(false))
     })?;
     match found {
         Some(v) => Err(KernelError::InvalidInput(format!(
@@ -1310,23 +1335,39 @@ fn held_strip(
     }
 }
 
-/// Where `p`, on the plane of the flat face `f` whose outline is
-/// `outline`, lies against the face, as [`locate`] decides it:
-/// `Some(true)` inside, `Some(false)` outside, `None` within `eps` of its
-/// boundary; a step, and one for each loop and side looked at.
+/// The outline [`place`] places a point against a face of a plane by.
+enum Against<'s, 'a> {
+    /// A flat face's loops in its plane ([`Face::to2`]).
+    Flat(&'s FlatOutline),
+    /// The chart's outline of a face with curved edges ([`outlines`]),
+    /// which follows them.
+    Chart(&'s Outline<'a>),
+}
+
+/// Where `p`, on the plane of face `f`, lies against the face by its
+/// outline `against`: `Some(true)` inside, `Some(false)` outside, `None`
+/// within `eps` of its boundary. A flat face's is decided in its plane
+/// (within `eps` of a side, or else by the parity of a ray across its
+/// sides), a face with curved edges as [`locate`] decides it. A step, and
+/// one for each loop, side or chord looked at.
 fn place(
-    outline: &FlatOutline,
+    against: &Against,
     f: &Face,
     p: DVec3,
     eps: f64,
     budget: &mut Budget,
 ) -> Result<Option<bool>, KernelError> {
-    let q = f.to2(p);
     let mut seen = 0;
-    let at = if outline.near(q, eps, &mut seen) {
-        None
-    } else {
-        Some(outline.inside(q, &mut seen))
+    let at = match against {
+        Against::Flat(outline) => {
+            let q = f.to2(p);
+            if outline.near(q, eps, &mut seen) {
+                None
+            } else {
+                Some(outline.inside(q, &mut seen))
+            }
+        }
+        Against::Chart(o) => o.locate_counting(o.chart.map(p), eps, eps / 16.0, &mut seen),
     };
     budget.spend(1 + seen)?;
     Ok(at)
@@ -1529,6 +1570,8 @@ fn lying_runs(
     };
     let mut near = Vec::new();
     face.near_surface(&pair.get(other(op)).surfaces[surface], pts.eps, &mut near);
+    #[cfg(test)]
+    super::work::add(&super::work::RUNS, near.len());
     for k in near {
         let (li, i) = face.coedge_at(k);
         let n = face.loops[li].len();
@@ -2920,11 +2963,11 @@ mod tests {
                     && distance(v, &ge) > eps
                     && (inside(v, &fe) || distance(v, &fe) <= eps)
             };
-            let mut budget = Budget(STRIP_STEPS);
+            let mut budget = Budget::new(STRIP_STEPS);
             let got = held_point(&strip, &fe, &ge, rho, &mut budget, |v, _| Ok(holds(v))).unwrap();
             if let Some(v) = got {
                 assert!(holds(v), "case {case}: {v} fails the test");
-                assert!(strip.contains(v, &mut Budget(STRIP_STEPS)).unwrap());
+                assert!(strip.contains(v, &mut Budget::new(STRIP_STEPS)).unwrap());
                 found[case % 2] += 1;
             }
             let n = 160;
@@ -2976,7 +3019,7 @@ mod tests {
         let holds = |v: DVec2| {
             inside(v, &ge) && distance(v, &ge) > eps && (inside(v, &fe) || distance(v, &fe) <= eps)
         };
-        let mut budget = Budget(STRIP_STEPS);
+        let mut budget = Budget::new(STRIP_STEPS);
         let got = held_point(&strip, &fe, &ge, rho, &mut budget, |v, _| Ok(holds(v))).unwrap();
         let v = got.expect("the small face is found");
         assert!(distance(v, &fe) < 1e-9, "{v}");
@@ -3031,7 +3074,7 @@ mod tests {
         let fe = edges(&f);
         let holds = |v: DVec2| inside(v, &ge) && distance(v, &ge) > eps && inside(v, &fe);
         assert!(inside(centre, &ge) && distance(centre, &ge) > rho);
-        let mut budget = Budget(STRIP_STEPS);
+        let mut budget = Budget::new(STRIP_STEPS);
         let got = held_point(&strip, &fe, &ge, rho, &mut budget, |v, _| Ok(holds(v))).unwrap();
         let v = got.expect("the region bounded by arcs is found");
         assert!((v - centre).length() < 0.3 * rho, "{v}");
@@ -3040,7 +3083,7 @@ mod tests {
     /// The strip of `feet` on `sides` with the meeting `lines`
     /// ([`strip_of`]), at ε = 1 and with the planes' cosine 1.
     fn strip(feet: &[DVec2], sides: &[f64], lines: &[(DVec2, DVec2)]) -> Vec<Piece> {
-        let mut budget = Budget(STRIP_STEPS);
+        let mut budget = Budget::new(STRIP_STEPS);
         strip_of(feet, sides, lines.to_vec(), 1.0, 1.0, &mut budget).unwrap()
     }
 
@@ -3110,6 +3153,109 @@ mod tests {
         }
     }
 
+    /// The strip check of a run of a prism's face lying on the plane of a
+    /// block's top (the tolerance 10⁻³; the planes 0.25° apart, the run 0.2
+    /// off the line where they cross, the strip between), the face having a
+    /// hole inside the strip and the block's top lying in the strip: a
+    /// diamond hole holding the middles of the sides of the top's region
+    /// deeper than ρ, and a rectangle holding all of that region.
+    /// Where the corners of that region are left in the face, held and
+    /// bounded only by the hole's edges, the check finds them through the
+    /// face's own edges that enter the strip (design note 0012 §20,
+    /// *Finding a held point*): each line it tests elsewhere has its middle
+    /// outside the top or in the hole.
+    #[test]
+    fn the_strip_check_takes_its_faces_edges_that_enter_the_strip() {
+        use crate::math::Frame;
+        use crate::{BrepKernel, ExtrudeSpec, Kernel, Profile, Tolerance};
+        let tol = Tolerance {
+            linear: 1e-3,
+            ..Tolerance::default()
+        };
+        let kernel = BrepKernel::with_tolerance(tol);
+        let t = 0.25f64.to_radians();
+        let tilted = Frame {
+            origin: DVec3::ZERO,
+            x: DVec3::X,
+            y: DVec3::new(0.0, t.cos(), t.sin()),
+            z: DVec3::new(0.0, -t.sin(), t.cos()),
+        };
+        let v = |pts: &[(f64, f64)]| -> Vec<DVec2> {
+            pts.iter().map(|&(x, y)| DVec2::new(x, y)).collect()
+        };
+        let outer = v(&[
+            (-0.5, -0.5),
+            (0.0, -0.2),
+            (1.0, -0.2),
+            (1.5, -0.5),
+            (2.0, -0.5),
+            (2.0, 0.5),
+            (-0.5, 0.5),
+        ]);
+        let block = kernel
+            .make_box(
+                &Frame {
+                    origin: DVec3::new(0.3, -0.17, -1.0),
+                    ..Frame::WORLD
+                },
+                DVec3::new(0.4, 0.14, 1.0),
+            )
+            .expect("a block");
+        let check = |hole: &[(f64, f64)]| {
+            let prism = kernel
+                .extrude(
+                    &Profile::polygon(tilted, &outer).with(Profile::polygon(tilted, &v(hole))),
+                    &ExtrudeSpec {
+                        distance: 0.5,
+                        symmetric: false,
+                    },
+                )
+                .expect("a prism");
+            let pair = Pair {
+                first: super::super::shape::shape(&block.brep, "first").expect("a shape"),
+                second: super::super::shape::shape(&prism.brep, "second").expect("a shape"),
+            };
+            let pts = Points::new(&pair, tol.linear);
+            let outlines = [
+                outlines(&pair.first).expect("outlines"),
+                outlines(&pair.second).expect("outlines"),
+            ];
+            let facing = |s: &Shape, n: DVec3| {
+                (s.faces.iter())
+                    .position(|f| f.normal().dot(n) > 1.0 - 1e-12)
+                    .expect("a face")
+            };
+            let (g, f) = (
+                facing(&pair.first, DVec3::Z),
+                facing(&pair.second, -tilted.z),
+            );
+            let dir = (pair.first.faces[g].normal())
+                .cross(pair.second.faces[f].normal())
+                .normalize();
+            let chain = Chain {
+                points: [1.0, 0.0].map(|x| tilted.x * x - tilted.y * 0.2).to_vec(),
+                either: true,
+            };
+            held_strip(
+                &pair,
+                &pts,
+                &outlines,
+                &mut StripSearch::new(STRIP_STEPS),
+                dir,
+                [(Operand::Second, f), (Operand::First, g)],
+                &chain,
+                &[],
+            )
+        };
+        let diamond = [(0.5, -0.175), (0.72, -0.1), (0.5, -0.025), (0.28, -0.1)];
+        match check(&diamond) {
+            Err(KernelError::InvalidInput(m)) => assert!(m.starts_with(super::super::RUNS_WITHIN)),
+            other => panic!("{other:?}"),
+        }
+        let rectangle = [(0.29, -0.18), (0.71, -0.18), (0.71, -0.02), (0.29, -0.02)];
+        assert!(check(&rectangle).is_ok());
+    }
+
     /// Cutting each piece by only the meetings over its span gives the same
     /// pieces as cutting it by all of them, in the same order, on random
     /// chains and meetings; and the meetings beside no piece cost nothing
@@ -3175,7 +3321,7 @@ mod tests {
                 (v(x, 3.0), v(x + 1.0, 3.0))
             })
             .collect();
-        let mut budget = Budget(STRIP_STEPS);
+        let mut budget = Budget::new(STRIP_STEPS);
         let pieces = strip_of(
             &[v(10.0, 5.0), v(0.0, 5.0)],
             &both,
@@ -3186,7 +3332,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pieces.len(), 1);
-        assert_eq!(STRIP_STEPS - budget.0, 1000 + 1);
+        assert_eq!(STRIP_STEPS - budget.left, 1000 + 1);
         // One step fewer left, and the boolean is refused as too large.
         let refused = strip_of(
             &[v(10.0, 5.0), v(0.0, 5.0)],
@@ -3194,7 +3340,7 @@ mod tests {
             lines,
             1.0,
             1.0,
-            &mut Budget(1000),
+            &mut Budget::new(1000),
         );
         assert!(
             matches!(&refused, Err(KernelError::TooLarge(m)) if m.contains(STRIP_WORK)),
