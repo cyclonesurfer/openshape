@@ -1105,6 +1105,54 @@ fn contacts_swept_across_the_band() {
     assert!(pinch.is_empty(), "{} pinches", pinch.len());
 }
 
+/// Cases of the contact fuzz at a hundred times its length where a bridge
+/// of a face carried no edge of the other body, a kernel error before:
+/// the curves where the face meets two faces of the other body merged
+/// into one over a sliver of the face (contact 4996), or at a corner of
+/// the other body within the tolerance of the face (2152, 5387); an edge
+/// lying on the face and leaving it at a slant, resting on it from
+/// outside (1203 at 0.75, the union pinching) or with its faces crossing
+/// the face beside it (1203 at −0.75 and 661, refused as a point the
+/// tolerance cannot place); the tree of a corner's bridges (161); and 149,
+/// whose merged curves run along an edge of the other body lying on the
+/// face, refused where the faces meet.
+#[test]
+fn contacts_whose_bridges_carry_no_edge() {
+    let eps = k().tolerance().linear;
+    let leaves = "an edge of one body lies on a face of the other and leaves it at a point the \
+                  tolerance cannot place";
+    let sliver = "the bodies leave a sliver thinner than the tolerance";
+    let cases: [(usize, f64, [&str; 4]); 8] = [
+        (149, -1.0, [leaves; 4]),
+        (4996, -4.0, [sliver; 4]),
+        (661, 0.75, [leaves; 4]),
+        (
+            1203,
+            0.75,
+            [
+                "the result would be non-manifold: the bodies touch along an edge",
+                "empty",
+                "(6, 12, 8)",
+                "(5, 9, 6)",
+            ],
+        ),
+        (1203, -0.75, [leaves; 4]),
+        (161, 1.0, [leaves; 4]),
+        (2152, -1.0, [sliver, sliver, sliver, leaves]),
+        (5387, -4.0, [sliver; 4]),
+    ];
+    let mut t = Tally::default();
+    for (case, q, want) in cases {
+        let c = contact_case(case);
+        let b = c.body(q);
+        let label = format!("contact {case} ({q} tolerance)");
+        let slack = 4.0 * (area(&c.a) + area(&b)) * (q.abs() + 1.0) * eps;
+        let got = identities_with(&mut t, &c.a, &b, &label, slack);
+        assert_eq!(got, want, "{label}");
+    }
+    assert_eq!(t.bugs, Vec::<String>::new());
+}
+
 /// Debugging aid (temporary): one case of the contact fuzz, `CONTACT` and
 /// `STEP` from the environment.
 #[test]

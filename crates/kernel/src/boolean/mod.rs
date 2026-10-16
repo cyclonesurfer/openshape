@@ -798,6 +798,15 @@ fn boolean_within(
             let mut obstacles: Vec<Vec<classify::Obstacle>> =
                 (0..split.regions.len()).map(|_| Vec::new()).collect();
             let mut held: Vec<Vec<Held>> = (0..split.regions.len()).map(|_| Vec::new()).collect();
+            let fault = edgeless_bridges(
+                &pair,
+                (&segs, &courses),
+                &edge_segs,
+                &pts,
+                &split.loose,
+                (op, fi, &face_segs[slot(op)][fi]),
+                tol,
+            )?;
             for l in &split.loose {
                 let holder = base + l.region;
                 match &l.kind {
@@ -812,22 +821,25 @@ fn boolean_within(
                             Course::Straight => (pts.rep[s.a] + pts.rep[s.b]) * 0.5,
                             course => courses.middle(course),
                         };
-                        let e = s
-                            .sources
-                            .iter()
-                            .find_map(|&src| match src {
-                                Source::Edge(o, e) if o == other(op) => Some(e),
-                                _ => None,
-                            })
-                            .ok_or_else(|| edgeless_contact(&segs, &pts, *seg, op, m, eps))?;
+                        // A bridge with no edge is the face's fault, raised
+                        // after the other contacts' refusals.
+                        let (e, places) = match carried(s, other(op)) {
+                            Some(e) => (e, vec![*seg]),
+                            None => match lying_pieces(&pair, &pts, &edge_segs, s, (op, fi), tol) {
+                                Some(x) => x,
+                                None => continue,
+                            },
+                        };
                         let n = outward(shape, f, m).normalize();
                         let (sigma, convex) = wedge(them, e, n, m, tol)?;
-                        contacts_in.push(assemble::Contact {
-                            place: assemble::Place::Seg(*seg),
-                            holder,
-                            sigma,
-                            at: m,
-                        });
+                        for p in places {
+                            contacts_in.push(assemble::Contact {
+                                place: assemble::Place::Seg(p),
+                                holder,
+                                sigma,
+                                at: m,
+                            });
+                        }
                         for (k, c) in [s.a, s.b].into_iter().enumerate() {
                             if free[k] {
                                 contacts_in.push(assemble::Contact {
@@ -877,6 +889,9 @@ fn boolean_within(
                         });
                     }
                 }
+            }
+            if let Some(fault) = fault {
+                return Err(fault);
             }
             for (ri, region) in split.regions.into_iter().enumerate() {
                 if clear {
@@ -1003,21 +1018,162 @@ struct Held {
 /// Test points a region holding contacts tries, at most.
 const HOLDER_TRIES: usize = 4;
 
-/// The error for a contact edge (a bridge, segment `seg`, its middle `m`)
-/// that carries no edge of the other body. Where a straight piece of an
-/// edge of the other body leaves one end of the bridge and ends within
-/// twice the tolerance of the bridge's line without reaching its other
-/// end, the edge lies on the face and leaves it where the tolerance cannot
-/// place the point: the edge's crossing of the face's boundary and the end
-/// of the curve where the faces meet are different points, a few
-/// tolerances apart where the face's boundary meets its neighbour at a
-/// slant (found by the contact fuzz). That is refused as input; anything
-/// else is a kernel error, a crossing curve left dangling.
+/// For a straight bridge `s` in face `f` of `op` that carries no edge of
+/// the other body but where [`merged`] finds [`Collapse::Leaves`] (an edge
+/// of the other body lying on the face, the bridge carrying the curves of
+/// its two faces and one end of the bridge on it): that edge, and its
+/// pieces from that end to its point nearest the bridge's other end, to be
+/// placed as the contact in the bridge's stead. In exact arithmetic the
+/// curves run along the edge to where it leaves the face, and the contact
+/// is the edge's; the tolerance has ended them a few tolerances from the
+/// edge's crossing of the face's boundary, which meets its neighbour at a
+/// slant (found by the contact fuzz). That holds only where the edge's
+/// faces leave the face to the side its ends are on, or the ends are on the
+/// face: where an end lies on the other side, the faces cross the face's
+/// plane a few tolerances from the edge and the bridge is no contact.
+/// `None` then, where the faces are too shallow to tell the side, and where
+/// the edge's nearest point to the bridge's other end is the bridge's own
+/// end; [`edgeless_contact`] refuses those.
+fn lying_pieces(
+    pair: &Pair,
+    pts: &Points,
+    edge_segs: &[Vec<Vec<usize>>; 2],
+    s: &Seg,
+    (op, f): (Operand, usize),
+    tol: &Tolerance,
+) -> Option<(usize, Vec<usize>)> {
+    if s.course != Course::Straight {
+        return None;
+    }
+    let Some(Collapse::Leaves { edge, on, away }) = merged(pair, pts, s, op, f) else {
+        return None;
+    };
+    // The side of the face the edge's faces leave it to, and the side its
+    // ends are on: the same, or on the face, for a contact; opposite where
+    // the faces cross the face's plane a few tolerances from the edge.
+    let shape = pair.get(op);
+    let them = pair.get(other(op));
+    let face = &shape.faces[f];
+    let m = (pts.rep[s.a] + pts.rep[s.b]) * 0.5;
+    let n = outward(shape, face, m).normalize();
+    let (sigma, _) = wedge(them, edge, n, m, tol).ok()?;
+    let (va, vb) = them.edges[edge];
+    let height = |v: usize| {
+        let d = shape.surfaces[face.surface].distance(them.points[v]);
+        if face.outward {
+            d
+        } else {
+            -d
+        }
+    };
+    if height(va) * f64::from(sigma) < 0.0 || height(vb) * f64::from(sigma) < 0.0 {
+        return None;
+    }
+    let list = pts.on_edge(other(op), edge);
+    let iv = list.iter().position(|&c| c == on)?;
+    let target = pts.rep[away];
+    let ic = (0..list.len()).min_by(|&i, &j| {
+        (pts.rep[list[i]] - target)
+            .length()
+            .total_cmp(&(pts.rep[list[j]] - target).length())
+    })?;
+    if ic == iv {
+        return None;
+    }
+    let (lo, hi) = (iv.min(ic), iv.max(ic));
+    Some((edge, edge_segs[slot(other(op))][edge][lo..hi].to_vec()))
+}
+
+/// The edge of `op` that segment `s` is a piece of, if any.
+fn carried(s: &Seg, op: Operand) -> Option<usize> {
+    s.sources.iter().find_map(|&src| match src {
+        Source::Edge(o, e) if o == op => Some(e),
+        _ => None,
+    })
+}
+
+/// The bridges of a face (`loose`, of face `f` of `op`, whose segments
+/// are `face`) that carry no edge of the other body, judged before any is
+/// placed ([`edgeless_contact`]): all are looked at, since the bridges of
+/// a tree share a cause and the one that shows it need not come first (a
+/// curve where the faces meet dangling from a crossing, through a second,
+/// to the point the tolerance cannot place; found by the contact fuzz).
+/// A refusal as input is returned as the error; otherwise the kernel
+/// error of the first such bridge, if any, for the caller to raise after
+/// the face's other contacts, whose refusals as input come first.
+fn edgeless_bridges(
+    pair: &Pair,
+    (segs, courses): (&Segments, &Courses),
+    edge_segs: &[Vec<Vec<usize>>; 2],
+    pts: &Points,
+    loose: &[planar::Loose],
+    (op, f, face): (Operand, usize, &[FaceSeg]),
+    tol: &Tolerance,
+) -> Result<Option<KernelError>, KernelError> {
+    let eps = tol.linear;
+    let mut fault = None;
+    for l in loose {
+        let planar::LooseKind::Bridge { seg, free, .. } = &l.kind else {
+            continue;
+        };
+        let s = &segs.list[*seg];
+        if carried(s, other(op)).is_some()
+            || lying_pieces(pair, pts, edge_segs, s, (op, f), tol).is_some()
+        {
+            continue;
+        }
+        let m = match s.course {
+            Course::Straight => (pts.rep[s.a] + pts.rep[s.b]) * 0.5,
+            course => courses.middle(course),
+        };
+        match edgeless_contact(pair, segs, pts, (*seg, *free), (op, f, face), m, eps) {
+            e @ KernelError::InvalidInput(_) => return Err(e),
+            e => {
+                fault.get_or_insert(e);
+            }
+        }
+    }
+    Ok(fault)
+}
+
+/// The error for a contact edge (a bridge, segment `seg` of face `f` of
+/// `op`, its middle `m`, `free` whether each end is off the face's loops)
+/// that carries no edge of the other body (design note 0012 §18.2,
+/// "Bridges with no edge"). In exact arithmetic a curve where the faces
+/// meet ends inside a face only where an edge of the other body lying on
+/// the face continues it, and that edge's pieces run along it; the curves
+/// of the other faces at a point of the other body's boundary pair up. A
+/// bridge with no edge is therefore a fault, refused as input where the
+/// tolerance made it (those [`lying_pieces`] places on the edge, a contact
+/// the tolerance moved, are not brought here):
+///
+/// * a straight piece of an edge of the other body leaves one end of the
+///   bridge and ends within twice the tolerance of the bridge's line
+///   without reaching its other end: the edge lies on the face and leaves
+///   it where the tolerance cannot place the point (found by the contact
+///   fuzz);
+/// * the bridge carries the curves where the face meets two faces of the
+///   other body ([`merged`]): two planes' curves on a third coincide only
+///   along a line common to the two, so the tolerance merged them over a
+///   region thinner than itself. Where the two have a common edge lying on
+///   the face (both its ends within the tolerance of the face's plane)
+///   with one end of the bridge on it, the edge's own pieces end elsewhere
+///   than the curves: it leaves the face where the tolerance cannot place
+///   the point. Otherwise the region between the curves is a sliver;
+/// * an end of the bridge is a vertex of the other body within the
+///   tolerance of the face's surface, where no other segment of the face
+///   ends ([`lone_corner`]): the curves of the faces at that vertex pair
+///   up there, so the tolerance has merged the partner of this one into
+///   the vertex, a sliver of the face about a corner within the tolerance
+///   of it.
+///
+/// Anything else is a kernel error, a crossing curve left dangling.
 fn edgeless_contact(
+    pair: &Pair,
     segs: &Segments,
     pts: &Points,
-    seg: usize,
-    op: Operand,
+    (seg, free): (usize, [bool; 2]),
+    (op, f, face): (Operand, usize, &[FaceSeg]),
     m: DVec3,
     eps: f64,
 ) -> KernelError {
@@ -1037,18 +1193,182 @@ fn edgeless_contact(
                     .iter()
                     .any(|x| matches!(*x, Source::Edge(o, _) if o == other(op)))
         });
-    if leaves {
+    let leaves_at = |p: DVec3| {
         KernelError::InvalidInput(format!(
             "an edge of one body lies on a face of the other and leaves it at a point the \
              tolerance cannot place near {}",
-            show(b)
+            show(p)
         ))
-    } else {
-        KernelError::InvalidResult(format!(
-            "boolean: a contact edge carries no edge of the other body near {}",
-            show(m)
+    };
+    let sliver = |p: DVec3| {
+        KernelError::InvalidInput(format!(
+            "the bodies leave a sliver thinner than the tolerance near {}",
+            show(p)
         ))
+    };
+    if leaves {
+        return leaves_at(b);
     }
+    if s.course == Course::Straight {
+        match merged(pair, pts, s, op, f) {
+            Some(Collapse::Leaves { away, .. }) => {
+                return leaves_at(pts.rep[away]);
+            }
+            Some(Collapse::Sliver) => {
+                return sliver(m);
+            }
+            None => {}
+        }
+        if let Some(c) = lone_corner(pair, segs, pts, (s, free), (op, f, face)) {
+            return sliver(pts.rep[c]);
+        }
+    }
+    KernelError::InvalidResult(format!(
+        "boolean: a contact edge carries no edge of the other body near {}",
+        show(m)
+    ))
+}
+
+/// The faces of the other body whose meetings with face `f` of `op`
+/// segment `s` carries, in order.
+fn met_faces(s: &Seg, op: Operand, f: usize) -> Vec<usize> {
+    let mut out: Vec<usize> = s
+        .sources
+        .iter()
+        .filter_map(|&src| match (src, op) {
+            (Source::Meet(fa, fb), Operand::First) if fa == f => Some(fb),
+            (Source::Meet(fa, fb), Operand::Second) if fb == f => Some(fa),
+            _ => None,
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// What a bridge carrying the curves where its face meets two faces of the
+/// other body shows ([`merged`]).
+enum Collapse {
+    /// An edge of the other body at both faces (`edge`) lies on the face,
+    /// one end of the bridge on it (`on`), and leaves it near the bridge's
+    /// other end (`away`).
+    Leaves { edge: usize, on: usize, away: usize },
+    /// The region of the face between the two curves is thinner than the
+    /// tolerance.
+    Sliver,
+}
+
+/// For a straight bridge `s` in face `f` of `op` carrying the meetings of
+/// `f` with two faces of the other body: [`Collapse::Leaves`] where the
+/// two have a common edge `e` on which one end of the bridge lies, and `e`
+/// lies on `f`'s plane (both its ends within the tolerance of it, the
+/// decision every stage reads from [`Points::sign`]), naming the edge,
+/// that end and the other; else [`Collapse::Sliver`]. `None` for a bridge
+/// meeting fewer than two faces.
+fn merged(pair: &Pair, pts: &Points, s: &Seg, op: Operand, f: usize) -> Option<Collapse> {
+    let met = met_faces(s, op, f);
+    if met.len() < 2 {
+        return None;
+    }
+    let them = pair.get(other(op));
+    let shape = pair.get(op);
+    let surface = shape.faces[f].surface;
+    let plane = matches!(shape.surfaces[surface], quadric::Quadric::Plane { .. });
+    for &x in &met {
+        for &(e, _) in them.faces[x].loops.iter().flatten() {
+            let both = them
+                .edge_faces(e)
+                .iter()
+                .any(|&(y, _)| y != x && met.binary_search(&y).is_ok());
+            let (va, vb) = them.edges[e];
+            let lies = both
+                && plane
+                && them.straight[e]
+                && pts.sign(other(op), va, surface) == 0
+                && pts.sign(other(op), vb, surface) == 0;
+            if !lies {
+                continue;
+            }
+            let on = pts.on_edge(other(op), e);
+            match (on.contains(&s.a), on.contains(&s.b)) {
+                (_, true) => {
+                    return Some(Collapse::Leaves {
+                        edge: e,
+                        on: s.b,
+                        away: s.a,
+                    })
+                }
+                (true, false) => {
+                    return Some(Collapse::Leaves {
+                        edge: e,
+                        on: s.a,
+                        away: s.b,
+                    })
+                }
+                (false, false) => {}
+            }
+        }
+    }
+    Some(Collapse::Sliver)
+}
+
+/// The ends of bridge `s` (with whether each is off the face's loops)
+/// where no other of the face's segments `face` ends.
+fn lone_ends<'s>(
+    segs: &'s Segments,
+    (s, free): (&'s Seg, [bool; 2]),
+    face: &'s [FaceSeg],
+) -> impl Iterator<Item = usize> + 's {
+    [s.a, s.b]
+        .into_iter()
+        .zip(free)
+        .filter_map(move |(c, free)| {
+            let mut at: Vec<usize> = face
+                .iter()
+                .filter(|fs| {
+                    let t = &segs.list[fs.seg];
+                    t.a == c || t.b == c
+                })
+                .map(|fs| fs.seg)
+                .collect();
+            at.sort_unstable();
+            at.dedup();
+            (free && at.len() == 1).then_some(c)
+        })
+}
+
+/// For a straight bridge `s` (with whether each end is off the face's
+/// loops) in face `f` of `op`, whose segments are `face`: an end of it
+/// off the loops where no other segment of the face ends, holding a vertex
+/// of the other body within the tolerance of `f`'s surface that a face the
+/// bridge meets has as a corner. `None` if there is none.
+fn lone_corner(
+    pair: &Pair,
+    segs: &Segments,
+    pts: &Points,
+    (s, free): (&Seg, [bool; 2]),
+    (op, f, face): (Operand, usize, &[FaceSeg]),
+) -> Option<usize> {
+    let met = met_faces(s, op, f);
+    let them = pair.get(other(op));
+    let surface = pair.get(op).faces[f].surface;
+    lone_ends(segs, (s, free), face).find(|&c| {
+        let (first, second) = pts.vertices_of(c);
+        let v = match op {
+            Operand::First => second,
+            Operand::Second => first,
+        };
+        v.is_some_and(|v| {
+            let corner = met.iter().any(|&x| {
+                them.faces[x]
+                    .loops
+                    .iter()
+                    .flatten()
+                    .any(|&(e, _)| them.edges[e].0 == v || them.edges[e].1 == v)
+            });
+            corner && pts.sign(other(op), v, surface) == 0
+        })
+    })
 }
 
 /// For an edge `e` of `shape` lying on a face of the other operand whose

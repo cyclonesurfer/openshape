@@ -1312,3 +1312,68 @@ fn an_edge_across_a_grooves_floor_leaving_it_where_its_faces_cross_beside_it() {
     let exact = six(&block, &rod(0.0), 1.0);
     assert_eq!(raised.each_ref().map(head), exact.each_ref().map(head));
 }
+
+/// A blade: a thin prism whose edge runs at 45° across P's top edge
+/// x = 2, through (2, 0, `z`), from 0.71 inside P's top face to as far
+/// outside; its two faces leave the edge to the same side at 12° and 14°
+/// to the top face, rising (`down`: falling).
+fn blade(z: f64, down: bool) -> Body {
+    let d = DVec3::new(1.0, 1.0, 0.0).normalize();
+    let frame = Frame {
+        origin: DVec3::new(2.0, 0.0, z) - d,
+        x: DVec3::new(-d.y, d.x, 0.0),
+        y: DVec3::Z,
+        z: d,
+    };
+    let at = |deg: f64| {
+        let t = if down { -deg } else { deg }.to_radians();
+        DVec2::new(t.cos(), t.sin()) * 0.5
+    };
+    prism(frame, &[DVec2::ZERO, at(12.0), at(14.0)], 2.0)
+}
+
+/// Golden 22: an edge lying on a face within the tolerance and crossing
+/// the face's boundary at a slant, its faces at a shallow angle to the
+/// face. The curves where the face meets them run from the edge's end
+/// inside the face to the boundary, ending where the boundary crosses
+/// their planes, a few tolerances from the edge's own crossing: a bridge
+/// carrying no edge, which is the edge's contact the tolerance moved
+/// (found by the contact fuzz, as a kernel error). Resting on P (0.75
+/// tolerances above), the union pinches along the edge; nested in P
+/// (0.75 below, falling), P − blade pinches (on main it returned a body
+/// touching itself); 0.75 above but falling, the faces cross the top
+/// face a few tolerances from the edge, and every operation is refused
+/// (on main P − blade touched itself).
+#[test]
+fn an_edge_lying_on_a_face_leaving_it_at_a_slant() {
+    let eps = k().tolerance().linear;
+    let p = plate(1.0);
+    let rest = blade(0.75 * eps, false);
+    let b = "(5, 9, 6, 1) V=0.008724874 A=2.043629687";
+    let along = edge_refusal("(1646.446609, -353.553622, 0.000037) mm");
+    assert_eq!(
+        six(&p, &rest, 1.0),
+        [along.as_str(), along.as_str(), "empty", "empty", P, b]
+    );
+    is_operand(&p, &rest, BooleanOp::Subtract, Operand::First);
+    is_operand(&rest, &p, BooleanOp::Subtract, Operand::First);
+    let nested = blade(-0.75 * eps, true);
+    let common = "(5, 9, 6, 1) V=0.005779097 A=1.280040940";
+    let union = "(10, 22, 14, 1) V=16.002945777 A=48.763588643";
+    let along = edge_refusal("(1646.446609, -353.553622, -0.000037) mm");
+    assert_eq!(
+        six(&p, &nested, 1.0),
+        [
+            union,
+            union,
+            common,
+            common,
+            along.as_str(),
+            "(5, 9, 6, 1) V=0.002945777 A=0.775927591",
+        ]
+    );
+    let crossing = blade(0.75 * eps, true);
+    let leaves = "refused: an edge of one body lies on a face of the other and leaves it at a \
+                  point the tolerance cannot place near (2000.000000, 0.000462, 0.000000) mm";
+    assert_eq!(six(&p, &crossing, 1.0), [leaves; 6]);
+}
