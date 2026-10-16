@@ -1,7 +1,9 @@
 //! A flat face's loops in its plane, with trees over their sides and over
 //! the loops' boxes built when a point first needs them: where a point lies
-//! against the face is decided by the sides and loops near it, not by a
-//! walk around every loop (`assemble::check_apart`, the strip search of
+//! against the face is decided by the sides within the tolerance of it and
+//! the loops whose boxes hold it, each short loop's sides all and a long
+//! loop's those its ray toward +x may cross (found through a tree), not by
+//! a walk around every loop (`assemble::check_apart`, the strip search of
 //! `imprint::held_strip`, design note 0012 §20, and the placing of points
 //! in long cycles of `planar::regions`).
 

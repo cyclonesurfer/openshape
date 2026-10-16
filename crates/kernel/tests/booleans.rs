@@ -382,10 +382,11 @@ fn bodies_touching_along_an_edge_or_at_a_point() {
 /// to 1.25: the face crosses the block's top along the axis `n` times, so
 /// the faces' regions have cycles of more sides than are walked one by
 /// one (placed through trees, `planar::regions`). A ∩ B is the prism's two
-/// ends under the top and the `n / 2 − 1` teeth between them, of volume
-/// tan 10° times the integral of the depth below the axis over the
-/// profile: 2 × 0.25 × 0.5² / 2 for the ends and w² / 12 for the teeth
-/// (each a triangle of base 1 / n and depth w = 1 mm).
+/// ends under the top, each with half a tooth, and the `n / 2 − 1` teeth
+/// between them, of volume tan 10° times the integral of the depth below
+/// the axis over the profile: 2 × 0.25 × 0.5² / 2 for the ends beyond x =
+/// 0 and 1, and w² / 12 for the teeth and the two half teeth (`n / 2`
+/// triangles' worth, each of base 1 / n and depth w = 1 mm, w² / 6n).
 #[test]
 fn a_face_crossing_another_many_times_along_one_line() {
     let n = 64;

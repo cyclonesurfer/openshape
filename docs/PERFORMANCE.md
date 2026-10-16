@@ -15,7 +15,9 @@ is kept true and measured.
    bounded at 24, three times the factor (an n log n operation grows about
    9 to 10 times, a quadratic one 64 times). A ratio holds on any machine,
    so these checks catch a change of complexity even where the budgets are
-   loose.
+   loose. A cost that is a small part of its operation's time can grow
+   faster without failing either; where profiling finds one, a unit test
+   counts its work instead (eighth pass, below).
 3. **Hot code uses the standard data structures**: spatial indexes
    (`crates/kernel/src/bvh.rs`, a bounding-volume hierarchy; uniform grids)
    instead of loops over all pairs, bulk-loaded triangulations, exact
@@ -74,8 +76,8 @@ three repetitions. The limit is what the test enforces.
 | Drill 64 round holes into a plate, one boolean each | 860–1,050 ms | 10,000 ms |
 | Intersect or subtract a plate with 100 round holes and a box across them | 52–55 ms | 600 ms |
 | Unite a box with a corner of a plate of 400 flush square pins (the result has 4,012 faces; each place of it checked against the faces near it) | 95–113 ms | 1,000 ms |
-| Intersect a notched block with a prism whose face's edge of 256 segments lies on the block's top beside the line where they cross (the strip check searches the whole strip) | 11.2–12.0 ms | 120 ms |
-| Intersect a block with a prism whose face crosses its top 1,024 times along one line (513 solids) | 64–69 ms | 700 ms |
+| Intersect a notched block with a prism whose face's edge of 256 segments lies on the block's top beside the line where they cross (the strip check searches the whole strip) | 11.6–13.1 ms | 120 ms |
+| Intersect a block with a prism whose face crosses its top 1,024 times along one line (513 solids) | 63–68 ms | 700 ms |
 | Dimple a plate with 16 balls, one boolean each | 73–89 ms | 900 ms |
 | Mesh it (173,680 triangles) | 382–406 ms | 4,000 ms |
 | Validate it | 2.2–2.5 ms | 40 ms |
@@ -112,7 +114,7 @@ factor):
 | Cut a box across a plate's round holes, 16 to 121 holes (7.6 times) | 7.8–8.4 times |
 | Mesh a ball, 13,964 to 105,556 triangles (7.6 times) | 8.6–9.6 times |
 | Unite a box with a corner of a plate of flush pins, 49 to 400 pins (8.2 times) | 8.4–9.2 times |
-| Intersect a notched block with a prism whose lying edge has 128 to 1,024 segments | 7.4–7.6 times |
+| Intersect a notched block with a prism whose lying edge has 128 to 1,024 segments | 7.5–8.1 times |
 
 One more checks the cut of a plate's 4th hole against that of its 16th,
 four times the holes counting the one cut (bound: 12, three times the
@@ -139,7 +141,7 @@ debug builds, where the limits are not applied.
 | Operation | Limit | Where |
 |---|---|---|
 | Boolean | 2,000,000 pairs of faces that meet; 8,000,000 pairs of edges near each other; 4,000,000 candidate points; 8,000,000 edge segments | `crates/kernel/src/boolean/mod.rs` (`LIMITS`) |
-| Boolean, the strip checks of design note 0012 §20 | 4,194,304 (2²²) steps for all of one boolean's strips | `crates/kernel/src/boolean/imprint.rs` (`STRIP_STEPS`) |
+| Boolean, the strip checks of design note 0012 §20 | 4,194,304 (2²²) steps for all of one boolean's strips | `crates/kernel/src/boolean/mod.rs` (`LIMITS.strip_steps`, set from `imprint::STRIP_STEPS`) |
 | Meshing | 2,000,000 vertices a face; edge samples grow at most eightfold (plus 100,000) while refining | `crates/kernel/src/tess.rs` |
 | Sketch regions | 40,000,000 intersection steps; curves of degree at most 24 and 10,000 points | `crates/kernel/src/arrangement` |
 | Mass properties | 30 levels of bisection of a boundary piece | `crates/kernel/src/mass.rs` |
@@ -472,43 +474,50 @@ million and 18.9 million more than on main.
 The strip check (§20) searches, for each chain of a face's boundary
 lying within the tolerance of the other face's plane, the strip between
 the chain and the line where the planes cross. Counted by callgrind
-against main, one run each, each operation a test of its own (building
-the operands included):
+against main, one run each of plain release builds, each operation a
+test of its own (building the operands included):
 
 | Operation | main | now |
 |---|---|---|
-| Union of two 256-sided star prisms | 360.9 million | 365.3 million (+1.2%) |
-| Cut 64 pins into a box, one boolean each | 2,343 million | 2,363 million (+0.8%) |
+| Union of two 256-sided star prisms | 361.1 million | 366.4 million (+1.5%) |
+| Cut 64 pins into a box, one boolean each | 2,345 million | 2,368 million (+1.0%) |
 
-Of the pins' difference, the strip checks take 19.9 million: a face
-whose boundary has no mark within the tolerance of the other's plane is
-skipped (the faces' relation knows it), and the outlines and the tables
-of them are built only when a strip needs them. Profiling two bodies
-made for it found three costs growing with the square of their size,
-two of them on main:
+Of the pins' 22.7 million more, the strip checks take 13.7 million: a
+face whose boundary has no mark within the tolerance of the other's
+plane is skipped (the faces' relation knows it), and the outlines and
+the tables of them are built only when a strip needs them. The star's
+strip checks take 80 thousand; most of its 5.3 million more is in
+classification (27.1 to 30.7 million), whose source is unchanged but
+whose walk of the other body's tree (`Bvh::visit`) the compiler no
+longer inlines. Profiling two bodies made for it found three places
+doing work that grows with the square of their size, two of them on
+main:
 
 * **Each strip's search walked every edge near the plane.** The time
   guards' zigzag is a face whose edge of n segments lies on the other
   body's top beside the line where the faces cross, a run with a reflex
   corner at every other vertex: n / 2 + 1 chains. Each chain's search
   took the edges of both faces within its distance of the plane, all n
-  of the run's among them, so the strip checks took 25.6 million
-  instructions at n = 256 and 224 million at 1,024 (8.8 times). The
-  walk of each face's tree now keeps to the strip's box as well
-  (`Face::near_surface_in`), and each chain takes the pair's meetings
-  over its own span from a list sorted once: 16.4 and 67.3 million (4.1
-  times). The intersection at 1,024 segments went from 632 to 474
-  million instructions, and from 61–64 ms to 52.5 ms (best of three,
-  two interleaved runs).
+  of the run's among them: the strip checks took 25.6 million
+  instructions at n = 256 and 224 million at 1,024, 8.8 times for four
+  times the segments, of which that walk (`Face::near_surface`) grew 15
+  times. The walk of each face's tree now keeps to the strip's box as
+  well (`Face::near_surface_in`), and each chain takes the pair's
+  meetings over its own span from a list sorted once: 16.5 and 67.4
+  million (4.1 times). The intersection itself (`Kernel::boolean`) at
+  1,024 segments went from 555 to 399 million instructions; by the wall
+  clock it takes 48–51 ms (best of three, three runs of it alone).
 * **The end checks of a pair's stretches found the faces' lying runs
   again for each stretch** (main): every stretch walked both faces'
   edges near the other's plane, and every pair of the faces' intervals
-  on the line was tested. The
-  time guards' comb, a face crossing a block's top 1,024 times along one
-  line, took 216 million instructions there. The runs are now found
-  once per pair, sorted along the line with their ends, and each
-  interval of one face meets only those of the other within the
-  tolerance of it: 12.8 million.
+  on the line was tested. On the time guards' comb, a face crossing a
+  block's top 1,024 times along one line, the meeting of each pair, the
+  faces' intervals on the line included, took 216 million instructions,
+  206 million of them in finding the runs. The runs are now found once
+  per pair, sorted along the line with their ends, and each interval of
+  one face meets only those of the other within the tolerance of it:
+  the meetings take 12.8 million, 2.5 million of them in finding the
+  runs.
 * **Points were placed in long cycles by walking every side**
   (`planar::regions`, main). Each part of a split face that does not
   touch its outer boundary is placed in the smallest region around its
@@ -518,14 +527,30 @@ two of them on main:
   through the outline of `check_apart` (§19, seventh pass), built when a
   point first needs it: the regions took 174 and 1,373 million
   instructions at 1,024 and 4,096 crossings (7.9 times), and take 128
-  and 563 million (4.4 times).
+  and 564 million (4.4 times).
 
-The comb's intersection went from 844 to 593 million instructions at
-1,024 crossings and from 7,770 to 3,562 million at 4,096; by the wall
-clock from 88–91 ms to 64–65 ms and from 783–789 ms to 374–384 ms (best
-of three, two interleaved runs). Both bodies are guarded (above), the
-zigzag with a scaling check; the comb has none, for the classification
-below.
+The comb's intersection (`Kernel::boolean`) went from 769 to 519
+million instructions at 1,024 crossings and from 7,342 to 3,137 million
+at 4,096. By the wall clock, against main in two interleaved runs of an
+earlier build of these fixes, it went from 88–91 ms to 64–65 ms and
+from 783–789 ms to 374–384 ms; the final build takes 63–65 ms and
+382–434 ms (best of three, three runs of each alone). Both bodies are guarded by time
+(above), the zigzag with a scaling check; the comb has none, for the
+classification below.
+
+The rest of each boolean dilutes these costs in its time, so a time
+guard need not fail with one of the fixes undone: with the walk of every
+edge near the plane restored, the zigzag's scaling grew 9.7 times
+against a bound of 24, and with long cycles walked whole the comb took
+71 ms against its limit of 700 (both measured in review). Each fix has a
+test of the work it saves instead, in `crates/kernel/src/boolean/mod.rs`,
+which fails with it undone: the zigzag's intersection is answered within
+300 strip steps a segment at 256 and 1,024 segments (with the walk
+restored, it needs about n² / 2 and is refused at 1,024), and the
+coedges looked at in finding the comb's lying runs, and the sides of
+cycles looked at in placing its points, grow at most six times from 256
+to 1,024 crossings (with the runs found for each stretch, the coedges grew 15
+times; with long cycles walked whole, the sides grew 24 times).
 
 ## Known slow spots
 

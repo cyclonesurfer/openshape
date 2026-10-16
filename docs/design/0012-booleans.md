@@ -3479,7 +3479,9 @@ built. They found:
   outcome of five contacts from main's: contact 2100 at −0.75 ε is
   this case (refused in every operation where main answers it), and
   contacts 1456 at −0.75 ε and 4416 at −1 ε are answered as on main
-  with either this fix or the next one below, and refused without both.
+  with either this fix or the restriction of each segment's sweep to the
+  side where F lies toward L (found in building the fixes, below), and
+  refused without both.
 - *A hole lying whole.* A hole of F whose loop lies within ε of P
   throughout is not a run (a run ends where its loop leaves the plane),
   so the rule did not look at it. A plate at 1° with a hole from 50 ε
@@ -3610,8 +3612,10 @@ and G meet there, and points within ε of G's boundary because that
 boundary is one place with the strip's edge or with R. Points near R
 are not left out: a run 1.1 ε to 2 ε from L has a strip all within ε
 of R, and main returns the fin there. The regions of F's plane within
-ε of P beside L that are no strip are not refused, and each is answered
-as on main (goldens 39 and 40): past a segment where F lies away from
+ε of P beside L that are no strip are not refused by this rule. Each
+kind below is answered as on main (goldens 39 and 40), and a notch tip
+across L whose two edges cross L fails as on main (*A fault on main*,
+below): past a segment where F lies away from
 L, the region between the segment and L is outside F; at a convex
 corner of F pointing toward L, its edges running away from P on its
 side, F lies beyond the corner from L, and the wedge between F and P
@@ -3669,14 +3673,24 @@ and a margin of ρ for rounding), found by one walk of G's tree over its
 edges' boxes that keeps to both; the edges of F that can enter it,
 those within that distance of P whose boxes meet the strip's box grown
 by ε, by F's tree likewise (a face of few edges has no tree, and each
-of its edges is tested by its box). Where a tested point lies against F and against G is decided by each
-face's loops in its plane with trees over their sides and their loops'
+of its edges is tested by its box). Where a tested point lies against
+F and against G is decided, for a face whose edges are all straight, by
+its loops in its plane with trees over their sides and their loops'
 boxes (the outline `check_apart` uses, §19), built when a strip first
-needs that face and kept for the rest of the boolean, so a point meets
-only the sides and loops near it; the first version walked every edge of
-both faces for each point, and an edge of 1,024 segments lying beside
-the line over golden 35's notch took more steps than the limit below and
-was refused as too large.
+needs that face and kept for the rest of the boolean: a point meets the
+sides within ε of it, the loops whose boxes hold it, and those of their
+sides that its ray to +x may cross, not every side of every loop. The
+first version walked every edge of both faces for each point, and an
+edge of 1,024 segments lying beside the line over golden 35's notch
+took more steps than the limit below and was refused as too large. For
+a face on a plane with arcs among its edges, it is decided by the face's
+outline in its chart (§11), whose bands about the chords hold the arcs,
+as classification decides it. The outline of `check_apart` takes an arc
+by its chord, and the first build used it for every face: a round bar's
+top held no point of the strip, so the bar's A ∩ B with golden 32's
+prism was the two wedges joined by the fin, and a round hole under the
+strip held every point the slab's top held, so that contact was refused
+(found by review; golden 41).
 
 *Not decided.*
 
@@ -3685,7 +3699,8 @@ was refused as too large.
   the convex hulls of the control points of its rational Bézier pieces,
   which hold it (each against each piece of the strip, by separating
   axes): the offsets of curves are not segments, so the search above
-  does not cover them. Such a boolean is refused as not supported.
+  does not cover them. Such a boolean is refused as not supported
+  (golden 41).
 - A boundary of F within ε of P that is no chain: a curved edge lying
   within ε of P, or a corner one of whose edges is curved. This rule
   does not see it.
@@ -3727,56 +3742,87 @@ the chain crosses its line), so k meetings over a piece leave at most
 3k + 1 parts. Each line is clipped against the pieces whose boxes it
 meets, cut by the capsules and split by the edges of F whose boxes it
 meets, each found by a tree over their boxes; each part tested costs a
-lookup in each face's outline (a step for each side and loop it meets).
-The searches of one boolean count their steps together (a stretch, an
-edge or a cut taken, a box tested, a clip, or a side or a loop met is
-one; building a face's outline is one for each side) and refuse the
-boolean as too large past 2²² of them.
+lookup in each face's outline (a step for each side and loop it meets,
+or, in a chart outline, one and one for each chord it looks at). The
+searches of one boolean count their steps together (a stretch, an edge
+or a cut taken, a box tested, a clip, or a side, a loop or a chord met
+is one; building a face's outline is one for each side) and refuse the
+boolean as too large past 2²² of them (`Limits::strip_steps`).
 
 Profiled with callgrind on the zigzag of the time guards (an edge of n
 segments lying beside L over golden 35's notch, zigzagging between 2 ε
 and 4 ε off L: a run, and a reflex corner at each of its n / 2 vertices
 2 ε off, n / 2 + 1 chains), the strip checks took 25.6 million
-instructions at n = 256 and 224 million at 1,024, growing with the
-square of n: each chain's search walked every edge of both faces near
-P. With each walk kept to the strip's box (by the face's tree), they
-take 16.4 and 67.3 million, 4.1 times for four times the segments, and
-the whole intersection 109 and 474 million. The time guard
-(`tests/timing.rs`) holds the intersection at 256 segments to 120 ms (it takes 11 to
-12 ms), and its growth from 128 to 1,024 segments to 24 times (it grows
-7.4 to 7.6 times). The end checks of
-§19 found the faces' lying runs again for each stretch of the pair and
-tested every pair of the faces' intervals on L, as on main; they now
-find the runs once per pair, sorted along L with their ends, and meet
-each interval of one face only with those of the other within ε of it.
-On a face crossing the other's top 1,024 times (the comb of the time
-guards) they took 216 million instructions and take 12.8 million.
+instructions at n = 256 and 224 million at 1,024, 8.8 times for four
+times the segments: each chain's search walked every edge of both faces
+near P, a walk that grew 15 times, with the square of n. With each walk
+kept to the strip's box (by the face's tree), they take 16.5 and 67.4
+million, 4.1 times, and the intersection (`Kernel::boolean`) 92 and 399
+million. The time guard (`tests/timing.rs`) holds the intersection at
+256 segments to 120 ms (it takes 11.6 to 13.1 ms), and its growth from
+128 to 1,024 segments to 24 times (it grows 7.5 to 8.1 times); with the
+walk undone it grew 9.7 times (measured in review) and would pass, so a
+unit test of the boolean holds its steps to 300 a segment at 256 and
+1,024 segments, where the walk undone takes about n² / 2 steps and is
+refused at 1,024. The end checks of §19 found the faces' lying runs again for
+each stretch of the pair and tested every pair of the faces' intervals
+on L, as on main; they now find the runs once per pair, sorted along L
+with their ends, and meet each interval of one face only with those of
+the other within ε of it. On a face crossing the other's top 1,024
+times (the comb of the time guards), the meeting of each pair, the
+faces' intervals on L included, took 216 million instructions, 206
+million of them in finding the runs, and takes 12.8 million, 2.5
+million of them in finding the runs. A unit test of the boolean counts
+the coedges looked at in finding them, and the sides looked at in
+placing points in regions' cycles (`planar::regions`, which on the comb
+walked whole cycles running along all the crossings; docs/PERFORMANCE.md,
+eighth pass): each grows at most six times from 256 to 1,024 crossings
+(with the runs found for each stretch, 15 times; with long cycles walked
+whole, 24 times).
 
-*Tests.* Goldens 32 to 40 (`tests/touching.rs`) assert all six
+*Tests.* Goldens 32 to 41 (`tests/touching.rs`) assert all six
 operations on: the fin of a run and its cases from the reviews (32, 33,
-34); the gaps flush with E's corners (35); a meeting between the run
-and L (36); a hole and a reflex corner on the side where the layer lies
-in F's body (37); runs, holes and corners on either side of L, with the
-prism above and below its face (38); five configurations with F beyond
-its edge from L, three of them among the seven the audit found refused
-(39); and corners beside L that are not apexes, convex across L or
-pointing at it and reflex with an edge crossing L (40). Unit
-tests check the search against a grid (above), and the strip itself:
-its band, its sides, its cut by a meeting (ε short of the meeting's
-line, split where the chain crosses that line, nothing where the chain
-lies on it), and that cutting each piece by only the meetings over its
-span gives the same pieces as cutting it by all of them, on 400 random
-chains and meetings, at the cost the sort promises; a unit test checks
-the walk of a face's tree kept to a box against filtering the slab's
-edges by their boxes. Of 27 changes to the rule and its searches (each
-test of a chain, a side, the band, a cut, a window or a search left out
-or turned round, alone or two together), the tests catch all but one,
-which only skips work (the skip of a face with no mark within ε); the
-first run left three more uncaught, which the tests now catch: a chain
-on a meeting's line on the other side of L (the unit test of the cut),
-the walk kept to a box (its unit test), and the placing of points in
-long cycles (a face crossing a block's top 64 times along one line,
-`tests/booleans.rs`).
+34); the gaps beside E: a notch and a hole flush with E's corners, a
+hole flush at one end, and a pocket whose far lip lies within ε of E
+(35); a meeting between the run and L (36); a hole and a reflex corner
+on the side where the layer lies in F's body (37); runs, holes and
+corners on either side of L, with the prism above and below its face
+(38); five configurations with F beyond its edge from L, three of them
+among the seven the audit found refused (39); corners beside L that are
+not apexes, convex across L or pointing at it and reflex with an edge
+crossing L (40); and faces with arcs (41): a round bar's top holding
+the strip (refused) and a round hole under it (answered as the
+contact), F turning away from P past the run's end along a quarter
+circle that leaves the strip (refused as golden 32), a round hole of
+G whose rim passes 0.9 ε beyond the strip (refused as not supported,
+or with the prism first as a tangent contact, found first) and 1.5 ε
+beyond it (refused as golden 32), and a round hole of F whose
+rim dips 2 ε across L into the strip (refused as not supported) or
+half an ε across, staying in the band (answered). Unit tests check the
+search against a grid (above), and the strip itself: its band, its
+sides, its cut by a meeting (ε short of the meeting's line, split where
+the chain crosses that line, nothing where the chain lies on it), and
+that cutting each piece by only the meetings over its span gives the
+same pieces as cutting it by all of them, on 400 random chains and
+meetings, at the cost the sort promises; a unit test checks the walk of
+a face's tree kept to a box against filtering the slab's edges by their
+boxes, and one the edges of F the check takes as entering the strip:
+with a hole of F in the strip over G's region, every line tested but
+those edges has its middle outside G or in the hole, and the check finds
+the region's corners only through the hole's edges. Tests of the
+boolean check that its strip checks draw on one budget (the fewest
+steps within which k strips are answered are at least k times those of
+one) and count the work of the three costs profiling found (above).
+Of 27 changes to the rule and its searches (each test of a chain, a
+side, the band, a cut, a window or a search left out or turned round,
+alone or two together), the first run's tests caught all but three:
+the skip of a face with no mark within ε, which only skips work; a
+chain on a meeting's line on the other side of L, now caught by the
+unit test of the cut; and the walk kept to a box, now caught by its
+unit test. The placing of points in long cycles was caught then only by
+the time guards' comb, whose boolean then fails, and a face crossing a
+block's top 64 times along one line (`tests/booleans.rs`) now catches
+it too.
 The flat fuzz, the motions and the contact fuzz at a hundred times their
 runs, and the curved fuzzes at twenty and at fifty, refuse exactly what
 main refuses (90,686, 8,290 and 20,522 refusals, the same operations

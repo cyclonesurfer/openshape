@@ -3,10 +3,12 @@
 //! Each operation is timed at a reference size (the best of a few runs) and
 //! held to a limit about ten times its measured time, so ordinary noise and
 //! slower machines pass while an accidental quadratic loop or a lost index
-//! fails. The scaling checks time one operation at two sizes and bound the
-//! ratio, which holds on any machine. Limits apply to release builds, which
-//! CI runs (`cargo test --release -p opendatum-kernel --test timing`); a
-//! debug build only reports the times.
+//! that takes most of the time fails. The scaling checks time one operation
+//! at two sizes and bound the ratio, which holds on any machine. A cost that
+//! is a small part of its operation's time need fail neither, and a test of
+//! its work guards it instead (docs/PERFORMANCE.md, eighth pass). Limits
+//! apply to release builds, which CI runs (`cargo test --release -p
+//! opendatum-kernel --test timing`); a debug build only reports the times.
 
 use std::f64::consts::TAU;
 use std::time::{Duration, Instant};
@@ -277,7 +279,9 @@ fn booleans() {
     );
     // An edge of 256 segments lying on the other body's top beside the
     // line where the faces cross, over a notch: the strip check searches
-    // its whole strip and finds no point the top holds.
+    // its whole strip and finds no point the top holds. The steps of its
+    // search are held to the segments by the kernel's unit test
+    // `the_strip_checks_of_a_long_edge_take_steps_in_proportion_to_it`.
     let (notched, zig) = (notched_block(), zigzag(256));
     let (r, t) = best(3, || {
         k().boolean(&notched, &zig, BooleanOp::Intersect)
@@ -289,10 +293,13 @@ fn booleans() {
         t,
         LIMIT.zigzag_256,
     );
-    // A face crossing the other body's top 1,024 times along one line: the
-    // checks of each stretch find the faces' lying runs once, and points
-    // are placed in the long regions through trees (found by profiling,
-    // where both took time growing with the square of the crossings).
+    // A face crossing the other body's top 1,024 times along one line.
+    // Profiling found two stages whose work grew with the square of the
+    // crossings, both fixed (the faces' lying runs found again for each
+    // stretch, points placed in long regions by walking every side); the
+    // rest of the boolean hides them in its time, so the kernel's unit test
+    // `a_face_crossing_another_many_times_costs_in_proportion` counts their
+    // work instead.
     let (block, comb) = (block(), comb(1024));
     let (r, t) = best(3, || {
         k().boolean(&block, &comb, BooleanOp::Intersect)

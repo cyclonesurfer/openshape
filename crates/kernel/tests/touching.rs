@@ -2159,11 +2159,12 @@ fn an_edge_lying_beside_the_line_where_the_faces_cross_held_in_part() {
 }
 
 /// Golden 35: golden 32's prism, its edge 5 tolerances off the axis, over a
-/// gap of the other body's top whose back edge is on the axis and whose
-/// walls are flush with the edge's corners: a notch, a hole, a hole flush
-/// at one end, and a pocket whose far lip lies 0.3 tolerances beyond the
-/// edge (found by the second review: measured at the edge's corners, the
-/// first rule took the walls for the top holding the strip). The strip
+/// gap of the other body's top whose back edge is on the axis: a notch and
+/// a hole whose walls are flush with the edge's corners, a hole flush with
+/// one of them, and a pocket whose walls stand 0.1 beyond the corners and
+/// whose far lip lies 0.3 tolerances beyond the edge (found by the second
+/// review: measured at the edge's corners, the first rule took the walls
+/// for the top holding the strip). The strip
 /// lies over the gap, so nothing of A bounds it, and each is answered as
 /// the contact: the unions pinch, A ∩ B is the two wedges, and the
 /// differences are the operands less the wedges.

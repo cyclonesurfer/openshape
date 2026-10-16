@@ -917,30 +917,40 @@ name open unchanged.
 - Fins, flaps and necks beside a crossing (design note 0012 §20),
   2026-10-16, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   TESTCOUNT tests and `cargo deny` pass, and the release time guards
-  pass as CI runs them. Goldens 32 to 40 (`tests/touching.rs`) assert
+  pass as CI runs them. Goldens 32 to 41 (`tests/touching.rs`) assert
   all six operations, with counts, volumes, areas and refusal texts and
   places, on the fin of a run and the cases three rounds of review
-  found, gaps flush with the run's corners, a meeting between the run
-  and the line where the faces cross, holes and reflex corners on
-  either side of that line with the body above and below its face,
-  five configurations with the face beyond its edge, and corners that
-  are not apexes; unit tests check the strip search against a grid and
-  the strip's band, sides and cuts. Each of the 13 configurations
-  probed for the audit gives main's outcomes in all six operations. The
-  flat fuzz, the motions and the contact fuzz at a hundred times and the
-  curved fuzzes at twenty and at fifty refuse exactly what main refuses
-  (90,686, 8,290 and 20,522 refusals, the same operations with the same
-  texts), none failing. Of 27 changes to the rule and its searches the tests catch
-  all but one, which only skips work; the three the first run missed
-  have tests now. The check costs 1.2% more instructions on a union of
-  two 256-sided star prisms and 0.8% on 64 pins cut one at a time.
-  Profiling two bodies made for it found three costs growing with the
-  square of their size, two of them on main (the end checks finding
-  runs again for each stretch, and points placed in long cycles by
-  walking every side), all fixed and guarded: an edge of 256 segments
-  lying beside a crossing (11–12 ms, limit 120 ms, with a scaling
-  check) and a face crossing a block's top 1,024 times (64–69 ms,
-  limit 700 ms; docs/PERFORMANCE.md, eighth pass). Classification stays
+  found, gaps beside the run, a meeting between the run and the line
+  where the faces cross, holes and reflex corners on either side of
+  that line with the body above and below its face, five
+  configurations with the face beyond its edge, corners that are not
+  apexes, and faces with arcs (a round bar's top holding the strip, a
+  round hole under it, curved edges beside the strip refused as not
+  supported); unit tests check the strip search against a grid, the
+  strip's band, sides and cuts, and the face's own edges it takes as
+  entering the strip. Each of the 13 configurations probed for the
+  audit gives main's outcomes in all six operations. The flat fuzz, the
+  motions and the contact fuzz at a hundred times and the curved fuzzes
+  at twenty and at fifty refuse exactly what main refuses (90,686,
+  8,290 and 20,522 refusals, the same operations with the same texts),
+  none failing. Of 27 changes to the rule and its searches, the first
+  run's tests caught all but three: one only skips work, and the other
+  two have tests now. A review found the check placing points on faces
+  with arcs by their chords, which let a round bar's fin through and
+  refused a round hole under the strip; points on such faces are now
+  placed by the face's outline in its chart (golden 41). This change
+  costs 1.5% more instructions on a union of two 256-sided star prisms
+  (its strip checks 0.02%; most of the rest is classification, whose
+  tree walk the compiler no longer inlines) and 1.0% on 64 pins cut one
+  at a time (its strip checks 0.6%). Profiling two bodies made for it
+  found three places doing work growing with the square of their size,
+  two of them on main (the end checks finding runs again for each
+  stretch, and points placed in long cycles by walking every side), all
+  fixed. Each fix has a test of the work it saves, which fails with the
+  fix undone, since the time guards need not: an edge of 256 segments
+  lying beside a crossing (11.6–13.1 ms, limit 120 ms, with a scaling
+  check) and a face crossing a block's top 1,024 times (63–68 ms, limit
+  700 ms; docs/PERFORMANCE.md, eighth pass). Classification stays
   quadratic in the crossings along one line (known slow spot).
 - Geometry for booleans of curved solids (design note 0012 §10.7, item
   1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
@@ -1299,11 +1309,11 @@ name open unchanged.
   main returns where an edge of a face, a hole in it or a reflex corner
   of it lies on the other face's plane beside the line where the faces
   cross, and the other face holds the strip between them and that line,
-  are refused (§20, goldens 32 to 40); where the other face does not
+  are refused (§20, goldens 32 to 41); where the other face does not
   hold the strip (a body resting on its edge, or over a hole or a gap
   flush with the corners) the contact is answered as before. That check
   does not decide a curved edge near a strip (refused as not supported
-  yet) or a boundary within the tolerance of the plane that is no
+  yet, golden 41) or a boundary within the tolerance of the plane that is no
   chain (a curved edge lying there, a corner one of whose edges is
   curved); and a run on the side of that line where the thin layer lies
   outside the face's body is refused, where main failed every
