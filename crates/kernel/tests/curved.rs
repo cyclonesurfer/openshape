@@ -3325,6 +3325,165 @@ fn volume_identities_on_chains_of_cuts() {
     report("chains of cuts", &t);
 }
 
+/// Pairs of the fuzz of planes and cylinders at twenty times its size
+/// (2026-10-16), with their operands as drawn, where a box's corner rests
+/// on a flat face of a prism from inside it (design note 0012 §19): pair
+/// 1072's prism's bottom, pair 1733's (a prism with a hole), and the flat
+/// side of pair 3493's D-shaped prism. Main refused the first two as
+/// tangent contacts and returned the third's prism minus the box touching
+/// itself at the corner. The difference of the prism and the box keeps the
+/// contact and is refused as touching at a point; every other operation
+/// succeeds, valid, with the volume identities and the membership of
+/// sampled points.
+#[test]
+fn corners_of_boxes_resting_on_flat_faces_of_prisms() {
+    let world = |x: f64, y: f64, z: f64| Frame {
+        origin: DVec3::new(x, y, z),
+        x: DVec3::X,
+        y: DVec3::Y,
+        z: DVec3::Z,
+    };
+    let boxed = |origin: [f64; 3], x: [f64; 3], y: [f64; 3], z: [f64; 3], size: [f64; 3]| {
+        let frame = Frame {
+            origin: DVec3::from(origin),
+            x: DVec3::from(x),
+            y: DVec3::from(y),
+            z: DVec3::from(z),
+        };
+        k().make_box(&frame, DVec3::from(size)).expect("a box")
+    };
+    let p = |x: f64, y: f64| DVec2::new(x, y);
+    let rounded_square = prism(
+        world(-0.25, 0.25, 0.0),
+        vec![
+            line(
+                p(-0.49999999999999994, -1.25),
+                p(4.592425496802574e-17, -1.25),
+            ),
+            arc(p(0.0, -0.5), 0.75, -FRAC_PI_2, FRAC_PI_2),
+            line(p(0.75, -0.5), p(0.75, 0.0)),
+            arc(p(0.0, 0.0), 0.75, 0.0, FRAC_PI_2),
+            line(
+                p(4.592425496802574e-17, 0.75),
+                p(-0.49999999999999994, 0.75),
+            ),
+            arc(p(-0.5, 0.0), 0.75, FRAC_PI_2, FRAC_PI_2),
+            line(
+                p(-1.25, 9.184850993605148e-17),
+                p(-1.25, -0.4999999999999999),
+            ),
+            arc(p(-0.5, -0.5), 0.75, PI, FRAC_PI_2),
+        ],
+        1.5,
+        false,
+    );
+    let (a, b, c, d) = (
+        p(0.10825118342210227, 0.3608200774980023),
+        p(-0.3608200774980023, 0.6082511834221023),
+        p(-0.6082511834221023, 0.1391799225019978),
+        p(-0.1391799225019978, -0.10825118342210227),
+    );
+    let holed_disc = prism(
+        world(0.25, -0.25, 0.0),
+        vec![
+            ProfileCurve::Circle {
+                center: p(-0.25, 0.25),
+                radius: 1.0,
+            },
+            line(a, b),
+            line(b, c),
+            line(c, d),
+            line(d, a),
+        ],
+        1.5,
+        false,
+    );
+    let d_shape = prism(
+        world(0.25, 0.0, 0.25),
+        vec![
+            arc(p(0.0, 0.0), 1.0, 6.030505052037507, 3.6469531638739503),
+            line(
+                p(-0.9682458365518543, -0.25000000000000006),
+                p(0.9682458365518541, -0.2500000000000004),
+            ),
+        ],
+        1.5,
+        true,
+    );
+    let pairs = [
+        (
+            "pair 1072",
+            boxed(
+                [-0.25, 0.5, 0.0],
+                [
+                    0.7999897685163102,
+                    -0.34593680307899616,
+                    0.49024901687275635,
+                ],
+                [0.043858386466885724, 0.8485915233511017, 0.5272275300410424],
+                [-0.598408566287066, -0.40027509886594337, 0.6940367663331084],
+                [0.75, 1.25, 1.25],
+            ),
+            rounded_square,
+        ),
+        (
+            "pair 1733",
+            holed_disc,
+            boxed(
+                [-0.5, -0.25, 0.0],
+                [0.44366950910568986, 0.849635497338689, 0.28509101766270134],
+                [-0.5789576135961494, 0.02890750069209197, 0.8148450392944591],
+                [0.6840800014245176, -0.5265775138246745, 0.5047283166073178],
+                [0.5, 0.5, 0.5],
+            ),
+        ),
+        (
+            "pair 3493",
+            d_shape,
+            boxed(
+                [0.0, -0.25, 0.0],
+                [
+                    -0.9797498931265659,
+                    0.07290969139129636,
+                    -0.1864787489761466,
+                ],
+                [-0.18194532350514747, 0.06459006629308546, 0.981185009359021],
+                [
+                    0.08358257098875342,
+                    0.9952448443661894,
+                    -0.05001653316083839,
+                ],
+                [1.25, 0.25, 1.5],
+            ),
+        ),
+    ];
+    let mut t = Tally::default();
+    let mut points = Rng(0x5A3F_0E18);
+    for (name, a, b) in &pairs {
+        identities(&mut t, a, b, name, 0.0, &mut points);
+    }
+    assert!(t.bugs.is_empty(), "{:?}", t.bugs);
+    let pinch = "the result would be non-manifold: the bodies touch at a point near";
+    let refused: Vec<&str> = t
+        .refused
+        .iter()
+        .map(|m| m.split(": ").next().unwrap_or(m))
+        .collect();
+    assert_eq!(
+        refused,
+        [
+            "pair 1072 Subtract",
+            "pair 1733 Subtract",
+            "pair 3493 Subtract"
+        ]
+    );
+    assert!(
+        t.refused.iter().all(|m| m.contains(pinch)),
+        "{:?}",
+        t.refused
+    );
+}
+
 /// Pairs the fuzz of planes across cones found faulty at fifty times its
 /// size (2026-10-15), with their operands as drawn: a pointed cone and a
 /// slab through or by its apex. Meshing the results (and the kernel's own

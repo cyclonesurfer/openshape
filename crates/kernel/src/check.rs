@@ -424,7 +424,14 @@ pub(crate) fn bounding_size(b: &Brep) -> f64 {
 /// body's size from its surfaces, with a bound on the volume's error:
 /// twice the area of the mesh of its curved faces times that distance (the
 /// mesh of a flat face lies in its plane, so the region between the mesh
-/// and the body is along curved faces), plus the rounding of the sum.
+/// and the body is along curved faces), plus the rounding of the sum. The
+/// tetrahedra are taken from a corner of the shell's mesh, not the world's
+/// origin: a triple product of points a metre away loses about 2⁻⁵² m³ to
+/// rounding in each cross product, which a shell a few micrometres across
+/// does not enclose (found by the contact fuzz: a corner dipping four
+/// tolerances into a face came out inside-out), and the bound counts the
+/// lengths of the three corners, not the product's own size, which that
+/// cancellation makes small.
 pub(crate) fn shell_volumes(b: &Brep, tol: &Tolerance) -> Result<Vec<(f64, f64)>, KernelError> {
     let opts = TessellationOptions {
         chord_tolerance: bounding_size(b).max(1e-9) * 1e-2,
@@ -435,14 +442,17 @@ pub(crate) fn shell_volumes(b: &Brep, tol: &Tolerance) -> Result<Vec<(f64, f64)>
         .iter()
         .map(|shell| {
             let (mut v, mut curved, mut magnitude) = (0.0, 0.0, 0.0);
+            let o = (shell.faces.iter())
+                .find_map(|f| t.faces[f.idx()].positions.first().copied())
+                .unwrap_or(DVec3::ZERO);
             for f in &shell.faces {
                 let ft = &t.faces[f.idx()];
                 let flat = b.faces[f.idx()].surface.plane().is_some();
                 for tri in &ft.triangles {
                     let [a, bb, c] = tri.map(|i| ft.positions[i as usize]);
-                    let w = a.dot(bb.cross(c)) / 6.0;
-                    v += w;
-                    magnitude += w.abs();
+                    let (p, q, r) = (a - o, bb - o, c - o);
+                    v += p.dot(q.cross(r)) / 6.0;
+                    magnitude += p.length() * q.length() * r.length() / 6.0;
                     if !flat {
                         curved += 0.5 * (bb - a).cross(c - a).length();
                     }

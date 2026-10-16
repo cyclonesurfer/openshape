@@ -32,6 +32,13 @@
 //! inside the face when it runs along the face's own edges in their
 //! direction (material on the left); regions bounded only by segments
 //! imprinted inside the face are inside it too.
+//!
+//! What separates nothing is reported apart from the regions (design note
+//! 0012 §18.2): a *bridge*, a segment with the same cycle on both sides (an
+//! edge of one body lying on the face, from a free end, between two loops
+//! or on its own), and an isolated point (a corner of one body resting on
+//! the face). Neither enters a region's loops; each is given with the
+//! region that holds it, for the booleans' rule on contacts.
 
 use glam::{DVec2, DVec3};
 use rustc_hash::FxHashMap;
@@ -266,6 +273,41 @@ impl Region {
             chords,
         }
     }
+}
+
+/// A face's regions, and what lies in them without bounding them.
+pub(super) struct Split {
+    /// The regions inside the face.
+    pub regions: Vec<Region>,
+    /// Bridges, then isolated points, each with the region holding it.
+    pub loose: Vec<Loose>,
+}
+
+/// A bridge or an isolated point of a face's graph, in a region.
+#[derive(Debug)]
+pub(super) struct Loose {
+    /// The holding region, by its position in [`Split::regions`].
+    pub region: usize,
+    pub kind: LooseKind,
+}
+
+/// What a [`Loose`] item is.
+#[derive(Debug)]
+pub(super) enum LooseKind {
+    /// A segment with the same region on both sides.
+    Bridge {
+        /// The segment's index, as given.
+        seg: usize,
+        /// Its chords' points in the chart, from its `a` to its `b`.
+        path: Vec<DVec2>,
+        /// The widest band of its chords.
+        band: f64,
+        /// Whether its `a` and its `b` are free: no segment of the
+        /// region's loops ends there.
+        free: [bool; 2],
+    },
+    /// A point (a cluster) on no segment.
+    Point(usize),
 }
 
 /// The band of the chord from `p` to `q` along a course on `[t0, t1]`.
@@ -568,14 +610,26 @@ fn split_ends(
 }
 
 /// The regions inside the face whose segments are `edges`, the clusters
-/// at chart points `pos`; `reach` gives the tolerance `eps` in the chart at
-/// a chart point.
+/// at chart points `pos`, and its bridges and the isolated `points`
+/// (clusters on no segment) in them; `reach` gives the tolerance `eps` in
+/// the chart at a chart point.
+///
+/// The half-edges are walked once; a chord whose two half-edges lie in one
+/// cycle is a bridge (in a plane graph an edge has the same face on both
+/// sides exactly when removing it disconnects its component), and with
+/// bridges the walk is made again without them. A bridge lies in the
+/// region whose loops hold the other half-edges of its first cycle, or,
+/// in a cycle of bridges alone (a tree), in the region around one of its
+/// points, as an isolated point does. A bridge or a point in no region, or
+/// in a hole, is off the face and dropped.
+/// With no bridges and no points the result is the one walk's.
 pub(super) fn regions(
     edges: &[Edge],
     pos: &dyn Fn(usize) -> DVec2,
     reach: &dyn Fn(DVec2) -> f64,
     eps: f64,
-) -> Result<Vec<Region>, Problem> {
+    points: &[usize],
+) -> Result<Split, Problem> {
     // Unique segments, in order of first appearance, with their sides.
     let mut unique: Vec<usize> = Vec::new();
     let mut slot: FxHashMap<usize, usize> = FxHashMap::default();
@@ -601,10 +655,13 @@ pub(super) fn regions(
         }
     }
     if unique.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Split {
+            regions: Vec::new(),
+            loose: Vec::new(),
+        });
     }
     let list: Vec<&Edge> = unique.iter().map(|&i| &edges[i]).collect();
-    // Nodes.
+    // Nodes: the segments' ends, then the isolated points.
     let mut node_of: FxHashMap<usize, usize> = FxHashMap::default();
     let mut nodes: Vec<usize> = Vec::new();
     for e in &list {
@@ -614,6 +671,17 @@ pub(super) fn regions(
                 nodes.len() - 1
             });
         }
+    }
+    let ends_count = nodes.len();
+    for &c in points {
+        if node_of.contains_key(&c) {
+            return Err(Problem::Inconsistent(
+                "a point touched off the segments ends one",
+                c,
+            ));
+        }
+        node_of.insert(c, nodes.len());
+        nodes.push(c);
     }
     let pos_nodes: Vec<DVec2> = nodes.iter().map(|&c| pos(c)).collect();
     let near: Vec<f64> = pos_nodes.iter().map(|&q| reach(q)).collect();
@@ -659,7 +727,6 @@ pub(super) fn regions(
         let d = p[to(h)] - p[from(h)];
         d.y.atan2(d.x)
     };
-    let mut rank = vec![0usize; nh];
     for (n, list) in out.iter_mut().enumerate() {
         list.sort_by(|&x, &y| angle(x).total_cmp(&angle(y)));
         for w in list.windows(2) {
@@ -667,40 +734,36 @@ pub(super) fn regions(
                 return Err(Problem::Close(g.cluster[n]));
             }
         }
-        for (r, &h) in list.iter().enumerate() {
-            rank[h] = r;
-        }
     }
-    let next = |h: usize| {
-        let t = h ^ 1;
-        let v = from(t);
-        let list = &out[v];
-        list[(rank[t] + list.len() - 1) % list.len()]
+    let unclosed =
+        |h: usize| Problem::Inconsistent("a half-edge walk did not close", g.cluster[from(h)]);
+    let (first_cycles, first_of) = walk(&out, nh, &from).map_err(unclosed)?;
+    // Bridges: chords with one cycle on both sides.
+    let bridge: Vec<bool> = (0..chord_ends.len())
+        .map(|c| first_of[2 * c] == first_of[2 * c + 1])
+        .collect();
+    let bridged = bridge.iter().any(|&b| b);
+    let (cycles, cycle_of, first) = if bridged {
+        for (c, &b) in bridge.iter().enumerate() {
+            if b && side[g.chords[c].edge].is_some() {
+                return Err(Problem::Inconsistent(
+                    "an edge of the face bounds no region",
+                    g.cluster[chord_ends[c].0],
+                ));
+            }
+        }
+        for list in &mut out {
+            list.retain(|&h| !bridge[h / 2]);
+        }
+        let (cycles, of) = walk(&out, nh, &from).map_err(unclosed)?;
+        (cycles, of, Some((first_cycles, first_of)))
+    } else {
+        (first_cycles, first_of, None)
     };
-
-    // Cycles, with antennas (segments with the same cycle on both sides)
-    // removed.
-    let mut seen = vec![false; nh];
-    let mut cycles: Vec<Vec<usize>> = Vec::new();
-    for h0 in 0..nh {
-        if seen[h0] {
-            continue;
-        }
-        let mut cyc = Vec::new();
-        let mut h = h0;
-        while !seen[h] {
-            seen[h] = true;
-            cyc.push(h);
-            h = next(h);
-        }
-        if h != h0 {
-            return Err(Problem::Inconsistent(
-                "a half-edge walk did not close",
-                g.cluster[from(h0)],
-            ));
-        }
-        cycles.push(prune(cyc));
-    }
+    debug_assert!(
+        cycles.iter().all(|c| prune(c.clone()).len() == c.len()),
+        "a half-edge followed by its twin after the bridges are removed"
+    );
     let area = |c: &[usize]| -> f64 {
         c.iter()
             .map(|&h| p[from(h)].perp_dot(p[to(h)]))
@@ -708,7 +771,8 @@ pub(super) fn regions(
             * 0.5
     };
 
-    // Components, by union–find over nodes.
+    // Components, by union–find over nodes, through chords that are not
+    // bridges.
     let mut comp: Vec<usize> = (0..p.len()).collect();
     fn find(c: &mut [usize], mut i: usize) -> usize {
         while c[i] != i {
@@ -717,7 +781,10 @@ pub(super) fn regions(
         }
         i
     }
-    for &(a, b) in &chord_ends {
+    for (k, &(a, b)) in chord_ends.iter().enumerate() {
+        if bridge[k] {
+            continue;
+        }
         let (ra, rb) = (find(&mut comp, a), find(&mut comp, b));
         if ra != rb {
             comp[ra.max(rb)] = ra.min(rb);
@@ -753,8 +820,10 @@ pub(super) fn regions(
         holes: Vec<Vec<usize>>,
     }
     let mut cells: Vec<Cell> = Vec::new();
-    let mut outsides: Vec<(Vec<usize>, f64)> = Vec::new();
-    for c in cycles {
+    // Per cycle, the cell it bounds (as its outer cycle or a hole).
+    let mut cell_of: Vec<Option<usize>> = vec![None; cycles.len()];
+    let mut outsides: Vec<(usize, Vec<usize>, f64)> = Vec::new();
+    for (ci, c) in cycles.into_iter().enumerate() {
         if c.is_empty() {
             continue;
         }
@@ -762,6 +831,7 @@ pub(super) fn regions(
         if a > 0.0 {
             let inside = inside_of(&c)?.unwrap_or(true);
             let k = find(&mut comp, from(c[0]));
+            cell_of[ci] = Some(cells.len());
             cells.push(Cell {
                 cycle: c,
                 area: a,
@@ -770,7 +840,7 @@ pub(super) fn regions(
                 holes: Vec::new(),
             });
         } else if a < 0.0 {
-            outsides.push((c, a));
+            outsides.push((ci, c, a));
         } else {
             return Err(Problem::Inconsistent(
                 "a cycle of zero area",
@@ -778,10 +848,30 @@ pub(super) fn regions(
             ));
         }
     }
+    // Bridges, by segment: their chords in order and their first cycle.
+    let mut bridges: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (k, &b) in bridge.iter().enumerate() {
+        if !b {
+            continue;
+        }
+        let e = g.chords[k].edge;
+        match bridges.last_mut() {
+            Some((last, chords)) if *last == e => chords.push(k),
+            _ => bridges.push((e, vec![k])),
+        }
+    }
+    // The bridges whose first cycle holds no other half-edge (trees),
+    // placed by a point as isolated points are.
+    let first_cycle = |chord: usize| -> &[usize] {
+        let (cycles, of) = first.as_ref().expect("bridges were found in a first walk");
+        &cycles[of[2 * chord]]
+    };
+    let tree = |chords: &[usize]| first_cycle(chords[0]).iter().all(|&h| bridge[h / 2]);
+    let placed_by_point = bridges.iter().any(|(_, ch)| tree(ch)) || nodes.len() > ends_count;
     // The regions around a point are among those whose boxes hold it
     // (padded against the rounding of the containment test).
     let pad = 1e-9 * scale(p);
-    let tree = (!outsides.is_empty()).then(|| {
+    let boxes = (!outsides.is_empty() || placed_by_point).then(|| {
         Bvh::new(
             cells
                 .iter()
@@ -795,8 +885,27 @@ pub(super) fn regions(
                 .collect(),
         )
     });
-    let mut near: Vec<usize> = Vec::new();
-    for (c, _) in outsides {
+    // The smallest cell around `q` (farther than its reach from every
+    // chord), other than of component `skip`.
+    let around = |q: DVec2, skip: Option<usize>, cells: &[Cell]| -> Option<usize> {
+        let mut near: Vec<usize> = Vec::new();
+        if let Some(t) = &boxes {
+            let q3 = q.extend(0.0);
+            t.overlapping(q3 - DVec3::splat(pad), q3 + DVec3::splat(pad), &mut near);
+        }
+        let mut best: Option<usize> = None;
+        for &i in &near {
+            let r = &cells[i];
+            if Some(r.comp) == skip || !contains(&r.cycle, q, p, &from) {
+                continue;
+            }
+            if best.is_none_or(|b| r.area < cells[b].area) {
+                best = Some(i);
+            }
+        }
+        best
+    };
+    for (ci, c, _) in outsides {
         let k = find(&mut comp, from(c[0]));
         // A cluster of the cycle: farther than the tolerance from every
         // segment it does not end.
@@ -805,21 +914,7 @@ pub(super) fn regions(
             .map(|&h| from(h))
             .find(|&n| n < g.real)
             .expect("a cycle passes through a cluster");
-        let q = p[first];
-        let mut best: Option<usize> = None;
-        if let Some(t) = &tree {
-            let q3 = q.extend(0.0);
-            t.overlapping(q3 - DVec3::splat(pad), q3 + DVec3::splat(pad), &mut near);
-        }
-        for &i in &near {
-            let r = &cells[i];
-            if r.comp == k || !contains(&r.cycle, q, p, &from) {
-                continue;
-            }
-            if best.is_none_or(|b| r.area < cells[b].area) {
-                best = Some(i);
-            }
-        }
+        let best = around(p[first], Some(k), &cells);
         let verdict = inside_of(&c)?;
         match best {
             Some(i) => {
@@ -830,6 +925,7 @@ pub(super) fn regions(
                     ));
                 }
                 cells[i].holes.push(c);
+                cell_of[ci] = Some(i);
             }
             None => {
                 if verdict != Some(false) {
@@ -839,6 +935,80 @@ pub(super) fn regions(
                     ));
                 }
             }
+        }
+    }
+    // The regions are the cells inside the face, in order.
+    let mut region_of: Vec<Option<usize>> = vec![None; cells.len()];
+    let mut count = 0;
+    for (i, r) in cells.iter().enumerate() {
+        if r.inside {
+            region_of[i] = Some(count);
+            count += 1;
+        }
+    }
+    // The region around a point of no cycle: the smallest cell around it,
+    // if inside the face and the point is in none of its holes.
+    let holding = |q: DVec2| -> Option<usize> {
+        let i = around(q, None, &cells)?;
+        let in_hole = cells[i].holes.iter().any(|h| contains(h, q, p, &from));
+        if in_hole {
+            None
+        } else {
+            region_of[i]
+        }
+    };
+    let mut loose: Vec<Loose> = Vec::new();
+    // Per node, whether a chord of the regions' loops reaches it.
+    let mut looped = vec![false; p.len()];
+    for (k, &(a, b)) in chord_ends.iter().enumerate() {
+        if !bridge[k] {
+            looped[a] = true;
+            looped[b] = true;
+        }
+    }
+    for (e, chords) in &bridges {
+        let (na, nb) = ends[*e];
+        let region = if tree(chords) {
+            holding(p[na])
+        } else {
+            first_cycle(chords[0])
+                .iter()
+                .find(|&&h| !bridge[h / 2])
+                .and_then(|&h| cell_of[cycle_of[h]])
+                .and_then(|i| region_of[i])
+        };
+        // A bridge off the face is dropped: the imprint of a coincident
+        // face takes the pieces of its edges within the tolerance of this
+        // face, and one can reach just outside it (a copy of a body moved
+        // by just over the tolerance, found by the motions test).
+        let Some(region) = region else {
+            continue;
+        };
+        let mut path = Vec::with_capacity(chords.len() + 1);
+        path.push(p[chord_ends[chords[0]].0]);
+        path.extend(chords.iter().map(|&k| p[chord_ends[k].1]));
+        loose.push(Loose {
+            region,
+            kind: LooseKind::Bridge {
+                seg: list[*e].seg,
+                path,
+                band: chords.iter().fold(0.0f64, |m, &k| m.max(g.chords[k].band)),
+                free: [!looped[na], !looped[nb]],
+            },
+        });
+    }
+    loose.sort_by_key(|l| match l.kind {
+        LooseKind::Bridge { seg, .. } => seg,
+        LooseKind::Point(_) => unreachable!("bridges come first"),
+    });
+    let mut isolated: Vec<usize> = (ends_count..nodes.len()).collect();
+    isolated.sort_by_key(|&n| nodes[n]);
+    for n in isolated {
+        if let Some(region) = holding(p[n]) {
+            loose.push(Loose {
+                region,
+                kind: LooseKind::Point(nodes[n]),
+            });
         }
     }
     // Each cycle as segments and chords, from its first cluster.
@@ -879,11 +1049,56 @@ pub(super) fn regions(
         }
         Region { loops, chords }
     };
-    Ok(cells
+    let regions = cells
         .iter()
         .filter(|r| r.inside)
         .map(|r| as_region(std::iter::once(&r.cycle).chain(&r.holes).collect()))
-        .collect())
+        .collect();
+    Ok(Split { regions, loose })
+}
+
+/// The cycles of the half-edges in the angle-sorted lists `out` (per node,
+/// the half-edges leaving it; `start` gives a half-edge's node), each
+/// half-edge followed by the one before its twin about the twin's node:
+/// the face on the left of every half-edge. Half-edges in no list are in no
+/// cycle. Returns the cycles, in order of their least half-edge, and per
+/// half-edge its cycle (`usize::MAX` for none), or a half-edge whose walk
+/// did not close.
+fn walk(
+    out: &[Vec<usize>],
+    nh: usize,
+    start: &dyn Fn(usize) -> usize,
+) -> Result<(Vec<Vec<usize>>, Vec<usize>), usize> {
+    let mut rank = vec![usize::MAX; nh];
+    for list in out {
+        for (r, &h) in list.iter().enumerate() {
+            rank[h] = r;
+        }
+    }
+    let next = |h: usize| {
+        let t = h ^ 1;
+        let list = &out[start(t)];
+        list[(rank[t] + list.len() - 1) % list.len()]
+    };
+    let mut of = vec![usize::MAX; nh];
+    let mut cycles: Vec<Vec<usize>> = Vec::new();
+    for h0 in 0..nh {
+        if of[h0] != usize::MAX || rank[h0] == usize::MAX {
+            continue;
+        }
+        let mut cyc = Vec::new();
+        let mut h = h0;
+        while of[h] == usize::MAX {
+            of[h] = cycles.len();
+            cyc.push(h);
+            h = next(h);
+        }
+        if h != h0 {
+            return Err(h0);
+        }
+        cycles.push(cyc);
+    }
+    Ok((cycles, of))
 }
 
 /// Segments below this count are checked pair by pair; above it, through
@@ -959,7 +1174,8 @@ fn consistent(
     Ok(())
 }
 
-/// Removes antennas: a half-edge followed by its twin.
+/// Removes antennas: a half-edge followed by its twin. Only checked: with
+/// the bridges removed, no cycle has one.
 fn prune(mut c: Vec<usize>) -> Vec<usize> {
     loop {
         let n = c.len();
@@ -1029,4 +1245,289 @@ fn contains(c: &[usize], q: DVec2, p: &[DVec2], from: &dyn Fn(usize) -> usize) -
         }
     }
     inside
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPS: f64 = 1e-7;
+
+    /// A face's graph on the points `at` (cluster `i` at `at[i]`), with
+    /// straight segments numbered in order.
+    struct Face {
+        at: Vec<DVec2>,
+        segs: Vec<(usize, usize, Option<bool>)>,
+    }
+
+    impl Face {
+        /// The square (0, 0)–(4, 4), counter-clockwise, as clusters 0 to 3.
+        fn square() -> Face {
+            let mut f = Face {
+                at: vec![
+                    DVec2::new(0.0, 0.0),
+                    DVec2::new(4.0, 0.0),
+                    DVec2::new(4.0, 4.0),
+                    DVec2::new(0.0, 4.0),
+                ],
+                segs: Vec::new(),
+            };
+            for i in 0..4 {
+                f.side(i, (i + 1) % 4);
+            }
+            f
+        }
+
+        fn point(&mut self, x: f64, y: f64) -> usize {
+            self.at.push(DVec2::new(x, y));
+            self.at.len() - 1
+        }
+
+        /// A segment of the face's own boundary, material on the left of
+        /// `from → to`.
+        fn side(&mut self, from: usize, to: usize) -> usize {
+            let s = (from.min(to), from.max(to), Some(from < to));
+            self.segs.push(s);
+            self.segs.len() - 1
+        }
+
+        /// A segment imprinted inside the face.
+        fn imprint(&mut self, a: usize, b: usize) -> usize {
+            self.segs.push((a.min(b), a.max(b), None));
+            self.segs.len() - 1
+        }
+
+        /// The square hole (1, 1)–(2, 2), as clusters from 4 on.
+        fn hole(&mut self) -> [usize; 4] {
+            let h = [
+                self.point(1.0, 1.0),
+                self.point(2.0, 1.0),
+                self.point(2.0, 2.0),
+                self.point(1.0, 2.0),
+            ];
+            for i in 0..4 {
+                // Clockwise: the face's material outside the hole.
+                self.side(h[(i + 1) % 4], h[i]);
+            }
+            h
+        }
+
+        fn split(&self, points: &[usize]) -> Result<Split, Problem> {
+            let edges: Vec<Edge> = self
+                .segs
+                .iter()
+                .enumerate()
+                .map(|(seg, &(a, b, side))| Edge {
+                    seg,
+                    a,
+                    b,
+                    side,
+                    bend: None,
+                })
+                .collect();
+            regions(&edges, &|c| self.at[c], &|_| EPS, EPS, points)
+        }
+    }
+
+    fn loops(s: &Split) -> Vec<Vec<Vec<(usize, bool)>>> {
+        s.regions.iter().map(|r| r.loops.clone()).collect()
+    }
+
+    fn bridge(l: &Loose) -> (usize, usize, Vec<DVec2>, [bool; 2]) {
+        match &l.kind {
+            LooseKind::Bridge {
+                seg, path, free, ..
+            } => (l.region, *seg, path.clone(), *free),
+            LooseKind::Point(c) => panic!("a point, {c}, where a bridge was expected"),
+        }
+    }
+
+    fn inconsistent(r: Result<Split, Problem>) -> &'static str {
+        match r {
+            Err(Problem::Inconsistent(m, _)) => m,
+            Err(p) => panic!("{p:?}"),
+            Ok(s) => panic!("split: {} regions, {:?}", s.regions.len(), s.loose),
+        }
+    }
+
+    #[test]
+    fn a_face_alone_is_one_region_with_nothing_loose() {
+        let s = Face::square().split(&[]).expect("a split");
+        assert_eq!(
+            loops(&s),
+            vec![vec![vec![(0, true), (1, true), (2, true), (3, false)]]]
+        );
+        assert!(s.loose.is_empty());
+    }
+
+    #[test]
+    fn an_antenna_is_a_bridge_and_leaves_the_region_as_it_was() {
+        let plain = Face::square().split(&[]).expect("a split");
+        let mut f = Face::square();
+        let inner = f.point(1.0, 1.0);
+        let seg = f.imprint(0, inner);
+        let s = f.split(&[]).expect("a split");
+        assert_eq!(loops(&s), loops(&plain));
+        assert_eq!(s.loose.len(), 1);
+        assert_eq!(
+            bridge(&s.loose[0]),
+            (0, seg, vec![DVec2::ZERO, DVec2::ONE], [false, true])
+        );
+    }
+
+    #[test]
+    fn a_segment_on_its_own_is_a_bridge_free_at_both_ends() {
+        let mut f = Face::square();
+        let (a, b) = (f.point(1.0, 1.0), f.point(3.0, 2.0));
+        let seg = f.imprint(a, b);
+        let s = f.split(&[]).expect("a split");
+        assert_eq!(s.regions.len(), 1);
+        assert_eq!(
+            bridge(&s.loose[0]),
+            (0, seg, vec![DVec2::ONE, DVec2::new(3.0, 2.0)], [true, true])
+        );
+    }
+
+    #[test]
+    fn a_tree_is_bridges_in_the_region_around_it() {
+        let mut f = Face::square();
+        let (a, b, c, d) = (
+            f.point(1.0, 1.0),
+            f.point(2.0, 1.0),
+            f.point(2.0, 2.0),
+            f.point(3.0, 1.0),
+        );
+        let segs = [f.imprint(a, b), f.imprint(b, c), f.imprint(b, d)];
+        let s = f.split(&[]).expect("a split");
+        assert_eq!(s.regions.len(), 1);
+        let got: Vec<_> = s.loose.iter().map(bridge).collect();
+        assert_eq!(got.len(), 3);
+        for (g, seg) in got.iter().zip(segs) {
+            assert_eq!((g.0, g.1, g.3), (0, seg, [true, true]));
+        }
+    }
+
+    #[test]
+    fn a_connector_between_a_hole_and_the_outer_loop_is_a_bridge() {
+        let mut plain = Face::square();
+        plain.hole();
+        let plain = plain.split(&[]).expect("a split");
+        assert_eq!(plain.regions[0].loops.len(), 2);
+        let mut f = Face::square();
+        let h = f.hole();
+        let seg = f.imprint(0, h[0]);
+        let s = f.split(&[]).expect("a split");
+        // Found by review: the walk's pruning kept such a connector as a
+        // slit in the region's loops.
+        assert_eq!(loops(&s), loops(&plain));
+        assert_eq!(
+            bridge(&s.loose[0]),
+            (0, seg, vec![DVec2::ZERO, DVec2::ONE], [false, false])
+        );
+    }
+
+    #[test]
+    fn a_chord_across_the_face_is_no_bridge() {
+        let mut f = Face::square();
+        let (a, b) = (f.point(2.0, 0.0), f.point(2.0, 4.0));
+        // The bottom and top sides end at the chord's ends.
+        f.segs.clear();
+        for (x, y) in [(0, a), (a, 1), (1, 2), (2, b), (b, 3), (3, 0)] {
+            f.side(x, y);
+        }
+        f.imprint(a, b);
+        let s = f.split(&[]).expect("a split");
+        assert_eq!(s.regions.len(), 2);
+        assert!(s.loose.is_empty());
+    }
+
+    #[test]
+    fn points_inside_the_face_are_kept_and_others_dropped() {
+        let mut f = Face::square();
+        f.hole();
+        let inside = f.point(0.5, 3.0);
+        let in_hole = f.point(1.5, 1.5);
+        let outside = f.point(5.0, 5.0);
+        let s = f.split(&[outside, in_hole, inside]).expect("a split");
+        assert_eq!(s.regions.len(), 1);
+        assert_eq!(s.loose.len(), 1);
+        assert!(matches!(s.loose[0].kind, LooseKind::Point(c) if c == inside));
+        assert_eq!(s.loose[0].region, 0);
+    }
+
+    #[test]
+    fn a_point_within_the_tolerance_of_a_side_is_refused() {
+        let mut f = Face::square();
+        let near = f.point(2.0, 0.5 * EPS);
+        assert!(matches!(f.split(&[near]), Err(Problem::Close(_))));
+    }
+
+    #[test]
+    fn a_point_on_a_segment_end_is_an_inconsistency() {
+        assert_eq!(
+            inconsistent(Face::square().split(&[2])),
+            "a point touched off the segments ends one"
+        );
+    }
+
+    #[test]
+    fn a_side_of_the_face_bounding_no_region_is_an_inconsistency() {
+        let mut f = Face::square();
+        let inner = f.point(1.0, 1.0);
+        f.side(0, inner);
+        assert_eq!(
+            inconsistent(f.split(&[])),
+            "an edge of the face bounds no region"
+        );
+    }
+
+    #[test]
+    fn a_bridge_off_the_face_is_dropped() {
+        // Outside the outer loop, on its own or from a corner; and inside
+        // a hole, from its corner.
+        let mut away = Face::square();
+        let (a, b) = (away.point(5.0, 5.0), away.point(6.0, 5.0));
+        away.imprint(a, b);
+        let mut spur = Face::square();
+        let out = spur.point(5.0, 5.0);
+        spur.imprint(2, out);
+        let mut into = Face::square();
+        let h = into.hole();
+        let mid = into.point(1.5, 1.5);
+        into.imprint(h[0], mid);
+        for f in [away, spur, into] {
+            let s = f.split(&[]).expect("a split");
+            assert_eq!(s.regions.len(), 1);
+            assert!(s.loose.is_empty(), "{:?}", s.loose);
+        }
+    }
+
+    #[test]
+    fn loose_items_come_bridges_first_by_segment_then_points_by_cluster() {
+        let mut f = Face::square();
+        let (a, b) = (f.point(1.0, 1.0), f.point(1.0, 2.0));
+        let (c, d) = (f.point(3.0, 1.0), f.point(3.0, 2.0));
+        let (p, q) = (f.point(2.0, 3.0), f.point(2.0, 3.5));
+        let late = f.imprint(c, d);
+        let early = f.imprint(a, b);
+        assert!(early > late);
+        let s = f.split(&[q, p]).expect("a split");
+        let order: Vec<String> = s
+            .loose
+            .iter()
+            .map(|l| match l.kind {
+                LooseKind::Bridge { seg, .. } => format!("seg {seg}"),
+                LooseKind::Point(c) => format!("point {c}"),
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                format!("seg {late}"),
+                format!("seg {early}"),
+                format!("point {p}"),
+                format!("point {q}")
+            ]
+        );
+    }
 }

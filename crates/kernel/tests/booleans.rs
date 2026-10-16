@@ -4,9 +4,12 @@
 
 use std::f64::consts::TAU;
 
+mod self_contact;
+
 use opendatum_kernel::{
-    Body, BooleanOp, BrepKernel, DVec2, DVec3, EdgeOrigin, ExtrudeSpec, FaceIx, FaceOrigin, Frame,
-    Kernel, KernelError, Merged, Operand, Profile, RevolveSpec, TessellationOptions, VertexOrigin,
+    Adjacency, Body, BodyMesh, BooleanOp, BrepKernel, DVec2, DVec3, EdgeOrigin, ExtrudeSpec,
+    FaceIx, FaceOrigin, Frame, Kernel, KernelError, Merged, Operand, Profile, RevolveSpec,
+    TessellationOptions, VertexOrigin,
 };
 
 fn k() -> BrepKernel {
@@ -297,16 +300,80 @@ fn disjoint_and_identical_bodies() {
     assert!(refused(&a, &a, BooleanOp::Subtract).contains("empty"));
 }
 
+/// `a o b` is `a` unchanged, each of its faces, edges and vertices named
+/// once by its origin in `a`, with nothing merged: the contact with `b`
+/// leaves no trace (ADR 0024 §3: `b` keeps no face at the shared entity,
+/// so its entities there are not origins).
+fn the_first_operand(a: &Body, b: &Body, op: BooleanOp) {
+    let r = run(a, b, op);
+    assert_eq!(counts(&r), counts(a), "{op:?}");
+    assert!(
+        close(volume(&r), volume(a)) && close(area(&r), area(a)),
+        "{op:?}"
+    );
+    let o = k().origins(&r);
+    let mut faces: Vec<u32> = (o.faces.iter())
+        .map(|g| match *g {
+            FaceOrigin::Operand {
+                operand: Operand::First,
+                face,
+            } => face.0,
+            ref other => panic!("{op:?}: a face from {other:?}"),
+        })
+        .collect();
+    let mut edges: Vec<u32> = (o.edges.iter())
+        .map(|g| match *g {
+            EdgeOrigin::Operand {
+                operand: Operand::First,
+                edge,
+            } => edge.0,
+            ref other => panic!("{op:?}: an edge from {other:?}"),
+        })
+        .collect();
+    let mut vertices: Vec<u32> = (o.vertices.iter())
+        .map(|g| match *g {
+            VertexOrigin::Operand {
+                operand: Operand::First,
+                vertex,
+            } => vertex.0,
+            ref other => panic!("{op:?}: a vertex from {other:?}"),
+        })
+        .collect();
+    faces.sort_unstable();
+    edges.sort_unstable();
+    vertices.sort_unstable();
+    let (f, e, v) = counts(a);
+    assert_eq!(faces, (0..f as u32).collect::<Vec<_>>(), "{op:?}");
+    assert_eq!(edges, (0..e as u32).collect::<Vec<_>>(), "{op:?}");
+    assert_eq!(vertices, (0..v as u32).collect::<Vec<_>>(), "{op:?}");
+    assert_eq!(o.merged, Vec::<Merged>::new(), "{op:?}");
+}
+
 #[test]
 fn bodies_touching_along_an_edge_or_at_a_point() {
     let a = cuboid(DVec3::ZERO, DVec3::ONE);
     let edge = cuboid(DVec3::new(1.0, 1.0, 0.0), DVec3::new(2.0, 2.0, 1.0));
-    assert!(refused(&a, &edge, BooleanOp::Union).contains("non-manifold"));
-    assert!(refused(&a, &edge, BooleanOp::Intersect).contains("empty"));
-    assert!(close(volume(&run(&a, &edge, BooleanOp::Subtract)), 1.0));
     let corner = cuboid(DVec3::ONE, DVec3::splat(2.0));
-    assert!(refused(&a, &corner, BooleanOp::Union).contains("non-manifold"));
-    assert!(close(volume(&run(&a, &corner, BooleanOp::Subtract)), 1.0));
+    let along = "the result would be non-manifold: the bodies touch along an edge near \
+                 (1000.000000, 1000.000000, 500.000000) mm";
+    let at = "the result would be non-manifold: the bodies touch at a point near \
+              (1000.000000, 1000.000000, 1000.000000) mm";
+    for (b, why) in [(&edge, along), (&corner, at)] {
+        assert_eq!(refused(&a, b, BooleanOp::Union), why);
+        assert_eq!(refused(b, &a, BooleanOp::Union), why);
+        assert_eq!(
+            refused(&a, b, BooleanOp::Intersect),
+            "the result would be empty"
+        );
+        assert_eq!(
+            refused(b, &a, BooleanOp::Intersect),
+            "the result would be empty"
+        );
+        // Before ADR 0024 the shared edge and its ends also named the other
+        // cube's edge and vertices, which bound no face of the result.
+        the_first_operand(&a, b, BooleanOp::Subtract);
+        the_first_operand(b, &a, BooleanOp::Subtract);
+    }
 }
 
 #[test]
@@ -543,49 +610,59 @@ struct Tally {
 }
 
 /// The volume of a boolean's result, `Some(0)` for an empty result, `None`
-/// for a refusal (recorded); kernel bugs are recorded too.
-fn measured(t: &mut Tally, a: &Body, b: &Body, op: BooleanOp, case: &str) -> Option<f64> {
+/// for a refusal (recorded); kernel bugs are recorded too, among them a
+/// result that touches itself ([`self_contact::touches_itself`]). With it,
+/// the outcome in short: the result's counts, "empty", the refusal's text
+/// without its place, or "bug".
+fn measured(t: &mut Tally, a: &Body, b: &Body, op: BooleanOp, case: &str) -> (Option<f64>, String) {
+    let bug = |t: &mut Tally, m: String| {
+        t.bugs.push(format!("{case} {op:?}: {m}"));
+        (None, "bug".to_string())
+    };
     match k().boolean(a, b, op) {
         Ok(r) => {
             let issues = k().validate(&r);
             if !issues.is_empty() {
-                t.bugs
-                    .push(format!("{case} {op:?}: invalid result: {issues:?}"));
-                return None;
+                return bug(t, format!("invalid result: {issues:?}"));
             }
             if let Err(e) = origins_agree(a, b, &r, op) {
-                t.bugs.push(format!("{case} {op:?}: origins: {e}"));
-                return None;
+                return bug(t, format!("origins: {e}"));
+            }
+            match self_contact::touches_itself(&k(), &r, &TessellationOptions::default()) {
+                Ok(None) => {}
+                Ok(Some(m)) => return bug(t, format!("the result touches itself: {m}")),
+                Err(e) => return bug(t, format!("mesh: {e}")),
             }
             match k().mass_properties(&r, 1e-12) {
-                Ok(m) => Some(m.volume),
-                Err(e) => {
-                    t.bugs.push(format!("{case} {op:?}: {e}"));
-                    None
-                }
+                Ok(m) => (Some(m.volume), format!("{:?}", counts(&r))),
+                Err(e) => bug(t, e.to_string()),
             }
         }
-        Err(KernelError::InvalidInput(m)) if m.contains("empty") => Some(0.0),
+        Err(KernelError::InvalidInput(m)) if m.contains("empty") => (Some(0.0), "empty".into()),
         Err(KernelError::InvalidInput(m)) => {
             t.refused.push(format!("{case} {op:?}: {m}"));
-            None
+            let short = m.split(" near ").next().unwrap_or(&m).to_string();
+            (None, short)
         }
-        Err(e) => {
-            t.bugs.push(format!("{case} {op:?}: {e}"));
-            None
-        }
+        Err(e) => bug(t, e.to_string()),
     }
 }
 
 /// Checks the identities on one pair; `slack` is the volume a coincidence
 /// within the tolerance may move.
 fn identities(t: &mut Tally, a: &Body, b: &Body, case: &str, slack: f64) {
+    identities_with(t, a, b, case, slack);
+}
+
+/// [`identities`], returning the outcomes of A ∪ B, A ∩ B, A − B and
+/// B − A in short ([`measured`]).
+fn identities_with(t: &mut Tally, a: &Body, b: &Body, case: &str, slack: f64) -> [String; 4] {
     t.pairs += 1;
     let (va, vb) = (volume(a), volume(b));
-    let u = measured(t, a, b, BooleanOp::Union, case);
-    let i = measured(t, a, b, BooleanOp::Intersect, case);
-    let ab = measured(t, a, b, BooleanOp::Subtract, case);
-    let ba = measured(t, b, a, BooleanOp::Subtract, case);
+    let (u, su) = measured(t, a, b, BooleanOp::Union, case);
+    let (i, si) = measured(t, a, b, BooleanOp::Intersect, case);
+    let (ab, sab) = measured(t, a, b, BooleanOp::Subtract, case);
+    let (ba, sba) = measured(t, b, a, BooleanOp::Subtract, case);
     let tol = 1e-9 * va.max(vb) + slack;
     let mut check = |name: &str, lhs: f64, rhs: f64| {
         if (lhs - rhs).abs() > tol {
@@ -611,6 +688,7 @@ fn identities(t: &mut Tally, a: &Body, b: &Body, case: &str, slack: f64) {
             t.checked += 1;
         }
     }
+    [su, si, sab, sba]
 }
 
 fn report(name: &str, t: &Tally) {
@@ -693,6 +771,30 @@ fn motion(case: usize, (seed, dir): (u64, DVec3)) -> (Body, Body, f64) {
     (a, b, slack)
 }
 
+/// Motions by 1.1 tolerances whose difference is a sliver between a face
+/// and its moved copy, the two bounded by one loop of points (two faces,
+/// four edges, four vertices; found by the motions' run a hundred times
+/// longer): it is a solid, its volume what the identities give.
+#[test]
+fn slivers_between_a_face_and_its_moved_copy() {
+    for (case, first) in [(836, true), (4539, false), (5883, false), (6751, false)] {
+        let (a, b, _) = motion(case, motions().nth(case).expect("a motion"));
+        let (x, y) = if first { (&a, &b) } else { (&b, &a) };
+        let r = (k().boolean(x, y, BooleanOp::Subtract)).unwrap_or_else(|e| panic!("{case}: {e}"));
+        assert_eq!(k().validate(&r), Vec::<String>::new(), "{case}");
+        assert_eq!(counts(&r), (2, 4, 4), "{case}");
+        let common = k()
+            .boolean(x, y, BooleanOp::Intersect)
+            .expect("the common part");
+        let v = volume(x) - volume(&common);
+        assert!(
+            v > 0.0 && (volume(&r) - v).abs() < 1e-12,
+            "{case}: {} {v}",
+            volume(&r)
+        );
+    }
+}
+
 #[test]
 fn motions_by_fractions_of_the_tolerance() {
     let mut t = Tally::default();
@@ -722,6 +824,537 @@ fn motions_by_fractions_of_the_tolerance() {
         0,
         "copies moved by at most half a tolerance refused"
     );
+}
+
+/// How a body of the contact fuzz rests on a face.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Rest {
+    /// A box on one of its corners.
+    Corner,
+    /// A triangular prism on one of its edges.
+    Edge,
+}
+
+/// The body of contact case `seed`: resting by `rest` on the plane through
+/// `x` with unit normal `n`, on the side `side` (+1 the side `n` points
+/// to), then moved by `delta` along `n`. A corner's three edges all rise
+/// from the plane; an edge runs along `along` if given (an edge of the
+/// face), or a random direction in the plane, and its prism's two faces
+/// rise from it at 9° or more. The same seed gives the same body at every
+/// `delta`.
+fn resting(
+    seed: u64,
+    rest: Rest,
+    (x, n): (DVec3, DVec3),
+    side: f64,
+    delta: f64,
+    along: Option<DVec3>,
+) -> Body {
+    let mut r = Rng(seed);
+    let (up, at) = (n * side, x + n * delta);
+    match rest {
+        Rest::Corner => {
+            let frame = loop {
+                let f = random_frame(&mut r, false, at);
+                if [f.x, f.y, f.z].iter().all(|a| a.dot(up) > 0.15) {
+                    break f;
+                }
+            };
+            let size = DVec3::new(r.range(0.1, 0.8), r.range(0.1, 0.8), r.range(0.1, 0.8));
+            k().make_box(&frame, size).expect("a box on its corner")
+        }
+        Rest::Edge => {
+            let v = DVec3::new(r.range(-1.0, 1.0), r.range(-1.0, 1.0), r.range(-1.0, 1.0));
+            let d = along.unwrap_or_else(|| {
+                v.reject_from_normalized(n)
+                    .normalize_or(n.any_orthonormal_vector())
+            });
+            let len = r.range(0.2, 1.6);
+            let start = r.range(0.0, 1.0) * len;
+            let frame = Frame {
+                origin: at - d * start,
+                x: n.cross(d),
+                y: n,
+                z: d,
+            };
+            let a1 = r.range(-0.6, 0.5);
+            let a2 = r.range(a1 + 0.1, 0.6);
+            let (h1, h2) = (r.range(0.1, 0.6), r.range(0.1, 0.6));
+            let mut pts = vec![
+                DVec2::ZERO,
+                DVec2::new(a2, side * h2),
+                DVec2::new(a1, side * h1),
+            ];
+            if (pts[1] - pts[0]).perp_dot(pts[2] - pts[0]) < 0.0 {
+                pts.swap(1, 2);
+            }
+            k().extrude(
+                &Profile::polygon(frame, &pts),
+                &ExtrudeSpec {
+                    distance: len,
+                    symmetric: false,
+                },
+            )
+            .expect("a prism on its edge")
+        }
+    }
+}
+
+/// A point of face `f` of a body: inside one of its triangles (true), or,
+/// one case in four, on one of its edges or at a corner, with the edge's
+/// direction.
+fn on_face(
+    r: &mut Rng,
+    mesh: &BodyMesh,
+    adj: &Adjacency,
+    f: usize,
+) -> (DVec3, Option<DVec3>, bool) {
+    let edges: Vec<usize> = (0..adj.edge_faces.len())
+        .filter(|&e| adj.edge_faces[e].contains(&FaceIx(f as u32)))
+        .collect();
+    if r.chance(0.25) && !edges.is_empty() {
+        let line = &mesh.edges[edges[(r.next() % edges.len() as u64) as usize]];
+        let (p, q) = (line[0], line[line.len() - 1]);
+        let t = if r.chance(0.3) {
+            0.0
+        } else {
+            r.range(0.2, 0.8)
+        };
+        return (p.lerp(q, t), Some((q - p).normalize()), false);
+    }
+    let face = &mesh.faces[f];
+    let tri = face.triangles[(r.next() % face.triangles.len() as u64) as usize];
+    let w = [r.range(0.05, 1.0), r.range(0.05, 1.0), r.range(0.05, 1.0)];
+    let sum = w[0] + w[1] + w[2];
+    let x = (0..3)
+        .map(|i| face.positions[tri[i] as usize] * (w[i] / sum))
+        .fold(DVec3::ZERO, |a, b| a + b);
+    (x, None, true)
+}
+
+/// The motions of the contact fuzz, in tolerances along the touched face's
+/// normal: across the band in quarters, and four tolerances either way.
+const STEPS: [f64; 11] = [
+    -4.0, -1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 4.0,
+];
+
+/// A case of the contact fuzz: the body A, the point `x` of its face with
+/// normal `n`, whether `x` is inside the face, and the body resting there
+/// at each motion.
+struct ContactCase {
+    a: Body,
+    x: DVec3,
+    n: DVec3,
+    inside: bool,
+    rest: Rest,
+    side: f64,
+    along: Option<DVec3>,
+    seed: u64,
+}
+
+impl ContactCase {
+    fn new(r: &mut Rng) -> ContactCase {
+        let a = random_body(r);
+        let mesh = k()
+            .tessellate(&a, &TessellationOptions::default())
+            .expect("a mesh");
+        let adj = k().adjacency(&a);
+        let f = (r.next() % mesh.faces.len() as u64) as usize;
+        let n = k()
+            .face_plane(&a, FaceIx(f as u32))
+            .expect("a flat face")
+            .normal;
+        let (x, edge, inside) = on_face(r, &mesh, &adj, f);
+        let rest = if r.chance(0.5) {
+            Rest::Corner
+        } else {
+            Rest::Edge
+        };
+        let side = if r.chance(0.5) { 1.0 } else { -1.0 };
+        let along = edge.filter(|_| r.chance(0.5));
+        let seed = r.next();
+        ContactCase {
+            a,
+            x,
+            n,
+            inside,
+            rest,
+            side,
+            along,
+            seed,
+        }
+    }
+
+    /// The resting body moved by `q` tolerances along the face's normal.
+    fn body(&self, q: f64) -> Body {
+        let eps = k().tolerance().linear;
+        let (c, x) = (self, (self.x, self.n));
+        resting(c.seed, c.rest, x, c.side, q * eps, c.along)
+    }
+}
+
+/// Case `n` of the contact fuzz.
+fn contact_case(n: usize) -> ContactCase {
+    let mut r = Rng(0xC047_AC75);
+    let mut c = ContactCase::new(&mut r);
+    for _ in 0..n {
+        c = ContactCase::new(&mut r);
+    }
+    c
+}
+
+/// Edges lying on a face for a few tolerances (contacts 86, 2504 and 5245,
+/// found at a hundred times the default run): B rests by an edge on a
+/// corner or an edge of A's face from inside, and a piece of B's edge
+/// 2.98 to 3.60 tolerances long, from where it passes the corner or meets
+/// A's faces to where it crosses another face of A, lies on that face.
+/// A − B kept the piece with B's faces on both sides, so the result
+/// touched itself; the middle of such a piece is now checked against a
+/// face with corners at both its ends, and A − B is refused; the other
+/// three are answered and pass the identities and the checks of
+/// [`measured`].
+#[test]
+fn edges_lying_on_a_face_for_a_few_tolerances() {
+    let along = "the result would be non-manifold: the bodies touch along an edge";
+    pinned_contacts(&[
+        (
+            86,
+            -0.5,
+            ["(20, 45, 29)", "(7, 15, 10)", along, "(13, 21, 14)"],
+        ),
+        (
+            2504,
+            -4.0,
+            ["(15, 34, 22)", "(7, 15, 10)", along, "(9, 15, 10)"],
+        ),
+        (
+            5245,
+            -0.5,
+            ["(19, 42, 27)", "(8, 18, 12)", along, "(14, 24, 16)"],
+        ),
+    ]);
+}
+
+/// Sharp corners that the check of a result's places lets off (design note
+/// 0012 §19, `check_apart`), each found by disabling its rules over longer
+/// runs of the contact fuzz: a piece of an edge shorter than four
+/// tolerances between two corners of a face, its middle outside the face
+/// but within the tolerance of its boundary (contacts 481 at 0.5 tolerance
+/// and 2896 at 0.75); one shorter than four tolerances leaving a face's
+/// corner (84 at 1, and golden 26); and a longer one leaving a corner whose
+/// far end is more than the tolerance off the face's plane (22 at −1, 281
+/// at 1, 1335 and 5358 at −4, crossing the face's plane at 14° and 3.6°;
+/// and 2714 at −1, at the edge of the band, an edge a tolerance under the
+/// face whose far end the imprint calls off it, 1.0000000002 tolerances,
+/// and whose other end it places on the face's corner). With its rule
+/// disabled, each is refused as touching along an edge; the results are
+/// valid and pass the oracle, which reported the last three until it let
+/// off a flat face that a straight edge leaves at a corner.
+#[test]
+fn sharp_corners_the_check_of_places_lets_off() {
+    let along = "the result would be non-manifold: the bodies touch along an edge";
+    pinned_contacts(&[
+        (
+            84,
+            1.0,
+            [
+                "(15, 38, 25)",
+                "(8, 18, 12)",
+                "(12, 28, 18)",
+                "(11, 27, 18)",
+            ],
+        ),
+        (
+            481,
+            0.5,
+            ["(18, 42, 27)", "(8, 18, 12)", along, "(15, 28, 19)"],
+        ),
+        (
+            2896,
+            0.75,
+            [
+                "(18, 49, 32)",
+                "(8, 18, 12)",
+                "(16, 42, 27)",
+                "(10, 24, 16)",
+            ],
+        ),
+        (
+            22,
+            -1.0,
+            ["(14, 31, 20)", "(5, 9, 6)", "(9, 22, 14)", "(10, 18, 12)"],
+        ),
+        (
+            281,
+            1.0,
+            [
+                "(23, 64, 42)",
+                "(14, 36, 24)",
+                "(22, 61, 40)",
+                "(15, 39, 26)",
+            ],
+        ),
+        (
+            1335,
+            -4.0,
+            ["(21, 54, 35)", "(4, 6, 4)", "(16, 42, 28)", "(9, 18, 11)"],
+        ),
+        (
+            2714,
+            -1.0,
+            ["(12, 27, 17)", "(4, 6, 4)", "(10, 21, 13)", "(6, 12, 8)"],
+        ),
+        (
+            5358,
+            -4.0,
+            ["(15, 39, 26)", "(5, 9, 6)", "(12, 30, 20)", "(8, 18, 12)"],
+        ),
+    ]);
+}
+
+/// Cases of the contact fuzz at a hundred times its default run where a
+/// corner of a result is beyond the tolerance of a face it is not on, off
+/// the face's boundary: 1.08 tolerances (contact 3827 at −4) and 1.31
+/// (369 at −1), so the result keeps clear of the face. The check of a
+/// result's places first took a point within the tolerance of a face's
+/// plane and, in the plane, of its loops for on the face, up to √2
+/// tolerances from it off a corner, and refused these; it now takes the
+/// two distances together. The results are valid and pass the oracle.
+#[test]
+fn corners_just_beyond_the_tolerance_of_a_face() {
+    let along = "the result would be non-manifold: the bodies touch along an edge";
+    pinned_contacts(&[
+        (
+            3827,
+            -4.0,
+            ["(20, 54, 36)", "(6, 12, 8)", "(18, 48, 32)", "(8, 18, 12)"],
+        ),
+        (
+            369,
+            -1.0,
+            ["(14, 36, 24)", "(6, 12, 8)", along, "(6, 12, 8)"],
+        ),
+    ]);
+}
+
+/// The contact fuzz (ADR 0024): a random polyhedron A and a body B resting
+/// on a point of one of A's faces by a corner or an edge, from outside or
+/// inside, swept across the tolerance band. Every result passes the
+/// identities, the origins check and the oracle for results that touch
+/// themselves; every operation is answered or refused, never a kernel
+/// error. Where B rests from outside inside A's face, A ∪ B pinches and is
+/// refused; from inside, A − B (design note 0012 §18.1; B is convex, so
+/// A's face is outside B about the contact). Moved four tolerances clear,
+/// neither is refused as non-manifold for that contact.
+#[test]
+fn contacts_swept_across_the_band() {
+    let eps = k().tolerance().linear;
+    let mut t = Tally::default();
+    let mut by_step = [0usize; STEPS.len()];
+    // Per step, operations whose outcome differs from the contact's own.
+    let mut changed = [0usize; STEPS.len()];
+    let mut pinch: Vec<String> = Vec::new();
+    let mut r = Rng(0xC047_AC75);
+    let cases = scale(60);
+    let zero = STEPS.iter().position(|&q| q == 0.0).expect("a step of 0");
+    for case in 0..cases {
+        let c = ContactCase::new(&mut r);
+        let (a, rest, side) = (&c.a, c.rest, c.side);
+        let label = |q: f64| format!("contact {case} ({rest:?}, side {side}, {q} tolerance)");
+        let slack = |b: &Body, q: f64| 4.0 * (area(a) + area(b)) * (q.abs() + 1.0) * eps;
+        let got: Vec<[String; 4]> = (STEPS.iter().enumerate())
+            .map(|(j, &q)| {
+                let b = c.body(q);
+                let before = t.refused.len();
+                let got = identities_with(&mut t, a, &b, &label(q), slack(&b, q));
+                by_step[j] += t.refused.len() - before;
+                got
+            })
+            .collect();
+        for (j, g) in got.iter().enumerate() {
+            changed[j] += g.iter().zip(&got[zero]).filter(|(x, y)| x != y).count();
+        }
+        if !c.inside {
+            continue;
+        }
+        // Where B rests inside A's face, the operation the table refuses.
+        let (k_op, name) = if side > 0.0 {
+            (0, "A ∪ B")
+        } else {
+            (2, "A − B")
+        };
+        if !got[zero][k_op].starts_with("the result would be non-manifold") {
+            pinch.push(format!("{}: {name} gave {}", label(0.0), got[zero][k_op]));
+        }
+        let op = [BooleanOp::Union, BooleanOp::Intersect, BooleanOp::Subtract][k_op];
+        if let Err(KernelError::InvalidInput(m)) = k().boolean(a, &c.body(4.0 * side), op) {
+            if m.starts_with("the result would be non-manifold") {
+                pinch.push(format!("{} moved clear: {name}: {m}", label(0.0)));
+            }
+        }
+    }
+    let ops = 4 * cases;
+    let line: Vec<String> = STEPS
+        .iter()
+        .zip(by_step.iter().zip(changed))
+        .map(|(q, (n, c))| format!("{q}: {n} refused, {c} changed"))
+        .collect();
+    println!(
+        "contacts by step, of {ops} operations each: {}",
+        line.join("; ")
+    );
+    for p in &pinch {
+        println!("  pinch: {p}");
+    }
+    report("contacts swept across the band", &t);
+    assert!(pinch.is_empty(), "{} pinches", pinch.len());
+}
+
+/// Cases of the contact fuzz at a hundred times its length where a bridge
+/// of a face carried no edge of the other body, a kernel error before:
+/// the curves where the face meets two faces of the other body merged
+/// into one over a sliver of the face (contact 4996), or at a corner of
+/// the other body within the tolerance of the face (2152, 5387); an edge
+/// lying on the face and leaving it at a slant, resting on it from
+/// outside (1203 at 0.75, the union pinching) or with its faces crossing
+/// the face beside it (1203 at −0.75 and 661, refused as a point the
+/// tolerance cannot place); the tree of a corner's bridges (161, refused
+/// by the bridge's test of a piece of the other body's edge leaving its
+/// end); 477, whose bridge carries the curves of the two faces of an edge
+/// lying on the face, refused where the edge leaves it (B − A as edges
+/// passing within the tolerance of each other); and 149, whose merged
+/// curves run along an edge of the other body lying on the face, refused
+/// where the faces meet. 149, 661 and 1203 at −0.75 are now
+/// refused by the check of the faces' meeting's ends
+/// (`imprint::plane_meeting`) before a bridge forms, with the same text.
+#[test]
+fn contacts_whose_bridges_carry_no_edge() {
+    let leaves = "an edge of one body lies on a face of the other and leaves it at a point the \
+                  tolerance cannot place";
+    let sliver = "the bodies leave a sliver thinner than the tolerance";
+    pinned_contacts(&[
+        (149, -1.0, [leaves; 4]),
+        (4996, -4.0, [sliver; 4]),
+        (661, 0.75, [leaves; 4]),
+        (
+            1203,
+            0.75,
+            [
+                "the result would be non-manifold: the bodies touch along an edge",
+                "empty",
+                "(6, 12, 8)",
+                "(5, 9, 6)",
+            ],
+        ),
+        (1203, -0.75, [leaves; 4]),
+        (161, 1.0, [leaves; 4]),
+        (
+            477,
+            -1.0,
+            [
+                leaves,
+                leaves,
+                leaves,
+                "edges where the bodies meet pass within the tolerance of each other",
+            ],
+        ),
+        (2152, -1.0, [sliver, sliver, sliver, leaves]),
+        (5387, -4.0, [sliver; 4]),
+    ]);
+}
+
+/// Cases of the contact fuzz at a hundred times its length where the
+/// faces at an edge lying on a face left it to both sides, or a contact's
+/// pieces disagreed on its side, kernel errors before: a box's corner by
+/// an edge of the other body that crosses one of the box's faces at a
+/// slant a few tolerances from the corner (681, 1583, 1666, 4183, 4906),
+/// refused as an edge running within the tolerance of a face over a
+/// stretch (1583's B − A as a sliver); a prism's face within the tolerance of the other body's over
+/// a band (2080), refused there in every operation, where one order of the
+/// operands reached the edge first; a prism's edge parallel to an edge of
+/// the face and about the tolerance from it, that edge lying on the
+/// prism's faces (828, as golden 24); and an edge lying on a face that
+/// leaves the body through a neighbour at an acute angle before it reaches
+/// their edge (3003, as golden 25).
+#[test]
+fn contacts_whose_lying_edges_leave_the_face_to_both_sides() {
+    let stretch = "an edge of one body runs within the tolerance of a face of the other over a \
+                   stretch without lying on it,";
+    let band = "a face of one body runs within the tolerance of the other's surface without lying \
+                on one of its faces,";
+    let leaves = "an edge of one body lies on a face of the other and leaves it at a point the \
+                  tolerance cannot place";
+    let sliver = "the bodies leave a sliver thinner than the tolerance";
+    pinned_contacts(&[
+        (681, -1.0, [stretch; 4]),
+        (1583, 1.0, [stretch, stretch, stretch, sliver]),
+        (1666, -1.0, [stretch; 4]),
+        (4183, -0.75, [stretch; 4]),
+        (4906, -1.0, [stretch; 4]),
+        (2080, 4.0, [band; 4]),
+        (828, -1.0, [leaves; 4]),
+        (3003, -1.0, [leaves; 4]),
+    ]);
+}
+
+/// Cases of the contact fuzz where a box's corner, resting inside a face
+/// of A, is pushed four tolerances through it, a metre or less from the
+/// world's origin, so that one result holds the box's tip as a tetrahedron
+/// a few tolerances across: A ∩ B where the box rests from outside
+/// (contacts 2 and 42), and B − A where it rests from inside (1, beside a
+/// larger piece of the box, and 15). Taken from the world's origin, the
+/// volume of that shell took the wrong sign, in the booleans (whose faces,
+/// projected onto their planes, fail to close by up to the tolerance) and
+/// in the validator (by rounding), and the operation failed with an
+/// invalid body, a void inside no solid (1, 2) or an outer shell turned
+/// inside out (15, 42); both now take their volumes from a corner of the
+/// shell.
+#[test]
+fn corners_dipping_four_tolerances_through_a_face() {
+    pinned_contacts(&[
+        (
+            1,
+            4.0,
+            [
+                "(15, 33, 22)",
+                "(7, 15, 10)",
+                "(11, 27, 18)",
+                "(11, 21, 14)",
+            ],
+        ),
+        (
+            2,
+            -4.0,
+            ["(14, 33, 22)", "(4, 6, 4)", "(11, 24, 16)", "(7, 15, 10)"],
+        ),
+        (
+            15,
+            4.0,
+            ["(9, 18, 12)", "(7, 15, 10)", "(12, 27, 18)", "(4, 6, 4)"],
+        ),
+        (
+            42,
+            -4.0,
+            ["(12, 27, 18)", "(4, 6, 4)", "(9, 18, 12)", "(7, 15, 10)"],
+        ),
+    ]);
+}
+
+/// Asserts the outcomes of A ∪ B, A ∩ B, A − B and B − A for cases of the
+/// contact fuzz, each with its motion, and that every operation passes
+/// the identities and the checks of [`measured`].
+fn pinned_contacts(cases: &[(usize, f64, [&str; 4])]) {
+    let eps = k().tolerance().linear;
+    let mut t = Tally::default();
+    for &(case, q, want) in cases {
+        let c = contact_case(case);
+        let b = c.body(q);
+        let label = format!("contact {case} ({q} tolerance)");
+        let slack = 4.0 * (area(&c.a) + area(&b)) * (q.abs() + 1.0) * eps;
+        let got = identities_with(&mut t, &c.a, &b, &label, slack);
+        assert_eq!(got, want, "{label}");
+    }
+    assert_eq!(t.bugs, Vec::<String>::new());
 }
 
 /// Copies of a body with a hole moved by three tolerances (motions 3449

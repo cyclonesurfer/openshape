@@ -184,7 +184,10 @@ to about `sqrt(tol / Δκ)`, as in the 2D near-tangencies of design note
 distinguishes:
 
 * **isolated tangent point** (sphere on a plane): a single point found
-  as a minimum of the distance function, returned as a vertex;
+  as a minimum of the distance function (design note 0012 §18 and ADR
+  0024 decide a boolean's contact inside a face without making it a
+  vertex; built for flat faces only, §19, so the booleans still refuse
+  such a contact where a face is curved as a tangent contact);
 * **tangent curve** (cylinder resting on a plane, fillet faces against
   their supports): recognised in closed form for the analytic pairs of
   §4.1; for the general case, traced as a curve of minima of the distance

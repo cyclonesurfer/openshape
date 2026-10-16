@@ -162,6 +162,10 @@ pub(super) struct Shape<'a> {
     /// `incident[first[v]..first[v + 1]]`.
     first: Vec<usize>,
     incident: Vec<usize>,
+    /// The faces at each edge, with whether their loops run it forward:
+    /// those at edge `e` are `bounding[at[e]..at[e + 1]]`.
+    at: Vec<usize>,
+    bounding: Vec<(usize, bool)>,
     /// Per vertex, the surface all its faces lie on, if they lie on one
     /// (a cap's centre, where its halves meet).
     one_surface: Vec<Option<usize>>,
@@ -171,6 +175,12 @@ impl Shape<'_> {
     /// The edges that start or end at vertex `v`.
     pub fn edges_at(&self, v: usize) -> &[usize] {
         &self.incident[self.first[v]..self.first[v + 1]]
+    }
+
+    /// The faces whose loops hold edge `e`, each with whether it runs the
+    /// edge forward (two, in a valid body), in order of face.
+    pub fn edge_faces(&self, e: usize) -> &[(usize, bool)] {
+        &self.bounding[self.at[e]..self.at[e + 1]]
     }
 
     /// The surface all faces at vertex `v` lie on, if they lie on one.
@@ -493,6 +503,24 @@ pub(super) fn shape<'a>(b: &'a Brep, which: &str) -> Result<Shape<'a>, KernelErr
             next[v] += 1;
         }
     }
+    // Each edge's faces, the same way.
+    let mut at = vec![0; edges.len() + 1];
+    for f in &faces {
+        for &(e, _) in f.loops.iter().flatten() {
+            at[e + 1] += 1;
+        }
+    }
+    for e in 0..edges.len() {
+        at[e + 1] += at[e];
+    }
+    let mut next = at.clone();
+    let mut bounding = vec![(0, false); at[edges.len()]];
+    for (fi, f) in faces.iter().enumerate() {
+        for &(e, forward) in f.loops.iter().flatten() {
+            bounding[next[e]] = (fi, forward);
+            next[e] += 1;
+        }
+    }
     Ok(Shape {
         brep: b,
         faces,
@@ -503,6 +531,8 @@ pub(super) fn shape<'a>(b: &'a Brep, which: &str) -> Result<Shape<'a>, KernelErr
         points,
         first,
         incident,
+        at,
+        bounding,
         one_surface,
     })
 }

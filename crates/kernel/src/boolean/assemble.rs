@@ -16,6 +16,7 @@ use super::{
     corners, imprint, key, planar, planar_edges, shape, show, slot, Course, Courses, Key, Pair,
     Piece, Segments, Source,
 };
+use crate::bvh::Bvh;
 use crate::geom::{Curve3, Surface};
 use crate::math::Frame;
 use crate::origin::{
@@ -81,6 +82,232 @@ struct Out {
     joined: bool,
 }
 
+/// Where the bodies touch without crossing inside a face (design note
+/// 0012 §18.2): along a segment, or at a cluster.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Place {
+    Seg(usize),
+    Point(usize),
+}
+
+/// A contact inside a piece: its place, the piece holding it (by index in
+/// the pieces), the side of the piece's face the other body's touching
+/// boundary lies on (+1 outside the piece's body), and a point of it (a
+/// segment's middle).
+pub(super) struct Contact {
+    pub place: Place,
+    pub holder: usize,
+    pub sigma: i8,
+    pub at: DVec3,
+}
+
+/// Decides every contact inside a face (design note 0012 §18.2): a place
+/// pinches, making the result non-manifold, if and only if kept pieces of
+/// both operands are at it: a piece holding it, and a piece of the other
+/// operand *incident* to it (with its segment in its loops, or a corner at
+/// its cluster). The least pinching place is refused, a segment before a
+/// point. Cross-checks, each a kernel error: every place has an incident
+/// piece, its holders agree on its side, and its incident pieces are all
+/// outside the holder's body where the touching boundary lies outside it
+/// (σ = +1) and all inside where it lies inside. A place that fails the
+/// side checks where the tolerance puts it on two faces of the holder's
+/// body away from their edge ([`on_two_faces`]) is refused as input
+/// instead, at that point (`rep`, the clusters' points), before any pinch;
+/// a kernel error at another place comes first.
+fn check_contacts(
+    op: BooleanOp,
+    pieces: &[Piece],
+    contacts: &[Contact],
+    segs: &Segments,
+    rep: &[DVec3],
+) -> Result<(), KernelError> {
+    if contacts.is_empty() {
+        return Ok(());
+    }
+    let keep = |i: usize| kept(op, &pieces[i]).is_some();
+    let mut places: BTreeMap<Place, Holding> = BTreeMap::new();
+    for c in contacts {
+        let e = places.entry(c.place).or_insert_with(|| Holding {
+            holders: Vec::new(),
+            sigma: c.sigma,
+            at: c.at,
+            split: false,
+        });
+        e.split |= e.sigma != c.sigma;
+        e.holders.push(c.holder);
+    }
+    let places: Vec<(Place, Holding)> = places.into_iter().collect();
+    let mut of_seg: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut of_point: FxHashMap<usize, usize> = FxHashMap::default();
+    for (k, (place, _)) in places.iter().enumerate() {
+        match *place {
+            Place::Seg(s) => of_seg.insert(s, k),
+            Place::Point(c) => of_point.insert(c, k),
+        };
+    }
+    // The pieces of the other operand at each place, in one pass over the
+    // loops.
+    let mut incident: Vec<Vec<usize>> = vec![Vec::new(); places.len()];
+    for (i, p) in pieces.iter().enumerate() {
+        for &(s, fw) in p.loops.iter().flatten() {
+            for k in [of_seg.get(&s), of_point.get(&segs.start(s, fw))]
+                .into_iter()
+                .flatten()
+            {
+                if pieces[places[*k].1.holders[0]].operand != p.operand {
+                    incident[*k].push(i);
+                }
+            }
+        }
+    }
+    // The faces at each cluster, made at the first disagreement.
+    let mut faces: Option<FxHashMap<usize, Vec<(Operand, usize)>>> = None;
+    let mut unplaced: Option<(Place, usize)> = None;
+    let mut pinch: Option<usize> = None;
+    for (k, (place, h)) in places.iter().enumerate() {
+        let Holding {
+            holders,
+            sigma,
+            at,
+            split,
+        } = h;
+        let inc = &mut incident[k];
+        inc.sort_unstable();
+        inc.dedup();
+        let Some(&first) = inc.first() else {
+            return Err(KernelError::InvalidResult(format!(
+                "boolean: a contact with no piece of the other body at it near {}",
+                show(*at)
+            )));
+        };
+        let class = pieces[first].class;
+        let side = match class {
+            Class::Outside => 1,
+            Class::Inside => -1,
+            _ => 0,
+        };
+        if *split || side != *sigma || inc.iter().any(|&i| pieces[i].class != class) {
+            let faces = faces.get_or_insert_with(|| faces_at(pieces, contacts, segs));
+            match on_two_faces(*place, holders, pieces, segs, faces) {
+                Some(x) => {
+                    unplaced = unplaced.or(Some((*place, x)));
+                    continue;
+                }
+                None => {
+                    return Err(KernelError::InvalidResult(format!(
+                        "boolean: a contact's pieces disagree on their side near {}",
+                        show(*at)
+                    )))
+                }
+            }
+        }
+        if pinch.is_none() && holders.iter().any(|&i| keep(i)) && inc.iter().any(|&i| keep(i)) {
+            pinch = Some(k);
+        }
+    }
+    if let Some((place, x)) = unplaced {
+        return Err(KernelError::InvalidInput(match place {
+            Place::Seg(_) => format!("{} near {}", super::LEAVES_UNPLACED, show(rep[x])),
+            Place::Point(_) => format!(
+                "a corner of one body lies within the tolerance of two faces of the other away \
+                 from their edge near {}",
+                show(rep[x])
+            ),
+        }));
+    }
+    match pinch {
+        None => Ok(()),
+        Some(k) => {
+            let (place, Holding { at, .. }) = &places[k];
+            Err(KernelError::InvalidInput(match place {
+                Place::Seg(_) => format!(
+                    "the result would be non-manifold: the bodies touch along an edge near {}",
+                    show(*at)
+                ),
+                Place::Point(_) => format!(
+                    "the result would be non-manifold: the bodies touch at a point near {}",
+                    show(*at)
+                ),
+            }))
+        }
+    }
+}
+
+/// Per cluster, the operand faces it is a node of: a corner of a piece of
+/// the face, or a point of a contact a piece of it holds (a segment's
+/// ends).
+fn faces_at(
+    pieces: &[Piece],
+    contacts: &[Contact],
+    segs: &Segments,
+) -> FxHashMap<usize, Vec<(Operand, usize)>> {
+    let mut at: FxHashMap<usize, Vec<(Operand, usize)>> = FxHashMap::default();
+    for p in pieces {
+        for l in &p.loops {
+            for c in corners(segs, l) {
+                at.entry(c).or_default().push((p.operand, p.face));
+            }
+        }
+    }
+    for c in contacts {
+        let p = &pieces[c.holder];
+        for x in place_points(c.place, segs) {
+            at.entry(x).or_default().push((p.operand, p.face));
+        }
+    }
+    at
+}
+
+/// The clusters of a place: a segment's two ends, or its point.
+fn place_points(place: Place, segs: &Segments) -> Vec<usize> {
+    match place {
+        Place::Seg(s) => vec![segs.list[s].a, segs.list[s].b],
+        Place::Point(c) => vec![c],
+    }
+}
+
+/// Where a place whose pieces disagree on its side is put by the
+/// tolerance on two faces of the holder's body away from their edge, if it
+/// is: a point of it inside a holder's face (not a corner of the holder)
+/// that is also a node of another face of that body (`faces`, from
+/// [`faces_at`]). The place is then within the tolerance of both faces
+/// and farther than the tolerance from the boundary of the one holding it
+/// (the planar split keeps points off chords they are not on), as where an
+/// edge lying on a face runs on past where it leaves the body through a
+/// neighbour meeting the face at an acute angle, or a corner touches two
+/// such faces (found by the contact fuzz). The other body's pieces there
+/// lie beyond the second face, so their class cannot agree with the side
+/// of the first, and the tolerance cannot say which face the contact is
+/// on.
+fn on_two_faces(
+    place: Place,
+    holders: &[usize],
+    pieces: &[Piece],
+    segs: &Segments,
+    faces: &FxHashMap<usize, Vec<(Operand, usize)>>,
+) -> Option<usize> {
+    let points = place_points(place, segs);
+    holders.iter().find_map(|&h| {
+        let p = &pieces[h];
+        let own: Vec<usize> = p.loops.iter().flat_map(|l| corners(segs, l)).collect();
+        points.iter().copied().find(|x| {
+            !own.contains(x)
+                && faces
+                    .get(x)
+                    .is_some_and(|fs| fs.iter().any(|&(o, g)| o == p.operand && g != p.face))
+        })
+    })
+}
+
+/// A place's holders (by index in the pieces), the side its first holder
+/// gives it, its point, and whether its holders disagree on the side.
+struct Holding {
+    holders: Vec<usize>,
+    sigma: i8,
+    at: DVec3,
+    split: bool,
+}
+
 /// Whether a piece is kept, and if so reversed (design note 0012 §4.4).
 fn kept(op: BooleanOp, p: &Piece) -> Option<bool> {
     use BooleanOp::*;
@@ -96,16 +323,19 @@ fn kept(op: BooleanOp, p: &Piece) -> Option<bool> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn assemble(
     geometry: &Geometry,
     pts: &Points,
     mut segs: Segments,
     pieces: Vec<Piece>,
+    contacts: &[Contact],
     coplanar: &FxHashSet<(usize, usize)>,
     op: BooleanOp,
     tol: &Tolerance,
 ) -> Result<(Brep, Origins), KernelError> {
     let eps = tol.linear;
+    check_contacts(op, &pieces, contacts, &segs, &pts.rep)?;
     let mut faces: Vec<Out> = Vec::new();
     for p in pieces {
         let Some(reversed) = kept(op, &p) else {
@@ -150,12 +380,17 @@ pub(super) fn assemble(
     check_vertices(&faces, pts, &segs)?;
     let shells = shells(&faces);
     let pair = geometry.pair;
-    // Faces on planes bounded by straight segments: the shells' volumes
-    // and the voids' places are exact on the clusters' places.
-    let flat = faces.iter().all(|f| {
-        geometry.planar(f.operand, f.face)
-            && directed(f).all(|(s, _)| segs.list[s].course == Course::Straight)
-    });
+    // Faces on planes bounded by straight segments: on them the clusters'
+    // places are exact, and in a result made only of them, so are the
+    // shells' volumes and the voids' places.
+    let exact: Vec<bool> = (faces.iter())
+        .map(|f| {
+            geometry.planar(f.operand, f.face)
+                && directed(f).all(|(s, _)| segs.list[s].course == Course::Straight)
+        })
+        .collect();
+    let flat = exact.iter().all(|&x| x);
+    check_apart(pair, (&faces, &exact), pts, &segs, eps)?;
     let solids = if flat {
         Some(solids(pair, pts, &segs, &faces, &shells)?)
     } else {
@@ -176,8 +411,315 @@ pub(super) fn assemble(
 }
 
 /// The segments of a face's loops, each with the way it is run.
-fn directed(f: &Out) -> impl Iterator<Item = (usize, bool)> + '_ {
+fn directed(f: &Out) -> impl Iterator<Item = (usize, bool)> + Clone + '_ {
     f.loops.iter().flatten().copied()
+}
+
+/// Every place of a result keeps clear of the `exact` faces it is not on,
+/// those on planes bounded by straight segments (design note 0012 §19): no
+/// end of a segment is on such a face without a corner there, and no
+/// middle of a straight segment on such a face the segment does not bound,
+/// else the result would touch itself and is refused as non-manifold
+/// there. (Faces with a curved side wait for the curved slice, §18.6.) A
+/// point is on a face when it is within the tolerance of it: within the
+/// tolerance of the face's plane and, in that plane, inside the face's
+/// loops, or beside them with the distances off the plane and in it to
+/// the loops' sides together within the tolerance. (A test of the two
+/// apart, first written, took points up to √2 tolerances from a face
+/// beside its loops for on it, and refused 51 operations of the contact
+/// fuzz at a hundred times its default run that this test answers, each
+/// for a point between the tolerance and √2 tolerances from a face;
+/// `corners_just_beyond_the_tolerance_of_a_face`.)
+/// Faces with a corner at an end of a segment are let off for its middle
+/// where they are a corner the segment leaves (an edge leaving a corner of
+/// a face at an angle θ stays within the tolerance of the face for the
+/// tolerance over sin θ): a face at one end where the segment is shorter
+/// than four tolerances or its other end is farther than the tolerance
+/// from the face's plane; and a face at both ends of a segment shorter
+/// than four tolerances unless the middle is inside it, where the face
+/// holds the segment lying on it. A segment at least four tolerances long
+/// with an end on a face's corner and the other within the tolerance of
+/// its plane lies along that plane, and its middle counts. The rule after
+/// selection (`check_contacts`) decides the contacts the imprint records;
+/// this decides, from the result alone, those that decisions at the edge
+/// of the tolerance let through (found by the contact fuzz, on main too):
+/// an edge of one body a tolerance from a face of the other, its vertices
+/// called off the face's plane while the points where it leaves the face
+/// are within the tolerance of the face's edges and placed on them, so the
+/// result has the edge lying on the face; and a piece of an edge of one
+/// body under four tolerances long (2.98 to 3.60 in the contact fuzz's
+/// cases), from a corner of the other within the tolerance of the edge to
+/// where the edge crosses a face at that corner, lying on that face. Each
+/// point is looked up in a tree of the faces' boxes, and each face it may
+/// be on in a tree of that face's edges in its plane, built when first
+/// needed: a face with many loops (islands, holes) is not walked edge by
+/// edge for every point near it (found by review: a plate with 1,600
+/// flush pins).
+/// It was first run only on results made wholly of exact faces, so the
+/// same contact escaped where any face of the result was curved (found by
+/// the contact fuzz's triage).
+fn check_apart(
+    pair: &Pair,
+    (faces, exact): (&[Out], &[bool]),
+    pts: &Points,
+    segs: &Segments,
+    eps: f64,
+) -> Result<(), KernelError> {
+    let planes: Vec<Frame> = faces.iter().map(|f| plane_of(pair, f)).collect();
+    let targets: Vec<usize> = (0..faces.len()).filter(|&i| exact[i]).collect();
+    // A face's corners projected onto its plane, loop by loop.
+    let flat = |i: usize| {
+        let fr = &planes[i];
+        (faces[i].loops.iter())
+            .map(move |l| (l.iter()).map(move |&(s, fw)| to2(fr, pts.rep[segs.start(s, fw)])))
+    };
+    // Each exact face's loops in its plane, made when first needed.
+    let outlines: Vec<std::cell::OnceCell<Outline>> = (0..faces.len())
+        .map(|_| std::cell::OnceCell::new())
+        .collect();
+    let outline = |g: usize| {
+        outlines[g].get_or_init(|| {
+            let mut sides = Vec::new();
+            let mut starts = vec![0];
+            for l in flat(g) {
+                let q: Vec<DVec2> = l.collect();
+                sides.extend((0..q.len()).map(|k| (q[k], q[(k + 1) % q.len()])));
+                starts.push(sides.len());
+            }
+            Outline::new(sides, starts)
+        })
+    };
+    // Boxes of the projected exact faces, padded by the tolerance off the
+    // plane and in it: every point on a face is in its box.
+    let boxes: Vec<(DVec3, DVec3)> = (targets.iter())
+        .map(|&i| {
+            let fr = &planes[i];
+            flat(i).flatten().fold(
+                (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
+                |(lo, hi), a| {
+                    let p = fr.origin + fr.x * a.x + fr.y * a.y;
+                    (lo.min(p), hi.max(p))
+                },
+            )
+        })
+        .map(|(lo, hi)| (lo - DVec3::splat(2.0 * eps), hi + DVec3::splat(2.0 * eps)))
+        .collect();
+    let tree = Bvh::new(boxes);
+    // The faces along each segment and with a corner at each cluster.
+    let along = ByKey::new(
+        segs.list.len(),
+        (faces.iter().enumerate()).flat_map(|(i, f)| directed(f).map(move |(s, _)| (s, i))),
+    );
+    let at = ByKey::new(
+        pts.rep.len(),
+        (faces.iter().enumerate())
+            .flat_map(|(i, f)| directed(f).map(move |(s, fw)| (segs.start(s, fw), i))),
+    );
+    let height = |g: usize, p: DVec3| (p - planes[g].origin).dot(planes[g].z).abs();
+    // Whether `p` is on face `g`: within the tolerance of its plane, and
+    // inside its loops or, unless `inside_only`, within the tolerance of
+    // the face beside them (the distance off the plane and the distance
+    // in it to the loops' sides together).
+    let on = |g: usize, p: DVec3, inside_only: bool| {
+        let h = height(g, p);
+        if h > eps {
+            return false;
+        }
+        let q = to2(&planes[g], p);
+        (!inside_only && outline(g).near(q, (eps * eps - h * h).sqrt())) || outline(g).inside(q)
+    };
+    let mut near = Vec::new();
+    // Each place is tested once, at the first segment that ends there.
+    let mut tested = vec![false; pts.rep.len()];
+    for (s, by) in (0..segs.list.len()).map(|s| (s, along.get(s))) {
+        if by.is_empty() {
+            continue;
+        }
+        let seg = &segs.list[s];
+        let (a, b) = (pts.rep[seg.a], pts.rep[seg.b]);
+        let ends = |c: usize| at.get(c);
+        let len = (b - a).length();
+        // For the middle: whether face `g` is let off (`None`), or else
+        // whether only its inside counts.
+        let middle = |g: usize| {
+            let (x, y) = (ends(seg.a).contains(&g), ends(seg.b).contains(&g));
+            match (x, y) {
+                (false, false) => Some(false),
+                (true, true) if len < 4.0 * eps => Some(true),
+                (true, true) => Some(false),
+                _ if len < 4.0 * eps || height(g, if x { b } else { a }) > eps => None,
+                _ => Some(false),
+            }
+        };
+        let straight = seg.course == Course::Straight;
+        let samples = [
+            (a, ends(seg.a), Some(seg.a)),
+            (b, ends(seg.b), Some(seg.b)),
+            ((a + b) * 0.5, by, None),
+        ];
+        for (p, allowed, end) in samples {
+            let skip = match end {
+                Some(c) => std::mem::replace(&mut tested[c], true),
+                None => !straight,
+            };
+            if skip {
+                continue;
+            }
+            let point = end.is_some();
+            tree.overlapping(p, p, &mut near);
+            for g in near.iter().map(|&k| targets[k]) {
+                if allowed.contains(&g) {
+                    continue;
+                }
+                let inside_only = if point { Some(false) } else { middle(g) };
+                if !inside_only.is_some_and(|i| on(g, p, i)) {
+                    continue;
+                }
+                return Err(KernelError::InvalidInput(if point {
+                    format!(
+                        "the result would be non-manifold: the bodies touch at a point near {}",
+                        show(p)
+                    )
+                } else {
+                    format!(
+                        "the result would be non-manifold: the bodies touch along an edge near {}",
+                        show(p)
+                    )
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The faces by key (a segment or a cluster, numbered from zero): each
+/// key's faces in increasing order, in one list made by a counting sort.
+struct ByKey {
+    starts: Vec<usize>,
+    faces: Vec<usize>,
+}
+
+impl ByKey {
+    fn new(keys: usize, pairs: impl Iterator<Item = (usize, usize)> + Clone) -> ByKey {
+        let mut starts = vec![0; keys + 1];
+        for (k, _) in pairs.clone() {
+            starts[k + 1] += 1;
+        }
+        for k in 0..keys {
+            starts[k + 1] += starts[k];
+        }
+        let mut next = starts.clone();
+        let mut faces = vec![0; starts[keys]];
+        for (k, f) in pairs {
+            faces[next[k]] = f;
+            next[k] += 1;
+        }
+        ByKey { starts, faces }
+    }
+
+    fn get(&self, key: usize) -> &[usize] {
+        &self.faces[self.starts[key]..self.starts[key + 1]]
+    }
+}
+
+/// The loops of a face in its plane, for [`check_apart`]: their sides, loop
+/// after loop, with trees over them built when a point first comes within
+/// the tolerance of the plane.
+struct Outline {
+    sides: Vec<(DVec2, DVec2)>,
+    /// Where each loop's sides start in `sides`, then their end.
+    starts: Vec<usize>,
+    /// Trees of every side's box and of every loop's box.
+    trees: std::cell::OnceCell<(Bvh, Bvh)>,
+    /// A tree of each long loop's sides.
+    long: Vec<std::cell::OnceCell<Bvh>>,
+}
+
+/// Loops with more sides than this are searched through a tree of them.
+const LONG_LOOP: usize = 32;
+
+fn lift(v: DVec2) -> DVec3 {
+    DVec3::new(v.x, v.y, 0.0)
+}
+
+fn side_boxes(sides: &[(DVec2, DVec2)]) -> Vec<(DVec3, DVec3)> {
+    (sides.iter())
+        .map(|&(a, b)| (lift(a.min(b)), lift(a.max(b))))
+        .collect()
+}
+
+impl Outline {
+    fn new(sides: Vec<(DVec2, DVec2)>, starts: Vec<usize>) -> Outline {
+        Outline {
+            long: (1..starts.len())
+                .map(|_| std::cell::OnceCell::new())
+                .collect(),
+            sides,
+            starts,
+            trees: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn trees(&self) -> &(Bvh, Bvh) {
+        self.trees.get_or_init(|| {
+            let loops = (self.starts.windows(2))
+                .map(|w| {
+                    (side_boxes(&self.sides[w[0]..w[1]]).into_iter()).fold(
+                        (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
+                        |(lo, hi), (a, b)| (lo.min(a), hi.max(b)),
+                    )
+                })
+                .collect();
+            (Bvh::new(side_boxes(&self.sides)), Bvh::new(loops))
+        })
+    }
+
+    /// Whether `q` is within `eps` of a side.
+    fn near(&self, q: DVec2, eps: f64) -> bool {
+        let r = DVec3::new(eps, eps, 0.0);
+        let (lo, hi) = (lift(q) - r, lift(q) + r);
+        !self.trees().0.visit(
+            |a, b| a.cmple(hi).all() && lo.cmple(b).all(),
+            |k| {
+                let (a, b) = self.sides[k];
+                let d = b - a;
+                let t =
+                    ((q - a).dot(d) / d.length_squared().max(f64::MIN_POSITIVE)).clamp(0.0, 1.0);
+                (q - (a + d * t)).length() > eps
+            },
+        )
+    }
+
+    /// Whether `q` is inside the loops: whether the ray from it toward +x
+    /// crosses an odd number of sides. A loop whose box does not hold `q`
+    /// is crossed an even number of times and is skipped, so a point among
+    /// many islands or holes meets only the loops around it (found by
+    /// review: a plate with 1,600 flush pins, whose rays crossed every hole
+    /// in their row).
+    fn inside(&self, q: DVec2) -> bool {
+        let crosses = |&(a, b): &(DVec2, DVec2)| {
+            (a.y > q.y) != (b.y > q.y) && q.x < a.x + (q.y - a.y) / (b.y - a.y) * (b.x - a.x)
+        };
+        let mut inside = false;
+        let mut held = Vec::new();
+        self.trees().1.overlapping(lift(q), lift(q), &mut held);
+        for k in held {
+            let sides = &self.sides[self.starts[k]..self.starts[k + 1]];
+            if sides.len() <= LONG_LOOP {
+                inside ^= sides.iter().filter(|s| crosses(s)).count() % 2 == 1;
+                continue;
+            }
+            let tree = self.long[k].get_or_init(|| Bvh::new(side_boxes(sides)));
+            tree.visit(
+                |lo, hi| lo.y <= q.y && q.y <= hi.y && q.x <= hi.x,
+                |i| {
+                    inside ^= crosses(&sides[i]);
+                    true
+                },
+            );
+        }
+        inside
+    }
 }
 
 /// Every segment must be used once in each direction: more uses are a
@@ -367,8 +909,10 @@ fn merge_faces(
             boundary.iter().map(|&(_, s, fw)| (s, Some(fw))),
         )?;
         let reach = |q: DVec2| chart.reach(q, eps);
-        let regions =
-            planar::regions(&edges, &|c| chart.map(pts.rep[c]), &reach, eps).map_err(|p| {
+        // Every edge passed has a side, so the split has no bridge (one
+        // would be an inconsistency) and no isolated point.
+        let split =
+            planar::regions(&edges, &|c| chart.map(pts.rep[c]), &reach, eps, &[]).map_err(|p| {
                 let (m, c) = p.describe();
                 match p {
                     planar::Problem::Far(_) => {
@@ -380,7 +924,8 @@ fn merge_faces(
                     )),
                 }
             })?;
-        for region in regions {
+        debug_assert!(split.loose.is_empty(), "a merged face with loose items");
+        for region in split.regions {
             out.push(Out {
                 operand,
                 face,
@@ -427,7 +972,7 @@ fn merge_edges(
     let mut joined: FxHashMap<usize, usize> = FxHashMap::default();
     loop {
         let mut touched: FxHashSet<usize> = FxHashSet::default();
-        let mut joins: Vec<(usize, usize, usize, usize, usize, Course)> = Vec::new();
+        let mut joins: Vec<Join> = Vec::new();
         let mut again: BTreeSet<usize> = BTreeSet::new();
         for &v in &look {
             let Some(ss) = at.get(&v) else {
@@ -500,26 +1045,44 @@ fn merge_edges(
                 },
                 _ => continue,
             };
+            let mut along: Vec<(Operand, usize)> = (seg_faces[&s0].iter())
+                .flat_map(|&i| faces[i].sources.iter().copied())
+                .collect();
+            along.sort_unstable();
+            along.dedup();
+            let Some(sources) = join_sources(geometry, pts, segs, &along, [s0, s1], [u, v, w], eps)
+            else {
+                continue;
+            };
             if [u, v, w].iter().any(|c| touched.contains(c)) {
                 again.insert(v);
                 continue;
             }
             touched.extend([u, v, w]);
-            joins.push((u, v, w, s0, s1, joined));
+            joins.push(Join {
+                ends: [u, v, w],
+                segs: [s0, s1],
+                course: joined,
+                sources,
+            });
         }
         if joins.is_empty() {
             break;
         }
-        for (u, v, w, s0, s1, course) in joins {
-            let mut sources: BTreeSet<Source> = segs.list[s0].sources.iter().copied().collect();
-            sources.extend(segs.list[s1].sources.iter().copied());
+        for Join {
+            ends: [u, v, w],
+            segs: [s0, s1],
+            course,
+            sources,
+        } in joins
+        {
             let courses = geometry.courses();
             let mut add = |x: Source| match course {
                 Course::Straight => segs.add(u, w, Course::Straight, x),
                 _ => segs.add_curved(u, w, course, x, &courses, eps),
             };
             let mut sources = sources.into_iter();
-            let first = sources.next().expect("a segment has a source");
+            let first = sources.next().expect("a join has a source along all of it");
             let s = add(first);
             for x in sources {
                 add(x);
@@ -563,6 +1126,104 @@ fn merge_edges(
         }
     }
     faces
+}
+
+/// A join of segments `segs[0]`, from `ends[0]` to `ends[1]`, and
+/// `segs[1]`, from `ends[1]` to `ends[2]`, end to end along `course`, with
+/// its sources.
+struct Join {
+    ends: [usize; 3],
+    segs: [usize; 2],
+    course: Course,
+    sources: Vec<Source>,
+}
+
+/// The sources of the segment joining segment `s0`, from `u` to `v`, and
+/// segment `s1`, from `v` to `w`, end to end: those that run along all of
+/// it, as every origin of an entity does (ADR 0020). `None` if none of
+/// them bounds the faces `along` it (ADR 0024): the point then stays a
+/// vertex.
+///
+/// A source of both pieces runs along all of the join. A source of one
+/// piece does if the other piece's far end and middle are within the
+/// tolerance of it: of a straight operand edge's line, or of the surfaces
+/// of a curved edge's faces or of the faces that meet. A straight join
+/// allows a bend of the tolerance where the pieces meet, so without this an
+/// operand's edge along a piece a few tolerances long, meeting a long piece
+/// that leaves its line at a slight angle there, was named the long edge's
+/// origin.
+fn join_sources(
+    geometry: &Geometry,
+    pts: &Points,
+    segs: &Segments,
+    along: &[(Operand, usize)],
+    [s0, s1]: [usize; 2],
+    [u, v, w]: [usize; 3],
+    eps: f64,
+) -> Option<Vec<Source>> {
+    let pair = geometry.pair;
+    let courses = geometry.courses();
+    let (g0, g1) = (&segs.list[s0], &segs.list[s1]);
+    // The far end and the middle of the piece `g`, which runs from `v`.
+    let probes = |g: &super::Seg, far: usize| {
+        let mid = match g.course {
+            Course::Straight => (pts.rep[v] + pts.rep[far]) * 0.5,
+            c => courses.middle(c),
+        };
+        [pts.rep[far], mid]
+    };
+    let mut sources: BTreeSet<Source> = BTreeSet::new();
+    for (g, h, far) in [(g0, g1, w), (g1, g0, u)] {
+        let mut at: Option<[DVec3; 2]> = None;
+        for &x in &g.sources {
+            if sources.contains(&x) {
+                continue;
+            }
+            let on = h.sources.contains(&x) || {
+                let p = *at.get_or_insert_with(|| probes(h, far));
+                p.iter().all(|&q| source_distance(pair, x, q) <= eps)
+            };
+            if on {
+                sources.insert(x);
+            }
+        }
+    }
+    let has = |f| along.binary_search(&f).is_ok();
+    (sources.iter().any(|&x| bounds(pair, has, x))).then(|| sources.into_iter().collect())
+}
+
+/// How far `p` is from what source `x` runs along: a straight operand
+/// edge's line, the surfaces of a curved edge's faces, or those of the
+/// faces that meet.
+fn source_distance(pair: &Pair, x: Source, p: DVec3) -> f64 {
+    let surface = |op: Operand, f: usize| {
+        let shape = pair.get(op);
+        shape.surfaces[shape.faces[f].surface].distance(p).abs()
+    };
+    match x {
+        Source::Edge(op, e) => {
+            let shape = pair.get(op);
+            if let (Curve3::Line { .. }, _, _) = shape.curve(e) {
+                let (a, b) = shape.edge_points(e);
+                (p - a).reject_from(b - a).length()
+            } else {
+                (shape.edge_faces(e).iter())
+                    .map(|&(f, _)| surface(op, f))
+                    .fold(0.0, f64::max)
+            }
+        }
+        Source::Meet(fa, fb) => surface(Operand::First, fa).max(surface(Operand::Second, fb)),
+    }
+}
+
+/// Whether one of the operand faces `has` holds (the sources of the
+/// result's faces along a segment, or at a cluster) bounds what source `x`
+/// runs along: the operand's edge, or both faces that meet (ADR 0024).
+fn bounds(pair: &Pair, has: impl Fn((Operand, usize)) -> bool, x: Source) -> bool {
+    match x {
+        Source::Edge(op, e) => (pair.get(op).edge_faces(e).iter()).any(|&(g, _)| has((op, g))),
+        Source::Meet(fa, fb) => has((Operand::First, fa)) && has((Operand::Second, fb)),
+    }
 }
 
 /// Refuses a result with an edge passing near the axis of its face's
@@ -677,20 +1338,30 @@ fn shells(faces: &[Out]) -> Vec<Vec<usize>> {
 }
 
 /// The enclosed volume of a shell of planar faces: a third of the sum of
-/// each face's area times its plane's distance from the origin along its
-/// outward normal.
+/// each face's area times its plane's distance along its outward normal
+/// from a corner of the shell. The distance is taken from that corner, not
+/// from the world's origin: the faces' areas are of the clusters' places
+/// projected onto each plane, which lie within the tolerance of it, so the
+/// projected faces fail to close by up to the tolerance times their
+/// perimeter, and the sum is off by that times the distance. From the
+/// world's origin, that gave the wrong sign to a shell a few tolerances
+/// across a metre from it (found by the contact fuzz: a corner dipping four
+/// tolerances into a face). The planes, unlike the places, hold the volume
+/// of a sliver a tolerance or so thick between two faces with one loop of
+/// places: a fan over the places, the other formula tried, gave it none
+/// (found by the fuzz of motions by fractions of the tolerance, run a
+/// hundred times longer).
 fn shell_volume(pair: &Pair, pts: &Points, segs: &Segments, faces: &[Out], shell: &[usize]) -> f64 {
+    let (s, fw) = faces[shell[0]].loops[0][0];
+    let c = pts.rep[segs.start(s, fw)];
     let mut v = 0.0;
     for &i in shell {
         let f = &faces[i];
         let fr = plane_of(pair, f);
-        let area: f64 = f
-            .loops
-            .iter()
+        let area: f64 = (f.loops.iter())
             .map(|l| {
-                let q: Vec<DVec2> = corners(segs, l)
-                    .into_iter()
-                    .map(|c| to2(&fr, pts.rep[c]))
+                let q: Vec<DVec2> = (corners(segs, l).into_iter())
+                    .map(|k| to2(&fr, pts.rep[k]))
                     .collect();
                 (0..q.len())
                     .map(|k| q[k].perp_dot(q[(k + 1) % q.len()]))
@@ -698,7 +1369,7 @@ fn shell_volume(pair: &Pair, pts: &Points, segs: &Segments, faces: &[Out], shell
                     * 0.5
             })
             .sum();
-        v += fr.origin.dot(fr.z) * area / 3.0;
+        v += (fr.origin - c).dot(fr.z) * area / 3.0;
     }
     v
 }
@@ -892,6 +1563,27 @@ fn build(
     // Per segment, its edge and whether the edge runs from its `b`.
     let mut edge_of: FxHashMap<usize, (EdgeId, bool)> = FxHashMap::default();
     let mut face_ids = Vec::with_capacity(faces.len());
+    // An origin names only operand entities that bound the result entity
+    // (ADR 0024, amending ADR 0020): the sources of the result's faces
+    // along each segment and at each cluster, merged faces and coplanar
+    // partners included.
+    let along = ByKey::new(
+        segs.list.len(),
+        (faces.iter().enumerate()).flat_map(|(i, f)| directed(f).map(move |(s, _)| (s, i))),
+    );
+    let around = ByKey::new(
+        pts.rep.len(),
+        (faces.iter().enumerate())
+            .flat_map(|(i, f)| directed(f).map(move |(s, fw)| (segs.start(s, fw), i))),
+    );
+    // Whether a result face of `list` has operand face `x` among its
+    // sources.
+    let has =
+        |list: &[usize], x: (Operand, usize)| list.iter().any(|&i| faces[i].sources.contains(&x));
+    // Whether a face in `u` holds vertex `v` of `op`.
+    let holds = |u: &[usize], op: Operand, v: usize| {
+        (pair.get(op).edges_at(v).iter()).any(|&e| bounds(pair, |x| has(u, x), Source::Edge(op, e)))
+    };
     for f in faces {
         let mut loops = Vec::with_capacity(f.loops.len());
         for l in &f.loops {
@@ -903,6 +1595,9 @@ fn build(
                         let id = brep.add_vertex(pts.rep[c]);
                         e.insert(id);
                         let (fv, sv) = pts.vertices_of(c);
+                        let u = around.get(c);
+                        let fv = fv.filter(|&v| holds(u, Operand::First, v));
+                        let sv = sv.filter(|&v| holds(u, Operand::Second, v));
                         let at = VertexIx(id.0);
                         let first = |op, v: usize| VertexOrigin::Operand {
                             operand: op,
@@ -932,10 +1627,9 @@ fn build(
                         };
                         let id = brep.add_edge(curve, t0, t1, v0, v1);
                         edge_of.insert(s, (id, flipped));
-                        let mut src = seg
-                            .sources
-                            .iter()
-                            .copied()
+                        let u = along.get(s);
+                        let mut src = (seg.sources.iter().copied())
+                            .filter(|&x| bounds(pair, |y| has(u, y), x))
                             .collect::<BTreeSet<_>>()
                             .into_iter();
                         let primary = src.next().ok_or_else(|| {
@@ -1074,4 +1768,322 @@ fn curved_solids(
         }
     }
     Ok(solids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A loop of segments, each with its direction.
+    type Loop = Vec<(usize, bool)>;
+
+    /// Two triangles' segments: the loop of a piece of the other operand
+    /// through clusters 10, 11 and 12 (segments 0, 1 and 2), and the loop
+    /// of a holder through clusters 20, 21 and 22.
+    fn triangles() -> (Segments, Loop, Loop) {
+        let mut segs = Segments::default();
+        let mut cycle = |c: [usize; 3]| -> Vec<(usize, bool)> {
+            (0..3)
+                .map(|i| {
+                    let (a, b) = (c[i], c[(i + 1) % 3]);
+                    let s = segs.add(a, b, Course::Straight, Source::Edge(Operand::Second, a));
+                    (s, segs.start(s, true) == a)
+                })
+                .collect()
+        };
+        let (l, h) = (cycle([10, 11, 12]), cycle([20, 21, 22]));
+        (segs, l, h)
+    }
+
+    /// The clusters' points: cluster i at (i, 0, 0) mm.
+    fn rep() -> Vec<DVec3> {
+        (0..32)
+            .map(|i| DVec3::new(i as f64 * 1e-3, 0.0, 0.0))
+            .collect()
+    }
+
+    fn piece(operand: Operand, class: Class, loops: Vec<Vec<(usize, bool)>>) -> Piece {
+        Piece {
+            operand,
+            face: 0,
+            loops,
+            class,
+            partner: None,
+        }
+    }
+
+    fn other(op: Operand) -> Operand {
+        super::super::other(op)
+    }
+
+    /// The four ways of design note 0012 §18.1: a piece of X holding a
+    /// contact, of class τ against Y, Y's touching boundary on side σ of
+    /// it, so Y's pieces at the contact are outside X for σ = +1 and inside
+    /// for σ = −1. Each pinches in exactly one of X ∪ Y, X ∩ Y, X − Y and
+    /// Y − X, whichever operand X is, at a segment or at a point.
+    #[test]
+    fn each_way_of_touching_pinches_in_one_operation() {
+        use BooleanOp::*;
+        let (segs, l, h) = triangles();
+        for (sigma, tau, pinches) in [
+            (1, Class::Outside, "X ∪ Y"),
+            (1, Class::Inside, "Y − X"),
+            (-1, Class::Outside, "X − Y"),
+            (-1, Class::Inside, "X ∩ Y"),
+        ] {
+            let y_class = if sigma > 0 {
+                Class::Outside
+            } else {
+                Class::Inside
+            };
+            for x in [Operand::First, Operand::Second] {
+                let pieces = [
+                    piece(x, tau, vec![h.clone()]),
+                    piece(other(x), y_class, vec![l.clone()]),
+                ];
+                let first = x == Operand::First;
+                for (place, text) in [
+                    (
+                        Place::Seg(l[0].0),
+                        "along an edge near (1000.000000, 0.000000, 0.000000) mm",
+                    ),
+                    (
+                        Place::Point(11),
+                        "at a point near (1000.000000, 0.000000, 0.000000) mm",
+                    ),
+                ] {
+                    let contacts = [Contact {
+                        place,
+                        holder: 0,
+                        sigma,
+                        at: DVec3::X,
+                    }];
+                    for (op, name) in [
+                        (Union, "X ∪ Y"),
+                        (Intersect, "X ∩ Y"),
+                        (Subtract, if first { "X − Y" } else { "Y − X" }),
+                    ] {
+                        let got = check_contacts(op, &pieces, &contacts, &segs, &rep());
+                        if name == pinches {
+                            let Err(KernelError::InvalidInput(m)) = got else {
+                                panic!("{name}, σ {sigma}, τ {tau:?}: {got:?}");
+                            };
+                            assert_eq!(
+                                m,
+                                format!(
+                                    "the result would be non-manifold: the bodies touch {text}"
+                                )
+                            );
+                        } else {
+                            assert!(got.is_ok(), "{name}, σ {sigma}, τ {tau:?}: {got:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn contacts_are_cross_checked() {
+        let (segs, l, h) = triangles();
+        let at = |place, holder, sigma| Contact {
+            place,
+            holder,
+            sigma,
+            at: DVec3::ZERO,
+        };
+        let internal = |r: Result<(), KernelError>, what: &str| match r {
+            Err(KernelError::InvalidResult(m)) => assert!(m.contains(what), "{m}"),
+            other => panic!("expected {what}: {other:?}"),
+        };
+        let holder = || piece(Operand::First, Class::Outside, vec![h.clone()]);
+        let union = BooleanOp::Union;
+        // No piece of the other operand at the place: a piece of the
+        // holder's own operand does not count.
+        let alone = [
+            holder(),
+            piece(Operand::First, Class::Outside, vec![l.clone()]),
+        ];
+        internal(
+            check_contacts(union, &alone, &[at(Place::Point(11), 0, 1)], &segs, &rep()),
+            "no piece of the other body",
+        );
+        // An incident piece inside the holder's body where the touching
+        // boundary lies outside it, or on a coincident face.
+        for class in [Class::Inside, Class::OnSame, Class::OnOpposite] {
+            let wrong = [holder(), piece(Operand::Second, class, vec![l.clone()])];
+            internal(
+                check_contacts(
+                    union,
+                    &wrong,
+                    &[at(Place::Seg(l[0].0), 0, 1)],
+                    &segs,
+                    &rep(),
+                ),
+                "disagree on their side",
+            );
+        }
+        // Incident pieces of different classes.
+        let mixed = [
+            holder(),
+            piece(Operand::Second, Class::Outside, vec![l.clone()]),
+            piece(Operand::Second, Class::Inside, vec![l.clone()]),
+        ];
+        internal(
+            check_contacts(union, &mixed, &[at(Place::Point(10), 0, 1)], &segs, &rep()),
+            "disagree on their side",
+        );
+        // Two holders of one place on different sides.
+        let two = [
+            holder(),
+            holder(),
+            piece(Operand::Second, Class::Outside, vec![l.clone()]),
+        ];
+        internal(
+            check_contacts(
+                union,
+                &two,
+                &[at(Place::Point(10), 0, 1), at(Place::Point(10), 1, -1)],
+                &segs,
+                &rep(),
+            ),
+            "disagree on their side",
+        );
+    }
+
+    /// A place whose pieces disagree on its side is refused as input where
+    /// a point of it inside the holder's face is a node of another face of
+    /// the holder's body (the tolerance puts it on both, away from their
+    /// edge), at that point and before any pinch; anywhere else, or at a
+    /// corner of the holder, it stays a kernel error, which comes first.
+    #[test]
+    fn a_place_on_two_faces_of_a_body_is_refused() {
+        let (segs, l, h) = triangles();
+        let on = |face: usize, p: Piece| Piece { face, ..p };
+        let at = |place, holder, sigma| Contact {
+            place,
+            holder,
+            sigma,
+            at: DVec3::ZERO,
+        };
+        let check = |pieces: &[Piece], contacts: &[Contact]| {
+            check_contacts(BooleanOp::Union, pieces, contacts, &segs, &rep())
+        };
+        let refused = |r: Result<(), KernelError>, what: &str| match r {
+            Err(KernelError::InvalidInput(m)) => assert_eq!(m, what),
+            other => panic!("expected {what}: {other:?}"),
+        };
+        let internal = |r: Result<(), KernelError>| match r {
+            Err(KernelError::InvalidResult(m)) => assert!(m.contains("disagree on their side")),
+            other => panic!("expected a kernel error: {other:?}"),
+        };
+        let seg = Place::Seg(l[0].0);
+        // The holder (face 0, around 20, 21, 22) and the other body's
+        // pieces along segment 10–11, outside it where σ = −1 says inside.
+        let holder = || piece(Operand::First, Class::Outside, vec![h.clone()]);
+        let outside = || piece(Operand::Second, Class::Outside, vec![l.clone()]);
+        // Cluster 10 is a corner of a piece of face 1 of the holder's body.
+        let beyond = [
+            holder(),
+            outside(),
+            on(1, piece(Operand::First, Class::Inside, vec![l.clone()])),
+        ];
+        refused(
+            check(&beyond, &[at(seg, 0, -1)]),
+            "an edge of one body lies on a face of the other and leaves it at a point the \
+             tolerance cannot place near (10.000000, 0.000000, 0.000000) mm",
+        );
+        // A kernel error at a later place comes first: point 12 is a
+        // corner of its holder.
+        let later = [
+            holder(),
+            outside(),
+            on(1, piece(Operand::First, Class::Inside, vec![l.clone()])),
+            piece(Operand::First, Class::Outside, vec![h.clone(), l.clone()]),
+        ];
+        internal(check(
+            &later,
+            &[at(seg, 0, -1), at(Place::Point(12), 3, -1)],
+        ));
+        // Of the holder's own face, or at a corner of the holder: a kernel
+        // error.
+        let own = [
+            holder(),
+            outside(),
+            piece(Operand::First, Class::Inside, vec![l.clone()]),
+        ];
+        internal(check(&own, &[at(seg, 0, -1)]));
+        let cornered = [
+            piece(Operand::First, Class::Outside, vec![h.clone(), l.clone()]),
+            outside(),
+            on(1, piece(Operand::First, Class::Inside, vec![l.clone()])),
+        ];
+        internal(check(&cornered, &[at(seg, 0, -1)]));
+        // A point held by two faces of one body on different sides: before
+        // the pinch along segment 11–12.
+        let two = [
+            holder(),
+            outside(),
+            on(1, piece(Operand::First, Class::Outside, vec![h.clone()])),
+        ];
+        refused(
+            check(&two, &[at(Place::Seg(l[1].0), 0, 1)]),
+            "the result would be non-manifold: the bodies touch along an edge near \
+             (0.000000, 0.000000, 0.000000) mm",
+        );
+        refused(
+            check(
+                &two,
+                &[
+                    at(Place::Point(10), 0, -1),
+                    at(Place::Point(10), 2, 1),
+                    at(Place::Seg(l[1].0), 0, 1),
+                ],
+            ),
+            "a corner of one body lies within the tolerance of two faces of the other away \
+             from their edge near (10.000000, 0.000000, 0.000000) mm",
+        );
+    }
+
+    /// The least pinching place is reported: segments before points, then
+    /// by index; a place that does not pinch is passed over.
+    #[test]
+    fn the_least_pinching_place_is_reported() {
+        let (segs, l, h) = triangles();
+        let pieces = [
+            piece(Operand::First, Class::Outside, vec![h.clone()]),
+            piece(Operand::Second, Class::Outside, vec![l.clone()]),
+            piece(Operand::First, Class::Inside, vec![h.clone()]),
+        ];
+        let at = |place, holder, x: f64| Contact {
+            place,
+            holder,
+            sigma: 1,
+            at: DVec3::new(x, 0.0, 0.0),
+        };
+        let report = |contacts: &[Contact]| match check_contacts(
+            BooleanOp::Union,
+            &pieces,
+            contacts,
+            &segs,
+            &rep(),
+        ) {
+            Err(KernelError::InvalidInput(m)) => m,
+            other => panic!("{other:?}"),
+        };
+        let (s0, s2) = (l[0].0, l[2].0);
+        // Point 10 is held by an inside piece, which a union drops.
+        let m = report(&[
+            at(Place::Point(10), 2, 0.001),
+            at(Place::Point(12), 0, 0.002),
+            at(Place::Seg(s2), 0, 0.003),
+            at(Place::Seg(s0), 2, 0.004),
+        ]);
+        assert!(m.contains("along an edge near (3.000000, "), "{m}");
+        let m = report(&[
+            at(Place::Point(12), 0, 0.002),
+            at(Place::Point(11), 0, 0.001),
+        ]);
+        assert!(m.contains("at a point near (1.000000, "), "{m}");
+    }
 }

@@ -450,11 +450,14 @@ fn triangulate(shape: &Shape, f: &Face, out: &mut Vec<[u32; 3]>) -> Result<(), S
         .map(|l| l.iter().map(|&v| q2(v)).collect())
         .collect();
     let (cdt, index) = tess::polygon_cdt(&loops)?;
-    if cdt.num_vertices() != index.len() {
-        return Err("two vertices at one point of the face's plane".into());
-    }
-    let mut at = vec![0; index.len()];
+    // A loop may pass through one vertex twice (a face of a union whose
+    // boundary touches itself there), which is one point of the
+    // triangulation; two vertices at one point are refused.
+    let mut at = vec![usize::MAX; cdt.num_vertices()];
     for (&i, &v) in index.iter().zip(f.verts.iter().flatten()) {
+        if at[i] != usize::MAX && at[i] != v {
+            return Err("two vertices at one point of the face's plane".into());
+        }
         at[i] = v;
     }
     for t in tess::inside_triangles(&cdt) {
@@ -513,6 +516,100 @@ pub(super) fn interior_point(loops: &[Vec<DVec2>]) -> Result<(DVec2, f64), Strin
         }
     }
     best.ok_or_else(|| "a piece with no area".into())
+}
+
+/// A contact of the bodies inside a piece (design note 0012 §18.2), which
+/// a point sought inside the piece keeps away from: a chain of chart
+/// points (one point for a corner) and the band its course strays within
+/// about the chain.
+pub(super) struct Obstacle {
+    pub path: Vec<DVec2>,
+    pub band: f64,
+}
+
+/// Obstacle points are placed at most this fraction of the polygon's size
+/// apart in the triangulation of [`interior_points_avoiding`].
+const OBSTACLE_STEP: f64 = 1.0 / 32.0;
+
+/// Points inside the polygon `loops` (outer first) away from the
+/// `obstacles` in it, best first, at most `count`: each with its distance
+/// from the loops at least and its *score*, the least of that distance and
+/// its distance from the obstacles less their bands.
+///
+/// The polygon is triangulated as for [`interior_point`], and the
+/// obstacles' points, at most [`OBSTACLE_STEP`] of the polygon's size
+/// apart along each, are inserted as free vertices: they constrain
+/// nothing, so the inside triangles cover the same polygon, but no
+/// triangle spans an obstacle's length. Each inside triangle's incentre is
+/// a candidate, its inscribed radius a distance from the loops; its
+/// distance from the obstacles is measured exactly on those near it (a
+/// tree of the obstacles' chords).
+pub(super) fn interior_points_avoiding(
+    loops: &[Vec<DVec2>],
+    obstacles: &[Obstacle],
+    count: usize,
+) -> Result<Vec<(DVec2, f64, f64)>, String> {
+    let (mut cdt, index) =
+        tess::polygon_cdt(loops).map_err(|e| format!("a piece's boundary: {e}"))?;
+    let mut at = vec![DVec2::ZERO; cdt.num_vertices()];
+    for (&i, q) in index.iter().zip(loops.iter().flatten()) {
+        at[i] = *q;
+    }
+    let (lo, hi) = loops.iter().flatten().fold(
+        (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+        |(lo, hi), &q| (lo.min(q), hi.max(q)),
+    );
+    let step = (hi - lo).length() * OBSTACLE_STEP;
+    // The obstacles' chords, each with its band.
+    let mut chords: Vec<(DVec2, DVec2, f64)> = Vec::new();
+    for o in obstacles {
+        let mut samples = vec![o.path[0]];
+        for w in o.path.windows(2) {
+            let n = ((w[1] - w[0]).length() / step).ceil().clamp(1.0, 1e6) as usize;
+            samples.extend((1..=n).map(|k| w[0].lerp(w[1], k as f64 / n as f64)));
+            chords.push((w[0], w[1], o.band));
+        }
+        if o.path.len() == 1 {
+            chords.push((o.path[0], o.path[0], o.band));
+        }
+        for q in samples {
+            let h = cdt
+                .insert(spade::Point2::new(q.x, q.y))
+                .map_err(|e| format!("a contact in a piece: {e:?}"))?;
+            if h.index() >= at.len() {
+                at.resize(h.index() + 1, DVec2::ZERO);
+                at[h.index()] = q;
+            }
+        }
+    }
+    let widest = chords.iter().fold(0.0f64, |m, c| m.max(c.2));
+    let tree = Bvh::new(
+        chords
+            .iter()
+            .map(|&(a, b, _)| (a.min(b).extend(0.0), a.max(b).extend(0.0)))
+            .collect(),
+    );
+    let mut near = Vec::new();
+    let mut found: Vec<(DVec2, f64, f64)> = Vec::new();
+    for t in tess::inside_triangles(&cdt) {
+        let Some((q, r)) = incircle(t.map(|i| at[i])) else {
+            continue;
+        };
+        let reach = DVec3::splat(r + widest);
+        tree.overlapping(q.extend(0.0) - reach, q.extend(0.0) + reach, &mut near);
+        let score = near.iter().fold(r, |m, &k| {
+            let (a, b, band) = chords[k];
+            m.min(super::planar::point_segment(q, a, b) - band)
+        });
+        found.push((q, r, score));
+    }
+    if found.is_empty() {
+        return Err("a piece with no area".into());
+    }
+    // Best first; ties in triangle order (the sort is stable).
+    found.sort_by(|x, y| y.2.total_cmp(&x.2));
+    found.truncate(count);
+    Ok(found)
 }
 
 /// Sides probed inward by [`probe_point`]: this many of the longest, and

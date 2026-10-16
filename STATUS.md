@@ -1,6 +1,6 @@
 # OpenDatum status
 
-Updated 2026-10-15. Phase 2 (sketcher) is done but for the tools that
+Updated 2026-10-16. Phase 2 (sketcher) is done but for the tools that
 need model faces (project/convert, intersection curves, pierce). Phase 3
 has begun: the design notes for intersections (0011), booleans (0012)
 and persistent naming (0013) are written; every region of the random
@@ -19,8 +19,15 @@ a plane through a frustum's apex), checked by the volume identities and
 point membership on tens of thousands of random pairs. Bodies with
 those conic edges on cylinders and cones are operands of further
 booleans (a second countersink beside a tilted one, a pin flattened
-twice, chains of cuts; §16, §17, ADR 0023). Next: tangent contacts,
-then the features that use booleans.
+twice, chains of cuts; §16, §17, ADR 0023). Bodies whose edges and
+corners rest on flat faces without crossing them are decided (§18, §19,
+ADR 0024; the faces there all flat): the contact leaves no trace, or
+the boolean is refused as non-manifold where the result would pinch; a fuzz of such contacts
+swept across the tolerance found 24,571 faults on main in 264,000
+operations (results touching themselves, wrong origins, kernel errors)
+and none in this build. Next: a fin this build still returns along an
+edge lying beside a crossing (§19), the rest of the contacts (curved
+faces, surfaces touching), then the features that use booleans.
 The product is now named OpenDatum (ADR 0017): packages `opendatum-*`,
 binary `opendatum`, documents `.odatum`; documents saved under the old
 name open unchanged.
@@ -109,8 +116,8 @@ name open unchanged.
     the topology and right by an independent geometric check, on tilted
     planes, symmetric extrudes, and partial and full revolves either way
     round, and that they follow the curves, not their order.
-  - Booleans (`Kernel::boolean`, design note 0012 §9, §11, §13, §15
-    and §17, ADR 0020): union, intersection and difference of solids bounded by
+  - Booleans (`Kernel::boolean`, design note 0012 §9, §11, §13, §15,
+    §17 and §19, ADRs 0020 and 0024): union, intersection and difference of solids bounded by
     planes and circular cylinders (boxes, extrudes of profiles with
     lines, arcs and circles, holes included, at any orientation), with
     coincident faces, edges and vertices, voids and several solids; and
@@ -145,9 +152,19 @@ name open unchanged.
     a place (non-manifold results, points or edges closer than the
     tolerance, slivers, faces running within the tolerance of the other
     surface, a plane through a pointed cone's apex where both bodies
-    reach it); spheres and cones with cylinders or cones off their axes,
-    cylinders at an angle to each other and tangent contacts fail as not
-    supported yet.
+    reach it). Where an edge or a corner of one body rests on a flat face of
+    the other without crossing it, from outside or inside, the faces there
+    all flat, the contact leaves no trace in the result, or the boolean is
+    refused as non-manifold at the contact where the result would pinch
+    there (a cube on its corner united with a plate, a wedge's edge in a
+    groove); what the tolerance cannot place is refused with its own
+    message, and every result is checked for a place within the tolerance of
+    a flat face bounded by straight edges that it is not on (§19). Spheres
+    and cones with cylinders or cones off their axes, cylinders at an angle
+    to each other, and contacts that do not cross where a face at the
+    contact is curved (an edge or a corner resting on a curved face, a
+    curved edge on a flat one, faces touching faces) fail as not supported
+    yet.
 - **Features** (`opendatum-features`): regenerates a Part Studio through the
   kernel with per-feature status (ok, warning, suppressed, failed with
   message). A failing feature never blocks the others. Sketch features are
@@ -858,6 +875,40 @@ name open unchanged.
   leaves out modules built only for tests (the rounding tests read
   their sample sizes from it) and also catches variables read when the
   kernel is built (`crates/kernel/tests/sources.rs`).
+- Contacts that do not cross on flat faces (design note 0012 §18 and
+  §19, ADR 0024), 2026-10-16, on Mesa lavapipe: fmt, clippy with `-D
+  warnings`, 1,072 tests and `cargo deny` pass, and the release time
+  guards pass as CI runs them. 31 goldens (`tests/touching.rs`, golden
+  11 in `tests/booleans.rs`) assert all six operations (union,
+  intersection and difference, each in both orders) with counts, volumes, areas, origins, and refusal texts and places: a
+  wedge on its edge and a cube on its corner on a plate from outside and
+  inside, a groove's root, a notch, the slit a knife left on main,
+  contacts on a face's boundary, many contacts in one face, millimetre
+  and kilometre scales, and thirteen found by review and the fuzz. A
+  contact fuzz (a random polyhedron with a box on its corner or a prism
+  on its edge resting on one of its faces, from outside or inside, moved
+  across the tolerance band in quarter steps): at a hundred times its
+  run, all 264,000 operations answered (by the volume identities, an
+  origins check and an oracle that finds results touching themselves)
+  or refused, none failing; on main the same run, with the final
+  oracle, fails 24,571 (20,457
+  results that validate and touch themselves, 2,148 naming origins that
+  do not bound their entities, 1,926 shell-volume kernel errors, 40
+  others). The flat fuzz and the motions at a hundred times refuse what
+  main refuses; the curved fuzzes at twenty times likewise, but for two
+  pairs where a box's corner rests on a prism's flat face from inside,
+  now answered but for the pinch, and pair 3493, where main returned a
+  result touching itself, now refused. Every result is checked for a
+  place within the tolerance of a flat face bounded by straight edges
+  that it is not on; disabled one
+  at a time, each of its three rules for sharp corners, and its measure
+  of a point's distance, fails a test that pins it (a fourth rule,
+  which none needed, was dropped). The slice costs 5.6% more
+  instructions on a union of two 256-sided star prisms and 8.1% on 64
+  pins cut one at a time; a union with a plate of 400 flush pins, which
+  a first version of the check took quadratic time on, is guarded
+  (95–113 ms, limit 1,000 ms) with a scaling check (docs/PERFORMANCE.md,
+  seventh pass).
 - Geometry for booleans of curved solids (design note 0012 §10.7, item
   1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   915 tests and `cargo deny` pass. Tested on its own; the boolean stages
@@ -1186,13 +1237,15 @@ name open unchanged.
   spheres and cones where every meeting is a circle (design note 0012
   §13), and planes across cones (§15). They refuse as not supported
   yet: spheres and cones with cylinders or cones off their axes, and two
-  cylinders at an angle (quartics); tangent contacts, where faces touch
-  without crossing (a box's face resting on a cylinder's side, a slot
-  tangent to a hole): 22 of 1,000 random operations in the fuzz of
-  planes and cylinders at 50 times, nearly all its refusals (63 of
-  60,000 operations there and at an angle, 52 and 11, where an edge
-  touches a face without crossing it, were done before item 3b's rule
-  for touches and are refused now); planes nearly tangent along a cone's
+  cylinders at an angle (quartics); tangent contacts where a face at
+  the contact is curved, faces touching without crossing (a box's face
+  resting on a cylinder's side, a slot tangent to a hole) or an edge or
+  a corner resting on a face: 324 of 16,000 random operations in the
+  fuzz of planes and cylinders at 20 times (292 faces touching, 32 an
+  edge or a corner), all its refusals but five non-manifold results,
+  and 4 of 8,000 at an angle (an edge or a corner resting on a flat
+  face of such a body, the faces there all flat, is decided since §19);
+  planes nearly tangent along a cone's
   ruling through or near its apex, where the cone stays within the
   tolerance of the plane out to the faces (the cone fuzz tilts them
   10⁻⁴ to 10⁻⁷ rad from tangent: 220 of its 20,000 operations on
@@ -1204,6 +1257,21 @@ name open unchanged.
   fifths of those through or near a pointed cone's apex and most of the
   rest tangent contacts, and 38 in 1,000 in chains of three or four
   cuts, likewise (design note 0012 §17).
+- Contacts that do not cross on flat faces (design note 0012 §19) are
+  decided, but much of the tolerance band is refused: the contact fuzz
+  at a hundred times its run refuses 80,627 of 264,000 operations (5,573
+  of 24,000 with the contact exact, 12,095 with the body moved a
+  tolerance against the face's normal), where main refused 53,168 and
+  failed 24,571. A fin
+  under a tolerance thick is still returned where an edge of one body
+  lies beside the line where its face crosses a face of the other,
+  between two reflex corners (§19, "Known fault"; main returns the same
+  fin). Within three quarters of a tolerance of the exact contact, 704
+  of 83,065 results differ in their counts from the exact contact's
+  (mostly an edge left split), 673 of them as on main: results are not
+  yet canonical under motions within the tolerance. The oracle that
+  finds contacts the booleans missed does not run on the curved fuzzes
+  yet: its test of a point in a curved face is not exact.
 - Far from the origin: a boolean is refused as too far from the origin
   for the tolerance where the rounding of the bound on a curved edge's
   course keeps a chord that could hide a contact wider than a sixteenth
@@ -1274,8 +1342,11 @@ name open unchanged.
   segments carry about eleven extra chords at each end, so splitting a
   face with 100 round holes takes 9 ms; every boolean reads both whole
   bodies, so its time grows with the bodies rather than with where they
-  meet (drilling a hole into a plate with 99 takes 40 ms). All are
-  within their budgets.
+  meet (drilling a hole into a plate with 99 takes 40 ms); and each
+  boolean groups a body's faces by surface with a linear search over
+  the groups found so far, faces times distinct surfaces (4.8% of the
+  instructions of a union with a plate of 900 flush pins, growing 14.5
+  times from 100 to 900 pins). All are within their budgets.
 - Non-manifold topology deferred to Phase 3.
 - No STEP or other exchange formats beyond STL (Phase 4; see docs/FORMATS.md).
 
@@ -1284,10 +1355,15 @@ name open unchanged.
 1. Check the new title bar on GNOME (on Pat's desktop).
 2. Phase 3, in the order the design notes give (0012 §12.4 item 3:
    balls and coaxial cones, item 3a, §13; planes across cones, item 3b,
-   §15, and operands with conic edges on cylinders and cones, §17, are
-   done). Next: tangent contacts (the largest share of the curved
-   refusals), then the
-   apex left refused (a plane through a pointed cone's apex where both
+   §15, operands with conic edges on cylinders and cones, §17, and
+   contacts that do not cross on flat faces, §19, are done). Next: the
+   fin left along a lying edge between reflex corners (§19, "Known
+   fault"), with a design note first; the rest of the contacts' slice 1
+   (§18.6 steps 5 to 8: the cut-pair filter, edges and corners on curved
+   faces, 76 of the curved fuzzes' refusals at twenty times, the Apart
+   band, the contact time guards and mutation checks), then slice 2,
+   surfaces that touch (§18.3), 1,304 of those refusals; then the apex
+   left refused (a plane through a pointed cone's apex where both
    bodies reach it: edges meeting at the cone's singular point), naming
    through booleans (design note 0013 §10 step 4), and extrude and
    revolve that add, remove and intersect. Alongside, absorb the boolean
@@ -1299,6 +1375,8 @@ name open unchanged.
    flat faces triangulated from orientation tests alone (no incircle
    test), which speeds meshing and validation; a cheaper exact stage of
    the incircle test, which curved faces' meshes reach on points of one
-   circle (18% of a ball's mesh); booleans that work near
+   circle (18% of a ball's mesh); faces grouped by surface through an
+   index of the surfaces, not a linear search (on main too, §19's
+   "Cost"); booleans that work near
    where the bodies meet (validation and classification of untouched
    faces carried over); then lower the budgets to match.

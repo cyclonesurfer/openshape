@@ -41,8 +41,10 @@ pub(super) enum Relation {
     /// On one surface (either orientation).
     Coplanar,
     /// The faces' surfaces cross, and each face reaches the other's
-    /// surface.
-    Crossing,
+    /// surface. `zero` says, per face (the first operand's first), whether
+    /// its boundary has a mark within the tolerance of the other's surface:
+    /// only then can it touch the other face without crossing it.
+    Crossing { zero: [bool; 2] },
 }
 
 /// The outlines of an operand's faces that are not flat; step 1's exact
@@ -309,7 +311,7 @@ pub(super) fn relation(
         if apart(ap, an, az) || apart(bp, bn, bz) {
             return Ok(Relation::Apart);
         }
-        return Ok(Relation::Crossing);
+        return Ok(Relation::Crossing { zero: [az, bz] });
     }
     // A boundary strictly on one side of the other surface keeps the face
     // there if the face cannot reach across without its boundary doing so.
@@ -350,7 +352,7 @@ pub(super) fn relation(
             "booleans of bodies whose faces meet where {m}, near {}",
             show(corner())
         ))),
-        Contact::Tracks(_) => Ok(Relation::Crossing),
+        Contact::Tracks(_) => Ok(Relation::Crossing { zero: [az, bz] }),
     }
 }
 
@@ -445,15 +447,40 @@ fn cuts(
 
 /// Where a loop of a face meets a surface: a vertex of the face, or a
 /// station (by its index along the edge) of an edge.
-#[derive(Clone, Copy)]
-enum Mark {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Mark {
     Vertex(usize),
     Station(usize, usize),
 }
 
-/// The clusters where the boundary of face `f` of `op` touches `surface`
-/// of the other operand from one side: a station or a vertex on it, or a
-/// run of them, between two strictly on one side along a loop (tangent
+/// A face's boundary touching a surface of the other operand from one
+/// side ([`touches`]): the cluster, the mark of the boundary there, and the
+/// side of the surface the boundary lies on next to it (by the surface's
+/// signed distance).
+#[derive(Clone, Copy, Debug)]
+struct Touch {
+    cluster: usize,
+    mark: Mark,
+    sign: i8,
+}
+
+/// A point of a face's boundary touching a face of the other operand
+/// ([`touches_in`]): the touched face (`op`, `face`), the cluster, the
+/// touching mark (of the other operand's boundary), and the side of the
+/// touched face the touching boundary lies on, +1 outside the touched body
+/// and −1 inside it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Touched {
+    pub op: Operand,
+    pub face: usize,
+    pub cluster: usize,
+    pub mark: Mark,
+    pub side: i8,
+}
+
+/// The places where the boundary of face `f` of `op` touches `surface` of
+/// the other operand from one side: a station or a vertex on it, or a run
+/// of them, between two strictly on one side along a loop (tangent
 /// contacts, at a vertex too: a rim touching a plane where a seam meets
 /// it, found by review). A run holding a whole edge is that edge lying on
 /// the surface (a rim on a plate), not a touch; nor is a run through a
@@ -464,6 +491,14 @@ enum Mark {
 /// its seam, a circle through a rod's cap's centre along the line that
 /// halves the cap; found refused as touches by diffing the fuzz's refusals
 /// against those of the code before this rule).
+///
+/// The marks of a run that touches, other than those inside an edge lying
+/// on the surface, must all be in one cluster, or, in a run with lying
+/// edges, in the clusters of those edges' ends: otherwise an edge runs
+/// within the tolerance of the surface over a stretch, which the
+/// tolerance cannot place, and the boolean is refused (design note 0012
+/// §18.2). On a plane no straight edge can: two of its vertices within the
+/// tolerance make it lie on the plane.
 fn touches(
     pair: &Pair,
     pts: &Points,
@@ -471,14 +506,14 @@ fn touches(
     f: usize,
     surface: usize,
     near: &[usize],
-) -> Result<Vec<usize>, KernelError> {
+) -> Result<Vec<Touch>, KernelError> {
     let shape = pair.get(op);
     let face = &shape.faces[f];
     let plane = is_plane(&pair.get(other(op)).surfaces[surface]);
     let mut out = Vec::new();
-    // Along a run of coedges: each station's side, where it is, and
-    // whether its edge lies wholly on the surface.
-    let mut seq: Vec<(i8, Mark, bool)> = Vec::new();
+    // Along a run of coedges: each mark's side, where it is, whether its
+    // edge lies wholly on the surface, and its edge.
+    let mut seq: Vec<(i8, Mark, bool, usize)> = Vec::new();
     // Per loop, its coedges near the surface (by position in the loop).
     let mut k = 0;
     while k < near.len() {
@@ -537,7 +572,7 @@ fn touches(
                     // The end is the next coedge's start.
                     marks.pop();
                 }
-                seq.extend(marks.into_iter().map(|(sign, m)| (sign, m, on)));
+                seq.extend(marks.into_iter().map(|(sign, m)| (sign, m, on, e)));
             }
             if whole {
                 // Around the loop from a point off the surface back to it.
@@ -565,16 +600,59 @@ fn touches(
                             || leaves_to(pair, pts, op, v, surface, -seq[a - 1].0)?;
                     }
                 }
-                if b + 1 < seq.len() && seq[a - 1].0 == seq[b + 1].0 && !lying && !crossed {
-                    let cluster = match seq[a].1 {
+                if b + 1 < seq.len() && seq[a - 1].0 == seq[b + 1].0 && !crossed {
+                    let cluster = |m: Mark| match m {
                         Mark::Vertex(v) => Some(pts.vertex_cluster(op, v)),
                         Mark::Station(e, s) => pts.station_cluster(pair, op, e, surface, s),
                     };
-                    let e = match seq[a].1 {
-                        Mark::Station(e, _) => e,
-                        Mark::Vertex(_) => face.loops[li][idx[i]].0,
+                    // The clusters the run may hold: its lying edges' ends,
+                    // or else its first mark's.
+                    let allowed: Vec<usize> = if lying {
+                        seq[a..=b]
+                            .iter()
+                            .filter(|x| x.2)
+                            .flat_map(|x| {
+                                let (va, vb) = shape.edges[x.3];
+                                [pts.vertex_cluster(op, va), pts.vertex_cluster(op, vb)]
+                            })
+                            .collect()
+                    } else {
+                        let first = cluster(seq[a].1).ok_or_else(|| match seq[a].1 {
+                            Mark::Station(e, _) => missing(op, e),
+                            Mark::Vertex(_) => missing(op, seq[a].3),
+                        })?;
+                        vec![first]
                     };
-                    out.push(cluster.ok_or_else(|| missing(op, e))?);
+                    for x in &seq[a..=b] {
+                        // A station inside a lying edge is on the surface
+                        // with it.
+                        if x.2 && matches!(x.1, Mark::Station(..)) {
+                            continue;
+                        }
+                        if !cluster(x.1).is_some_and(|c| allowed.contains(&c)) {
+                            let at = match x.1 {
+                                Mark::Vertex(v) => shape.points[v],
+                                Mark::Station(e, s) => {
+                                    let st = pts
+                                        .cached_stations(op, e, surface)
+                                        .ok_or_else(|| missing(op, e))?;
+                                    shape.curve(e).0.point(st[s].t)
+                                }
+                            };
+                            return Err(KernelError::InvalidInput(format!(
+                                "an edge of one body runs within the tolerance of a face of the \
+                                 other over a stretch without lying on it, near {}",
+                                show(at)
+                            )));
+                        }
+                    }
+                    if !lying {
+                        out.push(Touch {
+                            cluster: allowed[0],
+                            mark: seq[a].1,
+                            sign: seq[a - 1].0,
+                        });
+                    }
                 }
                 a = b + 1;
             }
@@ -614,6 +692,49 @@ fn leaves_to(
     Ok(false)
 }
 
+/// Records where the boundary of either face touches the other face from
+/// one side (design note 0012 §18.2): `zero` says, per face (the first's
+/// first), whether its boundary has a mark on the other's surface at all.
+/// A face with an outline keeps only points in it (closed); on a flat face
+/// the split places each point exactly.
+pub(super) fn touches_in(
+    pair: &Pair,
+    pts: &Points,
+    outlines: &[Vec<Option<Outline>>; 2],
+    fa: usize,
+    fb: usize,
+    zero: [bool; 2],
+    out: &mut Vec<Touched>,
+) -> Result<(), KernelError> {
+    let eps = pts.eps;
+    for (op, f, g) in [(Operand::First, fa, fb), (Operand::Second, fb, fa)] {
+        if !zero[slot(op)] {
+            continue;
+        }
+        let (mine, theirs) = (pair.get(op), pair.get(other(op)));
+        let gf = &theirs.faces[g];
+        let q = &theirs.surfaces[gf.surface];
+        let mut near = Vec::new();
+        mine.faces[f].near_surface(q, eps, &mut near);
+        for t in touches(pair, pts, op, f, gf.surface, &near)? {
+            let outline = outlines[slot(other(op))][g].as_ref();
+            if outline.is_some()
+                && locate(theirs, outline, gf, pts.rep[t.cluster], eps) == Some(false)
+            {
+                continue;
+            }
+            out.push(Touched {
+                op: other(op),
+                face: g,
+                cluster: t.cluster,
+                mark: t.mark,
+                side: if gf.outward { t.sign } else { -t.sign },
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Refuses an edge of either face touching the other face's surface at a
 /// point of the other face (closed): a tangent contact.
 fn refuse_touches(
@@ -630,8 +751,8 @@ fn refuse_touches(
         let q = &theirs.surfaces[gf.surface];
         let mut near = Vec::new();
         mine.faces[f].near_surface(q, eps, &mut near);
-        for c in touches(pair, pts, op, f, gf.surface, &near)? {
-            let p = pts.rep[c];
+        for t in touches(pair, pts, op, f, gf.surface, &near)? {
+            let p = pts.rep[t.cluster];
             let outline = outlines[slot(other(op))][g].as_ref();
             if locate(theirs, outline, gf, p, eps) != Some(false) {
                 return Err(KernelError::Unsupported(format!(
@@ -655,10 +776,41 @@ struct Interval {
 
 /// The stretches of the common line of two crossing faces on planes that
 /// lie in both (closed) faces, as pairs of clusters (step 1's meeting).
+///
+/// Where one face's interval is a run of its edges lying on the other's
+/// plane, and the other's is not, the stretch is that run (design note
+/// 0012 §18.2: a lying edge is imprinted as the meeting, and merges with
+/// the edge's own segments), so an end of it that the other face's
+/// boundary gives must be a point of the run. A run within the tolerance
+/// of a plane can be a few tolerances from the planes' exact common line
+/// where they meet at a slant, and the other face's boundary crosses that
+/// line, not the run: the run then leaves the other face at one point and
+/// the faces' meeting ends at another, more than the tolerance from the
+/// run. Beside the run on its face's side, or within the tolerance of its
+/// line, the stretch would bound a sliver of that face between it and the
+/// run that no face of the other body bounds (found by the contact fuzz:
+/// the edge of a prism resting within the tolerance on a face and crossing
+/// its boundary, its faces rising at a slant); that is refused as input
+/// ([`unplaced_leaving`]), as the face's planar split could not place it
+/// either. Beyond that off its face, the stretch lies off that face, whose
+/// split drops it, and it is kept: it splits the other face into pieces of
+/// one class, which the result joins again, or, where it ends inside that
+/// face, it is a bridge there carrying no edge, which
+/// [`super::lying_pieces`] places on the run as the contact (golden 22). The same holds where the run
+/// is only a part of the face's interval, the line going on into the face
+/// past a reflex corner at an end of the run or the run being an edge of a
+/// hole, for an end of the stretch beside the run (found by review: the
+/// stretch there bounded a fin of the two faces thinner than the
+/// tolerance). The side is taken from the run's edge nearest the end,
+/// since a run of several edges can bend within the tolerance of the plane
+/// (found by review). Where both intervals are runs (an edge of each face
+/// on the other's plane, the planes meeting at a slight angle), the ends
+/// are the runs' own vertices, not crossings of a plane, and are not
+/// checked here: the faces then lie within the tolerance of each other
+/// over a band, which classifying their pieces refuses.
 pub(super) fn plane_meeting(
     pair: &Pair,
     pts: &Points,
-    outlines: &[Vec<Option<Outline>>; 2],
     fa: usize,
     fb: usize,
 ) -> Result<Vec<(usize, usize)>, KernelError> {
@@ -678,14 +830,153 @@ pub(super) fn plane_meeting(
             let lo = later(x.lo, y.lo, eps, pts)?;
             let hi = earlier(x.hi, y.hi, eps, pts)?;
             if lo.1 != hi.1 && lo.0 < hi.0 {
+                let spans = [
+                    (Operand::First, fa, b.surface, x),
+                    (Operand::Second, fb, a.surface, y),
+                ];
+                let runs =
+                    spans.map(|(op, f, surface, iv)| lying_runs(pair, pts, op, f, surface, iv));
+                for (k, &(op, f, _, own)) in spans.iter().enumerate() {
+                    // Where the other span is a run as well, the ends it
+                    // gives are its run's own vertices.
+                    if runs[1 - k].iter().any(|r| r.exact) {
+                        continue;
+                    }
+                    let theirs = [lo.1, hi.1]
+                        .into_iter()
+                        .filter(|&c| c != own.lo.1 && c != own.hi.1);
+                    for c in theirs {
+                        let p = pts.rep[c];
+                        for run in &runs[k] {
+                            let (r0, r1) = run.stretch(dir);
+                            if p.dot(dir) < r0 - eps
+                                || p.dot(dir) > r1 + eps
+                                || run.edges.iter().any(|&e| pts.on_edge(op, e).contains(&c))
+                            {
+                                continue;
+                            }
+                            // The side of the run's face the end is on: the
+                            // direction into the face across the run's
+                            // edge nearest it is the face's outward normal
+                            // crossed with the edge's direction as its
+                            // loop runs it.
+                            let (a, b) = run.nearest(p);
+                            let face = &pair.get(op).faces[f];
+                            let into = face.normal().cross(b - a).normalize();
+                            if (p - a).dot(into) > -eps {
+                                return Err(unplaced_leaving(p));
+                            }
+                        }
+                    }
+                }
                 out.push((lo.1, hi.1));
             }
         }
     }
-    if !(a.flat && b.flat) {
-        refuse_touches(pair, pts, outlines, fa, fb)?;
-    }
     Ok(out)
+}
+
+/// The refusal of an edge of one body lying on a face of the other that
+/// leaves the face where the tolerance cannot place the point, near `p`.
+fn unplaced_leaving(p: DVec3) -> KernelError {
+    KernelError::InvalidInput(format!("{} near {}", super::LEAVES_UNPLACED, show(p)))
+}
+
+/// A run of consecutive straight edges of a face's loop lying on a plane
+/// of the other operand ([`lying_runs`]).
+struct Run {
+    /// Its edges, in loop order.
+    edges: Vec<usize>,
+    /// The places of its vertices, in loop order (one more than its edges).
+    points: Vec<DVec3>,
+    /// True if the run is the whole interval of its face on the line, from
+    /// the cluster at one end of it to the cluster at the other.
+    exact: bool,
+}
+
+impl Run {
+    /// The least and greatest positions of its vertices along `dir`.
+    fn stretch(&self, dir: DVec3) -> (f64, f64) {
+        (self.points.iter()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+            let t = p.dot(dir);
+            (lo.min(t), hi.max(t))
+        })
+    }
+
+    /// The ends of its edge nearest `p`, in loop order (the first of
+    /// those equally near).
+    fn nearest(&self, p: DVec3) -> (DVec3, DVec3) {
+        let ends = |k: usize| (self.points[k], self.points[k + 1]);
+        let d = |k: usize| {
+            let (a, b) = ends(k);
+            points::segment_distance(p, a, b)
+        };
+        ends((0..self.edges.len()).fold(0, |best, k| if d(k) < d(best) { k } else { best }))
+    }
+}
+
+/// The runs of face `f` of `op` lying on plane `surface` of the other
+/// operand: consecutive straight edges of one of its loops whose vertices
+/// are all within the tolerance of the plane, each marked exact where the
+/// interval `iv` of the face on the planes' common line runs along it from
+/// the cluster at one end to the cluster at the other. Only the coedges
+/// near the plane are looked at.
+fn lying_runs(
+    pair: &Pair,
+    pts: &Points,
+    op: Operand,
+    f: usize,
+    surface: usize,
+    iv: &Interval,
+) -> Vec<Run> {
+    let ends = [iv.lo.1, iv.hi.1];
+    let holds = |c: usize| {
+        let (v0, v1) = pts.vertices_of(c);
+        match op {
+            Operand::First => v0.is_some(),
+            Operand::Second => v1.is_some(),
+        }
+    };
+    let held = ends.iter().all(|&c| holds(c));
+    let mut runs = Vec::new();
+    let shape = pair.get(op);
+    let face = &shape.faces[f];
+    let lies = |li: usize, i: usize| {
+        let (e, _) = face.loops[li][i];
+        let vs = &face.verts[li];
+        shape.straight[e]
+            && pts.sign(op, vs[i], surface) == 0
+            && pts.sign(op, vs[(i + 1) % vs.len()], surface) == 0
+    };
+    let mut near = Vec::new();
+    face.near_surface(&pair.get(other(op)).surfaces[surface], pts.eps, &mut near);
+    for k in near {
+        let (li, i) = face.coedge_at(k);
+        let n = face.loops[li].len();
+        // A run starts at a lying coedge whose predecessor does not lie (a
+        // loop lying wholly on the plane has none: the faces would be
+        // coplanar).
+        if !lies(li, i) || lies(li, (i + n - 1) % n) {
+            continue;
+        }
+        let vs = &face.verts[li];
+        let mut edges = Vec::new();
+        let mut points = vec![shape.points[vs[i]]];
+        let mut j = i;
+        while edges.len() < n && lies(li, j) {
+            edges.push(face.loops[li][j].0);
+            j = (j + 1) % n;
+            points.push(shape.points[vs[j]]);
+        }
+        let (s, t) = (pts.vertex_cluster(op, vs[i]), pts.vertex_cluster(op, vs[j]));
+        let exact = held && ((s, t) == (ends[0], ends[1]) || (t, s) == (ends[0], ends[1]));
+        runs.push(Run {
+            edges,
+            points,
+            exact,
+        });
+    }
+    runs
 }
 
 fn compare(
