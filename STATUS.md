@@ -935,7 +935,9 @@ name open unchanged.
   8,290 and 20,522 refusals, the same operations with the same texts),
   none failing. Of 27 changes to the rule and its searches, the first
   run's tests caught all but three: one only skips work, and the other
-  two have tests now. A review found the check placing points on faces
+  two have tests now; run again on the final code with nine more, among
+  them one for each fix of the last review and of the profiling, the
+  tests catch all but the one that only skips work (35 of 36). A review found the check placing points on faces
   with arcs by their chords, which let a round bar's fin through and
   refused a round hole under the strip; points on such faces are now
   placed by the face's outline in its chart (golden 41). This change

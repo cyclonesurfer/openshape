@@ -3822,7 +3822,14 @@ unit test of the cut; and the walk kept to a box, now caught by its
 unit test. The placing of points in long cycles was caught then only by
 the time guards' comb, whose boolean then fails, and a face crossing a
 block's top 64 times along one line (`tests/booleans.rs`) now catches
-it too.
+it too. Run again on the final code with nine more changes (the search
+the stretches over a chain and the runs beside an end now share, left
+empty; and one for each fix of the last review and of the profiling:
+arcs placed by their chords, the test of a curved edge near a strip
+forced either way, F's edges entering the strip left out, a budget for
+each strip, the runs found again for each stretch, long cycles walked
+whole, and the walk's box taking every edge), the tests catch 35 of the
+36, all but the skip of a face with no mark.
 The flat fuzz, the motions and the contact fuzz at a hundred times their
 runs, and the curved fuzzes at twenty and at fifty, refuse exactly what
 main refuses (90,686, 8,290 and 20,522 refusals, the same operations
