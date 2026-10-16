@@ -56,10 +56,10 @@ the scaling tests alone), each test reporting its best repetition; in
 those runs rows already in the table often measured above their ranges
 (the flattened pins' plate validated in 4.5–8.8 ms against 3.1–3.8), so
 this row may read high against the others. The two rows of a face
-lying or crossing along one line were measured on 2026-10-16, after the
-eighth pass: the range of three runs of the booleans' and the scaling
-tests and two of a test timing those operations alone, each the best of
-three repetitions. The limit is what the test enforces.
+lying or crossing along one line, and the scaling row of the first,
+were measured on 2026-10-16, after the eighth pass: the range of three
+runs of the booleans' and the scaling tests, each the best of three
+repetitions. The limit is what the test enforces.
 
 | Operation | Measured | Limit |
 |---|---|---|
@@ -487,9 +487,9 @@ face whose boundary has no mark within the tolerance of the other's
 plane is skipped (the faces' relation knows it), and the outlines and
 the tables of them are built only when a strip needs them. The star's
 strip checks take 80 thousand; most of its 5.3 million more is in
-classification (27.1 to 30.7 million), whose source is unchanged but
-whose walk of the other body's tree (`Bvh::visit`) the compiler no
-longer inlines. Profiling two bodies made for it found three places
+classification (27.1 to 30.7 million), whose code differs from main's
+only in taking its refusal's text from a constant, but whose walk of the
+other body's tree (`Bvh::visit`) the compiler no longer inlines. Profiling two bodies made for it found three places
 doing work that grows with the square of their size, two of them on
 main:
 
@@ -631,8 +631,8 @@ instructions, not yet fixed; each is a candidate for a later pass.
   a tree over them, so where a line crosses the other body's face many
   times, each of the pieces along it crosses the others: on the comb
   (eighth pass), 93.7 million instructions at 1,024 crossings and 1,073
-  million at 4,096, 11.4 times for four times the crossings, 30% of the
-  larger intersection. Pieces that share an edge where the bodies do not
+  million at 4,096, 11.4 times for four times the crossings, 34% of the
+  larger intersection (`Kernel::boolean`). Pieces that share an edge where the bodies do not
   meet lie on the same side of the other body, so a classification
   carried from piece to piece across such edges, with a ray only for the
   first piece of each group, would make it linear; it needs a design

@@ -1409,7 +1409,7 @@ name open unchanged.
   piece of a split face, so where a face crosses the other body's face
   many times along one line its time grows with the square of the
   crossings (11.4 times the instructions for four times the crossings,
-  30% of an intersection with 4,096; PERFORMANCE.md, eighth pass). All
+  34% of an intersection with 4,096; PERFORMANCE.md, known slow spots). All
   are within their budgets.
 - Non-manifold topology deferred to Phase 3.
 - No STEP or other exchange formats beyond STL (Phase 4; see docs/FORMATS.md).

@@ -1158,6 +1158,7 @@ fn strip_runs(
 /// search's reach of the strip, or one of `f` that may enter it, refuses
 /// the boolean as not supported. A face with curved edges farther away
 /// places its points by its chart's outline in `outlines` ([`place`]).
+#[allow(clippy::too_many_arguments)]
 fn held_strip(
     pair: &Pair,
     pts: &Points,
@@ -1553,11 +1554,16 @@ fn lying_runs(
         }
     };
     // The ends of the intervals whose two end clusters hold vertices of
-    // the face's operand.
-    let held: Vec<(usize, usize)> = (ivs.iter())
+    // the face's operand, each the lesser first, sorted, so a run finds
+    // whether it is one by a search (found by review: a scan of them all
+    // for each run took time growing with the square of the runs on a face
+    // touching the line along many of them).
+    let mut held: Vec<(usize, usize)> = (ivs.iter())
         .map(|iv| (iv.lo.1, iv.hi.1))
         .filter(|&(c, d)| holds(c) && holds(d))
+        .map(|(c, d)| (c.min(d), c.max(d)))
         .collect();
+    held.sort_unstable();
     let mut runs = Vec::new();
     let shape = pair.get(op);
     let face = &shape.faces[f];
@@ -1591,7 +1597,7 @@ fn lying_runs(
             points.push(shape.points[vs[j]]);
         }
         let (s, t) = (pts.vertex_cluster(op, vs[i]), pts.vertex_cluster(op, vs[j]));
-        let exact = (held.iter()).any(|&ends| (s, t) == ends || (t, s) == ends);
+        let exact = held.binary_search(&(s.min(t), s.max(t))).is_ok();
         runs.push(Run {
             edges,
             points,
@@ -2223,7 +2229,11 @@ impl Piece {
     }
 
     /// Its part where `n · x ≥ c` (`n` a unit vector), if that has an area
-    /// (Sutherland and Hodgman 1974).
+    /// (Sutherland and Hodgman 1974). A side with the same normal is
+    /// replaced by the tighter of the two, so a piece split along L again
+    /// and again keeps its four sides and one for each meeting that cuts
+    /// it (found by review: carried sides made each test of a piece beside
+    /// n meetings take time in proportion to n).
     fn cut(&self, n: DVec2, c: f64) -> Option<Piece> {
         let k = self.corners.len();
         let mut corners: Vec<DVec2> = Vec::with_capacity(k + 1);
@@ -2249,7 +2259,10 @@ impl Piece {
             return None;
         }
         let mut sides = self.sides.clone();
-        sides.push((n, c));
+        match sides.iter_mut().find(|side| side.0 == n) {
+            Some(side) => side.1 = side.1.max(c),
+            None => sides.push((n, c)),
+        }
         Some(Piece {
             sides,
             corners,
@@ -2332,12 +2345,20 @@ fn strip_of(
             lines.partition_point(|l| l.0.x < x1),
         );
         budget.spend(1 + hi.saturating_sub(lo))?;
+        // The parts in order along L; those before `done` end at or before
+        // the start of the line being cut, and so of every later one, which
+        // keeps each whole (found by review: cutting every part by every
+        // line took steps growing with the square of the meetings beside
+        // one segment).
         let mut parts = vec![piece];
+        let mut done = 0;
         for &line in lines.get(lo..hi).unwrap_or(&[]) {
-            budget.spend(parts.len())?;
-            parts = (parts.into_iter())
-                .flat_map(|p| beyond_meeting(p, line, eps, cos))
-                .collect();
+            while done < parts.len() && parts[done].span().1 <= line.0.x {
+                done += 1;
+            }
+            budget.spend(1 + parts.len() - done)?;
+            let rest = parts.split_off(done);
+            parts.extend((rest.into_iter()).flat_map(|p| beyond_meeting(p, line, eps, cos)));
         }
         cut.extend(parts);
     }
@@ -3151,6 +3172,89 @@ mod tests {
             assert!(!strip(&chain, &both, &[]).is_empty());
             assert!(strip(&chain, &both, &[line]).is_empty());
         }
+    }
+
+    /// A segment beside `n` meetings, each over its own stretch of L
+    /// between the segment and L, slanting a little: cutting its strip
+    /// takes steps in proportion to `n`, and each piece keeps at most five
+    /// sides (its four and its meeting's), at 256 and 1,024 meetings (found
+    /// by review: every part was cut by every meeting, about n² steps, and
+    /// each part carried a side for every split before it).
+    #[test]
+    fn a_strip_beside_many_meetings_takes_steps_in_proportion_to_them() {
+        let v = DVec2::new;
+        for n in [256, 1024] {
+            let w = 10.0 / n as f64;
+            let lines: Vec<(DVec2, DVec2)> = (0..n)
+                .map(|i| (v(w * i as f64, 3.0), v(w * (i as f64 + 0.5), 3.0 + 0.1 * w)))
+                .collect();
+            let mut budget = Budget::new(STRIP_STEPS);
+            let pieces = strip_of(
+                &[v(10.0, 5.0), v(0.0, 5.0)],
+                &[1.0, -1.0],
+                lines,
+                1.0,
+                1.0,
+                &mut budget,
+            )
+            .unwrap();
+            assert_eq!(pieces.len(), 2 * n);
+            let steps = STRIP_STEPS - budget.left;
+            assert!(steps <= 8 * n, "{n}: {steps} steps");
+            let most = pieces.iter().map(|p| p.sides.len()).max();
+            assert_eq!(most, Some(5), "{n}");
+        }
+    }
+
+    /// [`apart`] against the separation of the points' hull and a piece
+    /// along 7,200 directions, on random points and pieces: where some
+    /// direction separates them by more than `gap` (a negative `gap`: they
+    /// overlap along it by less than `-gap`), `apart` says they are apart,
+    /// and where it says so, the best direction sampled comes within the
+    /// sampling's error of `gap`.
+    #[test]
+    fn apart_is_the_separation_of_a_hull_and_a_piece() {
+        let mut s = 11;
+        let dirs: Vec<DVec2> = (0..7200)
+            .map(|i| DVec2::from_angle(i as f64 * TAU / 7200.0))
+            .collect();
+        let span = |vs: &[DVec2], n: DVec2| {
+            (vs.iter()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(v.dot(n)), hi.max(v.dot(n)))
+            })
+        };
+        let (mut said, mut not) = (0, 0);
+        for case in 0..600 {
+            let mut at = || DVec2::new(6.0 * lcg(&mut s) - 3.0, 2.0 * lcg(&mut s) + 1.0);
+            let (a, b) = (at(), at());
+            let (a, b) = if a.x > b.x { (a, b) } else { (b, a) };
+            let mut out = Vec::new();
+            strip_pieces(a, b, 1.0, 1e-9, &[1.0], &mut out);
+            let Some(piece) = out.pop() else {
+                continue;
+            };
+            let points: Vec<DVec2> = (0..2 + case % 4)
+                .map(|_| DVec2::new(6.0 * lcg(&mut s) - 3.0, 6.0 * lcg(&mut s) - 2.0))
+                .collect();
+            let gap = 2.0 * lcg(&mut s) - 1.0;
+            let best = (dirs.iter())
+                .map(|&n| {
+                    let ((a0, a1), (b0, b1)) = (span(&points, n), span(&piece.corners, n));
+                    (b0 - a1).max(a0 - b1)
+                })
+                .fold(f64::NEG_INFINITY, f64::max);
+            let got = apart(&points, &piece, gap);
+            if best > gap + 1e-12 {
+                assert!(got, "case {case}: {best} against {gap}");
+            }
+            if got {
+                assert!(best > gap - 0.01, "case {case}: {best} against {gap}");
+                said += 1;
+            } else {
+                not += 1;
+            }
+        }
+        assert!(said > 100 && not > 100, "{said} apart, {not} not");
     }
 
     /// The strip check of a run of a prism's face lying on the plane of a

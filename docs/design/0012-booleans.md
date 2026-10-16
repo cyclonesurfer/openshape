@@ -3614,8 +3614,9 @@ are not left out: a run 1.1 ε to 2 ε from L has a strip all within ε
 of R, and main returns the fin there. The regions of F's plane within
 ε of P beside L that are no strip are not refused by this rule. Each
 kind below is answered as on main (goldens 39 and 40), and a notch tip
-across L whose two edges cross L fails as on main (*A fault on main*,
-below): past a segment where F lies away from
+across L whose two edges cross L fails or is refused as on main, by the
+operands' order (*A fault on main*, below): past a segment where F lies
+away from
 L, the region between the segment and L is outside F; at a convex
 corner of F pointing toward L, its edges running away from P on its
 side, F lies beyond the corner from L, and the wedge between F and P
@@ -3678,8 +3679,9 @@ F and against G is decided, for a face whose edges are all straight, by
 its loops in its plane with trees over their sides and their loops'
 boxes (the outline `check_apart` uses, §19), built when a strip first
 needs that face and kept for the rest of the boolean: a point meets the
-sides within ε of it, the loops whose boxes hold it, and those of their
-sides that its ray to +x may cross, not every side of every loop. The
+sides within ε of it, the loops whose boxes hold it, and of those loops
+all the sides of one of at most 32 and, of a longer one, those its ray
+to +x may cross, not every side of every loop. The
 first version walked every edge of both faces for each point, and an
 edge of 1,024 segments lying beside the line over golden 35's notch
 took more steps than the limit below and was refused as too large. For
