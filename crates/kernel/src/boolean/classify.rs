@@ -46,7 +46,7 @@ use spade::Triangulation;
 use super::chart::Outline;
 use super::quadric::Quadric;
 use super::shape::{Face, Shape};
-use super::show;
+use super::{show, RUNS_WITHIN};
 use crate::bvh::{self, Bvh};
 use crate::tess;
 use crate::KernelError;
@@ -395,8 +395,7 @@ impl<'a> Boundary<'a> {
     pub fn classify(&self, p: DVec3, eps: f64) -> Result<Class, KernelError> {
         if self.near(p, eps) {
             return Err(KernelError::InvalidInput(format!(
-                "a face of one body runs within the tolerance of the other's surface \
-                 without lying on one of its faces, near {}",
+                "{RUNS_WITHIN}, near {}",
                 show(p)
             )));
         }

@@ -275,6 +275,127 @@ fn booleans() {
         t,
         LIMIT.pinned_400,
     );
+    // An edge of 256 segments lying on the other body's top beside the
+    // line where the faces cross, over a notch: the strip check searches
+    // its whole strip and finds no point the top holds.
+    let (notched, zig) = (notched_block(), zigzag(256));
+    let (r, t) = best(3, || {
+        k().boolean(&notched, &zig, BooleanOp::Intersect)
+            .expect("two wedges")
+    });
+    assert_eq!(k().topology(&r).solids, 2);
+    within(
+        "intersection with an edge of 256 segments lying beside a crossing",
+        t,
+        LIMIT.zigzag_256,
+    );
+    // A face crossing the other body's top 1,024 times along one line: the
+    // checks of each stretch find the faces' lying runs once, and points
+    // are placed in the long regions through trees (found by profiling,
+    // where both took time growing with the square of the crossings).
+    let (block, comb) = (block(), comb(1024));
+    let (r, t) = best(3, || {
+        k().boolean(&block, &comb, BooleanOp::Intersect)
+            .expect("the teeth")
+    });
+    assert_eq!(k().topology(&r).solids, 513);
+    within(
+        "intersection with a face crossing the other's top 1,024 times",
+        t,
+        LIMIT.comb_1024,
+    );
+}
+
+/// A block from x = −0.25 to 1.25 and y = −1 to 1 under z = 0.
+fn block() -> Body {
+    k().make_box(
+        &Frame {
+            origin: DVec3::new(-0.25, -1.0, -1.0),
+            ..Frame::WORLD
+        },
+        DVec3::new(1.5, 2.0, 1.0),
+    )
+    .expect("a block")
+}
+
+/// [`zigzag`]'s prism with its edge over x from 0 to 1 zigzagging in `n`
+/// segments between 1 mm to either side of the x axis: its face crosses
+/// [`block`]'s top along the axis `n` times.
+fn comb(n: usize) -> Body {
+    let t = 10f64.to_radians();
+    let frame = Frame {
+        origin: DVec3::ZERO,
+        x: DVec3::X,
+        y: DVec3::new(0.0, t.cos(), t.sin()),
+        z: DVec3::new(0.0, -t.sin(), t.cos()),
+    };
+    let mut pts = vec![DVec2::new(-0.5, -0.5), DVec2::new(0.0, -0.5)];
+    pts.extend((0..=n).map(|i| {
+        let w = if i % 2 == 0 { -1e-3 } else { 1e-3 };
+        DVec2::new(i as f64 / n as f64, w)
+    }));
+    pts.extend([(1.0, -0.5), (2.0, -0.5), (2.0, 0.5), (-0.5, 0.5)].map(|(x, y)| DVec2::new(x, y)));
+    k().extrude(
+        &Profile::polygon(frame, &pts),
+        &ExtrudeSpec {
+            distance: 0.5,
+            symmetric: false,
+        },
+    )
+    .expect("a comb")
+}
+
+/// A block from x = −0.25 to 1.25 and y = −1 to 1 under z = 0, with a
+/// notch through it from x = 0 to 1 back to y = 0 (the touching goldens'
+/// golden 35).
+fn notched_block() -> Body {
+    let pts = [
+        (-0.25, -1.0),
+        (0.0, -1.0),
+        (0.0, 0.0),
+        (1.0, 0.0),
+        (1.0, -1.0),
+        (1.25, -1.0),
+        (1.25, 1.0),
+        (-0.25, 1.0),
+    ]
+    .map(|(x, y)| DVec2::new(x, y));
+    let frame = Frame {
+        origin: DVec3::new(0.0, 0.0, -1.0),
+        ..Frame::WORLD
+    };
+    prism_of(&pts, frame)
+}
+
+/// A prism on the plane through the x axis leaning 10° from z = 0 (the
+/// touching goldens' golden 32), its face's edge over [`notched_block`]'s
+/// notch zigzagging in `n` segments between 4 and 2 tolerances off the
+/// axis, every corner of it within the tolerance of the block's top: a run
+/// of `n` edges lying on the top beside the line where the faces cross,
+/// whose strip the strip check searches in full (design note 0012 §20).
+fn zigzag(n: usize) -> Body {
+    let eps = k().tolerance().linear;
+    let t = 10f64.to_radians();
+    let frame = Frame {
+        origin: DVec3::ZERO,
+        x: DVec3::X,
+        y: DVec3::new(0.0, t.cos(), t.sin()),
+        z: DVec3::new(0.0, -t.sin(), t.cos()),
+    };
+    let mut pts = vec![DVec2::new(-0.5, -0.5), DVec2::new(0.0, -0.5)];
+    pts.extend((0..=n).map(|i| {
+        let w = if i % 2 == 0 { -4.0 } else { -2.0 };
+        DVec2::new(i as f64 / n as f64, w * eps)
+    }));
+    pts.extend([(1.0, -0.5), (2.0, -0.5), (2.0, 0.5), (-0.5, 0.5)].map(|(x, y)| DVec2::new(x, y)));
+    k().extrude(
+        &Profile::polygon(frame, &pts),
+        &ExtrudeSpec {
+            distance: 0.5,
+            symmetric: false,
+        },
+    )
+    .expect("a prism")
 }
 
 /// A cylinder of radius `r` about `(x, y)`, from `z0` up `h`.
@@ -825,6 +946,21 @@ fn scaling() {
         },
     );
 
+    let (notched, zig128, zig1024) = (notched_block(), zigzag(128), zigzag(1024));
+    scales(
+        "intersection with an edge lying beside a crossing, 128 to 1024 segments",
+        8.0,
+        5,
+        || {
+            k().boolean(&notched, &zig128, BooleanOp::Intersect)
+                .expect("two wedges")
+        },
+        || {
+            k().boolean(&notched, &zig1024, BooleanOp::Intersect)
+                .expect("two wedges")
+        },
+    );
+
     // A ball meshed eight times as finely: on a doubly curved face the
     // triangles grow as the tolerance shrinks.
     let b = ball(DVec3::ZERO, 1.0);
@@ -858,6 +994,8 @@ struct Limits {
     boolean_256: f64,
     pins_64: f64,
     pinned_400: f64,
+    zigzag_256: f64,
+    comb_1024: f64,
     drill_64: f64,
     plate_box: f64,
     dimple_16: f64,
@@ -893,6 +1031,8 @@ const LIMIT: Limits = Limits {
     boolean_256: 500.0,
     pins_64: 3000.0,
     pinned_400: 1000.0,
+    zigzag_256: 120.0,
+    comb_1024: 700.0,
     drill_64: 10000.0,
     plate_box: 600.0,
     dimple_16: 900.0,

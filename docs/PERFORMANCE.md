@@ -53,8 +53,11 @@ the range of six runs (three of every guard, three of the booleans' and
 the scaling tests alone), each test reporting its best repetition; in
 those runs rows already in the table often measured above their ranges
 (the flattened pins' plate validated in 4.5–8.8 ms against 3.1–3.8), so
-this row may read high against the others. The limit is what the test
-enforces.
+this row may read high against the others. The two rows of a face
+lying or crossing along one line were measured on 2026-10-16, after the
+eighth pass: the range of three runs of the booleans' and the scaling
+tests and two of a test timing those operations alone, each the best of
+three repetitions. The limit is what the test enforces.
 
 | Operation | Measured | Limit |
 |---|---|---|
@@ -71,6 +74,8 @@ enforces.
 | Drill 64 round holes into a plate, one boolean each | 860–1,050 ms | 10,000 ms |
 | Intersect or subtract a plate with 100 round holes and a box across them | 52–55 ms | 600 ms |
 | Unite a box with a corner of a plate of 400 flush square pins (the result has 4,012 faces; each place of it checked against the faces near it) | 95–113 ms | 1,000 ms |
+| Intersect a notched block with a prism whose face's edge of 256 segments lies on the block's top beside the line where they cross (the strip check searches the whole strip) | 11.2–12.0 ms | 120 ms |
+| Intersect a block with a prism whose face crosses its top 1,024 times along one line (513 solids) | 64–69 ms | 700 ms |
 | Dimple a plate with 16 balls, one boolean each | 73–89 ms | 900 ms |
 | Mesh it (173,680 triangles) | 382–406 ms | 4,000 ms |
 | Validate it | 2.2–2.5 ms | 40 ms |
@@ -107,6 +112,7 @@ factor):
 | Cut a box across a plate's round holes, 16 to 121 holes (7.6 times) | 7.8–8.4 times |
 | Mesh a ball, 13,964 to 105,556 triangles (7.6 times) | 8.6–9.6 times |
 | Unite a box with a corner of a plate of flush pins, 49 to 400 pins (8.2 times) | 8.4–9.2 times |
+| Intersect a notched block with a prism whose lying edge has 128 to 1,024 segments | 7.4–7.6 times |
 
 One more checks the cut of a plate's 4th hole against that of its 16th,
 four times the holes counting the one cut (bound: 12, three times the
@@ -460,6 +466,66 @@ million and 18.9 million more than on main.
   to 216.4 million). The 400-pin union is guarded (above), with a
   scaling check.
 
+### Eighth pass: a meeting beside a lying run (design note 0012 §20)
+
+The strip check (§20) searches, for each chain of a face's boundary
+lying within the tolerance of the other face's plane, the strip between
+the chain and the line where the planes cross. Counted by callgrind
+against main, one run each, each operation a test of its own (building
+the operands included):
+
+| Operation | main | now |
+|---|---|---|
+| Union of two 256-sided star prisms | 360.9 million | 365.3 million (+1.2%) |
+| Cut 64 pins into a box, one boolean each | 2,343 million | 2,363 million (+0.8%) |
+
+Of the pins' difference, the strip checks take 19.9 million: a face
+whose boundary has no mark within the tolerance of the other's plane is
+skipped (the faces' relation knows it), and the outlines and the tables
+of them are built only when a strip needs them. Profiling two bodies
+made for it found three costs growing with the square of their size,
+two of them on main:
+
+* **Each strip's search walked every edge near the plane.** The time
+  guards' zigzag is a face whose edge of n segments lies on the other
+  body's top beside the line where the faces cross, a run with a reflex
+  corner at every other vertex: n / 2 + 1 chains. Each chain's search
+  took the edges of both faces within its distance of the plane, all n
+  of the run's among them, so the strip checks took 25.6 million
+  instructions at n = 256 and 224 million at 1,024 (8.8 times). The
+  walk of each face's tree now keeps to the strip's box as well
+  (`Face::near_surface_in`), and each chain takes the pair's meetings
+  over its own span from a list sorted once: 16.4 and 67.3 million (4.1
+  times). The intersection at 1,024 segments went from 632 to 474
+  million instructions, and from 61–64 ms to 52.5 ms (best of three,
+  two interleaved runs).
+* **The end checks of a pair's stretches found the faces' lying runs
+  again for each stretch** (main): every stretch walked both faces'
+  edges near the other's plane, and every pair of the faces' intervals
+  on the line was tested. The
+  time guards' comb, a face crossing a block's top 1,024 times along one
+  line, took 216 million instructions there. The runs are now found
+  once per pair, sorted along the line with their ends, and each
+  interval of one face meets only those of the other within the
+  tolerance of it: 12.8 million.
+* **Points were placed in long cycles by walking every side**
+  (`planar::regions`, main). Each part of a split face that does not
+  touch its outer boundary is placed in the smallest region around its
+  first point, tested against each candidate region's cycle by walking
+  all its sides; on the comb, the faces' regions have cycles running
+  along all the crossings. A cycle of more than 32 sides is now searched
+  through the outline of `check_apart` (§19, seventh pass), built when a
+  point first needs it: the regions took 174 and 1,373 million
+  instructions at 1,024 and 4,096 crossings (7.9 times), and take 128
+  and 563 million (4.4 times).
+
+The comb's intersection went from 844 to 593 million instructions at
+1,024 crossings and from 7,770 to 3,562 million at 4,096; by the wall
+clock from 88–91 ms to 64–65 ms and from 783–789 ms to 374–384 ms (best
+of three, two interleaved runs). Both bodies are guarded (above), the
+zigzag with a scaling check; the comb has none, for the classification
+below.
+
 ## Known slow spots
 
 Measured by wall clock, or counted by callgrind where a bullet gives
@@ -533,6 +599,19 @@ instructions, not yet fixed; each is a candidate for a later pass.
   keys that ignore a normal's sign and where a point lies along an
   axis, and a search of the neighbouring cells for the earliest group
   that matches.
+* **Classification casts a ray from each piece.** Each piece of a split
+  face is classified by a ray from a point inside it to the other body
+  (`classify::Boundary::classify`), counting the faces it crosses with
+  a tree over them, so where a line crosses the other body's face many
+  times, each of the pieces along it crosses the others: on the comb
+  (eighth pass), 93.7 million instructions at 1,024 crossings and 1,073
+  million at 4,096, 11.4 times for four times the crossings, 30% of the
+  larger intersection. Pieces that share an edge where the bodies do not
+  meet lie on the same side of the other body, so a classification
+  carried from piece to piece across such edges, with a ray only for the
+  first piece of each group, would make it linear; it needs a design
+  note first (which edges carry a side, and how a contact edge stops
+  it). The comb's guard has no scaling check until then.
 * **Meshing to a very fine tolerance can hit the vertex limit:** a full
   ring meshed to 1 µm needs more than 2,000,000 vertices on one face and is
   refused.

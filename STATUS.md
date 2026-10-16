@@ -25,9 +25,14 @@ ADR 0024; the faces there all flat): the contact leaves no trace, or
 the boolean is refused as non-manifold where the result would pinch; a fuzz of such contacts
 swept across the tolerance found 24,571 faults on main in 264,000
 operations (results touching themselves, wrong origins, kernel errors)
-and none in this build. Next: a fin this build still returns along an
-edge lying beside a crossing (§19), the rest of the contacts (curved
-faces, surfaces touching), then the features that use booleans.
+and none in this build. Fins, flaps and necks under a tolerance thick,
+which main returns where an edge, a hole or a reflex corner of a face
+lies within the tolerance of the other face's plane beside the line
+where the faces cross, are refused (§20). A known fault, also on main:
+a notch whose tip lies a few tolerances across that line makes every
+operation fail or be refused. Next: that fault, the rest of the
+contacts (curved faces, surfaces touching), then the features that use
+booleans.
 The product is now named OpenDatum (ADR 0017): packages `opendatum-*`,
 binary `opendatum`, documents `.odatum`; documents saved under the old
 name open unchanged.
@@ -909,6 +914,34 @@ name open unchanged.
   a first version of the check took quadratic time on, is guarded
   (95–113 ms, limit 1,000 ms) with a scaling check (docs/PERFORMANCE.md,
   seventh pass).
+- Fins, flaps and necks beside a crossing (design note 0012 §20),
+  2026-10-16, on Mesa lavapipe: fmt, clippy with `-D warnings`,
+  TESTCOUNT tests and `cargo deny` pass, and the release time guards
+  pass as CI runs them. Goldens 32 to 40 (`tests/touching.rs`) assert
+  all six operations, with counts, volumes, areas and refusal texts and
+  places, on the fin of a run and the cases three rounds of review
+  found, gaps flush with the run's corners, a meeting between the run
+  and the line where the faces cross, holes and reflex corners on
+  either side of that line with the body above and below its face,
+  five configurations with the face beyond its edge, and corners that
+  are not apexes; unit tests check the strip search against a grid and
+  the strip's band, sides and cuts. Each of the 13 configurations
+  probed for the audit gives main's outcomes in all six operations. The
+  flat fuzz, the motions and the contact fuzz at a hundred times and the
+  curved fuzzes at twenty refuse exactly what main refuses (90,686 and
+  8,290 refusals, the same operations with the same texts), none
+  failing. Of 27 changes to the rule and its searches the tests catch
+  all but one, which only skips work; the three the first run missed
+  have tests now. The check costs 1.2% more instructions on a union of
+  two 256-sided star prisms and 0.8% on 64 pins cut one at a time.
+  Profiling two bodies made for it found three costs growing with the
+  square of their size, two of them on main (the end checks finding
+  runs again for each stretch, and points placed in long cycles by
+  walking every side), all fixed and guarded: an edge of 256 segments
+  lying beside a crossing (11–12 ms, limit 120 ms, with a scaling
+  check) and a face crossing a block's top 1,024 times (64–69 ms,
+  limit 700 ms; docs/PERFORMANCE.md, eighth pass). Classification stays
+  quadratic in the crossings along one line (known slow spot).
 - Geometry for booleans of curved solids (design note 0012 §10.7, item
   1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   915 tests and `cargo deny` pass. Tested on its own; the boolean stages
@@ -1262,11 +1295,25 @@ name open unchanged.
   at a hundred times its run refuses 80,627 of 264,000 operations (5,573
   of 24,000 with the contact exact, 12,095 with the body moved a
   tolerance against the face's normal), where main refused 53,168 and
-  failed 24,571. A fin
-  under a tolerance thick is still returned where an edge of one body
-  lies beside the line where its face crosses a face of the other,
-  between two reflex corners (§19, "Known fault"; main returns the same
-  fin). Within three quarters of a tolerance of the exact contact, 704
+  failed 24,571. Fins, flaps and necks under a tolerance thick, which
+  main returns where an edge of a face, a hole in it or a reflex corner
+  of it lies on the other face's plane beside the line where the faces
+  cross, and the other face holds the strip between them and that line,
+  are refused (§20, goldens 32 to 40); where the other face does not
+  hold the strip (a body resting on its edge, or over a hole or a gap
+  flush with the corners) the contact is answered as before. That check
+  does not decide a curved edge near a strip (refused as not supported
+  yet) or a boundary within the tolerance of the plane that is no
+  chain (a curved edge lying there, a corner one of whose edges is
+  curved); and a run on the side of that line where the thin layer lies
+  outside the face's body is refused, where main failed every
+  operation. A known fault, also on main: a notch of a face whose tip
+  lies 3 to 4 tolerances across that line from the face's part beyond
+  it, within the tolerance of the plane, its edges crossing the line,
+  makes every operation fail ("a contact's pieces disagree on their
+  side", an invalid result) with the plain body first, and is refused
+  as edges within the tolerance of each other with the notched body
+  first (§20, "A fault on main"). Within three quarters of a tolerance of the exact contact, 704
   of 83,065 results differ in their counts from the exact contact's
   (mostly an edge left split), 673 of them as on main: results are not
   yet canonical under motions within the tolerance. The oracle that
@@ -1346,7 +1393,12 @@ name open unchanged.
   boolean groups a body's faces by surface with a linear search over
   the groups found so far, faces times distinct surfaces (4.8% of the
   instructions of a union with a plate of 900 flush pins, growing 14.5
-  times from 100 to 900 pins). All are within their budgets.
+  times from 100 to 900 pins). Classification casts a ray from each
+  piece of a split face, so where a face crosses the other body's face
+  many times along one line its time grows with the square of the
+  crossings (11.4 times the instructions for four times the crossings,
+  30% of an intersection with 4,096; PERFORMANCE.md, eighth pass). All
+  are within their budgets.
 - Non-manifold topology deferred to Phase 3.
 - No STEP or other exchange formats beyond STL (Phase 4; see docs/FORMATS.md).
 
@@ -1356,9 +1408,9 @@ name open unchanged.
 2. Phase 3, in the order the design notes give (0012 §12.4 item 3:
    balls and coaxial cones, item 3a, §13; planes across cones, item 3b,
    §15, operands with conic edges on cylinders and cones, §17, and
-   contacts that do not cross on flat faces, §19, are done). Next: the
-   fin left along a lying edge between reflex corners (§19, "Known
-   fault"), with a design note first; the rest of the contacts' slice 1
+   contacts that do not cross on flat faces, §19 and §20, are done).
+   Next: the notch tip that fails on main too (§20, "A fault on main",
+   in deciding the contact's side, §19); the rest of the contacts' slice 1
    (§18.6 steps 5 to 8: the cut-pair filter, edges and corners on curved
    faces, 76 of the curved fuzzes' refusals at twenty times, the Apart
    band, the contact time guards and mutation checks), then slice 2,
@@ -1377,6 +1429,9 @@ name open unchanged.
    the incircle test, which curved faces' meshes reach on points of one
    circle (18% of a ball's mesh); faces grouped by surface through an
    index of the surfaces, not a linear search (on main too, §19's
-   "Cost"); booleans that work near
+   "Cost"); classification carried from piece to piece across edges
+   where the bodies do not meet, with a design note first (quadratic in
+   the crossings along one line, PERFORMANCE.md eighth pass); booleans
+   that work near
    where the bodies meet (validation and classification of untouched
    faces carried over); then lower the budgets to match.

@@ -47,6 +47,7 @@ mod chart;
 mod classify;
 #[cfg(test)]
 mod dd;
+mod flat_outline;
 mod imprint;
 mod meet;
 mod planar;
@@ -491,6 +492,9 @@ fn boolean_within(
         imprint::outlines(&pair.first)?,
         imprint::outlines(&pair.second)?,
     ];
+    // What the strip checks share: the flat faces' outlines, built when a
+    // strip first needs one, and the steps left for them.
+    let mut strips = imprint::StripSearch::new();
     // Each face's chart: its plane's frame, or its outline's.
     let charts: [Vec<Chart>; 2] = [Operand::First, Operand::Second].map(|op| {
         pair.get(op)
@@ -617,7 +621,7 @@ fn boolean_within(
             face_segs[1][fb].push(FaceSeg { seg: s, side: None });
         };
         if planes {
-            for (lo, hi) in imprint::plane_meeting(&pair, &pts, fa, fb)? {
+            for (lo, hi) in imprint::plane_meeting(&pair, &pts, &mut strips, fa, fb, zero)? {
                 for w in pts.split_segment(lo, hi)?.windows(2) {
                     imprint(segs.add(w[0], w[1], Course::Straight, Source::Meet(fa, fb)));
                 }
@@ -1209,6 +1213,12 @@ fn edgeless_bridges(
 const LEAVES_UNPLACED: &str =
     "an edge of one body lies on a face of the other and leaves it at a point the tolerance \
      cannot place";
+
+/// The refusal of a face of one body within the tolerance of the other's
+/// surface without lying on one of its faces (`classify` and
+/// `imprint::plane_meeting`), followed by ", near" and the point.
+const RUNS_WITHIN: &str = "a face of one body runs within the tolerance of the other's surface \
+                           without lying on one of its faces";
 
 /// The error for a contact edge (a bridge, segment `seg` of face `f` of
 /// `op`, its middle `m`, `free` whether each end is off the face's loops)

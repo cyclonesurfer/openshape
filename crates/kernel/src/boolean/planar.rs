@@ -40,9 +40,12 @@
 //! the face). Neither enters a region's loops; each is given with the
 //! region that holds it, for the booleans' rule on contacts.
 
+use std::cell::OnceCell;
+
 use glam::{DVec2, DVec3};
 use rustc_hash::FxHashMap;
 
+use super::flat_outline::{FlatOutline, LONG_LOOP};
 use crate::bvh::Bvh;
 
 /// Why a face could not be split, at a point (a cluster).
@@ -885,6 +888,25 @@ pub(super) fn regions(
                 .collect(),
         )
     });
+    // Whether `q` is inside cell `i`'s outer cycle: a long cycle through
+    // its outline, with a tree of its sides built when a point is first
+    // placed against it, so a point meets the sides near it rather than
+    // every side (found by profiling: a face crossing the other's plane
+    // thousands of times, whose cells' cycles each run along all the
+    // crossings).
+    let outlines: Vec<OnceCell<FlatOutline>> = cells.iter().map(|_| OnceCell::new()).collect();
+    let in_cycle = |i: usize, q: DVec2, cells: &[Cell]| -> bool {
+        let c = &cells[i].cycle;
+        if c.len() <= LONG_LOOP {
+            return contains(c, q, p, &from);
+        }
+        let outline = outlines[i].get_or_init(|| {
+            let corner = |k: usize| p[from(c[k % c.len()])];
+            let sides = (0..c.len()).map(|k| (corner(k), corner(k + 1))).collect();
+            FlatOutline::new(sides, vec![0, c.len()])
+        });
+        outline.inside(q, &mut 0)
+    };
     // The smallest cell around `q` (farther than its reach from every
     // chord), other than of component `skip`.
     let around = |q: DVec2, skip: Option<usize>, cells: &[Cell]| -> Option<usize> {
@@ -896,7 +918,7 @@ pub(super) fn regions(
         let mut best: Option<usize> = None;
         for &i in &near {
             let r = &cells[i];
-            if Some(r.comp) == skip || !contains(&r.cycle, q, p, &from) {
+            if Some(r.comp) == skip || !in_cycle(i, q, cells) {
                 continue;
             }
             if best.is_none_or(|b| r.area < cells[b].area) {
