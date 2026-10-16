@@ -1191,10 +1191,10 @@ fn a_wedge_leaving_an_edge_near_a_corner() {
 /// them: 1.25 tolerances along those edges from where the prism's edge
 /// leaves the top, so the two points are not one. The top's meeting with
 /// the prism's faces ran between those crossings, a copy of the prism's
-/// edge on its faces beside it; the intersection and the prism minus the
-/// cube were inconsistent ("an edge with no origin"), and the other two
-/// refused as touching along the copy. Every operation is refused at the
-/// crossing. Lowered 0.75 tolerances, the faces cross the top's plane
+/// edge on its faces beside it. On main the prism minus the cube came back
+/// as one solid, its two ends joined over the top by a sliver 0.75
+/// tolerances thick, and validated; the code before this fix found that
+/// the copy had no origin. Every operation is refused at the crossing. Lowered 0.75 tolerances, the faces cross the top's plane
 /// beside the edge off them, where the meeting lies off the prism's faces
 /// and splits the top into pieces of one class: the outcomes are the exact
 /// contact's.
@@ -1254,11 +1254,12 @@ fn an_edge_on_a_face_leaving_it_where_its_faces_cross_beside_it() {
 /// prism lies across the floor of a groove with its ends in the groove's
 /// walls, its faces rising to the same side at slopes of 1 in 2 and 3 in
 /// 4. Lowered 0.75 tolerances, the faces cross the floor's plane beside
-/// the edge on them and every operation is refused at the crossing (on the
-/// code before, the intersection and the prism minus the block were
-/// inconsistent, and the other two refused as touching along the copy of
-/// the edge); raised 0.75 tolerances, the outcomes are the exact
-/// contact's.
+/// the edge on them and every operation is refused at the crossing (on
+/// main the intersection came back as one solid, the prism's two pieces in
+/// the walls joined along the floor by a sliver 0.75 tolerances thick, and
+/// validated; on the code before this fix the intersection and the prism
+/// minus the block were inconsistent); raised 0.75 tolerances, the
+/// outcomes are the exact contact's.
 #[test]
 fn an_edge_across_a_grooves_floor_leaving_it_where_its_faces_cross_beside_it() {
     let eps = k().tolerance().linear;
@@ -1339,11 +1340,14 @@ fn blade(z: f64, down: bool) -> Body {
 /// their planes, a few tolerances from the edge's own crossing: a bridge
 /// carrying no edge, which is the edge's contact the tolerance moved
 /// (found by the contact fuzz, as a kernel error). Resting on P (0.75
-/// tolerances above), the union pinches along the edge; nested in P
-/// (0.75 below, falling), P − blade pinches (on main it returned a body
-/// touching itself); 0.75 above but falling, the faces cross the top
-/// face a few tolerances from the edge, and every operation is refused
-/// (on main P − blade touched itself).
+/// tolerances above), the union pinches along the edge (main refused it
+/// as touching at a point at the edge's far end); nested in P (0.75
+/// below, falling), P − blade pinches (main returned a body that
+/// validates with the blade's edge 0.75 tolerances under P's top face,
+/// which it does not bound); 0.75 above but falling, the faces cross the
+/// top face a few tolerances from the edge, and every operation is
+/// refused (main returned P − blade with the edge 0.375 tolerances from
+/// the top face).
 #[test]
 fn an_edge_lying_on_a_face_leaving_it_at_a_slant() {
     let eps = k().tolerance().linear;

@@ -1069,6 +1069,16 @@ fn contacts_swept_across_the_band() {
         for (j, g) in got.iter().enumerate() {
             changed[j] += g.iter().zip(&got[zero]).filter(|(x, y)| x != y).count();
         }
+        if std::env::var_os("ZZDUMP_OUTCOMES").is_some() {
+            for (j, g) in got.iter().enumerate() {
+                for (i, s) in g.iter().enumerate() {
+                    println!(
+                        "zzoutcome\t{case}\t{rest:?}\t{side}\t{}\t{}\t{i}\t{s}",
+                        c.inside, STEPS[j]
+                    );
+                }
+            }
+        }
         if !c.inside {
             continue;
         }
