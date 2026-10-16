@@ -1123,6 +1123,18 @@ impl<'a> Outline<'a> {
     /// across the chords, which is the parity across the boundary for a
     /// point outside every band.
     pub fn locate(&self, q: DVec2, margin: f64, fine: f64) -> Option<bool> {
+        self.locate_counting(q, margin, fine, &mut 0)
+    }
+
+    /// [`Outline::locate`], adding to `seen` the chords looked at, each
+    /// half of a halved chord as one more.
+    pub fn locate_counting(
+        &self,
+        q: DVec2,
+        margin: f64,
+        fine: f64,
+        seen: &mut usize,
+    ) -> Option<bool> {
         let margin = self.chart.reach(q, margin);
         let r = self.reach + margin;
         let lo = DVec3::new(q.x - r, q.y - r, 0.0);
@@ -1134,6 +1146,7 @@ impl<'a> Outline<'a> {
         for i in near {
             stack.push(self.chords[i]);
             while let Some(c) = stack.pop() {
+                *seen += 1;
                 let d = point_segment(q, c.p, c.q);
                 if d <= c.band + margin {
                     // Halved while that can narrow its sag toward `fine`.

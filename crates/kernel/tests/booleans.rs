@@ -376,6 +376,58 @@ fn bodies_touching_along_an_edge_or_at_a_point() {
     }
 }
 
+/// A prism on the plane through the x axis leaning 10° from z = 0, its
+/// face's edge over x from 0 to 1 zigzagging in `n` segments between 1 mm
+/// to either side of the axis, against a block under z = 0 from x = −0.25
+/// to 1.25: the face crosses the block's top along the axis `n` times, so
+/// the faces' regions have cycles of more sides than are walked one by
+/// one (placed through trees, `planar::regions`). A ∩ B is the prism's two
+/// ends under the top, each with half a tooth, and the `n / 2 − 1` teeth
+/// between them, of volume tan 10° times the integral of the depth below
+/// the axis over the profile: 2 × 0.25 × 0.5² / 2 for the ends beyond x =
+/// 0 and 1, and w² / 12 for the teeth and the two half teeth (`n / 2`
+/// triangles' worth, each of base 1 / n and depth w = 1 mm, w² / 6n).
+#[test]
+fn a_face_crossing_another_many_times_along_one_line() {
+    let n = 64;
+    let w = 1e-3;
+    let t = 10f64.to_radians();
+    let frame = Frame {
+        origin: DVec3::ZERO,
+        x: DVec3::X,
+        y: DVec3::new(0.0, t.cos(), t.sin()),
+        z: DVec3::new(0.0, -t.sin(), t.cos()),
+    };
+    let mut pts = vec![DVec2::new(-0.5, -0.5), DVec2::new(0.0, -0.5)];
+    pts.extend((0..=n).map(|i| DVec2::new(i as f64 / n as f64, if i % 2 == 0 { -w } else { w })));
+    pts.extend([(1.0, -0.5), (2.0, -0.5), (2.0, 0.5), (-0.5, 0.5)].map(|(x, y)| DVec2::new(x, y)));
+    let comb = k()
+        .extrude(
+            &Profile::polygon(frame, &pts),
+            &ExtrudeSpec {
+                distance: 0.5,
+                symmetric: false,
+            },
+        )
+        .expect("a comb");
+    let block = cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(1.25, 1.0, 0.0));
+    let i = run(&block, &comb, BooleanOp::Intersect);
+    assert_eq!(k().topology(&i).solids, n / 2 + 1);
+    let expected = t.tan() * (0.0625 + w * w / 12.0);
+    assert!(
+        (volume(&i) - expected).abs() <= 1e-9 * expected,
+        "{} {expected}",
+        volume(&i)
+    );
+    let (va, vb) = (volume(&block), volume(&comb));
+    let u = run(&block, &comb, BooleanOp::Union);
+    assert!((volume(&u) - (va + vb - expected)).abs() <= 1e-9 * (va + vb));
+    for (x, y, v) in [(&block, &comb, va), (&comb, &block, vb)] {
+        let d = run(x, y, BooleanOp::Subtract);
+        assert!((volume(&d) - (v - expected)).abs() <= 1e-9 * v);
+    }
+}
+
 #[test]
 fn golden_cases_at_millimetre_and_kilometre_scales() {
     for s in [1e-3, 1e3] {
