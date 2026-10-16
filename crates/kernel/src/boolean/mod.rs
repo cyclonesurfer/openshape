@@ -2676,25 +2676,33 @@ mod tests {
     /// The strip checks of an edge of `n` segments zigzagging between 4 and
     /// 2 tolerances off the axis over a notch in a block's top (`tests/
     /// timing.rs`' zigzag: a run and an apex at every other corner, each a
-    /// chain), the top having `n` edges crossing the line beyond the notch
-    /// ([`toothed`]), take steps in proportion to `n`: the intersection is
-    /// answered within 300 steps a segment, at 256 and 1,024 segments.
-    /// Searching every edge of either face near the other's plane for each
-    /// chain, rather than those near its strip, takes steps growing with
-    /// n², and is refused at 1,024 (found by profiling for the edge, and by
-    /// review for the top).
+    /// chain) take steps in proportion to the edges near their strips:
+    /// within 150 steps a segment at 256 segments, against a block whose
+    /// top also has 256 edges crossing the line beyond the notch
+    /// ([`toothed`]; about 25,000 steps), and within 300 a segment at 1,024
+    /// against [`notches_and_runs`]' block. Searching every edge of a face
+    /// near the other's plane for each chain, rather than those near its
+    /// strip, takes about 58,000 steps at 256, for the top's edges (found
+    /// by review) or the edge's (found by profiling), and for the edge's
+    /// about n² / 2 more at 1,024: each is refused. (The toothed block at
+    /// 1,024 takes seconds as the tests are built, in stages the test is
+    /// not about.)
     #[test]
     fn the_strip_checks_of_a_long_edge_take_steps_in_proportion_to_it() {
         let tol = Tolerance::default();
         let eps = tol.linear;
-        for n in [256, 1024] {
-            let zigzag = teeth(n, |i| if i % 2 == 0 { -4.0 * eps } else { -2.0 * eps });
+        let zigzag = |n: usize| teeth(n, |i| if i % 2 == 0 { -4.0 * eps } else { -2.0 * eps });
+        let cases = [
+            (toothed(256), zigzag(256), 150 * 256),
+            (notches_and_runs(1, DVec3::ZERO).0, zigzag(1024), 300 * 1024),
+        ];
+        for (block, edge, strip_steps) in cases {
             let limits = Limits {
-                strip_steps: 300 * n,
+                strip_steps,
                 ..LIMITS
             };
-            let r = boolean_within(&toothed(n), &zigzag, BooleanOp::Intersect, &tol, &limits);
-            assert!(r.is_ok(), "{n}: {:?}", r.map(|_| ()));
+            let r = boolean_within(&block, &edge, BooleanOp::Intersect, &tol, &limits);
+            assert!(r.is_ok(), "{strip_steps}: {:?}", r.map(|_| ()));
         }
     }
 

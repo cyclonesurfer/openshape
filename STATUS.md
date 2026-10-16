@@ -937,22 +937,24 @@ name open unchanged.
   run's tests caught all but three: one only skips work, and the other
   two have tests now; run again on the final code with nine more, among
   them one for each fix of the last review and of the profiling, the
-  tests catch all but the one that only skips work (35 of 36). A review found the check placing points on faces
+  tests catch all but the one that only skips work (35 of 36), and of
+  eleven for the second review's fixes all but one whose work no test
+  counts. A review found the check placing points on faces
   with arcs by their chords, which let a round bar's fin through and
   refused a round hole under the strip; points on such faces are now
   placed by the face's outline in its chart (golden 41). This change
-  costs 1.5% more instructions on a union of two 256-sided star prisms
+  costs 1.2% more instructions on a union of two 256-sided star prisms
   (its strip checks 0.02%; most of the rest is classification, whose
-  tree walk the compiler no longer inlines) and 1.0% on 64 pins cut one
+  tree walk the compiler no longer inlines) and 0.8% on 64 pins cut one
   at a time (its strip checks 0.6%). Profiling two bodies made for it
   found three places doing work growing with the square of their size,
   two of them on main (the end checks finding runs again for each
   stretch, and points placed in long cycles by walking every side), all
   fixed, each with a test of the work it saves that fails with the fix
   undone (the time guards need not fail). The time guards hold an edge
-  of 256 segments lying beside a crossing (11.6–13.1 ms, limit 120 ms,
+  of 256 segments lying beside a crossing (11.7–13.1 ms, limit 120 ms,
   with a scaling check) and a face crossing a block's top 1,024 times
-  (63–68 ms, limit 700 ms; docs/PERFORMANCE.md, eighth pass). A second
+  (65–71 ms, limit 700 ms; docs/PERFORMANCE.md, eighth pass). A second
   review found two more (the cutting of a strip by the meetings beside
   it, and the marking of lying runs that are whole intervals), both
   fixed, the first with a test of its work. Classification stays

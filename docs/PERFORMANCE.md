@@ -76,8 +76,8 @@ repetitions. The limit is what the test enforces.
 | Drill 64 round holes into a plate, one boolean each | 860–1,050 ms | 10,000 ms |
 | Intersect or subtract a plate with 100 round holes and a box across them | 52–55 ms | 600 ms |
 | Unite a box with a corner of a plate of 400 flush square pins (the result has 4,012 faces; each place of it checked against the faces near it) | 95–113 ms | 1,000 ms |
-| Intersect a notched block with a prism whose face's edge of 256 segments lies on the block's top beside the line where they cross (the strip check searches the whole strip) | 11.6–13.1 ms | 120 ms |
-| Intersect a block with a prism whose face crosses its top 1,024 times along one line (513 solids) | 63–68 ms | 700 ms |
+| Intersect a notched block with a prism whose face's edge of 256 segments lies on the block's top beside the line where they cross (the strip check searches the whole strip) | 11.7–13.1 ms | 120 ms |
+| Intersect a block with a prism whose face crosses its top 1,024 times along one line (513 solids) | 65–71 ms | 700 ms |
 | Dimple a plate with 16 balls, one boolean each | 73–89 ms | 900 ms |
 | Mesh it (173,680 triangles) | 382–406 ms | 4,000 ms |
 | Validate it | 2.2–2.5 ms | 40 ms |
@@ -114,7 +114,7 @@ factor):
 | Cut a box across a plate's round holes, 16 to 121 holes (7.6 times) | 7.8–8.4 times |
 | Mesh a ball, 13,964 to 105,556 triangles (7.6 times) | 8.6–9.6 times |
 | Unite a box with a corner of a plate of flush pins, 49 to 400 pins (8.2 times) | 8.4–9.2 times |
-| Intersect a notched block with a prism whose lying edge has 128 to 1,024 segments | 7.5–8.1 times |
+| Intersect a notched block with a prism whose lying edge has 128 to 1,024 segments | 7.7–7.8 times |
 
 One more checks the cut of a plate's 4th hole against that of its 16th,
 four times the holes counting the one cut (bound: 12, three times the
@@ -479,19 +479,19 @@ test of its own (building the operands included):
 
 | Operation | main | now |
 |---|---|---|
-| Union of two 256-sided star prisms | 361.1 million | 366.4 million (+1.5%) |
-| Cut 64 pins into a box, one boolean each | 2,345 million | 2,368 million (+1.0%) |
+| Union of two 256-sided star prisms | 361.1 million | 365.5 million (+1.2%) |
+| Cut 64 pins into a box, one boolean each | 2,345 million | 2,364 million (+0.8%) |
 
-Of the pins' 22.7 million more, the strip checks take 13.7 million: a
+Of the pins' 19.0 million more, the strip checks take 13.7 million: a
 face whose boundary has no mark within the tolerance of the other's
 plane is skipped (the faces' relation knows it), and the outlines and
 the tables of them are built only when a strip needs them. The star's
-strip checks take 80 thousand; most of its 5.3 million more is in
+strip checks take 86 thousand; most of its 4.4 million more is in
 classification (27.1 to 30.7 million), whose code differs from main's
 only in taking its refusal's text from a constant, but whose walk of the
-other body's tree (`Bvh::visit`) the compiler no longer inlines. Profiling two bodies made for it found three places
-doing work that grows with the square of their size, two of them on
-main:
+other body's tree (`Bvh::visit`) the compiler no longer inlines.
+Profiling two bodies made for it found three places doing work that
+grows with the square of their size, two of them on main:
 
 * **Each strip's search walked every edge near the plane.** The time
   guards' zigzag is a face whose edge of n segments lies on the other
@@ -503,10 +503,10 @@ main:
   times the segments, of which that walk (`Face::near_surface`) grew 15
   times. The walk of each face's tree now keeps to the strip's box as
   well (`Face::near_surface_in`), and each chain takes the pair's
-  meetings over its own span from a list sorted once: 16.5 and 67.4
+  meetings over its own span from a list sorted once: 16.2 and 66.1
   million (4.1 times). The intersection itself (`Kernel::boolean`) at
-  1,024 segments went from 555 to 399 million instructions; by the wall
-  clock it takes 48–51 ms (best of three, three runs of it alone).
+  1,024 segments went from 555 to 396 million instructions; by the wall
+  clock it takes 49–55 ms (best of three, three runs of it alone).
 * **The end checks of a pair's stretches found the faces' lying runs
   again for each stretch** (main): every stretch walked both faces'
   edges near the other's plane, and every pair of the faces' intervals
@@ -529,12 +529,12 @@ main:
   instructions at 1,024 and 4,096 crossings (7.9 times), and take 128
   and 564 million (4.4 times).
 
-The comb's intersection (`Kernel::boolean`) went from 769 to 519
-million instructions at 1,024 crossings and from 7,342 to 3,137 million
+The comb's intersection (`Kernel::boolean`) went from 769 to 518
+million instructions at 1,024 crossings and from 7,342 to 3,136 million
 at 4,096. By the wall clock, against main in two interleaved runs of an
 earlier build of these fixes, it went from 88–91 ms to 64–65 ms and
-from 783–789 ms to 374–384 ms; the final build takes 63–65 ms and
-382–434 ms (best of three, three runs of each alone). Both bodies are guarded by time
+from 783–789 ms to 374–384 ms; the final build takes 64–65 ms and
+391–439 ms (best of three, three runs of each alone). Both bodies are guarded by time
 (above), the zigzag with a scaling check; the comb has none, for the
 classification below.
 
@@ -544,11 +544,13 @@ edge near the plane restored, the zigzag's scaling grew 9.7 times
 against a bound of 24, and with long cycles walked whole the comb took
 71 ms against its limit of 700 (both measured in review). Each fix has a
 test of the work it saves instead, in `crates/kernel/src/boolean/mod.rs`,
-which fails with it undone: the zigzag's intersection, against a block
-whose top also crosses the line as many times as the edge has segments
-beyond the notch, is answered within 300 strip steps a segment at 256
-and 1,024 segments (with either face's walk restored, the steps grow
-with n², and it is refused at 1,024), and the
+which fails with it undone: the zigzag's intersection is answered
+within 150 strip steps a segment at 256 segments, against a block whose
+top also has 256 edges crossing the line beyond the notch, and within
+300 a segment at 1,024 against the plain notched block (with the walk
+of either face's edges restored, the first takes about 58,000 steps
+against 25,000, and with the walk of the edge's restored the second
+about n² / 2 more: each is refused), and the
 coedges looked at in finding the comb's lying runs, and the sides of
 cycles looked at in placing its points, grow at most six times from 256
 to 1,024 crossings (with the runs found for each stretch, the coedges grew 15

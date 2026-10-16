@@ -3766,34 +3766,36 @@ and 4 ε off L: a run, and a reflex corner at each of its n / 2 vertices
 instructions at n = 256 and 224 million at 1,024, 8.8 times for four
 times the segments: each chain's search walked every edge of both faces
 near P, a walk that grew 15 times, with the square of n. With each walk
-kept to the strip's box (by the face's tree), they take 16.5 and 67.4
-million, 4.1 times, and the intersection (`Kernel::boolean`) 92 and 399
+kept to the strip's box (by the face's tree), they take 16.2 and 66.1
+million, 4.1 times, and the intersection (`Kernel::boolean`) 92 and 396
 million. The time guard (`tests/timing.rs`) holds the intersection at
-256 segments to 120 ms (it takes 11.6 to 13.1 ms), and its growth from
-128 to 1,024 segments to 24 times (it grows 7.5 to 8.1 times); with the
+256 segments to 120 ms (it takes 11.7 to 13.1 ms), and its growth from
+128 to 1,024 segments to 24 times (it grows 7.7 to 7.8 times); with the
 walk undone it grew 9.7 times (measured in review) and would pass, so a
-unit test of the boolean holds its steps to 300 a segment at 256 and
-1,024 segments, against a block whose top also crosses L n times beyond
-the notch: with either face's walk undone, the steps grow with n² and
-the boolean is refused at 1,024 (the walk of G's edges, which the edge
-alone did not exercise, found by review). The end checks of §19 found the faces' lying runs again for
+unit test of the boolean holds its steps to 150 a segment at 256
+segments, against a block whose top also has 256 edges crossing L beyond
+the notch (about 25,000 steps), and to 300 a segment at 1,024 against
+the plain block. With the walk of either face's edges undone, the first
+takes about 58,000 steps (the toothed top exercises the walk of G's
+edges, found by review, which the plain block does not), and with the
+walk of the edge's undone the second takes about n² / 2 more: each is
+refused. The end checks of §19 found the faces' lying runs again for
 each stretch of the pair and tested every pair of the faces' intervals
 on L, as on main; they now find the runs once per pair, sorted along L
 with their ends, and meet each interval of one face only with those of
 the other within ε of it. Which of a face's runs are whole intervals,
 for the strip checks, was found by scanning the intervals for each run;
 they are now sorted and searched (found by review). On a face crossing
-the other's top 1,024
-times (the comb of the time guards), the meeting of each pair, the
-faces' intervals on L included, took 216 million instructions, 206
-million of them in finding the runs, and takes 12.8 million, 2.5
-million of them in finding the runs. A unit test of the boolean counts
-the coedges looked at in finding them, and the sides looked at in
-placing points in regions' cycles (`planar::regions`, which on the comb
-walked whole cycles running along all the crossings; docs/PERFORMANCE.md,
-eighth pass): each grows at most six times from 256 to 1,024 crossings
-(with the runs found for each stretch, 15 times; with long cycles walked
-whole, 24 times).
+the other's top 1,024 times (the comb of the time guards), the meeting
+of each pair, the faces' intervals on L included, took 216 million
+instructions, 206 million of them in finding the runs, and takes 12.8
+million, 2.5 million of them in finding the runs. A unit test of the
+boolean counts the coedges looked at in finding them, and the sides
+looked at in placing points in regions' cycles (`planar::regions`, which
+on the comb walked whole cycles running along all the crossings;
+docs/PERFORMANCE.md, eighth pass): each grows at most six times from 256
+to 1,024 crossings (with the runs found for each stretch, 15 times; with
+long cycles walked whole, 24 times).
 
 *Tests.* Goldens 32 to 41 (`tests/touching.rs`) assert all six
 operations on: the fin of a run and its cases from the reviews (32, 33,
@@ -3848,7 +3850,12 @@ arcs placed by their chords, the test of a curved edge near a strip
 forced either way, F's edges entering the strip left out, a budget for
 each strip, the runs found again for each stretch, long cycles walked
 whole, and the walk's box taking every edge), the tests catch 35 of the
-36, all but the skip of a face with no mark.
+36, all but the skip of a face with no mark. Eleven more for the second
+review's fixes (every part cut by every meeting, sides carried through
+splits, either face's walk undone, a budget for each pair of faces or
+each strip, `apart` without one of its families of directions or with
+the gap's sign turned, and the runs' intervals scanned) are caught but
+the last, whose work no test counts.
 The flat fuzz, the motions and the contact fuzz at a hundred times their
 runs, and the curved fuzzes at twenty and at fifty, refuse exactly what
 main refuses (90,686, 8,290 and 20,522 refusals, the same operations
