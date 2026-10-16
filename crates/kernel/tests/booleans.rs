@@ -1006,30 +1006,135 @@ fn contact_case(n: usize) -> ContactCase {
 /// Edges lying on a face for a few tolerances (contacts 86, 2504 and 5245,
 /// found at a hundred times the default run): B rests by an edge on a
 /// corner or an edge of A's face from inside, and a piece of B's edge
-/// three to four tolerances long, from where it passes the corner or meets
+/// 2.98 to 3.60 tolerances long, from where it passes the corner or meets
 /// A's faces to where it crosses another face of A, lies on that face.
 /// A − B kept the piece with B's faces on both sides, so the result
 /// touched itself; the middle of such a piece is now checked against a
-/// face with corners at both its ends, and A − B is refused. Every
-/// operation passes the identities.
+/// face with corners at both its ends, and A − B is refused; the other
+/// three are answered and pass the identities and the checks of
+/// [`measured`].
 #[test]
 fn edges_lying_on_a_face_for_a_few_tolerances() {
-    let eps = k().tolerance().linear;
-    let mut t = Tally::default();
-    for (case, q) in [(86, -0.5), (2504, -4.0), (5245, -0.5)] {
-        let c = contact_case(case);
-        let b = c.body(q);
-        match k().boolean(&c.a, &b, BooleanOp::Subtract) {
-            Err(KernelError::InvalidInput(m)) => assert!(
-                m.starts_with("the result would be non-manifold: the bodies touch along an edge"),
-                "{case}: {m}"
-            ),
-            other => panic!("{case}: {other:?}"),
-        }
-        let slack = 4.0 * (area(&c.a) + area(&b)) * (q.abs() + 1.0) * eps;
-        identities_with(&mut t, &c.a, &b, &format!("contact {case}"), slack);
-    }
-    report("edges lying on a face for a few tolerances", &t);
+    let along = "the result would be non-manifold: the bodies touch along an edge";
+    pinned_contacts(&[
+        (
+            86,
+            -0.5,
+            ["(20, 45, 29)", "(7, 15, 10)", along, "(13, 21, 14)"],
+        ),
+        (
+            2504,
+            -4.0,
+            ["(15, 34, 22)", "(7, 15, 10)", along, "(9, 15, 10)"],
+        ),
+        (
+            5245,
+            -0.5,
+            ["(19, 42, 27)", "(8, 18, 12)", along, "(14, 24, 16)"],
+        ),
+    ]);
+}
+
+/// Sharp corners that the check of a result's places lets off (design note
+/// 0012 §19, `check_apart`), each found by disabling its rules over longer
+/// runs of the contact fuzz: a piece of an edge shorter than four
+/// tolerances between two corners of a face, its middle outside the face
+/// but within the tolerance of its boundary (contacts 481 at 0.5 tolerance
+/// and 2896 at 0.75); one shorter than four tolerances leaving a face's
+/// corner (84 at 1, and golden 26); and a longer one leaving a corner whose
+/// far end is more than the tolerance off the face's plane (22 at −1, 281
+/// at 1, 1335 and 5358 at −4, crossing the face's plane at 14° and 3.6°;
+/// and 2714 at −1, at the edge of the band, an edge a tolerance under the
+/// face whose far end the imprint calls off it, 1.0000000002 tolerances,
+/// and whose other end it places on the face's corner). With its rule
+/// disabled, each is refused as touching along an edge; the results are
+/// valid and pass the oracle, which reported the last three until it let
+/// off a flat face that a straight edge leaves at a corner.
+#[test]
+fn sharp_corners_the_check_of_places_lets_off() {
+    let along = "the result would be non-manifold: the bodies touch along an edge";
+    pinned_contacts(&[
+        (
+            84,
+            1.0,
+            [
+                "(15, 38, 25)",
+                "(8, 18, 12)",
+                "(12, 28, 18)",
+                "(11, 27, 18)",
+            ],
+        ),
+        (
+            481,
+            0.5,
+            ["(18, 42, 27)", "(8, 18, 12)", along, "(15, 28, 19)"],
+        ),
+        (
+            2896,
+            0.75,
+            [
+                "(18, 49, 32)",
+                "(8, 18, 12)",
+                "(16, 42, 27)",
+                "(10, 24, 16)",
+            ],
+        ),
+        (
+            22,
+            -1.0,
+            ["(14, 31, 20)", "(5, 9, 6)", "(9, 22, 14)", "(10, 18, 12)"],
+        ),
+        (
+            281,
+            1.0,
+            [
+                "(23, 64, 42)",
+                "(14, 36, 24)",
+                "(22, 61, 40)",
+                "(15, 39, 26)",
+            ],
+        ),
+        (
+            1335,
+            -4.0,
+            ["(21, 54, 35)", "(4, 6, 4)", "(16, 42, 28)", "(9, 18, 11)"],
+        ),
+        (
+            2714,
+            -1.0,
+            ["(12, 27, 17)", "(4, 6, 4)", "(10, 21, 13)", "(6, 12, 8)"],
+        ),
+        (
+            5358,
+            -4.0,
+            ["(15, 39, 26)", "(5, 9, 6)", "(12, 30, 20)", "(8, 18, 12)"],
+        ),
+    ]);
+}
+
+/// Cases of the contact fuzz at a hundred times its default run where a
+/// corner of a result is beyond the tolerance of a face it is not on, off
+/// the face's boundary: 1.08 tolerances (contact 3827 at −4) and 1.31
+/// (369 at −1), so the result keeps clear of the face. The check of a
+/// result's places first took a point within the tolerance of a face's
+/// plane and, in the plane, of its loops for on the face, up to √2
+/// tolerances from it off a corner, and refused these; it now takes the
+/// two distances together. The results are valid and pass the oracle.
+#[test]
+fn corners_just_beyond_the_tolerance_of_a_face() {
+    let along = "the result would be non-manifold: the bodies touch along an edge";
+    pinned_contacts(&[
+        (
+            3827,
+            -4.0,
+            ["(20, 54, 36)", "(6, 12, 8)", "(18, 48, 32)", "(8, 18, 12)"],
+        ),
+        (
+            369,
+            -1.0,
+            ["(14, 36, 24)", "(6, 12, 8)", along, "(6, 12, 8)"],
+        ),
+    ]);
 }
 
 /// The contact fuzz (ADR 0024): a random polyhedron A and a body B resting
@@ -1068,16 +1173,6 @@ fn contacts_swept_across_the_band() {
             .collect();
         for (j, g) in got.iter().enumerate() {
             changed[j] += g.iter().zip(&got[zero]).filter(|(x, y)| x != y).count();
-        }
-        if std::env::var_os("ZZDUMP_OUTCOMES").is_some() {
-            for (j, g) in got.iter().enumerate() {
-                for (i, s) in g.iter().enumerate() {
-                    println!(
-                        "zzoutcome\t{case}\t{rest:?}\t{side}\t{}\t{}\t{i}\t{s}",
-                        c.inside, STEPS[j]
-                    );
-                }
-            }
         }
         if !c.inside {
             continue;
@@ -1123,16 +1218,20 @@ fn contacts_swept_across_the_band() {
 /// lying on the face and leaving it at a slant, resting on it from
 /// outside (1203 at 0.75, the union pinching) or with its faces crossing
 /// the face beside it (1203 at −0.75 and 661, refused as a point the
-/// tolerance cannot place); the tree of a corner's bridges (161); and 149,
-/// whose merged curves run along an edge of the other body lying on the
-/// face, refused where the faces meet.
+/// tolerance cannot place); the tree of a corner's bridges (161, refused
+/// by the bridge's test of a piece of the other body's edge leaving its
+/// end); 477, whose bridge carries the curves of the two faces of an edge
+/// lying on the face, refused where the edge leaves it; and 149, whose
+/// merged curves run along an edge of the other body lying on the face,
+/// refused where the faces meet. 149, 661 and 1203 at −0.75 are now
+/// refused by the check of the faces' meeting's ends
+/// (`imprint::plane_meeting`) before a bridge forms, with the same text.
 #[test]
 fn contacts_whose_bridges_carry_no_edge() {
-    let eps = k().tolerance().linear;
     let leaves = "an edge of one body lies on a face of the other and leaves it at a point the \
                   tolerance cannot place";
     let sliver = "the bodies leave a sliver thinner than the tolerance";
-    let cases: [(usize, f64, [&str; 4]); 8] = [
+    pinned_contacts(&[
         (149, -1.0, [leaves; 4]),
         (4996, -4.0, [sliver; 4]),
         (661, 0.75, [leaves; 4]),
@@ -1148,11 +1247,104 @@ fn contacts_whose_bridges_carry_no_edge() {
         ),
         (1203, -0.75, [leaves; 4]),
         (161, 1.0, [leaves; 4]),
+        (
+            477,
+            -1.0,
+            [
+                leaves,
+                leaves,
+                leaves,
+                "edges where the bodies meet pass within the tolerance of each other",
+            ],
+        ),
         (2152, -1.0, [sliver, sliver, sliver, leaves]),
         (5387, -4.0, [sliver; 4]),
-    ];
+    ]);
+}
+
+/// Cases of the contact fuzz at a hundred times its length where the
+/// faces at an edge lying on a face left it to both sides, or a contact's
+/// pieces disagreed on its side, kernel errors before: a box's corner by
+/// an edge of the other body that crosses one of the box's faces at a
+/// slant a few tolerances from the corner (681, 1583, 1666, 4183, 4906),
+/// refused as an edge running within the tolerance of a face over a
+/// stretch; a prism's face within the tolerance of the other body's over
+/// a band (2080), refused there in every operation, where one order of the
+/// operands reached the edge first; a prism's edge parallel to an edge of
+/// the face and about the tolerance from it, that edge lying on the
+/// prism's faces (828, as golden 24); and an edge lying on a face that
+/// leaves the body through a neighbour at an acute angle before it reaches
+/// their edge (3003, as golden 25).
+#[test]
+fn contacts_whose_lying_edges_leave_the_face_to_both_sides() {
+    let stretch = "an edge of one body runs within the tolerance of a face of the other over a \
+                   stretch without lying on it,";
+    let band = "a face of one body runs within the tolerance of the other's surface without lying \
+                on one of its faces,";
+    let leaves = "an edge of one body lies on a face of the other and leaves it at a point the \
+                  tolerance cannot place";
+    let sliver = "the bodies leave a sliver thinner than the tolerance";
+    pinned_contacts(&[
+        (681, -1.0, [stretch; 4]),
+        (1583, 1.0, [stretch, stretch, stretch, sliver]),
+        (1666, -1.0, [stretch; 4]),
+        (4183, -0.75, [stretch; 4]),
+        (4906, -1.0, [stretch; 4]),
+        (2080, 4.0, [band; 4]),
+        (828, -1.0, [leaves; 4]),
+        (3003, -1.0, [leaves; 4]),
+    ]);
+}
+
+/// Cases of the contact fuzz where a box's corner, resting on a corner of
+/// a face of A, is pushed four tolerances through it, a metre or less from
+/// the world's origin, so that one result holds the box's tip as a
+/// tetrahedron a few tolerances across: A ∩ B where the box rests from
+/// outside (contacts 2 and 42), and B − A where it rests from inside (1,
+/// beside a larger piece of the box, and 15). Taken from the world's
+/// origin, the volume of that shell took the wrong sign, in the booleans
+/// (whose faces, projected onto their planes, fail to close by up to the
+/// tolerance) and in the validator (by rounding), and the result was
+/// refused as a void inside no solid (1, 2) or a shell turned inside out
+/// (15, 42); both now take their volumes from a corner of the shell.
+#[test]
+fn corners_dipping_four_tolerances_through_a_face() {
+    pinned_contacts(&[
+        (
+            1,
+            4.0,
+            [
+                "(15, 33, 22)",
+                "(7, 15, 10)",
+                "(11, 27, 18)",
+                "(11, 21, 14)",
+            ],
+        ),
+        (
+            2,
+            -4.0,
+            ["(14, 33, 22)", "(4, 6, 4)", "(11, 24, 16)", "(7, 15, 10)"],
+        ),
+        (
+            15,
+            4.0,
+            ["(9, 18, 12)", "(7, 15, 10)", "(12, 27, 18)", "(4, 6, 4)"],
+        ),
+        (
+            42,
+            -4.0,
+            ["(12, 27, 18)", "(4, 6, 4)", "(9, 18, 12)", "(7, 15, 10)"],
+        ),
+    ]);
+}
+
+/// Asserts the outcomes of A ∪ B, A ∩ B, A − B and B − A for cases of the
+/// contact fuzz, each with its motion, and that every operation passes
+/// the identities and the checks of [`measured`].
+fn pinned_contacts(cases: &[(usize, f64, [&str; 4])]) {
+    let eps = k().tolerance().linear;
     let mut t = Tally::default();
-    for (case, q, want) in cases {
+    for &(case, q, want) in cases {
         let c = contact_case(case);
         let b = c.body(q);
         let label = format!("contact {case} ({q} tolerance)");
@@ -1161,116 +1353,6 @@ fn contacts_whose_bridges_carry_no_edge() {
         assert_eq!(got, want, "{label}");
     }
     assert_eq!(t.bugs, Vec::<String>::new());
-}
-
-/// Debugging aid (temporary): one case of the contact fuzz, `CONTACT` and
-/// `STEP` from the environment.
-#[test]
-fn zz_contact_case() {
-    let Some(n) = std::env::var("CONTACT")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-    else {
-        return;
-    };
-    let q: f64 = std::env::var("STEP")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.0);
-    let c = contact_case(n);
-    let b = c.body(q);
-    println!(
-        "x {:?} n {:?} inside {} rest {:?} side {} along {:?}",
-        c.x, c.n, c.inside, c.rest, c.side, c.along
-    );
-    println!(
-        "A {:?} vol {} B {:?} vol {}",
-        counts(&c.a),
-        volume(&c.a),
-        counts(&b),
-        volume(&b)
-    );
-    for (x, y, op) in [
-        (&c.a, &b, BooleanOp::Union),
-        (&c.a, &b, BooleanOp::Intersect),
-        (&c.a, &b, BooleanOp::Subtract),
-        (&b, &c.a, BooleanOp::Subtract),
-    ] {
-        match k().boolean(x, y, op) {
-            Ok(res) => {
-                if let Err(e) = origins_agree(x, y, &res, op) {
-                    println!("{op:?} origins: {e}");
-                    let m = k()
-                        .tessellate(&res, &TessellationOptions::default())
-                        .unwrap();
-                    let (mx, my) = (
-                        k().tessellate(x, &TessellationOptions::default()).unwrap(),
-                        k().tessellate(y, &TessellationOptions::default()).unwrap(),
-                    );
-                    let og = k().origins(&res);
-                    for (e, l) in m.edges.iter().enumerate() {
-                        let src = match og.edges[e] {
-                            EdgeOrigin::Operand {
-                                operand: Operand::First,
-                                edge,
-                            } => Some(&mx.edges[edge.0 as usize]),
-                            EdgeOrigin::Operand {
-                                operand: Operand::Second,
-                                edge,
-                            } => Some(&my.edges[edge.0 as usize]),
-                            _ => None,
-                        };
-                        println!(
-                            "  edge {e} {:?} {:?} -> {:?} src {:?}",
-                            og.edges[e],
-                            l[0],
-                            l[l.len() - 1],
-                            src.map(|q| (q[0], q[q.len() - 1]))
-                        );
-                    }
-                    for mm in &og.merged {
-                        println!("  merged {mm:?}");
-                    }
-                }
-                let o = self_contact::touches_itself(&k(), &res, &TessellationOptions::default());
-                println!(
-                    "{op:?}: {:?} vol {} oracle {:?}",
-                    counts(&res),
-                    volume(&res),
-                    o
-                );
-                if o.as_ref().is_ok_and(|x| x.is_some()) && std::env::var_os("DUMP").is_some() {
-                    let m = k()
-                        .tessellate(&res, &TessellationOptions::default())
-                        .unwrap();
-                    let adj = k().adjacency(&res);
-                    let og = k().origins(&res);
-                    for (f, fo) in og.faces.iter().enumerate() {
-                        println!(
-                            "  face {f} {:?} {fo:?}",
-                            k().face_plane(&res, FaceIx(f as u32))
-                        );
-                    }
-                    for (e, l) in m.edges.iter().enumerate() {
-                        println!(
-                            "  edge {e} {:?} faces {:?} {:?} -> {:?}",
-                            og.edges[e],
-                            adj.edge_faces[e],
-                            l[0],
-                            l[l.len() - 1]
-                        );
-                    }
-                    for (v, p) in m.vertices.iter().enumerate() {
-                        println!(
-                            "  vertex {v} {:?} {:?} edges {:?}",
-                            og.vertices[v], p, adj.vertex_edges[v]
-                        );
-                    }
-                }
-            }
-            Err(e) => println!("{op:?}: {e:?}"),
-        }
-    }
 }
 
 /// Copies of a body with a hole moved by three tolerances (motions 3449

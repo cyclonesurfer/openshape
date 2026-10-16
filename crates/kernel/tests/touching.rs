@@ -13,7 +13,7 @@
 use opendatum_kernel::{
     Body, BooleanOp, BrepKernel, CurveKind, DVec2, DVec3, EdgeOrigin, ExtrudeSpec, FaceIx,
     FaceOrigin, Frame, Kernel, KernelError, Merged, Operand, Origins, Profile, TessellationOptions,
-    VertexOrigin,
+    Tolerance, VertexOrigin,
 };
 
 mod self_contact;
@@ -303,8 +303,8 @@ fn same(r: &Body, q: &Body, what: &str) {
         "{what}"
     );
     assert_eq!(
-        origin_lists(&k().origins(r)),
-        origin_lists(&k().origins(q)),
+        origin_lists(k().origins(r)),
+        origin_lists(k().origins(q)),
         "{what}"
     );
 }
@@ -1380,4 +1380,525 @@ fn an_edge_lying_on_a_face_leaving_it_at_a_slant() {
     let leaves = "refused: an edge of one body lies on a face of the other and leaves it at a \
                   point the tolerance cannot place near (2000.000000, 0.000462, 0.000000) mm";
     assert_eq!(six(&p, &crossing, 1.0), [leaves; 6]);
+}
+
+/// Golden 23: a cube of side 0.3 on its corner on the plane of the unit
+/// box's front face, 0.75 tolerances below its top face, so within the
+/// tolerance of the box's edge between them. The cube's bottom face holds
+/// the corner, tilted 18° from level; the box's edge crosses it at 14.5°
+/// three tolerances from the corner, 1.5 tolerances from the cube's edge
+/// in that face. The piece of the box's edge from the corner to the
+/// crossing is within the tolerance of the bottom face, the box's faces
+/// at it leaving that face to both sides: the edge crosses the face at a
+/// slant where the tolerance does not decide, and every operation is
+/// refused there (before, a kernel error: "the faces at a lying edge leave
+/// the face it lies on to both sides"; found by the contact fuzz).
+#[test]
+fn a_corner_by_an_edge_that_crosses_its_face_at_a_slant() {
+    let eps = k().tolerance().linear;
+    let unit = cuboid(DVec3::ZERO, DVec3::ONE);
+    let h = 0.75 * eps;
+    let corner = DVec3::new(0.5, 0.0, 1.0 - h);
+    // The cube's edges: `up` normal to its bottom face; `along` in it, 30°
+    // from the direction from the corner to where the box's edge crosses
+    // the face.
+    let up = DVec3::new(-0.25, 0.187, 0.95).normalize();
+    let crossing = DVec3::new(0.5 - up.z * h / up.x, 0.0, 1.0);
+    let u = (crossing - corner).normalize();
+    let (c, s) = (30f64.to_radians().cos(), 30f64.to_radians().sin());
+    let along = u * c + up.cross(u) * s;
+    let cube = k()
+        .make_box(
+            &Frame {
+                origin: corner,
+                x: along.cross(up),
+                y: along,
+                z: up,
+            },
+            DVec3::splat(0.3),
+        )
+        .expect("a cube");
+    let refused = "refused: an edge of one body runs within the tolerance of a face of the other \
+                   over a stretch without lying on it, near (500.000143, 0.000000, 999.999963) mm";
+    assert_eq!(six(&unit, &cube, 1.0), [(); 6].map(|_| refused.to_string()));
+}
+
+/// Golden 24: a prism's edge lying on the unit box's front face, parallel
+/// to the box's top front edge and 1.1 tolerances below it, its faces
+/// rising on both sides of the front face (as contact 828 of the contact
+/// fuzz). The box's top front edge then lies within the tolerance of both
+/// of the prism's faces (0.57 and 0.41 tolerances from them), and the
+/// box's top face meets each along that edge, from where the prism's ends
+/// cross the top face's plane, points the tolerance puts at the prism's
+/// corners, 1.1 tolerances below the edge: the box's edge leaves the
+/// prism's faces where the tolerance cannot place the point, and every
+/// operation is refused at one of the prism's ends (before, a kernel
+/// error: the prism's faces at its edge left the front face to both
+/// sides).
+#[test]
+fn an_edge_lying_on_a_face_by_its_edge_beyond_the_tolerance() {
+    let eps = k().tolerance().linear;
+    let unit = cuboid(DVec3::ZERO, DVec3::ONE);
+    let blade = prism(
+        yz(DVec3::new(0.25, 0.0, 1.0 - 1.1 * eps)),
+        &[DVec2::ZERO, DVec2::new(0.3, 0.5), DVec2::new(-0.2, 0.5)],
+        0.5,
+    );
+    let at = |x: &str| {
+        format!(
+            "refused: an edge of one body lies on a face of the other and leaves it at a point \
+             the tolerance cannot place near ({x}, 0.000000, 999.999890) mm"
+        )
+    };
+    let (far, near) = (at("750.000000"), at("250.000000"));
+    assert_eq!(
+        six(&unit, &blade, 1.0),
+        [
+            far.clone(),
+            near.clone(),
+            far.clone(),
+            near.clone(),
+            far,
+            near
+        ]
+    );
+}
+
+/// A prism whose top face (z = 0, x ≤ 0, |y| ≤ 1) meets its slanted face
+/// at `degrees` along the edge x = z = 0.
+fn acute(degrees: f64) -> Body {
+    let t = degrees.to_radians().tan();
+    prism(
+        xz(DVec3::new(0.0, 1.0, 0.0)),
+        &[
+            DVec2::new(0.0, 0.0),
+            DVec2::new(-2.0, -2.0 * t),
+            DVec2::new(-2.0, 0.0),
+        ],
+        2.0,
+    )
+}
+
+/// A knife whose edge runs along x from x = −0.5 to 0.5, `depth`
+/// tolerances under the plane z = 0, its faces falling from the edge.
+fn knife_under(depth: f64) -> Body {
+    let eps = k().tolerance().linear;
+    prism(
+        yz(DVec3::new(-0.5, 0.0, -depth * eps)),
+        &[
+            DVec2::new(0.0, 0.0),
+            DVec2::new(-0.3, -0.5),
+            DVec2::new(0.3, -0.5),
+        ],
+        1.0,
+    )
+}
+
+/// Golden 25: an edge lying on a face, within the tolerance under it,
+/// that leaves the body through a neighbour meeting the face at an acute
+/// angle before it reaches their edge (contact 3003 of the contact fuzz at
+/// a hundred times its default run, a tolerance inside). Nine tenths of a
+/// tolerance down, the knife's edge leaves the prism through the slanted
+/// face at x = −1.56 tolerances, within the tolerance of the top face but
+/// 1.8 tolerances from its edge, and passes the edge itself 1.56
+/// tolerances on: the tolerance cannot place where it leaves the top face,
+/// and all six operations are refused there (they were kernel errors, the
+/// knife's pieces past the slanted face disagreeing with the side the
+/// contact has on the top face). A quarter of a tolerance down, the two
+/// points are one and the operations are answered, the difference of the
+/// prism pinching along the edge as with the knife resting on the face.
+/// A cube's corner within the tolerance of both faces of a 20° edge,
+/// three tolerances from it, is refused the same way.
+#[test]
+fn an_edge_leaving_a_face_through_an_acute_neighbour() {
+    let a = acute(30.0);
+    let leaves = "refused: an edge of one body lies on a face of the other and leaves it at a \
+                  point the tolerance cannot place near (-0.000156, 0.000000, -0.000090) mm";
+    assert_eq!(six(&a, &knife_under(0.9), 1.0), [leaves; 6]);
+    let union = "(10, 22, 14, 1) V=2.451067746 A=14.985469630";
+    let common = "(4, 6, 4, 1) V=0.008333331 A=0.318325044";
+    assert_eq!(
+        six(&a, &knife_under(0.25), 1.0),
+        [
+            union,
+            union,
+            common,
+            common,
+            &edge_refusal("(-250.000005, 0.000000, -0.000017) mm"),
+            "(6, 12, 8, 1) V=0.141666669 A=1.947865326",
+        ]
+    );
+    let eps = k().tolerance().linear;
+    let z = -0.9 * eps;
+    let at = DVec3::new(z / 20f64.to_radians().tan() - 0.5 * eps, 0.0, z);
+    let two = "refused: a corner of one body lies within the tolerance of two faces of the other \
+               away from their edge near (-0.000297, 0.000000, -0.000090) mm";
+    assert_eq!(
+        six(&acute(20.0), &corner_cube(at, 0.1, true), 1.0),
+        [two; 6]
+    );
+}
+
+/// A thin wedge whose edge runs level from `start` along the unit
+/// horizontal `d` for `len`, its two faces leaving the edge at angles `t1`
+/// < `t2` (degrees) from the horizontal `Z × d`, toward +z (as [`blade`]).
+fn level_wedge(start: DVec3, d: DVec3, len: f64, (t1, t2): (f64, f64)) -> Body {
+    let frame = Frame {
+        origin: start,
+        x: DVec3::Z.cross(d),
+        y: DVec3::Z,
+        z: d,
+    };
+    let leg = |t: f64| DVec2::new(t.to_radians().cos(), t.to_radians().sin()) * 0.5;
+    prism(frame, &[DVec2::ZERO, leg(t1), leg(t2)], len)
+}
+
+/// A wedge over the plate's corner (2, 2, 0): its edge, `z` tolerances
+/// up, crosses the plate's edge x = 2 `delta` tolerances from the corner,
+/// running at `alpha` degrees from y.
+fn corner_blade(delta: f64, alpha: f64, z: f64, faces: (f64, f64)) -> Body {
+    let eps = k().tolerance().linear;
+    let a = alpha.to_radians();
+    let d = DVec3::new(a.sin(), a.cos(), 0.0);
+    let at = DVec3::new(2.0, 2.0 - delta * eps, z * eps);
+    level_wedge(at - 0.71 * d, d, 1.42, faces)
+}
+
+/// Golden 26: a thin wedge's edge lying on the plate's top and leaving it
+/// across the edge x = 2 three tolerances from the corner, its faces
+/// falling into the plate at 12° and 14° (found by review). The curves
+/// where the top meets the blade's faces ended at the top's corner, and
+/// the point of the blade's edge nearest the corner lay beyond the top,
+/// past where the edge crosses its boundary: the contact placed along the
+/// edge to that point took in a piece outside the top, and every
+/// operation was a kernel error (a contact's pieces disagreeing on their
+/// side). The contact now stops where the edge leaves the top. Exact and
+/// 0.75 tolerances down, the outcomes are the same, the plate minus the
+/// wedge pinching along the edge (on main, exact, it came back with the
+/// wedge's edge lying on the top face, which does not bound it).
+#[test]
+fn a_blade_leaving_a_face_near_its_corner() {
+    let p = plate(1.0);
+    let faces = (-168.0, -166.0);
+    for (z, area, at) in [
+        (0.0, ["49.145490820", "1.157848476"], "0.000000"),
+        (-0.75, ["49.145490714", "1.157848482"], "-0.000037"),
+    ] {
+        let union = format!("(11, 25, 16, 1) V=16.005463499 A={}", area[0]);
+        let common = "(4, 6, 4, 1) V=0.000731161 A=0.308016471".to_string();
+        assert_eq!(
+            six(&p, &corner_blade(3.0, 30.0, z, faces), 1.0),
+            [
+                union.clone(),
+                union,
+                common.clone(),
+                common,
+                edge_refusal(&format!("(1822.500000, 1692.560832, {at}) mm")),
+                format!("(6, 12, 8, 1) V=0.005463499 A={}", area[1]),
+            ]
+        );
+    }
+}
+
+/// Golden 27: a thin wedge crossing the plate's side x = 2 eight tolerances
+/// from its corner, at 60°, its faces falling at 20° and 23° (found by
+/// review). The curves where the side meets the blade's two faces leave
+/// the edge's crossing at a slant and end within the tolerance of each
+/// other on the corner's vertical edge, so one segment carries both: the
+/// blade's section by the side's plane is thinner than the tolerance
+/// there. The intersection and the blade minus the plate had the blade's
+/// two faces meet along that segment, an edge of neither body, a kernel
+/// error (main answered, the side's piece dropped and the edge named
+/// after the side, which does not bound it). Refused as a sliver in every
+/// operation, exact, 0.75 tolerances down, and 1.5 down, where the edge
+/// is clear of the top.
+#[test]
+fn a_blade_whose_section_by_a_face_is_a_sliver() {
+    let p = plate(1.0);
+    for (z, at) in [
+        (0.0, "-0.000137"),
+        (-0.75, "-0.000202"),
+        (-1.5, "-0.000287"),
+    ] {
+        let sliver = format!(
+            "refused: the bodies leave a sliver thinner than the tolerance near (2000.000000, \
+             1999.999600, {at}) mm"
+        );
+        let b = corner_blade(8.0, 60.0, z, (-23.0, -20.0));
+        assert_eq!(six(&p, &b, 1.0), [(); 6].map(|_| sliver.clone()), "{z}");
+    }
+}
+
+/// A prism of thickness 0.5 whose bottom face lies on the plane through
+/// the x axis tilted `t` degrees up toward +y, with the profile `pts`:
+/// (u along x, w across, whether w is in tolerances).
+fn tilted(t: f64, pts: &[(f64, f64, bool)]) -> Body {
+    let eps = k().tolerance().linear;
+    let t = t.to_radians();
+    let frame = Frame {
+        origin: DVec3::ZERO,
+        x: DVec3::X,
+        y: DVec3::new(0.0, t.cos(), t.sin()),
+        z: DVec3::new(0.0, -t.sin(), t.cos()),
+    };
+    let p: Vec<DVec2> = (pts.iter())
+        .map(|&(u, w, tol)| DVec2::new(u, if tol { w * eps } else { w }))
+        .collect();
+    prism(frame, &p, 0.5)
+}
+
+/// Golden 28: a prism tilted 10° about the x axis whose bottom face's
+/// edge along x bends in the middle, its three vertices 5 tolerances
+/// to either side of the axis, so within the tolerance of the plane
+/// z = 0, on a box whose top's edge x = 0.45 crosses the axis (found by
+/// review). The check of a lying run's ends measured the side against the
+/// line from its first vertex to its last: with the bend away from the
+/// face (reflex), the end at x = 0.45 lies 4 tolerances off the face
+/// beside the edge there, but the line put it 5 inside, and every
+/// operation was refused; with the bend into the face (convex), the end
+/// lies 4 tolerances inside, which the line put outside, and other checks
+/// refused it with other texts. Measured against the run's edge nearest
+/// the end, the reflex bend gives the exact contact's outcomes and the
+/// convex one is refused at the end.
+#[test]
+fn a_bent_edge_lying_on_a_face() {
+    let a = cuboid(DVec3::new(0.45, -1.0, -1.0), DVec3::new(2.0, 1.0, 0.0));
+    let bent = |w: f64| {
+        tilted(
+            10.0,
+            &[
+                (0.0, -w, true),
+                (0.5, w, true),
+                (1.0, -w, true),
+                (1.0, 0.5, false),
+                (0.0, 0.5, false),
+            ],
+        )
+    };
+    let touch = edge_refusal("(750.000000, 0.000000, 0.000000) mm");
+    assert_eq!(
+        six(&a, &bent(5.0), 1.0),
+        [
+            touch.clone(),
+            touch,
+            "empty".into(),
+            "empty".into(),
+            "(6, 12, 8, 1) V=3.100000000 A=13.300000000".into(),
+            "(7, 15, 10, 1) V=0.250000000 A=2.500000500".into(),
+        ]
+    );
+    let leaves =
+        "refused: an edge of one body lies on a face of the other and leaves it at a point \
+                  the tolerance cannot place near (450.000000, 0.000000, 0.000000) mm";
+    assert_eq!(six(&a, &bent(-5.0), 1.0), [leaves; 6]);
+}
+
+/// Golden 29: the tilted prism's edge straight, 5 tolerances off the axis
+/// on the far side from its face, and ending at a reflex corner, where its
+/// face's boundary turns away and the axis runs on into the face (found
+/// by review). The check of a lying run's ends looked only at a meeting
+/// that is the run itself, so it passed this one, which goes on past the
+/// run; the intersection then held a fin 0.55 long and under a tolerance
+/// thick between the box's top and the prism's face (as on main). As
+/// golden 20, every
+/// operation is refused where the box's edge crosses the axis, 5
+/// tolerances inside the face beside the run.
+#[test]
+fn an_edge_lying_on_a_face_ending_at_a_reflex_corner() {
+    let a = cuboid(DVec3::new(0.45, -1.0, -1.0), DVec3::new(1.8, 1.0, 0.0));
+    let b = tilted(
+        10.0,
+        &[
+            (0.0, -5.0, true),
+            (1.0, -5.0, true),
+            (1.5, -0.5, false),
+            (2.0, -0.5, false),
+            (2.0, 0.5, false),
+            (0.0, 0.5, false),
+        ],
+    );
+    let leaves =
+        "refused: an edge of one body lies on a face of the other and leaves it at a point \
+                  the tolerance cannot place near (450.000000, 0.000000, 0.000000) mm";
+    assert_eq!(six(&a, &b, 1.0), [leaves; 6]);
+}
+
+/// Golden 30: an edge of each body lying on the other's face, the faces
+/// at 10° (found by review): the box's top edge y = 4 tolerances on the
+/// wedge's face, and the wedge's edge on the top, 4 tolerances to the
+/// other side of the axis. The ends of the meeting are the runs' own
+/// vertices and the end check passes them; the faces lie within the
+/// tolerance of each other over the band between the edges, which
+/// classifying their pieces refuses in every operation. With the wedge's
+/// edge 4 tolerances to the box's side instead, the runs do not overlap
+/// and the outcomes are the exact contact's along the edge.
+#[test]
+fn edges_of_both_bodies_lying_on_the_others_face() {
+    let eps = k().tolerance().linear;
+    let a = cuboid(DVec3::new(0.0, -1.0, -1.0), DVec3::new(1.0, 4.0 * eps, 0.0));
+    let t = 10f64.to_radians();
+    let up = DVec2::new(t.cos(), t.sin());
+    let wedge = |off: f64| {
+        let at = up * (-off * eps);
+        prism(
+            yz(DVec3::new(0.2, 0.0, 0.0)),
+            &[
+                at,
+                at + up * 0.5,
+                at + DVec2::new(-0.1, 1.0).normalize() * 0.5,
+            ],
+            0.6,
+        )
+    };
+    let band = "refused: a face of one body runs within the tolerance of the other's surface \
+                without lying on one of its faces, near (500.000000, -0.000001, -0.000000) mm";
+    assert_eq!(six(&a, &wedge(4.0), 1.0), [band; 6]);
+    let touch = edge_refusal("(500.000000, 0.000394, 0.000069) mm");
+    assert_eq!(
+        six(&a, &wedge(-4.0), 1.0),
+        [
+            touch.clone(),
+            touch,
+            "empty".into(),
+            "empty".into(),
+            "(6, 12, 8, 1) V=1.000000400 A=6.000001600".into(),
+            "(5, 9, 6, 1) V=0.074789923 A=1.257389214".into(),
+        ]
+    );
+}
+
+/// Golden 31: a wedge whose edge passes half a tolerance under the corner
+/// (1, 1, 1) of the unit cube into it, rising at about 9.6° to cross the
+/// top face three tolerances from the corner (contact 86 of the contact
+/// fuzz, from its triage). The corner is placed on the edge, so the edge's
+/// piece inside the cube runs from the top face's corner to the corner of
+/// the hole the wedge makes in it and lies on the face; A − B keeps the
+/// top face and the wedge's faces along it, so it would touch itself
+/// there and is refused (on main it was returned). With a round hole
+/// through the cube's sides away from the corner, which makes the results
+/// not flat, the answers are the same: the check of the result's places
+/// first ran only on flat results.
+#[test]
+fn a_wedge_under_a_corner_crossing_a_face_beside_it() {
+    let eps = k().tolerance().linear;
+    let a = cuboid(DVec3::ZERO, DVec3::ONE);
+    let d = DVec3::new(-1.0, -1.0, (2.0f64 / 35.0).sqrt()).normalize();
+    let y = (DVec3::Z - d * d.z).normalize();
+    let frame = Frame {
+        origin: DVec3::ONE - DVec3::Z * (0.5 * eps) - d * 0.3,
+        x: y.cross(d),
+        y,
+        z: d,
+    };
+    let b = prism(
+        frame,
+        &tri(1.0, [(0.0, 0.0), (0.3, -0.5), (-0.3, -0.5)]),
+        0.8,
+    );
+    let rod = k()
+        .extrude(
+            &Profile::circle(yz(DVec3::new(-1.0, 0.0, 0.0)), DVec2::new(0.3, 0.3), 0.1),
+            &ExtrudeSpec {
+                distance: 3.0,
+                symmetric: false,
+            },
+        )
+        .expect("a rod");
+    let holed = op(&a, &rod, BooleanOp::Subtract);
+    let pinch = edge_refusal("(999.999895, 999.999895, 1000.000000) mm");
+    let common = "(7, 14, 9, 1) V=0.067524482 A=1.051687610";
+    // B − A: the wedge beyond the corner, and its tip through the top.
+    let lobes = "(10, 17, 11, 2) V=0.052475518 A=1.142975557";
+    for (x, union) in [
+        (&a, "(13, 28, 18, 1) V=1.052475518 A=6.661264706"),
+        (&holed, "(15, 34, 22, 1) V=1.021059592 A=7.226751384"),
+    ] {
+        assert_eq!(
+            six(x, &b, 1.0),
+            [union, union, common, common, &pinch, lobes]
+        );
+    }
+}
+
+/// A kernel a hundred times finer than the default, which builds bodies
+/// that the default tolerance takes for touching themselves: the oracle's
+/// own tests.
+fn fine() -> BrepKernel {
+    BrepKernel::with_tolerance(Tolerance {
+        linear: 1e-9,
+        ..Tolerance::default()
+    })
+}
+
+/// The oracle reports a body whose wall is thinner than half the
+/// tolerance, a C whose slot ends `w` from its outer side (built by a
+/// finer kernel; the default refuses the profile), and passes it at
+/// three fifths of the tolerance.
+#[test]
+fn the_oracle_finds_a_wall_thinner_than_half_the_tolerance() {
+    let eps = k().tolerance().linear;
+    let c = |w: f64| {
+        let pts = [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 0.45),
+            (w, 0.45),
+            (w, 0.55),
+            (1.0, 0.55),
+            (1.0, 1.0),
+            (0.0, 1.0),
+        ]
+        .map(|(x, y)| DVec2::new(x, y));
+        let body = fine()
+            .extrude(
+                &Profile::polygon(Frame::WORLD, &pts),
+                &ExtrudeSpec {
+                    distance: 1.0,
+                    symmetric: false,
+                },
+            )
+            .expect("a C");
+        self_contact::touches_itself(&k(), &body, &TessellationOptions::default()).expect("a mesh")
+    };
+    let thin = c(0.3 * eps).expect("a report");
+    assert!(thin.contains("comes within 3.000e-8 m of face"), "{thin}");
+    assert_eq!(c(0.6 * eps), None);
+}
+
+/// A body's diamond ridge along x (A) and the ridge of a second diamond
+/// along y three tenths of the tolerance above it (B), crossing at a
+/// quarter of each, made one body by a finer kernel. Neither ridge's ends
+/// nor middle comes near the other body, so only measuring the edges whole
+/// finds the crossing; the oracle sampled them before.
+#[test]
+fn the_oracle_measures_straight_edges_whole() {
+    let eps = k().tolerance().linear;
+    let diamond = |c: DVec2| {
+        [(0.0, -0.5), (0.5, 0.0), (0.0, 0.5), (-0.5, 0.0)].map(|(x, y)| c + DVec2::new(x, y))
+    };
+    let solid = |frame: Frame, pts: &[DVec2]| {
+        fine()
+            .extrude(
+                &Profile::polygon(frame, pts),
+                &ExtrudeSpec {
+                    distance: 1.0,
+                    symmetric: false,
+                },
+            )
+            .expect("a prism")
+    };
+    // A's ridge: (0..1, 0.5, 0.5). B's: (0.25, 0.25..1.25, 0.5 + 0.3 ε).
+    let a = solid(yz(DVec3::ZERO), &diamond(DVec2::new(0.5, 0.0)));
+    let b = solid(
+        xz(DVec3::new(0.0, 1.25, 0.0)),
+        &diamond(DVec2::new(0.25, 1.0 + 0.3 * eps)),
+    );
+    let both = fine()
+        .boolean(&a, &b, BooleanOp::Union)
+        .expect("two solids");
+    assert_eq!(counts(&both).3, 2);
+    let report = self_contact::touches_itself(&k(), &both, &TessellationOptions::default())
+        .expect("a mesh")
+        .expect("a report");
+    assert!(report.contains("at (250.0"), "{report}");
 }

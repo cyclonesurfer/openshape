@@ -2842,3 +2842,428 @@ on touch results and the time guards.
   Aided Design and Manufacturing*, Springer, 2002, §6.4.1.
 * C. L. Bajaj, C. M. Hoffmann, R. E. Lynch & J. E. Hopcroft, "Tracing
   surface intersections", *CAGD* 5(4):285–307, 1988.
+
+## 19. As built: slice 1 on flat faces (2026-10-16)
+
+Steps 2 to 4 of §18.6 are built: the origin filter, bridges and places,
+and points on planes. Steps 5 to 7 are not: the cut-pair filter, curved
+pairs (a contact where a face is curved, an edge or a vertex touching a
+curved face or a curved edge resting on a plane, is still refused as
+`Unsupported`, "a tangent contact", as on main) and the Apart band. Of
+step 8, the contact fuzz and its sweeps are built and this section
+records them; the contact time guards (ADR 0024: a comb of 512 teeth, a
+grid of 256 corners) are not, and the mutation checks were run on the
+backstop's rules only (below). There are 31 numbered goldens, golden 11
+in `tests/booleans.rs` and the rest in `tests/touching.rs`: §18.5's
+eighteen flat ones and thirteen found while building (19 to 31), by
+review and by the contact fuzz. Every fix below has a test that fails
+without it.
+
+**Where the build differs from §18.2.**
+
+* *Bridges off the face are dropped*, not refused as "an imprint edge
+  lies outside the face": the imprint of a coincident face takes the
+  pieces of its edges within the tolerance of this face, and one can
+  reach just outside it (a copy of a body moved by just over the
+  tolerance, found by the fuzz of motions). Points off the face were
+  already dropped.
+* *"One point touched from both sides"* is checked only for the isolated
+  points that settling keeps. A point that ends a segment of the touched
+  face is dropped first (rules 2 and 3), and at a vertex where a face
+  crosses through a reflex corner the runs on either side of the
+  crossing report both sides, correctly.
+* *Holders* take up to four test points (`HOLDER_TRIES`) from
+  `classify::interior_points_avoiding`, large pieces as well as small:
+  the triangulation of the region with the obstacles' points as free
+  vertices, each inside triangle's incircle scored against the
+  obstacles. `probe_point` with each obstacle as two extra sides is not
+  built.
+* *No separate limit on places.* A place is a segment or a cluster, each
+  once, so the existing limits on segments and points bound them; the
+  cap refused as `TooLarge` that §18.2's "Cost" names is not built.
+* *Operand faces whose loop passes a vertex twice* (a face of an earlier
+  union whose boundary touches itself at a vertex, a valid face) are
+  classified: their triangulation takes the vertex's two visits as one
+  point, where main refused "two vertices at one point of the face's
+  plane". Two vertices at one point are still refused.
+* *Bridges that carry no edge* of the other body, which §18.2 makes a
+  kernel error, are decided where the fuzz found them (below), and a
+  bridge whose faces leave the face to both sides, a kernel error in
+  `wedge`, likewise. Contacts whose pieces disagree on their side are
+  refused as input where the tolerance puts the place on two faces of
+  the holder's body away from their edge.
+* *A backstop on every result* (`check_apart`, below), which §18.2 does
+  not have.
+
+Refusals added beyond §18.2's table, each followed by "near {p}":
+
+| text | kind | where |
+|---|---|---|
+| an edge of one body lies on a face of the other and leaves it at a point the tolerance cannot place | InvalidInput | `imprint::plane_meeting`, `edgeless_contact`, `assemble::check_contacts` |
+| a corner of one body lies within the tolerance of two faces of the other away from their edge | InvalidInput | `check_contacts` |
+| the bodies leave a sliver thinner than the tolerance (the existing text) | InvalidInput | `edgeless_contact`, `merged_chord` |
+| an edge of one body runs within the tolerance of a face of the other over a stretch without lying on it (§18.2's text) | InvalidInput | `astride` |
+| the result would be non-manifold: the bodies touch along an edge / at a point (the existing texts) | InvalidInput | `check_apart` |
+
+**Faults on main found by the new tests.** The contact fuzz at a
+hundred times its default run (6,000 cases, 264,000 operations), with
+the final oracle, on main (b032fc6): 24,571 operations fail. On this
+slice none does.
+
+1. *Silent pinches* (the fault §18 was written for): 20,457 results, in
+   3,693 of the 6,000 cases, that validate and touch themselves (the
+   oracle), 15,813 of them with B within half a tolerance of the
+   contact and 3,549 with it exact. The oracle reports a point within
+   half the tolerance of a face; nearer the edge of the band main
+   returns more that it does not see: on golden 22's blade nested 0.75
+   tolerances under P's top face, P − blade validates with the blade's
+   edge 0.75 tolerances under that face, and goldens 20 and 21 come
+   back as one solid whose two parts are joined by a sliver 0.75
+   tolerances thick.
+2. *Origins that are not along their entity*: 2,148 results naming an
+   operand entity that does not bound the result entity (2,014 "edge …
+   is not along … edge …", 134 "edge … leaves the plane of face …").
+   Two causes: the sources a cluster on a lying edge adds (the origin
+   filter of §18.2 fixes those), and joined edges. `merge_edges` joins
+   two segments at a point where only they meet, and the joined segment
+   kept the sources of both pieces, so an edge four tolerances long that
+   ended at a corner, joined to the long meeting beyond it, named the
+   meeting as a piece of that edge. The joined segment now keeps only
+   the sources that run along all of it (`join_sources`): those of both
+   pieces, and those of one piece that the other piece's far end and
+   middle are within the tolerance of (a straight edge's line, or the
+   surfaces of a curved edge's faces or of both faces where the bodies
+   meet). Where no kept source bounds the faces along the segment, the
+   point stays a vertex. Golden 19, `a_wedge_leaving_an_edge_near_a_corner`.
+3. *Shell volumes far from the origin*: 1,391 kernel errors "a void …
+   is inside no solid" and 535 "outer shell is inside-out", 1,644 of
+   them with B pushed four tolerances into A or out of it.
+   `assemble::shell_volume` summed the signed volumes of the faces'
+   cones from the world origin; for a shell a few tolerances thick a
+   long way from the origin the terms cancel to rounding and the sign
+   came out wrong, so a sliver was taken for a void or a shell for one
+   turned inside out. A fan over the places, tried first, gave the
+   pillow slivers between a face and its moved copy (two faces, four
+   edges) no volume at all. It now takes each face's plane relative to a
+   corner of the shell: v = Σ (o_f − c) · n_f A_f / 3, exact for a
+   closed flat shell and free of the origin's distance. The validator's
+   `shell_volumes` had the same fault and takes a local origin likewise.
+   Tests: `corners_dipping_four_tolerances_through_a_face` (contacts 1,
+   2, 15 and 42), which fails on main, and
+   `slivers_between_a_face_and_its_moved_copy` (motions 836, 4539, 5883
+   and 6751 of the fuzz of motions run a hundred times longer), which
+   main passes and the fan failed.
+4. 40 kernel errors "the kept pieces do not close along an edge", in 9
+   cases, at steps −4, −1, 0.75 and 1. None remains on this slice; they
+   were not traced one by one.
+
+The fuzz of planes and cylinders at twenty times its run found one more
+(`corners_of_boxes_resting_on_flat_faces_of_prisms`, in `tests/curved.rs`):
+a box's corner resting on the flat side of a D-shaped prism from inside
+it (pair 3493), where main returned the prism minus the box touching
+itself at the corner. The curved fuzzes do not run the oracle (below),
+so main passed it; the difference is now refused as touching at a point.
+
+**Loud failures the contact fuzz found in the slice**, at a hundred
+times its run, each class fixed and kept as tests that fail without the
+fix:
+
+* *Bridges with no edge* (185 operations in 50 cases, "a contact edge
+  carries no edge of the other body"). Three kinds. (a) An edge E of
+  the other body lying on the face F within the tolerance and leaving F
+  across an edge K of F at a slant, its faces at a shallow angle to F:
+  the curves where F meets E's two faces merge into one segment, which
+  ends where K crosses their planes, a few tolerances along K from where
+  E's own pieces end, so the bridge is E's contact moved by the
+  tolerance. `lying_pieces` recognises it (the bridge carries the curves
+  of two faces of the other body that share a straight edge lying on F,
+  with one end of the bridge on that edge) and places the contact on
+  E's own pieces from that end; where an end of E lies on the side of F
+  opposite to the side E's faces leave it to, the faces cross F a few
+  tolerances from E, and the boolean is refused as an edge leaving a
+  face where the tolerance cannot place the point. On main the nested
+  and crossing forms come back touching themselves (golden 22). (b) The
+  curves where F meets two faces of the other body with no common edge
+  on F, merged over a stretch: a sliver of F, refused. (c) A corner of
+  the other body within the tolerance of F next to F's boundary, where
+  one of the curves at it merged into the corner and the bridge dangles
+  from it: the same sliver refusal (`lone_corner`). All of a face's
+  edgeless bridges are judged before any of its contacts is placed
+  (`edgeless_bridges`), so the bridge that shows the cause decides (a
+  tree of bridges at a corner, contact 161); a bridge none of these
+  explains stays a kernel error, raised after the face's other contacts.
+  `contacts_whose_bridges_carry_no_edge`, golden 22.
+* *Meetings along a lying run that end off it* (57 operations in 31
+  cases, "an edge with no origin"). Where one face's interval of the
+  planes' common line is a run of its edges lying on the other's plane,
+  the stretch is that run (§18.2), so an end of it that the other face's
+  boundary gives must be a point of the run. A run within the tolerance
+  of a plane can be a few tolerances from the planes' exact common line
+  where they meet at a slant, and the other face's boundary crosses that
+  line, not the run: the meeting then ran beside the run, a copy of the
+  edge on the other body's faces that no face of the first bounds.
+  `plane_meeting` now refuses such an end on the run's face's side as an
+  edge leaving a face where the tolerance cannot place the point; off
+  that side the copy lies off the face and is dropped. On main (where
+  the copy was kept) goldens 20 and 21 come back as one solid joined by
+  a sliver 0.75 tolerances thick, which validates. Review found three
+  more forms of the same check: the side measured against the line from
+  a run's first vertex to its last, where the run bends within the
+  tolerance (golden 28, now against the run's edge nearest the end); an
+  end of a meeting that goes on past the run's reflex corner into the
+  face (golden 29); and both faces' intervals being runs, the faces then
+  within the tolerance of each other over a band, which classifying
+  their pieces refuses (golden 30).
+* *Lying edges whose faces leave the face to both sides* (24 operations
+  in 7 cases): a box's corner within the tolerance of an edge of the
+  other body that crosses one of the box's faces at a slant a few
+  tolerances from the corner, the piece of that edge between them
+  imprinted as lying on the face. `astride` refuses it as an edge running
+  within the tolerance of a face over a stretch (golden 23); where one
+  order of the operands reached such an edge before a face found within
+  the tolerance of another over a band, the error now waits until every
+  face is split, and the band's refusal comes first in all four
+  operations (contact 2080). A third form the triage found, a prism's
+  edge parallel to an edge of the face and about the tolerance from it,
+  is refused by the run check above (golden 24).
+  `contacts_whose_lying_edges_leave_the_face_to_both_sides`.
+* *A contact's pieces disagreeing on their side* (4 operations, contact
+  3003): an edge lying on a face within the tolerance that leaves the
+  body through a neighbour meeting the face at an acute angle before it
+  reaches their edge, where it pierces the neighbour within the tolerance
+  of the face but more than the tolerance from the edge. The tolerance
+  cannot say which face the contact is on; refused as an edge leaving a
+  face where the tolerance cannot place the point, and a corner touching
+  two such faces as "a corner of one body lies within the tolerance of
+  two faces of the other away from their edge" (golden 25). On main the
+  same input's difference validates and touches itself along the edge.
+  Review found the same disagreement where a blade's edge leaves a face
+  three tolerances from its corner and the contact, placed to the point
+  of the edge nearest the corner, took in a piece outside the face; the
+  contact now stops where the edge leaves the face (golden 26).
+* *Sections thinner than the tolerance*: a blade crossing a face near
+  its corner whose two faces' curves on that face end within the
+  tolerance of each other, so one segment carries both (found by
+  review); refused as a sliver (`merged_chord`, golden 27), where main
+  answered with the face's piece dropped and an edge named after a face
+  that does not bound it.
+
+**The backstop on every result** (`check_apart`). The rule after
+selection decides the contacts the imprint records; this check decides,
+from the result alone, those that decisions at the edge of the tolerance
+let through. It tests the result's *exact* faces, those on planes whose
+loops are all straight (faces with a curved side wait for the curved
+slice): no end of a segment is on such a face without a corner there,
+and no middle of a straight segment on such a face the segment does not
+bound, else the result would touch itself and is refused as
+non-manifold there. A point is on a face when it is within the tolerance
+of it: within the tolerance of the face's plane and, in the plane,
+inside the face's loops or beside them with the distances off the plane
+and in it together within the tolerance.
+
+Faces with a corner at an end of a segment are let off for its middle
+where they are a corner the segment leaves (an edge leaving a corner of
+a face at an angle θ stays within the tolerance of the face for ε / sin θ
+from it):
+
+* (a) a segment shorter than four tolerances with a face at both ends:
+  only the face's inside counts, where the face holds the segment lying
+  on it;
+* (b) a segment shorter than four tolerances with a face at one end:
+  let off;
+* (c) a longer segment with a face at one end whose other end is
+  farther than the tolerance from the face's plane: let off. A segment
+  with an end on a face's corner and the other within the tolerance of
+  its plane lies along that plane, and its middle counts.
+
+Each was found by disabling the rules over longer runs of the contact
+fuzz, and disabled one at a time, each refuses the cases that pin it
+(`sharp_corners_the_check_of_places_lets_off`): (a) a piece of an edge
+shorter than four tolerances between two corners of a face, its middle
+outside the face but within the tolerance of its boundary (contacts 481
+at 0.5 and 2896 at 0.75); (b) one shorter than four tolerances leaving a
+face's corner (84 at 1, and golden 26); (c) a longer one
+leaving a corner whose far end is more than the tolerance off the
+face's plane (22 at −1, 281 at 1, 1335 and 5358 at −4, crossing the
+face's plane at 14° and 3.6°, and 2714 at −1). The last is at the edge
+of the band: an edge a tolerance under the face, whose far end the
+imprint calls off it (1.0000000002 tolerances) and whose other end it
+places on the face's corner; it may be answered or refused, and is
+answered. A fourth rule, letting off a face at either end of a segment
+no longer than two tolerances, was dropped: with it removed, no test
+fails and the contact fuzz at a hundred times, the flat fuzz, the
+motions and the curved fuzzes at twenty times refuse exactly the
+operations they refused with it.
+
+The check was first written letting off a face at either end of any
+segment shorter than four tolerances; the fuzz run a hundred times
+longer found three results where a piece of an edge three to four
+tolerances long, from a corner within the tolerance of the edge to
+where the edge crosses a face at that corner, lies inside that face
+(contacts 86, 2504 and 5245, `edges_lying_on_a_face_for_a_few_tolerances`;
+golden 31 is contact 86 by hand). Two narrower rules were measured on
+that run before (a): letting off only faces within the tolerance of the
+middle refused 107 more operations, 66 of them a box's corner pushed
+four tolerances through a face, whose triangle there has sides a few
+tolerances long and sharp corners; testing a face at both ends for its
+boundary as well as its inside refused three more, segments of 2.0 to
+2.3 tolerances lying in a face's plane just outside it, 0.94 to 0.95
+tolerances from its boundary. The test of a point's two distances
+apart, first written, took points up to √2 tolerances from a face beside
+its loops for on it, and refused 51 operations of the hundredfold run
+that the test of the two together answers, each for a point between the
+tolerance and √2 tolerances from a face
+(`corners_just_beyond_the_tolerance_of_a_face`: contacts 3827 at −4 and
+369 at −1, corners 1.08 and 1.31 tolerances from a face). Disabled, the
+test of the two together fails that test. The check first ran only on
+results made wholly of exact faces, so the same contact escaped where
+any face of the result was curved (golden 31 with a round hole through
+the cube's sides).
+
+Cost: each place (a cluster, or a straight segment's middle) is tested
+once. Each point is looked up in a tree of the exact faces' boxes, and
+each face it may be on in that face's outline, built when first needed:
+its sides in the plane, a tree of them, and a tree of its loops' boxes,
+with a loop of more than 32 sides given a tree of its own, so a face
+with many loops is not walked edge by edge for every point near it
+(found by review: a plate with 1,600 flush pins took a quadratic time,
+each point's parity test crossing every hole in its row). The segments
+at each cluster and the faces along each segment are grouped by a
+counting sort. A union of a box with a corner of a plate of 400 flush
+pins is guarded (docs/PERFORMANCE.md).
+
+**The oracle as built** (`tests/self_contact`). It finds a result's
+edge within half the tolerance of a face that does not bound it, other
+than the faces at the edge's ends near those ends. Flat faces are
+measured exactly: the mesh of each is first moved onto its plane, since
+its corners are the result's vertices, which may be up to the tolerance
+off the plane, and a mesh leaning towards an edge a tolerance from the
+face reported contacts that were not there (four reports of the contact
+fuzz, the edge exactly a tolerance under the face). A straight edge is
+measured whole against each exact face with no corner at its ends
+(segment to triangle distances), so a crossing between sample points is
+found (`the_oracle_measures_straight_edges_whole`, two diamond ridges
+three tenths of a tolerance apart, made one body by a kernel a hundred
+times finer); every other point of an edge (its mesh polyline's points
+and the middles of their pieces) is tested against the faces near it,
+other than a face at an end of the edge within the tolerance of the
+point (every point that near a vertex is that near each face at it), and
+other than a flat face that a straight edge leaves at a corner, its
+other end more than the tolerance from the face's plane: as for
+`check_apart`'s rule (c), such an edge stays within the tolerance of the
+face for ε / sin θ from the corner, which is not a contact. Without the
+vertex rule, fourteen of the twenty-one reports at the hundredfold run
+were points within the tolerance of a vertex of the face; without the
+corner rule, it reported contacts 1335, 2714 and 5358 of the pins in
+`sharp_corners_the_check_of_places_lets_off`, and motion 3527 of the
+fuzz of motions run a hundred times longer. Its own tests:
+`the_oracle_finds_a_wall_thinner_than_half_the_tolerance` (a C whose
+slot ends three tenths of the tolerance from its side, reported, and
+one three fifths of the tolerance from it, passed) and the ridges
+above. The half tolerance leaves contacts between half the tolerance
+and the tolerance to `check_apart` on exact faces (main's golden 22
+above). Curved faces are checked through their mesh and confirmed on
+the surface; run on the curved fuzzes, the oracle reports 965 results,
+the same on main, and its curved check counts a point of the surface
+just outside a face, within the chord of its boundary, as on it, so
+those reports are not yet sorted into contacts and false reports.
+Sorting them, with an exact test of a point in a curved face, is part
+of the curved slice; until then the curved fuzzes do not run the
+oracle.
+
+**The contact fuzz as built** (`contacts_swept_across_the_band`). A
+random polyhedron A (a random prism of the flat fuzz) and a body B
+resting on a random point of one of A's faces (inside it, on its edge or
+at its corner): a box on a corner, its three edges rising at least 9°,
+or a triangular prism on an edge, along an edge of the face or across
+it, its faces rising at 9° or more, from outside A or inside it, moved
+along the face's normal by −4, −1 to 1 by quarters, and 4 tolerances
+(§18.5 planned −2 to 2). Every operation must pass the identities, the
+origins check and the oracle, or be refused; where B rests from outside
+inside A's face, A ∪ B must be refused as non-manifold at step 0, and
+from inside, A − B; moved four tolerances clear, that operation must
+not be refused as non-manifold. Sixty cases at the default run (2,640
+operations), six thousand at the hundredfold run (264,000); CI runs it
+at ten times, with the flat fuzz and the motions.
+
+*What it does not assert.* §18.1's "no trace" (a result equal, entity
+by entity, to the boolean with B moved clear) is asserted by the
+goldens, not by the fuzz: B rests on a random point, often near an edge
+of A, and leaves A's face across that edge, a second contact that moving
+B clear also removes, so the counts with B moved clear differ for
+reasons of their own. Within the band the counts do change: of the
+83,065 operations answered both at step 0 and at a step within three
+quarters of a tolerance of it, at the hundredfold run, 704 differ from
+step 0's counts, 619 of them by one edge and one vertex (an operand's
+edge left split near where B's edge meets it); 673 of the 704 differ
+the same way on main, 29 are operations main failed, and 2 differ on
+main by other counts. The results are valid and pass every check; they
+are not yet canonical under motions within the tolerance.
+
+**Known fault: a fin along a lying run between reflex corners.** A
+prism's face F tilted 10° to a box's top face G, crossing it along a
+line, with an edge of F lying on G's plane 5 tolerances beside that
+line, between two reflex corners of F past which F's boundary turns
+away and the line runs on inside F (the profile (−0.5, −0.5), (0, −5ε),
+(1, −5ε), (1.5, −0.5), (2, −0.5), (2, 0.5), (−0.5, 0.5), of `tilted` in
+`tests/touching.rs`, against `cuboid((−0.25, −1, −1), (1.25, 1, 0))`):
+the strip of F between the line and the edge lies within the tolerance
+of G, and A ∩ B is returned as the two wedges beyond the corners joined
+by a fin 5 tolerances wide and under a tolerance thick along the edge.
+It validates and passes the oracle (no edge of the fin comes within the
+tolerance of a face it does not bound). Main returns the same
+intersection, and in the union and the box minus the prism names
+origins that do not bound their entities; this slice answers those two
+correctly. Where the box's edge crosses the line beside the edge (the
+box from x = 0.2 to 0.8, or from −0.25 to 0.5) every operation is
+refused, as in golden 29. The end check of `plane_meeting` looks at the
+meeting's ends beside a run; the meeting here passes the run with both
+ends beyond it. Detecting it means deciding, for a meeting that passes
+beside a run on its face's side, between this fin and golden 28's
+reflex bend, whose triangle of F between the line and the run is
+absorbed into the exact contact's outcomes; that is the next step's
+first item, with a design note before the code.
+
+**Rates.** Refusals, at a hundred times the flat fuzzes' default runs
+and twenty times the curved ones', on main and on this slice:
+
+| fuzz | operations | main: refused | main: failed | slice: refused | slice: failed |
+|---|---|---|---|---|---|
+| random polyhedra | 120,000 | 47 | 0 | 47 | 0 |
+| motions by the tolerance | 28,000 | 10,004 | 0 | 10,004 | 0 |
+| contacts swept across the band | 264,000 | 53,168 | 24,571 | 80,627 (305.4 per thousand) | 0 |
+| random solids of planes and cylinders | 16,000 | 334 | 0 | 329 | 0 |
+
+The contact fuzz refuses 5,573 of its 24,000 operations at step 0, the
+exact contact (1,991 on main, which fails 3,582 more there), and 4,213
+and 2,841 at four tolerances either way (−4 and 4). The other curved
+families (cylinders at an angle, balls and cones about one axis, planes
+across cones, second cuts, chains of cuts) refuse the same operations as
+on main.
+
+**Outcome changes in the other fuzzes**, against main: in the flat fuzz
+and the motions, none. In the planes and cylinders at twenty times:
+pairs 1072 (a box's corner on the bottom of a rounded-square prism) and
+1733 (a box's corner on the bottom of a disc with a square hole), from
+inside, refused by main in all four operations as tangent contacts, now
+give three results and refuse the prism minus the box as touching at a
+point; pair 3493 is the fault on main above.
+`corners_of_boxes_resting_on_flat_faces_of_prisms` asserts all three.
+
+**Cost.** Instructions (callgrind, one run each) against main: a union
+of two 256-sided star prisms, 295.5 million to 311.9 million (+5.6%:
+`check_apart` 11.3 million, `build` 5.3 million against 3.8 million);
+64 pins cut one at a time, 2,168 million to 2,344 million (+8.1%:
+`check_apart` 95.5 million, `build` 68.5 million against 49.6 million).
+The guard and scaling check on the plate of flush pins are in
+docs/PERFORMANCE.md. Found while measuring, on main too and not changed
+here: `shape::shape` groups faces by surface with a linear search over
+the groups found so far, so its time grows with the faces times the
+distinct surfaces (14.5 times from 100 to 900 pins, against 9 times
+the pins; 82.8 million of the union's 1,739 million instructions at
+900).
+
+**What remains of slice 1**: the cut-pair filter (step 5), curved pairs
+(step 6), the Apart band (step 7), the contact time guards and the
+mutation checks beyond `check_apart` (step 8), the fin above, and the
+oracle's exact test of a point in a curved face.

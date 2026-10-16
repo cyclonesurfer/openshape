@@ -742,6 +742,16 @@ fn boolean_within(
     let boxes = [pair.first.extent(), pair.second.extent()];
     let mut pieces: Vec<Piece> = Vec::new();
     let mut contacts_in: Vec<assemble::Contact> = Vec::new();
+    // The middle of the first lying edge whose faces leave the face it
+    // lies on to both sides with nothing found to account for it
+    // ([`astride`]): a kernel error, reported once every face is split and
+    // classified, so that a later stage finding the input undecidable
+    // refuses it instead (the contact fuzz found a prism's face within the
+    // tolerance of a face of the other body over a band, refused at a
+    // piece's test point in one operand order and reaching such an edge
+    // first in the other).
+    let mut astride_at: Option<DVec3> = None;
+    let ends = Ends::default();
     for op in [Operand::First, Operand::Second] {
         let shape = pair.get(op);
         let them = pair.get(other(op));
@@ -792,21 +802,35 @@ fn boolean_within(
             }
             // The contacts each region holds (design note 0012 §18.2): as
             // places for the rule after selection, as obstacles its test
-            // point keeps away from, and with the sides and the wedge the
-            // cross-checks compare its class with.
+            // point keeps away from (with the first one's place, where a
+            // refusal for them is reported), and with the sides and the
+            // wedge the cross-checks compare its class with.
             let base = pieces.len();
             let mut obstacles: Vec<Vec<classify::Obstacle>> =
                 (0..split.regions.len()).map(|_| Vec::new()).collect();
+            let mut first: Vec<Option<DVec3>> = vec![None; split.regions.len()];
             let mut held: Vec<Vec<Held>> = (0..split.regions.len()).map(|_| Vec::new()).collect();
             let fault = edgeless_bridges(
                 &pair,
-                (&segs, &courses),
+                (&segs, &courses, &ends),
                 &edge_segs,
                 &pts,
                 &split.loose,
                 (op, fi, &face_segs[slot(op)][fi]),
                 tol,
             )?;
+            if let Some(m) = merged_chord(
+                (shape, them),
+                (&segs, &face_segs[slot(other(op))]),
+                &pts,
+                &split.loose,
+                (op, fi, &face_segs[slot(op)][fi]),
+            ) {
+                return Err(KernelError::InvalidInput(format!(
+                    "the bodies leave a sliver thinner than the tolerance near {}",
+                    show(m)
+                )));
+            }
             for l in &split.loose {
                 let holder = base + l.region;
                 match &l.kind {
@@ -831,7 +855,19 @@ fn boolean_within(
                             },
                         };
                         let n = outward(shape, f, m).normalize();
-                        let (sigma, convex) = wedge(them, e, n, m, tol)?;
+                        obstacles[l.region].push(classify::Obstacle {
+                            path: path.clone(),
+                            band: *band,
+                        });
+                        first[l.region].get_or_insert(m);
+                        let Some((sigma, convex)) = wedge(them, e, n, m, tol)? else {
+                            // No contact: the region's test point still
+                            // keeps away from the bridge, so that it cannot
+                            // be refused for lying on it.
+                            astride(shape, f, them, e, &segs, &pts, *seg, m, eps)?;
+                            astride_at.get_or_insert(m);
+                            continue;
+                        };
                         for p in places {
                             contacts_in.push(assemble::Contact {
                                 place: assemble::Place::Seg(p),
@@ -850,10 +886,6 @@ fn boolean_within(
                                 });
                             }
                         }
-                        obstacles[l.region].push(classify::Obstacle {
-                            path: path.clone(),
-                            band: *band,
-                        });
                         held[l.region].push(Held {
                             at: m,
                             sigma,
@@ -882,6 +914,7 @@ fn boolean_within(
                             path: vec![pos(c)],
                             band: 0.0,
                         });
+                        first[l.region].get_or_insert(pts.rep[c]);
                         held[l.region].push(Held {
                             at: pts.rep[c],
                             sigma,
@@ -913,17 +946,16 @@ fn boolean_within(
                 }
                 // A region holding contacts is tested at points away from
                 // them, best first.
-                let tests = if held[ri].is_empty() {
-                    vec![chart.unmap(inner)]
-                } else {
-                    avoiding(
+                let tests = match first[ri] {
+                    None => vec![chart.unmap(inner)],
+                    Some(near) => avoiding(
                         refined.as_ref().unwrap_or(&region),
                         &obstacles[ri],
                         &chart,
                         fi,
                         eps,
-                        held[ri][0].at,
-                    )?
+                        near,
+                    )?,
                 };
                 let at = tests[0];
                 let mut class = None;
@@ -959,10 +991,10 @@ fn boolean_within(
                     }
                 }
                 let boundary = &boundaries[slot(other(op))];
-                let class = match class {
-                    Some(c) => c,
-                    None if held[ri].is_empty() => boundary.classify(at, eps)?,
-                    None => holder_class(boundary, &tests, eps, held[ri][0].at)?,
+                let class = match (class, first[ri]) {
+                    (Some(c), _) => c,
+                    (None, None) => boundary.classify(at, eps)?,
+                    (None, Some(near)) => holder_class(boundary, &tests, eps, near)?,
                 };
                 if !held[ri].is_empty() {
                     cross_check(boundary, shape, f, class, &held[ri], eps)?;
@@ -976,6 +1008,12 @@ fn boolean_within(
                 });
             }
         }
+    }
+    if let Some(m) = astride_at {
+        return Err(KernelError::InvalidResult(format!(
+            "boolean: the faces at a lying edge leave the face it lies on to both sides near {}",
+            show(m)
+        )));
     }
     let coplanar: FxHashSet<(usize, usize)> = coplanar.into_iter().collect();
     let geometry = assemble::Geometry {
@@ -1022,8 +1060,9 @@ const HOLDER_TRIES: usize = 4;
 /// the other body but where [`merged`] finds [`Collapse::Leaves`] (an edge
 /// of the other body lying on the face, the bridge carrying the curves of
 /// its two faces and one end of the bridge on it): that edge, and its
-/// pieces from that end to its point nearest the bridge's other end, to be
-/// placed as the contact in the bridge's stead. In exact arithmetic the
+/// pieces from that end toward its point nearest the bridge's other end,
+/// up to the first point on the face's boundary, to be placed as the
+/// contact in the bridge's stead. In exact arithmetic the
 /// curves run along the edge to where it leaves the face, and the contact
 /// is the edge's; the tolerance has ended them a few tolerances from the
 /// edge's crossing of the face's boundary, which meets its neighbour at a
@@ -1031,9 +1070,14 @@ const HOLDER_TRIES: usize = 4;
 /// faces leave the face to the side its ends are on, or the ends are on the
 /// face: where an end lies on the other side, the faces cross the face's
 /// plane a few tolerances from the edge and the bridge is no contact.
-/// `None` then, where the faces are too shallow to tell the side, and where
-/// the edge's nearest point to the bridge's other end is the bridge's own
-/// end; [`edgeless_contact`] refuses those.
+/// `None` then, where the faces are too shallow to tell the side or leave
+/// the face to both sides (or the edge is not on two faces, which no valid
+/// operand has), and where the edge's nearest point to the bridge's other
+/// end is the bridge's own end; [`edgeless_contact`] refuses those. The
+/// test of the ends' side is a backstop: on flat faces the check of the
+/// meeting's ends (`imprint::plane_meeting`) refuses the cases found so far
+/// before a bridge forms (golden 22's crossing row), and no test, nor the
+/// contact fuzz at twenty times its default run, reaches it.
 fn lying_pieces(
     pair: &Pair,
     pts: &Points,
@@ -1056,7 +1100,7 @@ fn lying_pieces(
     let face = &shape.faces[f];
     let m = (pts.rep[s.a] + pts.rep[s.b]) * 0.5;
     let n = outward(shape, face, m).normalize();
-    let (sigma, _) = wedge(them, edge, n, m, tol).ok()?;
+    let (sigma, _) = wedge(them, edge, n, m, tol).ok().flatten()?;
     let (va, vb) = them.edges[edge];
     let height = |v: usize| {
         let d = shape.surfaces[face.surface].distance(them.points[v]);
@@ -1080,7 +1124,22 @@ fn lying_pieces(
     if ic == iv {
         return None;
     }
-    let (lo, hi) = (iv.min(ic), iv.max(ic));
+    // The contact ends where the edge leaves the face: near a corner of the
+    // face the bridge ends at the corner, and the edge's point nearest it
+    // can lie beyond the face's boundary, past where the edge crosses it a
+    // few tolerances from the corner (found by review).
+    let mut bounds: Vec<usize> = (face.loops.iter().flatten())
+        .flat_map(|&(e, _)| pts.on_edge(op, e).iter().copied())
+        .collect();
+    bounds.sort_unstable();
+    let mut end = iv;
+    while end != ic {
+        end = if ic > iv { end + 1 } else { end - 1 };
+        if bounds.binary_search(&list[end]).is_ok() {
+            break;
+        }
+    }
+    let (lo, hi) = (iv.min(end), iv.max(end));
     Some((edge, edge_segs[slot(other(op))][edge][lo..hi].to_vec()))
 }
 
@@ -1103,7 +1162,7 @@ fn carried(s: &Seg, op: Operand) -> Option<usize> {
 /// the face's other contacts, whose refusals as input come first.
 fn edgeless_bridges(
     pair: &Pair,
-    (segs, courses): (&Segments, &Courses),
+    (segs, courses, ends): (&Segments, &Courses, &Ends),
     edge_segs: &[Vec<Vec<usize>>; 2],
     pts: &Points,
     loose: &[planar::Loose],
@@ -1112,6 +1171,8 @@ fn edgeless_bridges(
 ) -> Result<Option<KernelError>, KernelError> {
     let eps = tol.linear;
     let mut fault = None;
+    // The face's segments, in order, sorted when first needed.
+    let mut own: Vec<usize> = Vec::new();
     for l in loose {
         let planar::LooseKind::Bridge { seg, free, .. } = &l.kind else {
             continue;
@@ -1126,7 +1187,12 @@ fn edgeless_bridges(
             Course::Straight => (pts.rep[s.a] + pts.rep[s.b]) * 0.5,
             course => courses.middle(course),
         };
-        match edgeless_contact(pair, segs, pts, (*seg, *free), (op, f, face), m, eps) {
+        if own.is_empty() {
+            own = face.iter().map(|fs| fs.seg).collect();
+            own.sort_unstable();
+        }
+        let near = (ends, &own[..]);
+        match edgeless_contact(pair, (segs, near), pts, (*seg, *free), (op, f), m, eps) {
             e @ KernelError::InvalidInput(_) => return Err(e),
             e => {
                 fault.get_or_insert(e);
@@ -1136,10 +1202,18 @@ fn edgeless_bridges(
     Ok(fault)
 }
 
+/// The refusal of an edge lying on a face that leaves it where the
+/// tolerance cannot place the point ([`edgeless_contact`],
+/// `imprint::plane_meeting` and `assemble::check_contacts`), followed by
+/// "near" and the point.
+const LEAVES_UNPLACED: &str =
+    "an edge of one body lies on a face of the other and leaves it at a point the tolerance \
+     cannot place";
+
 /// The error for a contact edge (a bridge, segment `seg` of face `f` of
 /// `op`, its middle `m`, `free` whether each end is off the face's loops)
-/// that carries no edge of the other body (design note 0012 §18.2,
-/// "Bridges with no edge"). In exact arithmetic a curve where the faces
+/// that carries no edge of the other body (design note 0012 §19, "Bridges
+/// with no edge"). In exact arithmetic a curve where the faces
 /// meet ends inside a face only where an edge of the other body lying on
 /// the face continues it, and that edge's pieces run along it; the curves
 /// of the other faces at a point of the other body's boundary pair up. A
@@ -1170,10 +1244,10 @@ fn edgeless_bridges(
 /// Anything else is a kernel error, a crossing curve left dangling.
 fn edgeless_contact(
     pair: &Pair,
-    segs: &Segments,
+    (segs, (ends, own)): (&Segments, (&Ends, &[usize])),
     pts: &Points,
     (seg, free): (usize, [bool; 2]),
-    (op, f, face): (Operand, usize, &[FaceSeg]),
+    (op, f): (Operand, usize),
     m: DVec3,
     eps: f64,
 ) -> KernelError {
@@ -1182,24 +1256,21 @@ fn edgeless_contact(
     let line = (b - a).normalize_or_zero();
     let off = |q: DVec3| (q - a).reject_from_normalized(line).length();
     let leaves = s.course == Course::Straight
-        && segs.list.iter().any(|t| {
-            let from = [t.a, t.b].iter().position(|&c| c == s.a || c == s.b);
-            t.course == Course::Straight
-                && from.is_some_and(|k| {
-                    let end = [t.b, t.a][k];
-                    end != s.a && end != s.b && off(pts.rep[end]) <= 2.0 * eps
-                })
-                && t.sources
-                    .iter()
-                    .any(|x| matches!(*x, Source::Edge(o, _) if o == other(op)))
+        && [s.a, s.b].into_iter().any(|c| {
+            ends.at(segs, c).iter().any(|&(_, t)| {
+                let t = &segs.list[t];
+                let end = if t.a == c { t.b } else { t.a };
+                t.course == Course::Straight
+                    && end != s.a
+                    && end != s.b
+                    && off(pts.rep[end]) <= 2.0 * eps
+                    && t.sources
+                        .iter()
+                        .any(|x| matches!(*x, Source::Edge(o, _) if o == other(op)))
+            })
         });
-    let leaves_at = |p: DVec3| {
-        KernelError::InvalidInput(format!(
-            "an edge of one body lies on a face of the other and leaves it at a point the \
-             tolerance cannot place near {}",
-            show(p)
-        ))
-    };
+    let leaves_at =
+        |p: DVec3| KernelError::InvalidInput(format!("{LEAVES_UNPLACED} near {}", show(p)));
     let sliver = |p: DVec3| {
         KernelError::InvalidInput(format!(
             "the bodies leave a sliver thinner than the tolerance near {}",
@@ -1219,7 +1290,7 @@ fn edgeless_contact(
             }
             None => {}
         }
-        if let Some(c) = lone_corner(pair, segs, pts, (s, free), (op, f, face)) {
+        if let Some(c) = lone_corner(pair, (segs, ends, own), pts, (s, free), (op, f)) {
             return sliver(pts.rep[c]);
         }
     }
@@ -1227,6 +1298,68 @@ fn edgeless_contact(
         "boolean: a contact edge carries no edge of the other body near {}",
         show(m)
     ))
+}
+
+/// The middle of a straight segment that bounds regions of the flat face
+/// `f` of `op` (whose segments are `face` and loose items `loose`) and
+/// carries only the curves where the face meets two faces of the other
+/// body (`them`, whose faces' segments are `theirs`) that bound regions of
+/// those faces too, where the edge the two faces share crosses the face's
+/// plane, its ends more than the tolerance to either side. The two faces
+/// then cross the plane along two lines through the edge's crossing, and
+/// the body's section between them, for which the segment stands, is
+/// thinner than the tolerance all along it: a sliver. Found by review: a
+/// thin wedge's edge crossing the face a few tolerances from a corner, the
+/// curves of its two faces ending within the tolerance of each other on
+/// the corner's other edge; the result had the two faces meet along that
+/// segment, an edge of neither body. Curves from faces whose edge lies on
+/// the face's plane are a copy of the edge the tolerance made beside it,
+/// and the cases that hold them decide them (goldens 20 and 21); a bridge
+/// carrying such curves is judged by [`edgeless_contact`].
+fn merged_chord(
+    (shape, them): (&Shape, &Shape),
+    (segs, theirs): (&Segments, &[Vec<FaceSeg>]),
+    pts: &Points,
+    loose: &[planar::Loose],
+    (op, f, face): (Operand, usize, &[FaceSeg]),
+) -> Option<DVec3> {
+    let surface = shape.faces[f].surface;
+    if !matches!(shape.surfaces[surface], quadric::Quadric::Plane { .. }) {
+        return None;
+    }
+    let bridge = |seg: usize| {
+        loose
+            .iter()
+            .any(|l| matches!(l.kind, planar::LooseKind::Bridge { seg: b, .. } if b == seg))
+    };
+    let holds = |x: usize, seg: usize| theirs[x].iter().any(|t| t.seg == seg);
+    face.iter().find_map(|fs| {
+        let s = &segs.list[fs.seg];
+        if s.course != Course::Straight || !s.sources.iter().all(|x| matches!(x, Source::Meet(..)))
+        {
+            return None;
+        }
+        let met = met_faces(s, op, f);
+        // Two faces met that share an edge crossing the plane, both
+        // bounding regions along the segment. The edges looked at are
+        // those of the face with fewer.
+        let crossed = (met.iter().enumerate()).any(|(i, &x)| {
+            met[i + 1..].iter().any(|&y| {
+                let (few, rest) = if them.faces[x].coedges() <= them.faces[y].coedges() {
+                    (x, y)
+                } else {
+                    (y, x)
+                };
+                let cross = them.faces[few].loops.iter().flatten().any(|&(e, _)| {
+                    let (va, vb) = them.edges[e];
+                    (them.edge_faces(e).iter()).any(|&(g, _)| g == rest)
+                        && pts.sign(other(op), va, surface) * pts.sign(other(op), vb, surface) < 0
+                });
+                cross && holds(x, fs.seg) && holds(y, fs.seg)
+            })
+        });
+        (crossed && !bridge(fs.seg)).then(|| (pts.rep[s.a] + pts.rep[s.b]) * 0.5)
+    })
 }
 
 /// The faces of the other body whose meetings with face `f` of `op`
@@ -1313,46 +1446,62 @@ fn merged(pair: &Pair, pts: &Points, s: &Seg, op: Operand, f: usize) -> Option<C
 }
 
 /// The ends of bridge `s` (with whether each is off the face's loops)
-/// where no other of the face's segments `face` ends.
+/// where no other of the face's segments (`own`, in order) ends.
 fn lone_ends<'s>(
-    segs: &'s Segments,
+    (segs, ends, own): (&'s Segments, &'s Ends, &'s [usize]),
     (s, free): (&'s Seg, [bool; 2]),
-    face: &'s [FaceSeg],
 ) -> impl Iterator<Item = usize> + 's {
     [s.a, s.b]
         .into_iter()
         .zip(free)
         .filter_map(move |(c, free)| {
-            let mut at: Vec<usize> = face
-                .iter()
-                .filter(|fs| {
-                    let t = &segs.list[fs.seg];
-                    t.a == c || t.b == c
-                })
-                .map(|fs| fs.seg)
-                .collect();
-            at.sort_unstable();
-            at.dedup();
-            (free && at.len() == 1).then_some(c)
+            let at = (ends.at(segs, c).iter())
+                .filter(|&&(_, t)| own.binary_search(&t).is_ok())
+                .count();
+            (free && at == 1).then_some(c)
         })
 }
 
+/// The segments ending at each cluster, as (cluster, segment) pairs in
+/// order, built when first needed: by the refusals of bridges that carry
+/// no edge, a path most booleans never take, which would otherwise look
+/// through every segment for each such bridge.
+#[derive(Default)]
+struct Ends(std::cell::OnceCell<Vec<(usize, usize)>>);
+
+impl Ends {
+    /// The (cluster, segment) pairs of the segments ending at cluster `c`.
+    fn at(&self, segs: &Segments, c: usize) -> &[(usize, usize)] {
+        let all = self.0.get_or_init(|| {
+            let mut v: Vec<(usize, usize)> = (segs.list.iter().enumerate())
+                .flat_map(|(i, t)| [(t.a, i), (t.b, i)])
+                .collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        });
+        let lo = all.partition_point(|&(x, _)| x < c);
+        let hi = all.partition_point(|&(x, _)| x <= c);
+        &all[lo..hi]
+    }
+}
+
 /// For a straight bridge `s` (with whether each end is off the face's
-/// loops) in face `f` of `op`, whose segments are `face`: an end of it
+/// loops) in face `f` of `op`, whose segments are `own`: an end of it
 /// off the loops where no other segment of the face ends, holding a vertex
 /// of the other body within the tolerance of `f`'s surface that a face the
 /// bridge meets has as a corner. `None` if there is none.
 fn lone_corner(
     pair: &Pair,
-    segs: &Segments,
+    (segs, ends, own): (&Segments, &Ends, &[usize]),
     pts: &Points,
     (s, free): (&Seg, [bool; 2]),
-    (op, f, face): (Operand, usize, &[FaceSeg]),
+    (op, f): (Operand, usize),
 ) -> Option<usize> {
     let met = met_faces(s, op, f);
     let them = pair.get(other(op));
     let surface = pair.get(op).faces[f].surface;
-    lone_ends(segs, (s, free), face).find(|&c| {
+    lone_ends((segs, ends, own), (s, free)).find(|&c| {
         let (first, second) = pts.vertices_of(c);
         let v = match op {
             Operand::First => second,
@@ -1374,18 +1523,19 @@ fn lone_corner(
 /// For an edge `e` of `shape` lying on a face of the other operand whose
 /// unit outward normal at `m` (a point of the edge) is `n`: the side of
 /// that face the edge's two faces leave it to (+1 outward), and whether
-/// the edge is convex, `None` where its faces are too nearly flat to tell.
-/// The direction into each face across the edge is its outward normal
-/// crossed with the edge's direction as the face's loop runs it (material
-/// on the left); one within the angular tolerance of the touched face's
-/// plane is refused.
+/// the edge is convex, `None` where its faces are too nearly flat to tell;
+/// `None` in place of both where the two faces leave it to different
+/// sides ([`astride`] decides those). The direction into each face across
+/// the edge is its outward normal crossed with the edge's direction as the
+/// face's loop runs it (material on the left); one within the angular
+/// tolerance of the touched face's plane is refused.
 fn wedge(
     shape: &Shape,
     e: usize,
     n: DVec3,
     m: DVec3,
     tol: &Tolerance,
-) -> Result<(i8, Option<bool>), KernelError> {
+) -> Result<Option<(i8, Option<bool>)>, KernelError> {
     let along = if shape.straight[e] {
         let (a, b) = shape.edge_points(e);
         (b - a).normalize()
@@ -1407,7 +1557,7 @@ fn wedge(
         let nk = outward(shape, &shape.faces[fi], m).normalize();
         let r = nk.cross(if fw { along } else { -along });
         let d = n.dot(r);
-        if !(d.abs() >= tol.angular) {
+        if d.is_nan() || d.abs() < tol.angular {
             return Err(KernelError::InvalidInput(format!(
                 "the bodies touch at an angle too shallow for the tolerance near {}",
                 show(m)
@@ -1418,13 +1568,64 @@ fn wedge(
         normals[k] = nk;
     }
     if sides[0] != sides[1] {
-        return Err(KernelError::InvalidResult(format!(
-            "boolean: the faces at a lying edge leave the face it lies on to both sides near {}",
+        return Ok(None);
+    }
+    let c = normals[0].dot(into[1]);
+    Ok(Some((
+        sides[0],
+        (c.abs() >= tol.angular).then_some(c < 0.0),
+    )))
+}
+
+/// A bridge `seg` (middle `m`) of face `f` of `shape` carrying edge `e` of
+/// the other operand `them`, whose two faces leave the face to both sides:
+/// the other body crosses the face along the bridge, so the face holds a
+/// region inside that body beside it, which the split did not find. Where
+/// the edge does not lie on the face's surface (an end of it is farther
+/// than the tolerance from it) while the bridge's ends and middle are
+/// within twice the tolerance of it, the bridge is the stretch of an edge
+/// crossing the surface at a slant between two points the tolerance puts
+/// on the face, a few tolerances apart: a corner of one body within the
+/// tolerance of an edge of the other, and where that edge crosses a face
+/// at the corner (found by the contact fuzz, design note 0012 §19: a
+/// box's corner resting by a face's edge, the edge crossing one of the
+/// box's faces a few tolerances from the corner). The tolerance does not
+/// decide where the edge leaves the face, and the boolean is refused.
+/// Anything else, a curved bridge included, is left to the caller as a
+/// kernel error.
+#[allow(clippy::too_many_arguments)]
+fn astride(
+    shape: &Shape,
+    f: &shape::Face,
+    them: &Shape,
+    e: usize,
+    segs: &Segments,
+    pts: &Points,
+    seg: usize,
+    m: DVec3,
+    eps: f64,
+) -> Result<(), KernelError> {
+    let s = &segs.list[seg];
+    if s.course != Course::Straight {
+        return Ok(());
+    }
+    let surface = &shape.surfaces[f.surface];
+    let off = |p: DVec3| surface.distance(p).abs();
+    if [pts.rep[s.a], m, pts.rep[s.b]]
+        .iter()
+        .any(|&p| off(p) > 2.0 * eps)
+    {
+        return Ok(());
+    }
+    let (ea, eb) = them.edge_points(e);
+    if off(ea) > eps || off(eb) > eps {
+        return Err(KernelError::InvalidInput(format!(
+            "an edge of one body runs within the tolerance of a face of the other over a \
+             stretch without lying on it, near {}",
             show(m)
         )));
     }
-    let c = normals[0].dot(into[1]);
-    Ok((sides[0], (c.abs() >= tol.angular).then_some(c < 0.0)))
+    Ok(())
 }
 
 /// Test points in `region` of face `face` away from its contacts
@@ -1527,6 +1728,10 @@ fn cross_check(
     Ok(())
 }
 
+/// A face's isolated touched points, by face: each point's cluster and
+/// the side the touching boundary lies on (+1 outside).
+type Touches = FxHashMap<usize, Vec<(usize, i8)>>;
+
 /// The isolated points of each face that the other body's boundary
 /// touches (design note 0012 §18.2), per operand by face, each with its
 /// cluster and the side the touching boundary lies on (+1 outside), by
@@ -1543,7 +1748,7 @@ fn settle_touches(
     segs: &Segments,
     face_segs: &[Vec<Vec<FaceSeg>>; 2],
     mut touched: Vec<imprint::Touched>,
-) -> Result<[FxHashMap<usize, Vec<(usize, i8)>>; 2], KernelError> {
+) -> Result<[Touches; 2], KernelError> {
     let key = |t: &imprint::Touched| (slot(t.op), t.face, t.cluster, t.mark, t.side);
     touched.sort_by_key(key);
     touched.dedup_by_key(|t| key(t));

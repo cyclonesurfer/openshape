@@ -227,22 +227,25 @@ pub trait Kernel: Send + Sync {
     /// Revolves a planar profile about an axis lying in its plane.
     fn revolve(&self, profile: &Profile, spec: &RevolveSpec) -> Result<Self::Body, KernelError>;
 
-    /// The union, intersection or difference (`a − b`) of two bodies
-    /// (design note 0012, ADR 0020). The result's origins refer to the
-    /// operands' faces, edges and vertices. Fails with
-    /// [`KernelError::InvalidInput`] when the result would be empty or
-    /// non-manifold (the bodies touching only along an edge or at a
-    /// point), or the bodies lie too far from the origin for the tolerance
-    /// (rounding keeps a curved edge's course from being resolved within
-    /// it), and with [`KernelError::Unsupported`] for what is not
-    /// handled yet: faces other than planes, circular cylinders, spheres
-    /// and cones; faces that meet in a quartic curve (cylinders, cones and
-    /// spheres off each other's axes); faces that touch without crossing
-    /// (tangent contacts); a plane through or very near the apex of a
-    /// cone where faces reach it; a result with an edge passing within the
-    /// tolerance of a turned face's centre, a cone's apex or a sphere's
-    /// pole; and an operand with a NURBS edge of degree above five, or one
-    /// on a sphere. Conics an earlier cut left on cylinders and cones are
+    /// The union, intersection or difference (`a − b`) of two bodies (design
+    /// note 0012, ADRs 0020 and 0024). The result's origins refer to the
+    /// operands' faces, edges and vertices. An edge or a corner of one body
+    /// resting on a flat face of the other without crossing it, the faces there
+    /// all flat, leaves no trace in the result, unless the result would pinch
+    /// there. Fails with [`KernelError::InvalidInput`] when the result would be
+    /// empty or non-manifold (the bodies touching only along an edge or at a
+    /// point, or such a contact pinching the result), where the tolerance
+    /// cannot place a contact, or the bodies lie too far from the origin for
+    /// the tolerance (rounding keeps a curved edge's course from being resolved
+    /// within it), and with [`KernelError::Unsupported`] for what is not
+    /// handled yet: faces other than planes, circular cylinders, spheres and
+    /// cones; faces that meet in a quartic curve (cylinders, cones and spheres
+    /// off each other's axes); bodies touching without crossing where a face at
+    /// the contact is curved (tangent contacts); a plane through or very near
+    /// the apex of a cone where faces reach it; a result with an edge passing
+    /// within the tolerance of a turned face's centre, a cone's apex or a
+    /// sphere's pole; and an operand with a NURBS edge of degree above five, or
+    /// one on a sphere. Conics an earlier cut left on cylinders and cones are
     /// followed as stored (ADR 0023).
     fn boolean(
         &self,

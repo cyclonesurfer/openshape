@@ -259,6 +259,22 @@ fn booleans() {
     });
     assert_eq!(k().topology(&body).faces, 6 + 64 * 4);
     within("cut 64 holes into a box one at a time", t, LIMIT.pins_64);
+    // A box across a corner of a plate whose 20 by 20 square holes each
+    // hold a pin flush with it: the result's places are checked against
+    // the plate's top face, whose 400 holes lie around 400 islands (found
+    // by review, where each point's parity test crossed every hole in its
+    // row).
+    let (pinned, corner) = (pinned_plate(20), corner_box());
+    let (r, t) = best(3, || {
+        k().boolean(&pinned, &corner, BooleanOp::Union)
+            .expect("a union")
+    });
+    assert_eq!(k().topology(&r).faces, 12 + 10 * 400);
+    within(
+        "union of a box with a corner of a plate of 400 flush pins",
+        t,
+        LIMIT.pinned_400,
+    );
 }
 
 /// A cylinder of radius `r` about `(x, y)`, from `z0` up `h`.
@@ -794,6 +810,21 @@ fn scaling() {
         },
     );
 
+    let (p7, p20, corner) = (pinned_plate(7), pinned_plate(20), corner_box());
+    scales(
+        "union of a box with a corner of a plate of flush pins, 49 to 400 pins",
+        400.0 / 49.0,
+        5,
+        || {
+            k().boolean(&p7, &corner, BooleanOp::Union)
+                .expect("a union")
+        },
+        || {
+            k().boolean(&p20, &corner, BooleanOp::Union)
+                .expect("a union")
+        },
+    );
+
     // A ball meshed eight times as finely: on a doubly curved face the
     // triangles grow as the tolerance shrinks.
     let b = ball(DVec3::ZERO, 1.0);
@@ -826,6 +857,7 @@ struct Limits {
     mesh_plate: f64,
     boolean_256: f64,
     pins_64: f64,
+    pinned_400: f64,
     drill_64: f64,
     plate_box: f64,
     dimple_16: f64,
@@ -860,6 +892,7 @@ const LIMIT: Limits = Limits {
     mesh_plate: 2500.0,
     boolean_256: 500.0,
     pins_64: 3000.0,
+    pinned_400: 1000.0,
     drill_64: 10000.0,
     plate_box: 600.0,
     dimple_16: 900.0,
@@ -876,3 +909,43 @@ const LIMIT: Limits = Limits {
     creased: [150.0, 5000.0, 4000.0, 150.0],
     regions_122: 1200.0,
 };
+
+/// A plate with an `m` by `m` grid of square holes, each holding a square
+/// pin flush with it: islands on its top and bottom.
+fn pinned_plate(m: usize) -> Body {
+    let sq = |lo: f64, hi: f64, x: f64, y: f64| {
+        Profile::rectangle(
+            Frame::WORLD,
+            DVec2::new(x + lo, y + lo),
+            DVec2::new(x + hi, y + hi),
+        )
+    };
+    let mut p = Profile::rectangle(Frame::WORLD, DVec2::ZERO, DVec2::splat(m as f64));
+    for i in 0..m {
+        for j in 0..m {
+            let (x, y) = (i as f64, j as f64);
+            p = p.with(sq(0.2, 0.8, x, y)).with(sq(0.35, 0.65, x, y));
+        }
+    }
+    k().extrude(
+        &p,
+        &ExtrudeSpec {
+            distance: 1.0,
+            symmetric: false,
+        },
+    )
+    .expect("a pinned plate")
+}
+
+/// A box across the corner of [`pinned_plate`] at the origin, through its
+/// top face.
+fn corner_box() -> Body {
+    k().make_box(
+        &Frame {
+            origin: DVec3::new(-0.5, -0.5, 0.5),
+            ..Frame::WORLD
+        },
+        DVec3::splat(0.6),
+    )
+    .expect("a box")
+}

@@ -199,6 +199,37 @@ Trumbore & Hughes 1986).
   and a grid of 256 corners to twice the time of the same bodies
   crossing, with a scaling check and a limit on the number of contacts.
 
+## As built: slice 1 on flat faces (2026-10-16)
+
+Design note 0012 §19 records the build, with its departures from
+§18.2. For edges and corners resting on flat faces, decisions 2 and 3
+hold as written and decision 1 as built there; the cut-pair filter,
+curved pairs and the Apart band (§18.6 steps 5 to 7) are not built, so
+a contact where a face is curved is still refused as a tangent contact.
+Three additions, each from a fault the tests found:
+
+* **A backstop on every result** (`check_apart`): a place of the result
+  within the tolerance of an exact face (planar, its loops straight) it
+  is not on is refused as non-manifold there, so a contact that a
+  decision at the edge of the tolerance let through is refused, never
+  returned. Sharp corners a segment leaves are let off by three rules
+  that §19 lists, each pinned by a test that fails without it.
+* **Refusals for contacts the tolerance cannot place**: an edge lying on
+  a face and leaving it where the tolerance cannot place the point, and
+  a corner within the tolerance of two faces away from their edge, both
+  `InvalidInput` with the place.
+* **Origins of joined edges** keep only the sources that run along all
+  of the joined edge (`join_sources`), which decision 3 implies but did
+  not say.
+
+Of the consequences, the time guards of contacts (the comb and the
+grid) and the mutation checks beyond `check_apart` are not yet built;
+the rates are re-baselined (§19: at a hundred times its run the contact
+fuzz refuses 80,627 of 264,000 operations, where main refuses 53,168
+and fails 24,571). One fault is known and not fixed: a fin under the
+tolerance thick along an edge that lies beside a crossing between two
+reflex corners, returned as on main (§19).
+
 ## References
 
 * A. A. G. Requicha, "Representations for rigid solids: theory, methods,

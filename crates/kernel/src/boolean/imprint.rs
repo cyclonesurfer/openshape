@@ -786,14 +786,28 @@ struct Interval {
 /// where they meet at a slant, and the other face's boundary crosses that
 /// line, not the run: the run then leaves the other face at one point and
 /// the faces' meeting ends at another, more than the tolerance from the
-/// run. Beside the run on its face's side, the stretch would bound a
-/// sliver of that face between it and the run that no face of the other
-/// body bounds (found by the contact fuzz: the edge of a prism resting
-/// within the tolerance on a face and crossing its boundary, its faces
-/// rising at a slant); that is refused as input ([`unplaced_leaving`]).
-/// Beside it off its face, the stretch lies off that face, whose split
-/// drops it, and splits the other face into pieces of one class, which the
-/// result joins again; it is kept.
+/// run. Beside the run on its face's side, or within the tolerance of its
+/// line, the stretch would bound a sliver of that face between it and the
+/// run that no face of the other body bounds (found by the contact fuzz:
+/// the edge of a prism resting within the tolerance on a face and crossing
+/// its boundary, its faces rising at a slant); that is refused as input
+/// ([`unplaced_leaving`]), as the face's planar split could not place it
+/// either. Beyond that off its face, the stretch lies off that face, whose
+/// split drops it, and it is kept: it splits the other face into pieces of
+/// one class, which the result joins again, or, where it ends inside that
+/// face, it is a bridge there carrying no edge, which
+/// [`super::lying_pieces`] places on the run as the contact (golden 22). The same holds where the run
+/// is only a part of the face's interval, the line going on into the face
+/// past a reflex corner at an end of the run or the run being an edge of a
+/// hole, for an end of the stretch beside the run (found by review: the
+/// stretch there bounded a fin of the two faces thinner than the
+/// tolerance). The side is taken from the run's edge nearest the end,
+/// since a run of several edges can bend within the tolerance of the plane
+/// (found by review). Where both intervals are runs (an edge of each face
+/// on the other's plane, the planes meeting at a slight angle), the ends
+/// are the runs' own vertices, not crossings of a plane, and are not
+/// checked here: the faces then lie within the tolerance of each other
+/// over a band, which classifying their pieces refuses.
 pub(super) fn plane_meeting(
     pair: &Pair,
     pts: &Points,
@@ -821,30 +835,37 @@ pub(super) fn plane_meeting(
                     (Operand::Second, fb, a.surface, y),
                 ];
                 let runs =
-                    spans.map(|(op, f, surface, iv)| lying_run(pair, pts, op, f, surface, iv));
+                    spans.map(|(op, f, surface, iv)| lying_runs(pair, pts, op, f, surface, iv));
                 for (k, &(op, f, _, own)) in spans.iter().enumerate() {
-                    // Where the other span is a run as well (an edge of
-                    // each face on the other's plane, as where the planes
-                    // meet at a slight angle), the ends it gives are its
-                    // run's own vertices, not crossings of the plane.
-                    let (Some(run), None) = (&runs[k], &runs[1 - k]) else {
+                    // Where the other span is a run as well, the ends it
+                    // gives are its run's own vertices.
+                    if runs[1 - k].iter().any(|r| r.exact) {
                         continue;
-                    };
+                    }
                     let theirs = [lo.1, hi.1]
                         .into_iter()
                         .filter(|&c| c != own.lo.1 && c != own.hi.1);
                     for c in theirs {
-                        if run.edges.iter().any(|&e| pts.on_edge(op, e).contains(&c)) {
-                            continue;
-                        }
-                        // The side of the run's face the end is on: the
-                        // direction into the face across the run is the
-                        // face's outward normal crossed with the run's
-                        // direction as its loop runs it.
-                        let face = &pair.get(op).faces[f];
-                        let into = face.normal().cross(run.to - run.from).normalize();
-                        if (pts.rep[c] - run.from).dot(into) > -eps {
-                            return Err(unplaced_leaving(pts.rep[c]));
+                        let p = pts.rep[c];
+                        for run in &runs[k] {
+                            let (r0, r1) = run.stretch(dir);
+                            if p.dot(dir) < r0 - eps
+                                || p.dot(dir) > r1 + eps
+                                || run.edges.iter().any(|&e| pts.on_edge(op, e).contains(&c))
+                            {
+                                continue;
+                            }
+                            // The side of the run's face the end is on: the
+                            // direction into the face across the run's
+                            // edge nearest it is the face's outward normal
+                            // crossed with the edge's direction as its
+                            // loop runs it.
+                            let (a, b) = run.nearest(p);
+                            let face = &pair.get(op).faces[f];
+                            let into = face.normal().cross(b - a).normalize();
+                            if (p - a).dot(into) > -eps {
+                                return Err(unplaced_leaving(p));
+                            }
                         }
                     }
                 }
@@ -858,38 +879,56 @@ pub(super) fn plane_meeting(
 /// The refusal of an edge of one body lying on a face of the other that
 /// leaves the face where the tolerance cannot place the point, near `p`.
 fn unplaced_leaving(p: DVec3) -> KernelError {
-    KernelError::InvalidInput(format!(
-        "an edge of one body lies on a face of the other and leaves it at a point the \
-         tolerance cannot place near {}",
-        show(p)
-    ))
+    KernelError::InvalidInput(format!("{} near {}", super::LEAVES_UNPLACED, show(p)))
 }
 
 /// A run of consecutive straight edges of a face's loop lying on a plane
-/// of the other operand ([`lying_run`]).
+/// of the other operand ([`lying_runs`]).
 struct Run {
     /// Its edges, in loop order.
     edges: Vec<usize>,
-    /// The places of the vertices it starts and ends at, in loop order.
-    from: DVec3,
-    to: DVec3,
+    /// The places of its vertices, in loop order (one more than its edges).
+    points: Vec<DVec3>,
+    /// True if the run is the whole interval of its face on the line, from
+    /// the cluster at one end of it to the cluster at the other.
+    exact: bool,
 }
 
-/// The run that the interval `iv` of face `f` of `op` on the common line
-/// with plane `surface` (of the other operand) runs along: consecutive
-/// straight edges of one of its loops whose vertices are all within the
-/// tolerance of the plane, from the cluster at one end of `iv` to the
-/// cluster at the other. `None` if `iv` is no such run. Only the coedges
-/// near the plane are looked at, and only when both ends of `iv` hold a
-/// vertex of `op`.
-fn lying_run(
+impl Run {
+    /// The least and greatest positions of its vertices along `dir`.
+    fn stretch(&self, dir: DVec3) -> (f64, f64) {
+        (self.points.iter()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+            let t = p.dot(dir);
+            (lo.min(t), hi.max(t))
+        })
+    }
+
+    /// The ends of its edge nearest `p`, in loop order (the first of
+    /// those equally near).
+    fn nearest(&self, p: DVec3) -> (DVec3, DVec3) {
+        let ends = |k: usize| (self.points[k], self.points[k + 1]);
+        let d = |k: usize| {
+            let (a, b) = ends(k);
+            points::segment_distance(p, a, b)
+        };
+        ends((0..self.edges.len()).fold(0, |best, k| if d(k) < d(best) { k } else { best }))
+    }
+}
+
+/// The runs of face `f` of `op` lying on plane `surface` of the other
+/// operand: consecutive straight edges of one of its loops whose vertices
+/// are all within the tolerance of the plane, each marked exact where the
+/// interval `iv` of the face on the planes' common line runs along it from
+/// the cluster at one end to the cluster at the other. Only the coedges
+/// near the plane are looked at.
+fn lying_runs(
     pair: &Pair,
     pts: &Points,
     op: Operand,
     f: usize,
     surface: usize,
     iv: &Interval,
-) -> Option<Run> {
+) -> Vec<Run> {
     let ends = [iv.lo.1, iv.hi.1];
     let holds = |c: usize| {
         let (v0, v1) = pts.vertices_of(c);
@@ -898,9 +937,8 @@ fn lying_run(
             Operand::Second => v1.is_some(),
         }
     };
-    if !ends.iter().all(|&c| holds(c)) {
-        return None;
-    }
+    let held = ends.iter().all(|&c| holds(c));
+    let mut runs = Vec::new();
     let shape = pair.get(op);
     let face = &shape.faces[f];
     let lies = |li: usize, i: usize| {
@@ -921,23 +959,24 @@ fn lying_run(
         if !lies(li, i) || lies(li, (i + n - 1) % n) {
             continue;
         }
+        let vs = &face.verts[li];
         let mut edges = Vec::new();
+        let mut points = vec![shape.points[vs[i]]];
         let mut j = i;
         while edges.len() < n && lies(li, j) {
             edges.push(face.loops[li][j].0);
             j = (j + 1) % n;
+            points.push(shape.points[vs[j]]);
         }
-        let vs = &face.verts[li];
         let (s, t) = (pts.vertex_cluster(op, vs[i]), pts.vertex_cluster(op, vs[j]));
-        if (s, t) == (ends[0], ends[1]) || (t, s) == (ends[0], ends[1]) {
-            return Some(Run {
-                edges,
-                from: shape.points[vs[i]],
-                to: shape.points[vs[j]],
-            });
-        }
+        let exact = held && ((s, t) == (ends[0], ends[1]) || (t, s) == (ends[0], ends[1]));
+        runs.push(Run {
+            edges,
+            points,
+            exact,
+        });
     }
-    None
+    runs
 }
 
 fn compare(

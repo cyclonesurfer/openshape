@@ -54,13 +54,80 @@ pub fn triangle_distance(p: DVec3, a: DVec3, b: DVec3, c: DVec3) -> f64 {
     (p - (a + ab * v + ac * w)).length()
 }
 
+/// The closest points of the segments `p1 q1` and `p2 q2`: the point on the
+/// first and its distance from the second (Ericson, *Real-Time Collision
+/// Detection*, 2005, §5.1.9).
+pub fn segment_distance(p1: DVec3, q1: DVec3, p2: DVec3, q2: DVec3) -> (DVec3, f64) {
+    let (d1, d2, r) = (q1 - p1, q2 - p2, p1 - p2);
+    let (a, e, f) = (d1.dot(d1), d2.dot(d2), d2.dot(r));
+    let tiny = f64::MIN_POSITIVE;
+    let (s, t) = if a <= tiny && e <= tiny {
+        (0.0, 0.0)
+    } else if a <= tiny {
+        (0.0, (f / e).clamp(0.0, 1.0))
+    } else {
+        let c = d1.dot(r);
+        if e <= tiny {
+            ((-c / a).clamp(0.0, 1.0), 0.0)
+        } else {
+            let b = d1.dot(d2);
+            let denom = a * e - b * b;
+            let s = if denom > 0.0 {
+                ((b * f - c * e) / denom).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let t = (b * s + f) / e;
+            if t < 0.0 {
+                ((-c / a).clamp(0.0, 1.0), 0.0)
+            } else if t > 1.0 {
+                (((b - c) / a).clamp(0.0, 1.0), 1.0)
+            } else {
+                (s, t)
+            }
+        }
+    };
+    let x = p1 + d1 * s;
+    (x, (x - (p2 + d2 * t)).length())
+}
+
+/// The point of the segment `p q` nearest the triangle `a b c`, and its
+/// distance. Where they do not meet, the nearest points are an end of the
+/// segment and the triangle, or the segment and a side of the triangle;
+/// where the segment crosses the triangle's plane, the crossing is tried
+/// too, and is at no distance if it is inside the triangle.
+pub fn segment_triangle_distance((p, q): (DVec3, DVec3), [a, b, c]: [DVec3; 3]) -> (DVec3, f64) {
+    let mut best = (p, triangle_distance(p, a, b, c));
+    let mut take = |x: (DVec3, f64)| {
+        if x.1 < best.1 {
+            best = x;
+        }
+    };
+    take((q, triangle_distance(q, a, b, c)));
+    for (u, v) in [(a, b), (b, c), (c, a)] {
+        take(segment_distance(p, q, u, v));
+    }
+    let n = (b - a).cross(c - a);
+    let (dp, dq) = ((p - a).dot(n), (q - a).dot(n));
+    if (dp <= 0.0) != (dq <= 0.0) || dp == 0.0 {
+        let x = if dp == dq {
+            p
+        } else {
+            p + (q - p) * (dp / (dp - dq))
+        };
+        take((x, triangle_distance(x, a, b, c)));
+    }
+    best
+}
+
 /// Where `r` touches itself, if it does: the first point (by edge, then
 /// along it) of an edge's mesh polyline, or the middle of one of its
 /// segments, within half the tolerance of a face that is not along the
 /// edge there (a face the edge does not bound and, for a point within the
 /// tolerance of one of the edge's ends, that is not at that end: every
-/// point that near a vertex is that near each face at it), meshed by
-/// `opts`.
+/// point that near a vertex is that near each face at it; nor a flat face
+/// that a straight edge leaves at a corner, [`touches_itself_in`]), meshed
+/// by `opts`.
 pub fn touches_itself(
     k: &BrepKernel,
     r: &Body,
@@ -75,12 +142,33 @@ pub fn touches_itself(
 /// plane: its corners are the result's vertices, which may be off the
 /// plane by up to the tolerance, so the mesh as made can lean towards a
 /// point the face itself is a tolerance from. Moved, the mesh of a flat
-/// face bounded by straight edges is the face, and decides alone. For any
-/// other face, a
-/// point within `chord` and half the tolerance of its mesh is a candidate,
-/// confirmed by its distance to the face's surface; so a point on the
-/// surface just outside such a face, within `chord` of its boundary, would
-/// be reported too (none has been seen).
+/// face bounded by straight edges is the face, and decides alone.
+///
+/// A straight edge is measured against such a face whole, not at sample
+/// points, where the face has no corner at the edge's ends: its nearest
+/// point to the face's triangles, wherever along it that is. (The booleans'
+/// own check of their results, `check_apart`, tests the ends and the middle
+/// of each edge; this keeps the oracle from sharing that blind spot.) Where
+/// the face has a corner at an end, the edge leaves that corner and comes
+/// within half the tolerance of the face for half the tolerance over the
+/// sine of the angle between them, which no fixed distance from the corner
+/// excuses. Where the edge's other end is more than the tolerance from the
+/// face's plane, the edge leaves the face at that corner (crossing its
+/// plane at a slant, if at all, where the tolerance puts the crossing at
+/// the corner) and the face is let off: a straight line is near a plane
+/// only over one stretch, and this one is the corner's. The booleans' own
+/// check lets these corners off for the same reason, so the oracle cannot
+/// find a fault there; it reported three results of the contact fuzz at a
+/// hundred times its default run that are of this kind (contacts 1335,
+/// 2714 and 5358, `sharp_corners_the_check_of_places_lets_off`). Where the
+/// other end is within the tolerance of the plane, the edge lies along the
+/// face's plane, and the face is tested at the sample points, as curved
+/// edges and faces are.
+///
+/// For any other face, a point within `chord` and half the tolerance of
+/// its mesh is a candidate, confirmed by its distance to the face's
+/// surface; so a point on the surface just outside such a face, within
+/// `chord` of its boundary, would be reported too (none has been seen).
 pub fn touches_itself_in(k: &BrepKernel, r: &Body, mesh: &BodyMesh, chord: f64) -> Option<String> {
     let near = 0.5 * k.tolerance().linear;
     let adj = k.adjacency(r);
@@ -143,11 +231,27 @@ pub fn touches_itself_in(k: &BrepKernel, r: &Body, mesh: &BodyMesh, chord: f64) 
     let tol = k.tolerance().linear;
     for (e, line) in mesh.edges.iter().enumerate() {
         let along: Vec<u32> = adj.edge_faces[e].iter().map(|f| f.0).collect();
-        // The faces a point of the edge may be near: those along it, and
-        // those at an end within the tolerance of the point, which every
-        // point that near the end is near.
+        // Flat faces at one end of a straight edge whose other end is more
+        // than the tolerance from their planes: the edge leaves them at
+        // that corner, and is near them only about it.
+        let mut leaving: Vec<u32> = Vec::new();
+        if let (CurveKind::Line, &[v, w]) = (kinds[e], ends[e].as_slice()) {
+            for (v, w) in [(v, w), (w, v)] {
+                for &f in &at_vertex[v] {
+                    let off = (planes[f as usize].as_ref())
+                        .is_some_and(|pl| (mesh.vertices[w] - pl.point).dot(pl.normal).abs() > tol);
+                    if exact[f as usize] && off {
+                        leaving.push(f);
+                    }
+                }
+            }
+        }
+        // The faces a point of the edge may be near: those along it, those
+        // it leaves at a corner, and those at an end within the tolerance
+        // of the point, which every point that near the end is near.
         let allowed = |p: DVec3| -> Vec<u32> {
             let mut a = along.clone();
+            a.extend(&leaving);
             for &v in &ends[e] {
                 if (p - mesh.vertices[v]).length() <= tol {
                     a.extend(&at_vertex[v]);
@@ -155,6 +259,29 @@ pub fn touches_itself_in(k: &BrepKernel, r: &Body, mesh: &BodyMesh, chord: f64) 
             }
             a
         };
+        // A straight edge against the flat faces with no corner at its
+        // ends, whole.
+        if kinds[e] == CurveKind::Line {
+            let (p, q) = (line[0], line[line.len() - 1]);
+            let (lo, hi) = (p.min(q), p.max(q));
+            for (f, face) in mesh.faces.iter().enumerate() {
+                let (flo, fhi) = bounds[f];
+                if !exact[f]
+                    || along.contains(&(f as u32))
+                    || ends[e].iter().any(|&v| at_vertex[v].contains(&(f as u32)))
+                    || hi.cmplt(flo).any()
+                    || lo.cmpgt(fhi).any()
+                {
+                    continue;
+                }
+                let nearest = (face.triangles.iter())
+                    .map(|t| segment_triangle_distance((p, q), t.map(|i| positions[f][i as usize])))
+                    .find(|x| x.1 <= near);
+                if let Some((x, d)) = nearest {
+                    return report(e, f, d, x);
+                }
+            }
+        }
         let mut samples: Vec<DVec3> = Vec::new();
         for (i, p) in line.iter().enumerate() {
             samples.push(*p);
