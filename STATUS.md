@@ -928,9 +928,9 @@ name open unchanged.
   the strip's band, sides and cuts. Each of the 13 configurations
   probed for the audit gives main's outcomes in all six operations. The
   flat fuzz, the motions and the contact fuzz at a hundred times and the
-  curved fuzzes at twenty refuse exactly what main refuses (90,686 and
-  8,290 refusals, the same operations with the same texts), none
-  failing. Of 27 changes to the rule and its searches the tests catch
+  curved fuzzes at twenty and at fifty refuse exactly what main refuses
+  (90,686, 8,290 and 20,522 refusals, the same operations with the same
+  texts), none failing. Of 27 changes to the rule and its searches the tests catch
   all but one, which only skips work; the three the first run missed
   have tests now. The check costs 1.2% more instructions on a union of
   two 256-sided star prisms and 0.8% on 64 pins cut one at a time.

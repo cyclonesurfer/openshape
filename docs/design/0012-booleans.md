@@ -3778,9 +3778,9 @@ the walk kept to a box (its unit test), and the placing of points in
 long cycles (a face crossing a block's top 64 times along one line,
 `tests/booleans.rs`).
 The flat fuzz, the motions and the contact fuzz at a hundred times their
-runs, and the curved fuzzes at twenty, refuse exactly what main refuses
-(90,686 and 8,290 refusals, the same operations with the same texts),
-with no failures. Of the five contacts the third rule had changed in
+runs, and the curved fuzzes at twenty and at fifty, refuse exactly what
+main refuses (90,686, 8,290 and 20,522 refusals, the same operations
+with the same texts), with no failures. Of the five contacts the third rule had changed in
 the contact fuzz, four are refused only where main refuses them (their
 other results pass the fuzz's checks), and contact 2080 at
 4 ε, which main refuses as a face running within the tolerance (found
