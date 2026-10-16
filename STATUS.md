@@ -797,7 +797,7 @@ name open unchanged.
   flattened pins and the creased revolve.
 - Operands with conic edges on curved faces (design note 0012 §16 and
   §17, ADR 0023), 2026-10-15, on Mesa lavapipe: fmt, clippy with `-D
-  warnings`, 1,010 tests and `cargo deny` pass, and the release time
+  warnings`, 1,011 tests and `cargo deny` pass, and the release time
   guards pass as CI runs them. Golden second cuts with all four
   operations, exact in volume, with topology and origins: a conic-edged
   body against a box far away, a rod cut by a tilted plane and again by

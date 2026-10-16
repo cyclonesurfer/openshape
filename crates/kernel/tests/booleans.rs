@@ -4,9 +4,12 @@
 
 use std::f64::consts::TAU;
 
+mod self_contact;
+
 use opendatum_kernel::{
-    Body, BooleanOp, BrepKernel, DVec2, DVec3, EdgeOrigin, ExtrudeSpec, FaceIx, FaceOrigin, Frame,
-    Kernel, KernelError, Merged, Operand, Profile, RevolveSpec, TessellationOptions, VertexOrigin,
+    Adjacency, Body, BodyMesh, BooleanOp, BrepKernel, DVec2, DVec3, EdgeOrigin, ExtrudeSpec,
+    FaceIx, FaceOrigin, Frame, Kernel, KernelError, Merged, Operand, Profile, RevolveSpec,
+    TessellationOptions, VertexOrigin,
 };
 
 fn k() -> BrepKernel {
@@ -297,16 +300,80 @@ fn disjoint_and_identical_bodies() {
     assert!(refused(&a, &a, BooleanOp::Subtract).contains("empty"));
 }
 
+/// `a o b` is `a` unchanged, each of its faces, edges and vertices named
+/// once by its origin in `a`, with nothing merged: the contact with `b`
+/// leaves no trace (ADR 0024 §3: `b` keeps no face at the shared entity,
+/// so its entities there are not origins).
+fn the_first_operand(a: &Body, b: &Body, op: BooleanOp) {
+    let r = run(a, b, op);
+    assert_eq!(counts(&r), counts(a), "{op:?}");
+    assert!(
+        close(volume(&r), volume(a)) && close(area(&r), area(a)),
+        "{op:?}"
+    );
+    let o = k().origins(&r);
+    let mut faces: Vec<u32> = (o.faces.iter())
+        .map(|g| match *g {
+            FaceOrigin::Operand {
+                operand: Operand::First,
+                face,
+            } => face.0,
+            ref other => panic!("{op:?}: a face from {other:?}"),
+        })
+        .collect();
+    let mut edges: Vec<u32> = (o.edges.iter())
+        .map(|g| match *g {
+            EdgeOrigin::Operand {
+                operand: Operand::First,
+                edge,
+            } => edge.0,
+            ref other => panic!("{op:?}: an edge from {other:?}"),
+        })
+        .collect();
+    let mut vertices: Vec<u32> = (o.vertices.iter())
+        .map(|g| match *g {
+            VertexOrigin::Operand {
+                operand: Operand::First,
+                vertex,
+            } => vertex.0,
+            ref other => panic!("{op:?}: a vertex from {other:?}"),
+        })
+        .collect();
+    faces.sort_unstable();
+    edges.sort_unstable();
+    vertices.sort_unstable();
+    let (f, e, v) = counts(a);
+    assert_eq!(faces, (0..f as u32).collect::<Vec<_>>(), "{op:?}");
+    assert_eq!(edges, (0..e as u32).collect::<Vec<_>>(), "{op:?}");
+    assert_eq!(vertices, (0..v as u32).collect::<Vec<_>>(), "{op:?}");
+    assert_eq!(o.merged, Vec::<Merged>::new(), "{op:?}");
+}
+
 #[test]
 fn bodies_touching_along_an_edge_or_at_a_point() {
     let a = cuboid(DVec3::ZERO, DVec3::ONE);
     let edge = cuboid(DVec3::new(1.0, 1.0, 0.0), DVec3::new(2.0, 2.0, 1.0));
-    assert!(refused(&a, &edge, BooleanOp::Union).contains("non-manifold"));
-    assert!(refused(&a, &edge, BooleanOp::Intersect).contains("empty"));
-    assert!(close(volume(&run(&a, &edge, BooleanOp::Subtract)), 1.0));
     let corner = cuboid(DVec3::ONE, DVec3::splat(2.0));
-    assert!(refused(&a, &corner, BooleanOp::Union).contains("non-manifold"));
-    assert!(close(volume(&run(&a, &corner, BooleanOp::Subtract)), 1.0));
+    let along = "the result would be non-manifold: the bodies touch along an edge near \
+                 (1000.000000, 1000.000000, 500.000000) mm";
+    let at = "the result would be non-manifold: the bodies touch at a point near \
+              (1000.000000, 1000.000000, 1000.000000) mm";
+    for (b, why) in [(&edge, along), (&corner, at)] {
+        assert_eq!(refused(&a, b, BooleanOp::Union), why);
+        assert_eq!(refused(b, &a, BooleanOp::Union), why);
+        assert_eq!(
+            refused(&a, b, BooleanOp::Intersect),
+            "the result would be empty"
+        );
+        assert_eq!(
+            refused(b, &a, BooleanOp::Intersect),
+            "the result would be empty"
+        );
+        // Before ADR 0024 the shared edge and its ends also named the other
+        // cube's edge and vertices, which bound no face of the result.
+        the_first_operand(&a, b, BooleanOp::Subtract);
+        the_first_operand(b, &a, BooleanOp::Subtract);
+    }
 }
 
 #[test]
@@ -543,49 +610,59 @@ struct Tally {
 }
 
 /// The volume of a boolean's result, `Some(0)` for an empty result, `None`
-/// for a refusal (recorded); kernel bugs are recorded too.
-fn measured(t: &mut Tally, a: &Body, b: &Body, op: BooleanOp, case: &str) -> Option<f64> {
+/// for a refusal (recorded); kernel bugs are recorded too, among them a
+/// result that touches itself ([`self_contact::touches_itself`]). With it,
+/// the outcome in short: the result's counts, "empty", the refusal's text
+/// without its place, or "bug".
+fn measured(t: &mut Tally, a: &Body, b: &Body, op: BooleanOp, case: &str) -> (Option<f64>, String) {
+    let bug = |t: &mut Tally, m: String| {
+        t.bugs.push(format!("{case} {op:?}: {m}"));
+        (None, "bug".to_string())
+    };
     match k().boolean(a, b, op) {
         Ok(r) => {
             let issues = k().validate(&r);
             if !issues.is_empty() {
-                t.bugs
-                    .push(format!("{case} {op:?}: invalid result: {issues:?}"));
-                return None;
+                return bug(t, format!("invalid result: {issues:?}"));
             }
             if let Err(e) = origins_agree(a, b, &r, op) {
-                t.bugs.push(format!("{case} {op:?}: origins: {e}"));
-                return None;
+                return bug(t, format!("origins: {e}"));
+            }
+            match self_contact::touches_itself(&k(), &r, &TessellationOptions::default()) {
+                Ok(None) => {}
+                Ok(Some(m)) => return bug(t, format!("the result touches itself: {m}")),
+                Err(e) => return bug(t, format!("mesh: {e}")),
             }
             match k().mass_properties(&r, 1e-12) {
-                Ok(m) => Some(m.volume),
-                Err(e) => {
-                    t.bugs.push(format!("{case} {op:?}: {e}"));
-                    None
-                }
+                Ok(m) => (Some(m.volume), format!("{:?}", counts(&r))),
+                Err(e) => bug(t, e.to_string()),
             }
         }
-        Err(KernelError::InvalidInput(m)) if m.contains("empty") => Some(0.0),
+        Err(KernelError::InvalidInput(m)) if m.contains("empty") => (Some(0.0), "empty".into()),
         Err(KernelError::InvalidInput(m)) => {
             t.refused.push(format!("{case} {op:?}: {m}"));
-            None
+            let short = m.split(" near ").next().unwrap_or(&m).to_string();
+            (None, short)
         }
-        Err(e) => {
-            t.bugs.push(format!("{case} {op:?}: {e}"));
-            None
-        }
+        Err(e) => bug(t, e.to_string()),
     }
 }
 
 /// Checks the identities on one pair; `slack` is the volume a coincidence
 /// within the tolerance may move.
 fn identities(t: &mut Tally, a: &Body, b: &Body, case: &str, slack: f64) {
+    identities_with(t, a, b, case, slack);
+}
+
+/// [`identities`], returning the outcomes of A ∪ B, A ∩ B, A − B and
+/// B − A in short ([`measured`]).
+fn identities_with(t: &mut Tally, a: &Body, b: &Body, case: &str, slack: f64) -> [String; 4] {
     t.pairs += 1;
     let (va, vb) = (volume(a), volume(b));
-    let u = measured(t, a, b, BooleanOp::Union, case);
-    let i = measured(t, a, b, BooleanOp::Intersect, case);
-    let ab = measured(t, a, b, BooleanOp::Subtract, case);
-    let ba = measured(t, b, a, BooleanOp::Subtract, case);
+    let (u, su) = measured(t, a, b, BooleanOp::Union, case);
+    let (i, si) = measured(t, a, b, BooleanOp::Intersect, case);
+    let (ab, sab) = measured(t, a, b, BooleanOp::Subtract, case);
+    let (ba, sba) = measured(t, b, a, BooleanOp::Subtract, case);
     let tol = 1e-9 * va.max(vb) + slack;
     let mut check = |name: &str, lhs: f64, rhs: f64| {
         if (lhs - rhs).abs() > tol {
@@ -611,6 +688,7 @@ fn identities(t: &mut Tally, a: &Body, b: &Body, case: &str, slack: f64) {
             t.checked += 1;
         }
     }
+    [su, si, sab, sba]
 }
 
 fn report(name: &str, t: &Tally) {
@@ -693,6 +771,30 @@ fn motion(case: usize, (seed, dir): (u64, DVec3)) -> (Body, Body, f64) {
     (a, b, slack)
 }
 
+/// Motions by 1.1 tolerances whose difference is a sliver between a face
+/// and its moved copy, the two bounded by one loop of points (two faces,
+/// four edges, four vertices; found by the motions' run a hundred times
+/// longer): it is a solid, its volume what the identities give.
+#[test]
+fn slivers_between_a_face_and_its_moved_copy() {
+    for (case, first) in [(836, true), (4539, false), (5883, false), (6751, false)] {
+        let (a, b, _) = motion(case, motions().nth(case).expect("a motion"));
+        let (x, y) = if first { (&a, &b) } else { (&b, &a) };
+        let r = (k().boolean(x, y, BooleanOp::Subtract)).unwrap_or_else(|e| panic!("{case}: {e}"));
+        assert_eq!(k().validate(&r), Vec::<String>::new(), "{case}");
+        assert_eq!(counts(&r), (2, 4, 4), "{case}");
+        let common = k()
+            .boolean(x, y, BooleanOp::Intersect)
+            .expect("the common part");
+        let v = volume(x) - volume(&common);
+        assert!(
+            v > 0.0 && (volume(&r) - v).abs() < 1e-12,
+            "{case}: {} {v}",
+            volume(&r)
+        );
+    }
+}
+
 #[test]
 fn motions_by_fractions_of_the_tolerance() {
     let mut t = Tally::default();
@@ -722,6 +824,394 @@ fn motions_by_fractions_of_the_tolerance() {
         0,
         "copies moved by at most half a tolerance refused"
     );
+}
+
+/// How a body of the contact fuzz rests on a face.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Rest {
+    /// A box on one of its corners.
+    Corner,
+    /// A triangular prism on one of its edges.
+    Edge,
+}
+
+/// The body of contact case `seed`: resting by `rest` on the plane through
+/// `x` with unit normal `n`, on the side `side` (+1 the side `n` points
+/// to), then moved by `delta` along `n`. A corner's three edges all rise
+/// from the plane; an edge runs along `along` if given (an edge of the
+/// face), or a random direction in the plane, and its prism's two faces
+/// rise from it at 9° or more. The same seed gives the same body at every
+/// `delta`.
+fn resting(
+    seed: u64,
+    rest: Rest,
+    (x, n): (DVec3, DVec3),
+    side: f64,
+    delta: f64,
+    along: Option<DVec3>,
+) -> Body {
+    let mut r = Rng(seed);
+    let (up, at) = (n * side, x + n * delta);
+    match rest {
+        Rest::Corner => {
+            let frame = loop {
+                let f = random_frame(&mut r, false, at);
+                if [f.x, f.y, f.z].iter().all(|a| a.dot(up) > 0.15) {
+                    break f;
+                }
+            };
+            let size = DVec3::new(r.range(0.1, 0.8), r.range(0.1, 0.8), r.range(0.1, 0.8));
+            k().make_box(&frame, size).expect("a box on its corner")
+        }
+        Rest::Edge => {
+            let v = DVec3::new(r.range(-1.0, 1.0), r.range(-1.0, 1.0), r.range(-1.0, 1.0));
+            let d = along.unwrap_or_else(|| {
+                v.reject_from_normalized(n)
+                    .normalize_or(n.any_orthonormal_vector())
+            });
+            let len = r.range(0.2, 1.6);
+            let start = r.range(0.0, 1.0) * len;
+            let frame = Frame {
+                origin: at - d * start,
+                x: n.cross(d),
+                y: n,
+                z: d,
+            };
+            let a1 = r.range(-0.6, 0.5);
+            let a2 = r.range(a1 + 0.1, 0.6);
+            let (h1, h2) = (r.range(0.1, 0.6), r.range(0.1, 0.6));
+            let mut pts = vec![
+                DVec2::ZERO,
+                DVec2::new(a2, side * h2),
+                DVec2::new(a1, side * h1),
+            ];
+            if (pts[1] - pts[0]).perp_dot(pts[2] - pts[0]) < 0.0 {
+                pts.swap(1, 2);
+            }
+            k().extrude(
+                &Profile::polygon(frame, &pts),
+                &ExtrudeSpec {
+                    distance: len,
+                    symmetric: false,
+                },
+            )
+            .expect("a prism on its edge")
+        }
+    }
+}
+
+/// A point of face `f` of a body: inside one of its triangles (true), or,
+/// one case in four, on one of its edges or at a corner, with the edge's
+/// direction.
+fn on_face(
+    r: &mut Rng,
+    mesh: &BodyMesh,
+    adj: &Adjacency,
+    f: usize,
+) -> (DVec3, Option<DVec3>, bool) {
+    let edges: Vec<usize> = (0..adj.edge_faces.len())
+        .filter(|&e| adj.edge_faces[e].contains(&FaceIx(f as u32)))
+        .collect();
+    if r.chance(0.25) && !edges.is_empty() {
+        let line = &mesh.edges[edges[(r.next() % edges.len() as u64) as usize]];
+        let (p, q) = (line[0], line[line.len() - 1]);
+        let t = if r.chance(0.3) {
+            0.0
+        } else {
+            r.range(0.2, 0.8)
+        };
+        return (p.lerp(q, t), Some((q - p).normalize()), false);
+    }
+    let face = &mesh.faces[f];
+    let tri = face.triangles[(r.next() % face.triangles.len() as u64) as usize];
+    let w = [r.range(0.05, 1.0), r.range(0.05, 1.0), r.range(0.05, 1.0)];
+    let sum = w[0] + w[1] + w[2];
+    let x = (0..3)
+        .map(|i| face.positions[tri[i] as usize] * (w[i] / sum))
+        .fold(DVec3::ZERO, |a, b| a + b);
+    (x, None, true)
+}
+
+/// The motions of the contact fuzz, in tolerances along the touched face's
+/// normal: across the band in quarters, and four tolerances either way.
+const STEPS: [f64; 11] = [
+    -4.0, -1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 4.0,
+];
+
+/// A case of the contact fuzz: the body A, the point `x` of its face with
+/// normal `n`, whether `x` is inside the face, and the body resting there
+/// at each motion.
+struct ContactCase {
+    a: Body,
+    x: DVec3,
+    n: DVec3,
+    inside: bool,
+    rest: Rest,
+    side: f64,
+    along: Option<DVec3>,
+    seed: u64,
+}
+
+impl ContactCase {
+    fn new(r: &mut Rng) -> ContactCase {
+        let a = random_body(r);
+        let mesh = k()
+            .tessellate(&a, &TessellationOptions::default())
+            .expect("a mesh");
+        let adj = k().adjacency(&a);
+        let f = (r.next() % mesh.faces.len() as u64) as usize;
+        let n = k()
+            .face_plane(&a, FaceIx(f as u32))
+            .expect("a flat face")
+            .normal;
+        let (x, edge, inside) = on_face(r, &mesh, &adj, f);
+        let rest = if r.chance(0.5) {
+            Rest::Corner
+        } else {
+            Rest::Edge
+        };
+        let side = if r.chance(0.5) { 1.0 } else { -1.0 };
+        let along = edge.filter(|_| r.chance(0.5));
+        let seed = r.next();
+        ContactCase {
+            a,
+            x,
+            n,
+            inside,
+            rest,
+            side,
+            along,
+            seed,
+        }
+    }
+
+    /// The resting body moved by `q` tolerances along the face's normal.
+    fn body(&self, q: f64) -> Body {
+        let eps = k().tolerance().linear;
+        let (c, x) = (self, (self.x, self.n));
+        resting(c.seed, c.rest, x, c.side, q * eps, c.along)
+    }
+}
+
+/// Case `n` of the contact fuzz.
+fn contact_case(n: usize) -> ContactCase {
+    let mut r = Rng(0xC047_AC75);
+    let mut c = ContactCase::new(&mut r);
+    for _ in 0..n {
+        c = ContactCase::new(&mut r);
+    }
+    c
+}
+
+/// Edges lying on a face for a few tolerances (contacts 86, 2504 and 5245,
+/// found at a hundred times the default run): B rests by an edge on a
+/// corner or an edge of A's face from inside, and a piece of B's edge
+/// three to four tolerances long, from where it passes the corner or meets
+/// A's faces to where it crosses another face of A, lies on that face.
+/// A − B kept the piece with B's faces on both sides, so the result
+/// touched itself; such a piece is now checked against the faces at its
+/// ends, and A − B is refused. Every operation passes the identities.
+#[test]
+fn edges_lying_on_a_face_for_a_few_tolerances() {
+    let eps = k().tolerance().linear;
+    let mut t = Tally::default();
+    for (case, q) in [(86, -0.5), (2504, -4.0), (5245, -0.5)] {
+        let c = contact_case(case);
+        let b = c.body(q);
+        match k().boolean(&c.a, &b, BooleanOp::Subtract) {
+            Err(KernelError::InvalidInput(m)) => assert!(
+                m.starts_with("the result would be non-manifold: the bodies touch along an edge"),
+                "{case}: {m}"
+            ),
+            other => panic!("{case}: {other:?}"),
+        }
+        let slack = 4.0 * (area(&c.a) + area(&b)) * (q.abs() + 1.0) * eps;
+        identities_with(&mut t, &c.a, &b, &format!("contact {case}"), slack);
+    }
+    report("edges lying on a face for a few tolerances", &t);
+}
+
+/// The contact fuzz (ADR 0024): a random polyhedron A and a body B resting
+/// on a point of one of A's faces by a corner or an edge, from outside or
+/// inside, swept across the tolerance band. Every result passes the
+/// identities, the origins check and the oracle for results that touch
+/// themselves; every operation is answered or refused, never a kernel
+/// error. Where B rests from outside inside A's face, A ∪ B pinches and is
+/// refused; from inside, A − B (design note 0012 §18.1; B is convex, so
+/// A's face is outside B about the contact). Moved four tolerances clear,
+/// neither is refused as non-manifold for that contact.
+#[test]
+fn contacts_swept_across_the_band() {
+    let eps = k().tolerance().linear;
+    let mut t = Tally::default();
+    let mut by_step = [0usize; STEPS.len()];
+    // Per step, operations whose outcome differs from the contact's own.
+    let mut changed = [0usize; STEPS.len()];
+    let mut pinch: Vec<String> = Vec::new();
+    let mut r = Rng(0xC047_AC75);
+    let cases = scale(60);
+    let zero = STEPS.iter().position(|&q| q == 0.0).expect("a step of 0");
+    for case in 0..cases {
+        let c = ContactCase::new(&mut r);
+        let (a, rest, side) = (&c.a, c.rest, c.side);
+        let label = |q: f64| format!("contact {case} ({rest:?}, side {side}, {q} tolerance)");
+        let slack = |b: &Body, q: f64| 4.0 * (area(a) + area(b)) * (q.abs() + 1.0) * eps;
+        let got: Vec<[String; 4]> = (STEPS.iter().enumerate())
+            .map(|(j, &q)| {
+                let b = c.body(q);
+                let before = t.refused.len();
+                let got = identities_with(&mut t, a, &b, &label(q), slack(&b, q));
+                by_step[j] += t.refused.len() - before;
+                got
+            })
+            .collect();
+        for (j, g) in got.iter().enumerate() {
+            changed[j] += g.iter().zip(&got[zero]).filter(|(x, y)| x != y).count();
+        }
+        if !c.inside {
+            continue;
+        }
+        // Where B rests inside A's face, the operation the table refuses.
+        let (k_op, name) = if side > 0.0 {
+            (0, "A ∪ B")
+        } else {
+            (2, "A − B")
+        };
+        if !got[zero][k_op].starts_with("the result would be non-manifold") {
+            pinch.push(format!("{}: {name} gave {}", label(0.0), got[zero][k_op]));
+        }
+        let op = [BooleanOp::Union, BooleanOp::Intersect, BooleanOp::Subtract][k_op];
+        if let Err(KernelError::InvalidInput(m)) = k().boolean(a, &c.body(4.0 * side), op) {
+            if m.starts_with("the result would be non-manifold") {
+                pinch.push(format!("{} moved clear: {name}: {m}", label(0.0)));
+            }
+        }
+    }
+    let ops = 4 * cases;
+    let line: Vec<String> = STEPS
+        .iter()
+        .zip(by_step.iter().zip(changed))
+        .map(|(q, (n, c))| format!("{q}: {n} refused, {c} changed"))
+        .collect();
+    println!(
+        "contacts by step, of {ops} operations each: {}",
+        line.join("; ")
+    );
+    for p in &pinch {
+        println!("  pinch: {p}");
+    }
+    report("contacts swept across the band", &t);
+    assert!(pinch.is_empty(), "{} pinches", pinch.len());
+}
+
+/// Debugging aid (temporary): one case of the contact fuzz, `CONTACT` and
+/// `STEP` from the environment.
+#[test]
+fn zz_contact_case() {
+    let Some(n) = std::env::var("CONTACT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+    else {
+        return;
+    };
+    let q: f64 = std::env::var("STEP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let c = contact_case(n);
+    let b = c.body(q);
+    println!(
+        "x {:?} n {:?} inside {} rest {:?} side {} along {:?}",
+        c.x, c.n, c.inside, c.rest, c.side, c.along
+    );
+    println!(
+        "A {:?} vol {} B {:?} vol {}",
+        counts(&c.a),
+        volume(&c.a),
+        counts(&b),
+        volume(&b)
+    );
+    for (x, y, op) in [
+        (&c.a, &b, BooleanOp::Union),
+        (&c.a, &b, BooleanOp::Intersect),
+        (&c.a, &b, BooleanOp::Subtract),
+        (&b, &c.a, BooleanOp::Subtract),
+    ] {
+        match k().boolean(x, y, op) {
+            Ok(res) => {
+                if let Err(e) = origins_agree(x, y, &res, op) {
+                    println!("{op:?} origins: {e}");
+                    let m = k()
+                        .tessellate(&res, &TessellationOptions::default())
+                        .unwrap();
+                    let (mx, my) = (
+                        k().tessellate(x, &TessellationOptions::default()).unwrap(),
+                        k().tessellate(y, &TessellationOptions::default()).unwrap(),
+                    );
+                    let og = k().origins(&res);
+                    for (e, l) in m.edges.iter().enumerate() {
+                        let src = match og.edges[e] {
+                            EdgeOrigin::Operand {
+                                operand: Operand::First,
+                                edge,
+                            } => Some(&mx.edges[edge.0 as usize]),
+                            EdgeOrigin::Operand {
+                                operand: Operand::Second,
+                                edge,
+                            } => Some(&my.edges[edge.0 as usize]),
+                            _ => None,
+                        };
+                        println!(
+                            "  edge {e} {:?} {:?} -> {:?} src {:?}",
+                            og.edges[e],
+                            l[0],
+                            l[l.len() - 1],
+                            src.map(|q| (q[0], q[q.len() - 1]))
+                        );
+                    }
+                    for mm in &og.merged {
+                        println!("  merged {mm:?}");
+                    }
+                }
+                let o = self_contact::touches_itself(&k(), &res, &TessellationOptions::default());
+                println!(
+                    "{op:?}: {:?} vol {} oracle {:?}",
+                    counts(&res),
+                    volume(&res),
+                    o
+                );
+                if o.as_ref().is_ok_and(|x| x.is_some()) && std::env::var_os("DUMP").is_some() {
+                    let m = k()
+                        .tessellate(&res, &TessellationOptions::default())
+                        .unwrap();
+                    let adj = k().adjacency(&res);
+                    let og = k().origins(&res);
+                    for (f, fo) in og.faces.iter().enumerate() {
+                        println!(
+                            "  face {f} {:?} {fo:?}",
+                            k().face_plane(&res, FaceIx(f as u32))
+                        );
+                    }
+                    for (e, l) in m.edges.iter().enumerate() {
+                        println!(
+                            "  edge {e} {:?} faces {:?} {:?} -> {:?}",
+                            og.edges[e],
+                            adj.edge_faces[e],
+                            l[0],
+                            l[l.len() - 1]
+                        );
+                    }
+                    for (v, p) in m.vertices.iter().enumerate() {
+                        println!(
+                            "  vertex {v} {:?} {:?} edges {:?}",
+                            og.vertices[v], p, adj.vertex_edges[v]
+                        );
+                    }
+                }
+            }
+            Err(e) => println!("{op:?}: {e:?}"),
+        }
+    }
 }
 
 /// Copies of a body with a hole moved by three tolerances (motions 3449

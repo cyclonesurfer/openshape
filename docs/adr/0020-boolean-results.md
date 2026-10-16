@@ -44,7 +44,8 @@ with a new `KernelError::Unsupported` naming what is missing, so callers
 and tests can tell "not yet" from "invalid" and from a kernel bug
 (`InvalidResult`). Results that would be non-manifold (bodies touching
 only along an edge or at a point) fail with `InvalidInput` saying so
-(design note 0012 §3).
+(design note 0012 §3; for every contact that does not cross, design note
+0012 §18 and ADR 0024).
 
 ### 2. Origins
 
@@ -74,7 +75,9 @@ The operands are called **first** and **second** (`Operand::First`,
   (design note 0013 §4: `Kept(A) (N)`), and the kernel would duplicate
   it.
 
-**Decision: A.** The existing tables and their consumers are unchanged;
+**Decision: A** (amended by ADR 0024: an origin names only operand
+entities that bound the result entity). The existing tables and their
+consumers are unchanged;
 a boolean's origins say exactly which operand entities each result
 entity comes from, and the side table carries the merges §5 of design
 note 0013 needs. The naming layer reports boolean origins as unsupported
