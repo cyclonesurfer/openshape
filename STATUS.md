@@ -25,9 +25,11 @@ ADR 0024; the faces there all flat): the contact leaves no trace, or
 the boolean is refused as non-manifold where the result would pinch; a fuzz of such contacts
 swept across the tolerance found 24,571 faults on main in 264,000
 operations (results touching themselves, wrong origins, kernel errors)
-and none in this build. Next: a fin this build still returns along an
-edge lying beside a crossing (§19), the rest of the contacts (curved
-faces, surfaces touching), then the features that use booleans.
+and none in this build. A fin under a tolerance thick, which main
+returns where an edge lies beside the line where its face crosses a
+face of the other body, is refused (§20). Next: the rest of the
+contacts (curved faces, surfaces touching), then the features that use
+booleans.
 The product is now named OpenDatum (ADR 0017): packages `opendatum-*`,
 binary `opendatum`, documents `.odatum`; documents saved under the old
 name open unchanged.
@@ -1263,10 +1265,16 @@ name open unchanged.
   of 24,000 with the contact exact, 12,095 with the body moved a
   tolerance against the face's normal), where main refused 53,168 and
   failed 24,571. A fin
-  under a tolerance thick is still returned where an edge of one body
-  lies beside the line where its face crosses a face of the other,
-  between two reflex corners (§19, "Known fault"; main returns the same
-  fin). Within three quarters of a tolerance of the exact contact, 704
+  under a tolerance thick, which main returns where an edge of one body
+  lies on a face's plane beside the line where its own face crosses
+  that face, past reflex corners, and the face holds the strip between
+  them (§19's known fault, with more cases found by review: the face's
+  edge on that line, a hole's edge, a notch's floor), is refused (§20,
+  goldens 32 and 33); where the face does not hold the strip (B resting
+  on its edge, or over a hole) the contact is answered as before. The
+  check does not itself decide a corner of the face within the
+  tolerance beside that line under the strip: probes of that were
+  refused by other checks, but no proof is claimed. Within three quarters of a tolerance of the exact contact, 704
   of 83,065 results differ in their counts from the exact contact's
   (mostly an edge left split), 673 of them as on main: results are not
   yet canonical under motions within the tolerance. The oracle that
@@ -1356,9 +1364,8 @@ name open unchanged.
 2. Phase 3, in the order the design notes give (0012 §12.4 item 3:
    balls and coaxial cones, item 3a, §13; planes across cones, item 3b,
    §15, operands with conic edges on cylinders and cones, §17, and
-   contacts that do not cross on flat faces, §19, are done). Next: the
-   fin left along a lying edge between reflex corners (§19, "Known
-   fault"), with a design note first; the rest of the contacts' slice 1
+   contacts that do not cross on flat faces, §19 and §20, are done).
+   Next: the rest of the contacts' slice 1
    (§18.6 steps 5 to 8: the cut-pair filter, edges and corners on curved
    faces, 76 of the curved fuzzes' refusals at twenty times, the Apart
    band, the contact time guards and mutation checks), then slice 2,

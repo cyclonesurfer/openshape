@@ -17,19 +17,22 @@
 //! no cut reaches lies wholly in the face or wholly out of it, decided at
 //! its points.
 
+use std::cell::OnceCell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::f64::consts::{FRAC_PI_2, TAU};
 
-use glam::DVec3;
+use glam::{DVec2, DVec3};
 use rustc_hash::FxHashMap;
 
 use super::chart::Outline;
+use super::flat_outline::{FlatOutline, FlatOutlines};
 use super::meet::{self, Meet, Track};
 use super::points::{self, Points};
 use super::quadric::{self, Quadric};
 use super::shape::{Face, Shape};
 use super::{name, other, show, slot, Pair};
+use crate::bvh::Bvh;
 use crate::origin::Operand;
 use crate::KernelError;
 
@@ -807,12 +810,19 @@ struct Interval {
 /// on the other's plane, the planes meeting at a slight angle), the ends
 /// are the runs' own vertices, not crossings of a plane, and are not
 /// checked here: the faces then lie within the tolerance of each other
-/// over a band, which classifying their pieces refuses.
+/// over a band, which classifying their pieces refuses. After those
+/// checks, the strips between the line and the chains of either face's
+/// boundary lying on the other's plane are checked ([`held_strips`]), for
+/// each face whose `zero` ([`Relation::Crossing`]) says its boundary has a
+/// mark within the tolerance of the other's plane: a face with none has no
+/// chain. The checks of one boolean share `strips`.
 pub(super) fn plane_meeting(
     pair: &Pair,
     pts: &Points,
+    strips: &mut StripSearch,
     fa: usize,
     fb: usize,
+    zero: [bool; 2],
 ) -> Result<Vec<(usize, usize)>, KernelError> {
     let a = &pair.first.faces[fa];
     let b = &pair.second.faces[fb];
@@ -824,22 +834,32 @@ pub(super) fn plane_meeting(
     let eps = pts.eps;
     let sa = face_line(pair, pts, Operand::First, fa, b.surface, dir)?;
     let sb = face_line(pair, pts, Operand::Second, fb, a.surface, dir)?;
+    // Each face's runs lying on the other's plane, found once for the pair
+    // when a stretch first needs them.
+    let mut found: Option<[Runs; 2]> = None;
     let mut out = Vec::new();
     for x in &sa {
-        for y in &sb {
+        // The intervals of `b` within ε of `x` (each face's intervals are
+        // disjoint and in order along the line): no other can meet it.
+        let first = sb.partition_point(|y| y.hi.0 < x.lo.0 - eps);
+        for y in sb[first..].iter().take_while(|y| y.lo.0 <= x.hi.0 + eps) {
             let lo = later(x.lo, y.lo, eps, pts)?;
             let hi = earlier(x.hi, y.hi, eps, pts)?;
             if lo.1 != hi.1 && lo.0 < hi.0 {
-                let spans = [
-                    (Operand::First, fa, b.surface, x),
-                    (Operand::Second, fb, a.surface, y),
-                ];
-                let runs =
-                    spans.map(|(op, f, surface, iv)| lying_runs(pair, pts, op, f, surface, iv));
-                for (k, &(op, f, _, own)) in spans.iter().enumerate() {
+                let spans = [(Operand::First, fa, x), (Operand::Second, fb, y)];
+                let runs = found.get_or_insert_with(|| {
+                    [
+                        (Operand::First, fa, b.surface),
+                        (Operand::Second, fb, a.surface),
+                    ]
+                    .map(|(op, f, surface)| {
+                        Runs::new(lying_runs(pair, pts, op, f, surface, &[]), dir)
+                    })
+                });
+                for (k, &(op, f, own)) in spans.iter().enumerate() {
                     // Where the other span is a run as well, the ends it
                     // gives are its run's own vertices.
-                    if runs[1 - k].iter().any(|r| r.exact) {
+                    if runs[1 - k].exact(spans[1 - k].2) {
                         continue;
                     }
                     let theirs = [lo.1, hi.1]
@@ -847,14 +867,15 @@ pub(super) fn plane_meeting(
                         .filter(|&c| c != own.lo.1 && c != own.hi.1);
                     for c in theirs {
                         let p = pts.rep[c];
-                        for run in &runs[k] {
-                            let (r0, r1) = run.stretch(dir);
+                        for run in runs[k].beside(p.dot(dir), eps) {
+                            let (r0, r1) = run.stretch;
                             if p.dot(dir) < r0 - eps
                                 || p.dot(dir) > r1 + eps
-                                || run.edges.iter().any(|&e| pts.on_edge(op, e).contains(&c))
+                                || run.holds(c, pts, op)
                             {
                                 continue;
                             }
+                            let run = &run.run;
                             // The side of the run's face the end is on: the
                             // direction into the face across the run's
                             // edge nearest it is the face's outward normal
@@ -873,7 +894,470 @@ pub(super) fn plane_meeting(
             }
         }
     }
+    held_strips(
+        pair,
+        pts,
+        strips,
+        dir,
+        [
+            (Operand::First, fa, &sa, zero[0]),
+            (Operand::Second, fb, &sb, zero[1]),
+        ],
+        &out,
+    )?;
     Ok(out)
+}
+
+/// How far past the tolerance ε the strip search reaches, as a fraction of
+/// ε ([`held_strip`]): it finds every region of a strip that the other
+/// face holds deeper than ρ = ε (1 + `DEEP`), and refuses only where it
+/// holds one deeper than ε, so the difference is far below the tolerance
+/// and far above rounding.
+const DEEP: f64 = 1.0 / 1024.0;
+
+/// Steps of the strip searches of one boolean, at most ([`held_strip`]):
+/// a stretch, an edge or a cut taken, a box tested, a clip of a segment or
+/// of a curve's piece against a piece of a strip, and a side or a loop of
+/// a face's outline met in placing a point are each one step, and building
+/// a face's outline is one for each of its sides.
+const STRIP_STEPS: usize = 1 << 22;
+
+/// What [`STRIP_STEPS`] counts, for the refusal.
+const STRIP_WORK: &str = "steps to test where a face runs within the tolerance of the other \
+                          body's surface (design note 0012 §20)";
+
+/// The steps the strip searches may still take ([`STRIP_STEPS`]).
+struct Budget(usize);
+
+impl Budget {
+    fn spend(&mut self, n: usize) -> Result<(), KernelError> {
+        self.0 =
+            (self.0.checked_sub(n)).ok_or_else(|| super::too_large(STRIP_WORK, STRIP_STEPS))?;
+        Ok(())
+    }
+}
+
+/// What the strip checks of one boolean share: the faces' outlines, each
+/// built when a strip first needs it, and the steps left
+/// ([`STRIP_STEPS`]), so the searches of all its strips together are
+/// bounded.
+pub(super) struct StripSearch {
+    outlines: FlatOutlines,
+    budget: Budget,
+}
+
+impl StripSearch {
+    /// No outline built and no step taken yet.
+    pub(super) fn new() -> StripSearch {
+        StripSearch {
+            outlines: FlatOutlines::new(),
+            budget: Budget(STRIP_STEPS),
+        }
+    }
+}
+
+/// The check of the strips of a pair of crossing faces on planes (design
+/// note 0012 §20): for each face, given with its operand and its intervals
+/// on the planes' common line (direction `dir`) and whether its boundary
+/// has a mark within the tolerance of the other's plane, each chain of its
+/// boundary lying on the other's plane ([`strip_runs`]; none without such
+/// a mark), against the pair's `stretches` beside it ([`held_strip`]).
+fn held_strips(
+    pair: &Pair,
+    pts: &Points,
+    strips: &mut StripSearch,
+    dir: DVec3,
+    sides: [(Operand, usize, &[Interval], bool); 2],
+    stretches: &[(usize, usize)],
+) -> Result<(), KernelError> {
+    let eps = pts.eps;
+    // The stretches by their least position along L, each with the
+    // greatest end of those up to it, sorted when a chain first needs
+    // them: a chain takes those over its span along L (and ε more), whose
+    // meetings are the only ones that can cut its strip.
+    let mut sorted: Option<(Vec<(f64, f64, usize)>, Vec<f64>)> = None;
+    for (k, &(op, f, ivs, zero)) in sides.iter().enumerate() {
+        if !zero {
+            continue;
+        }
+        let (them, g, _, _) = sides[1 - k];
+        let surface = pair.get(them).faces[g].surface;
+        for chain in strip_runs(pair, pts, op, f, surface, ivs) {
+            if sorted.is_none() {
+                strips.budget.spend(stretches.len())?;
+            }
+            let (along, reach) = sorted.get_or_insert_with(|| {
+                let mut along: Vec<(f64, f64, usize)> = (stretches.iter().enumerate())
+                    .map(|(i, &(c, d))| {
+                        let (s, t) = (pts.rep[c].dot(dir), pts.rep[d].dot(dir));
+                        (s.min(t), s.max(t), i)
+                    })
+                    .collect();
+                along.sort_by(|p, q| p.0.total_cmp(&q.0));
+                let reach = (along.iter())
+                    .scan(f64::NEG_INFINITY, |m, s| {
+                        *m = m.max(s.1);
+                        Some(*m)
+                    })
+                    .collect();
+                (along, reach)
+            });
+            let (lo, hi) = (chain.points.iter())
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), p| {
+                    (l.min(p.dot(dir)), h.max(p.dot(dir)))
+                });
+            let (lo, hi) = (lo - eps, hi + eps);
+            let (i, j) = (
+                reach.partition_point(|&m| m < lo),
+                along.partition_point(|s| s.0 <= hi),
+            );
+            strips.budget.spend(1 + j.saturating_sub(i))?;
+            // In the pair's order, which the strip's own sort keeps for
+            // stretches starting at one place.
+            let mut beside: Vec<usize> = (along.get(i..j).unwrap_or(&[]).iter())
+                .filter(|s| s.1 >= lo)
+                .map(|s| s.2)
+                .collect();
+            beside.sort_unstable();
+            let beside: Vec<(usize, usize)> = beside.into_iter().map(|i| stretches[i]).collect();
+            held_strip(
+                pair,
+                pts,
+                strips,
+                dir,
+                [(op, f), (them, g)],
+                &chain,
+                &beside,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// A chain of a face's boundary lying on the other operand's plane, whose
+/// strip [`held_strip`] tests ([`strip_runs`]).
+struct Chain {
+    /// The places of its points in order: one for a vertex alone, and a
+    /// closed loop's first again at its end.
+    points: Vec<DVec3>,
+    /// True if its strip is tested on both sides of the planes' common
+    /// line (a run), false if only on the side where the layer between the
+    /// faces lies in the face's own body.
+    either: bool,
+}
+
+/// The chains of face `f` of `op`'s boundary lying on plane `surface` of
+/// the other operand whose strips [`held_strip`] tests:
+///
+/// - each run of its straight edges lying on the plane ([`lying_runs`])
+///   that is not one of its intervals `ivs` on the planes' common line
+///   whole (§18.2 takes such a run itself as the meeting, so no line is
+///   imprinted beside it, and what lies between it and the other face is
+///   left to classification), on either side;
+/// - each loop lying on the plane whole, closed: a hole of the face (an
+///   outer loop lies there whole only where the whole face does, which
+///   [`relation`] takes for coplanar or refuses before this);
+/// - a vertex within the tolerance of the plane whose two edges are
+///   straight and run away from the plane (the other end of each farther
+///   from it than the vertex, on its side), at a reflex corner of the
+///   face: the boundary touches the plane there without crossing it, and
+///   the face lies on both sides of the vertex's way to the line (a neck).
+///
+/// Only the coedges near the plane are looked at.
+fn strip_runs(
+    pair: &Pair,
+    pts: &Points,
+    op: Operand,
+    f: usize,
+    surface: usize,
+    ivs: &[Interval],
+) -> Vec<Chain> {
+    let shape = pair.get(op);
+    let face = &shape.faces[f];
+    let plane = &pair.get(other(op)).surfaces[surface];
+    let lies = |li: usize, i: usize| {
+        let (e, _) = face.loops[li][i];
+        let vs = &face.verts[li];
+        shape.straight[e]
+            && pts.sign(op, vs[i], surface) == 0
+            && pts.sign(op, vs[(i + 1) % vs.len()], surface) == 0
+    };
+    let mut runs: Vec<Chain> = (lying_runs(pair, pts, op, f, surface, ivs).into_iter())
+        .filter(|run| !run.exact)
+        .map(|run| Chain {
+            points: run.points,
+            either: true,
+        })
+        .collect();
+    let mut near = Vec::new();
+    face.near_surface(plane, pts.eps, &mut near);
+    let mut seen = vec![false; face.loops.len()];
+    for k in near {
+        let (li, i) = face.coedge_at(k);
+        let vs = &face.verts[li];
+        let n = vs.len();
+        let before = (i + n - 1) % n;
+        if !seen[li] && lies(li, i) {
+            seen[li] = true;
+            if (0..n).all(|j| lies(li, j)) {
+                let mut points: Vec<DVec3> = vs.iter().map(|&v| shape.points[v]).collect();
+                points.push(points[0]);
+                runs.push(Chain {
+                    points,
+                    either: false,
+                });
+            }
+        }
+        // The vertex the coedge starts at: an apex if both its edges run
+        // away from the plane (and so from L).
+        let (v, a, b) = (vs[i], vs[before], vs[(i + 1) % n]);
+        let p = shape.points[v];
+        let d = plane.distance(p);
+        let away = |u: usize| {
+            let du = plane.distance(shape.points[u]);
+            du.signum() == d.signum() && du.abs() > d.abs()
+        };
+        if pts.sign(op, v, surface) != 0
+            || d == 0.0
+            || !shape.straight[face.loops[li][before].0]
+            || !shape.straight[face.loops[li][i].0]
+            || !away(a)
+            || !away(b)
+        {
+            continue;
+        }
+        // Reflex: the loop turns clockwise about the face's outward normal
+        // (holes run clockwise, so this holds for their corners too).
+        let turn = (p - shape.points[a]).cross(shape.points[b] - p);
+        if turn.dot(face.normal()) < 0.0 {
+            runs.push(Chain {
+                points: vec![p],
+                either: false,
+            });
+        }
+    }
+    runs
+}
+
+/// The check of the strip of `run`, a chain of face `f` of `op`'s boundary
+/// lying on the plane P of face `g` of `them` ([`strip_runs`]), which
+/// crosses `f`'s plane along the line L (direction `dir`; design note 0012
+/// §20). The strip is the region of `f`'s plane swept from the chain to
+/// the meeting the imprint makes, on the side of each of the chain's
+/// segments where `f` lies toward L ([`strip_pieces`]; a lone vertex
+/// sweeps a segment, [`point_pieces`]), cut to `f`: each point of the
+/// chain to its foot on L, and where one of `stretches` (the pair's, those
+/// over the chain's span along L) lies between the chain and L, no farther
+/// than that stretch
+/// ([`beyond_meeting`]); less its points within the tolerance of L or of
+/// the stretch. Every point of it lies within the tolerance of P (the
+/// chain does, L and each stretch are on P, and the distance from P is
+/// linear along each segment). Where `g` holds a point of it more than the
+/// tolerance inside its boundary (the point's foot on P), the faces lie
+/// flush over a region that neither the meeting's imprint nor
+/// classification separates, and the result would hold a fin thinner than
+/// the tolerance between them, so the boolean is refused there.
+///
+/// The search runs in P ([`held_point`]), each point of `f`'s plane taken
+/// to its foot there, which is linear and keeps straight edges straight.
+/// It does not take curved edges: one of `g` that may come within the
+/// search's reach of the strip, or one of `f` that may enter it, refuses
+/// the boolean as not supported.
+fn held_strip(
+    pair: &Pair,
+    pts: &Points,
+    strips: &mut StripSearch,
+    dir: DVec3,
+    [(op, f), (them, g)]: [(Operand, usize); 2],
+    chain: &Chain,
+    stretches: &[(usize, usize)],
+) -> Result<(), KernelError> {
+    let eps = pts.eps;
+    let rho = eps * (1.0 + DEEP);
+    let (shape, theirs) = (pair.get(op), pair.get(them));
+    let (face, gf) = (&shape.faces[f], &theirs.faces[g]);
+    let (nf, ng) = (face.normal(), gf.normal());
+    // In f's plane, `dir` along L and `across` square to it; P leans from
+    // `across` by the angle between the planes, along `up`.
+    let across = nf.cross(dir);
+    let sin = across.dot(ng);
+    if sin.abs() <= 1e-10 {
+        return Ok(());
+    }
+    let lean = across - ng * sin;
+    let cos = lean.length();
+    // Faces this nearly square to each other have no strip: a run within
+    // the tolerance of P lies at most ε / sin from L, so its strip is at
+    // most ε (1 / sin − 1), under 10⁻¹² ε, wide.
+    if cos <= 1e-6 {
+        return Ok(());
+    }
+    let up = lean / cos;
+    // The margin for rounding of the search, in P: ρ / 1024 in f's plane.
+    let tau = rho * DEEP * cos;
+    // The origin: on L, square across from the chain's first point.
+    let a = chain.points[0];
+    let a = a - nf * (a - face.frame.origin).dot(nf);
+    let o = a - across * ((a - gf.frame.origin).dot(ng) / sin);
+    // Coordinates in P along `dir` and `up`: a point of f's plane at its
+    // foot, and a point of P itself; and back.
+    let foot = |p: DVec3| DVec2::new((p - o).dot(dir), (p - o).dot(across) * cos);
+    let in_p = |p: DVec3| DVec2::new((p - o).dot(dir), (p - o).dot(up));
+    let on_f = |v: DVec2| o + dir * v.x + across * (v.y / cos);
+    let on_g = |v: DVec2| o + dir * v.x + up * v.y;
+    let (outlines, budget) = (&strips.outlines, &mut strips.budget);
+    let feet: Vec<DVec2> = chain.points.iter().map(|&p| foot(p)).collect();
+    // A point of f's plane `t` across L lies `t sin` off P along `ng`, so
+    // the layer between it and P runs from it along −sign(t sin) `ng`, and
+    // lies in f's body (behind f, against `nf`) where sign(t sin) nf·ng is
+    // positive: on the side of L whose sign is `inner`.
+    let inner = sin.signum() * nf.dot(ng).signum();
+    let sides: &[f64] = if chain.either {
+        &[1.0, -1.0]
+    } else if inner > 0.0 {
+        &[1.0]
+    } else {
+        &[-1.0]
+    };
+    let lines: Vec<(DVec2, DVec2)> = (stretches.iter())
+        .map(|&(c, d)| (foot(pts.rep[c]), foot(pts.rep[d])))
+        .collect();
+    let pieces = strip_of(&feet, sides, lines, eps, cos, budget)?;
+    if pieces.is_empty() {
+        return Ok(());
+    }
+    let strip = Strip::new(pieces, tau);
+    let (lo, hi) = strip.bounds;
+    let corners = [lo, DVec2::new(lo.x, hi.y), hi, DVec2::new(hi.x, lo.y)];
+    let box_of = |map: &dyn Fn(DVec2) -> DVec3, pad: f64| {
+        let (l, h) = (corners.iter()).fold(
+            (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
+            |(l, h), &v| (l.min(map(v)), h.max(map(v))),
+        );
+        (l - DVec3::splat(pad), h + DVec3::splat(pad))
+    };
+    // How far the strip's points are from P, at most (at its corners).
+    let off = (strip.pieces.iter())
+        .flat_map(|p| p.corners.iter())
+        .fold(0.0f64, |m, v| m.max((v.y / cos * sin).abs()));
+    let meets =
+        |(l, h): (DVec3, DVec3), (bl, bh): (DVec3, DVec3)| l.cmple(bh).all() && bl.cmple(h).all();
+    // The edges of `g` within ρ of the strip, in P (the search's reach):
+    // among g's coedges within `off` + ρ of f's plane, which every point
+    // within ρ of the strip's feet is, those whose boxes meet the strip's
+    // box padded by ρ (each with a margin of ρ more, for rounding), found
+    // by the face's tree over its edges' boxes.
+    let reach = box_of(&on_g, 2.0 * rho);
+    let mut coedges = Vec::new();
+    gf.near_surface_in(
+        &shape.surfaces[face.surface],
+        off + 2.0 * rho,
+        reach,
+        &mut coedges,
+    );
+    budget.spend(coedges.len())?;
+    let mut edges: Vec<usize> = (coedges.iter())
+        .map(|&k| {
+            let (li, i) = gf.coedge_at(k);
+            gf.loops[li][i].0
+        })
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let mut near = Vec::new();
+    for e in edges {
+        if !meets(theirs.edge_boxes[e], reach) {
+            continue;
+        }
+        if theirs.straight[e] {
+            let (a, b) = theirs.edge_points(e);
+            near.push((in_p(a), in_p(b)));
+        } else if strip.reached(theirs, e, &in_p, rho + tau, budget)? {
+            return Err(curved_beside(on_f(strip.pieces[0].corners[0])));
+        }
+    }
+    // The edges of f that can enter the strip: among f's coedges within
+    // `off` of P, those whose boxes meet the strip's box, found likewise.
+    let within = box_of(&on_f, eps);
+    face.near_surface_in(
+        &theirs.surfaces[gf.surface],
+        off + tau,
+        within,
+        &mut coedges,
+    );
+    budget.spend(coedges.len())?;
+    let mut edges: Vec<usize> = (coedges.iter())
+        .map(|&k| {
+            let (li, i) = face.coedge_at(k);
+            face.loops[li][i].0
+        })
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let mut cuts = Vec::new();
+    for e in edges {
+        if !meets(shape.edge_boxes[e], within) {
+            continue;
+        }
+        if shape.straight[e] {
+            let (a, b) = shape.edge_points(e);
+            cuts.push((foot(a), foot(b)));
+        } else if strip.reached(shape, e, &foot, -tau, budget)? {
+            return Err(curved_beside(on_f(strip.pieces[0].corners[0])));
+        }
+    }
+    // The faces' outlines, for where a point lies against each (a step for
+    // each side, once, when one is first built).
+    let (outline_f, outline_g) = (outlines.get(pair, op, f), outlines.get(pair, them, g));
+    for (o, fresh) in [outline_f, outline_g] {
+        if fresh {
+            budget.spend(o.len())?;
+        }
+    }
+    let found = held_point(&strip, &cuts, &near, rho, budget, |v, budget| {
+        Ok(place(outline_g.0, gf, on_g(v), eps, budget)? == Some(true)
+            && place(outline_f.0, face, on_f(v), eps, budget)? != Some(false))
+    })?;
+    match found {
+        Some(v) => Err(KernelError::InvalidInput(format!(
+            "{}, near {}",
+            super::RUNS_WITHIN,
+            show(on_f(v))
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Where `p`, on the plane of the flat face `f` whose outline is
+/// `outline`, lies against the face, as [`locate`] decides it:
+/// `Some(true)` inside, `Some(false)` outside, `None` within `eps` of its
+/// boundary; a step, and one for each loop and side looked at.
+fn place(
+    outline: &FlatOutline,
+    f: &Face,
+    p: DVec3,
+    eps: f64,
+    budget: &mut Budget,
+) -> Result<Option<bool>, KernelError> {
+    let q = f.to2(p);
+    let mut seen = 0;
+    let at = if outline.near(q, eps, &mut seen) {
+        None
+    } else {
+        Some(outline.inside(q, &mut seen))
+    };
+    budget.spend(1 + seen)?;
+    Ok(at)
+}
+
+/// The refusal of a strip ([`held_strip`]) that a curved edge may reach,
+/// near `p`.
+fn curved_beside(p: DVec3) -> KernelError {
+    KernelError::Unsupported(format!(
+        "booleans where a face of one body runs within the tolerance of the other's surface \
+         beside a curved edge (design note 0012 §20) near {}",
+        show(p)
+    ))
 }
 
 /// The refusal of an edge of one body lying on a face of the other that
@@ -889,9 +1373,86 @@ struct Run {
     edges: Vec<usize>,
     /// The places of its vertices, in loop order (one more than its edges).
     points: Vec<DVec3>,
+    /// The clusters at its first vertex and at its last.
+    ends: (usize, usize),
     /// True if the run is the whole interval of its face on the line, from
     /// the cluster at one end of it to the cluster at the other.
     exact: bool,
+}
+
+/// A face's runs lying on the other face's plane, for the checks of its
+/// stretches ([`plane_meeting`]): each with its stretch along the planes'
+/// common line, in order of their least position along the line with the
+/// greatest end of those up to each, and their ends, so a stretch finds
+/// the runs beside it, and whether it is a run, by searches.
+struct Runs {
+    runs: Vec<IndexedRun>,
+    reach: Vec<f64>,
+    ends: Vec<(usize, usize)>,
+}
+
+/// A run with its stretch along the line and the clusters on its edges
+/// (sorted), found when a point beside the run first needs them.
+struct IndexedRun {
+    run: Run,
+    stretch: (f64, f64),
+    on: OnceCell<Vec<usize>>,
+}
+
+impl IndexedRun {
+    /// Whether cluster `c` lies on one of the run's edges (of `op`).
+    fn holds(&self, c: usize, pts: &Points, op: Operand) -> bool {
+        let on = self.on.get_or_init(|| {
+            let mut on: Vec<usize> = (self.run.edges.iter())
+                .flat_map(|&e| pts.on_edge(op, e).iter().copied())
+                .collect();
+            on.sort_unstable();
+            on.dedup();
+            on
+        });
+        on.binary_search(&c).is_ok()
+    }
+}
+
+impl Runs {
+    fn new(runs: Vec<Run>, dir: DVec3) -> Runs {
+        let mut ends: Vec<(usize, usize)> = (runs.iter())
+            .map(|r| (r.ends.0.min(r.ends.1), r.ends.0.max(r.ends.1)))
+            .collect();
+        ends.sort_unstable();
+        let mut runs: Vec<IndexedRun> = (runs.into_iter())
+            .map(|run| IndexedRun {
+                stretch: run.stretch(dir),
+                run,
+                on: OnceCell::new(),
+            })
+            .collect();
+        runs.sort_by(|p, q| p.stretch.0.total_cmp(&q.stretch.0));
+        let mut reach = Vec::with_capacity(runs.len());
+        for r in &runs {
+            let m = reach.last().copied().unwrap_or(f64::NEG_INFINITY);
+            reach.push(r.stretch.1.max(m));
+        }
+        Runs { runs, reach, ends }
+    }
+
+    /// Whether the interval `iv` is a run, from the cluster at one end of
+    /// it to the cluster at the other: the whole interval of its face on
+    /// the line.
+    fn exact(&self, iv: &Interval) -> bool {
+        let (c, d) = (iv.lo.1, iv.hi.1);
+        self.ends.binary_search(&(c.min(d), c.max(d))).is_ok()
+    }
+
+    /// The runs whose stretches reach within 2ε of position `t` along the
+    /// line (those within ε, and more for rounding).
+    fn beside(&self, t: f64, eps: f64) -> impl Iterator<Item = &IndexedRun> {
+        let (lo, hi) = (t - 2.0 * eps, t + 2.0 * eps);
+        let first = self.reach.partition_point(|&m| m < lo);
+        (self.runs[first..].iter())
+            .take_while(move |r| r.stretch.0 <= hi)
+            .filter(move |r| r.stretch.1 >= lo)
+    }
 }
 
 impl Run {
@@ -917,19 +1478,18 @@ impl Run {
 
 /// The runs of face `f` of `op` lying on plane `surface` of the other
 /// operand: consecutive straight edges of one of its loops whose vertices
-/// are all within the tolerance of the plane, each marked exact where the
-/// interval `iv` of the face on the planes' common line runs along it from
-/// the cluster at one end to the cluster at the other. Only the coedges
-/// near the plane are looked at.
+/// are all within the tolerance of the plane, each marked exact where one
+/// of the intervals `ivs` of the face on the planes' common line runs
+/// along it from the cluster at one end to the cluster at the other. Only
+/// the coedges near the plane are looked at.
 fn lying_runs(
     pair: &Pair,
     pts: &Points,
     op: Operand,
     f: usize,
     surface: usize,
-    iv: &Interval,
+    ivs: &[Interval],
 ) -> Vec<Run> {
-    let ends = [iv.lo.1, iv.hi.1];
     let holds = |c: usize| {
         let (v0, v1) = pts.vertices_of(c);
         match op {
@@ -937,7 +1497,12 @@ fn lying_runs(
             Operand::Second => v1.is_some(),
         }
     };
-    let held = ends.iter().all(|&c| holds(c));
+    // The ends of the intervals whose two end clusters hold vertices of
+    // the face's operand.
+    let held: Vec<(usize, usize)> = (ivs.iter())
+        .map(|iv| (iv.lo.1, iv.hi.1))
+        .filter(|&(c, d)| holds(c) && holds(d))
+        .collect();
     let mut runs = Vec::new();
     let shape = pair.get(op);
     let face = &shape.faces[f];
@@ -969,10 +1534,11 @@ fn lying_runs(
             points.push(shape.points[vs[j]]);
         }
         let (s, t) = (pts.vertex_cluster(op, vs[i]), pts.vertex_cluster(op, vs[j]));
-        let exact = held && ((s, t) == (ends[0], ends[1]) || (t, s) == (ends[0], ends[1]));
+        let exact = (held.iter()).any(|&ends| (s, t) == ends || (t, s) == ends);
         runs.push(Run {
             edges,
             points,
+            ends: (s, t),
             exact,
         });
     }
@@ -1579,4 +2145,1041 @@ pub(super) fn stretches(
         }
     }
     Ok((out, whole))
+}
+
+/// A convex piece of a strip ([`strip_pieces`]): the points `x` with
+/// `n · x ≥ c` for each of its sides `(n, c)` (`n` a unit vector), and its
+/// corners in order around it.
+struct Piece {
+    sides: Vec<(DVec2, f64)>,
+    corners: Vec<DVec2>,
+    /// The ends of the segment of the chain whose sweep it is a part of.
+    along: (DVec2, DVec2),
+}
+
+impl Piece {
+    /// The least and greatest x of its corners.
+    fn span(&self) -> (f64, f64) {
+        (self.corners.iter()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(v.x), hi.max(v.x))
+        })
+    }
+
+    /// Its part where `n · x ≥ c` (`n` a unit vector), if that has an area
+    /// (Sutherland and Hodgman 1974).
+    fn cut(&self, n: DVec2, c: f64) -> Option<Piece> {
+        let k = self.corners.len();
+        let mut corners: Vec<DVec2> = Vec::with_capacity(k + 1);
+        for i in 0..k {
+            let (u, v) = (self.corners[i], self.corners[(i + 1) % k]);
+            let (du, dv) = (n.dot(u) - c, n.dot(v) - c);
+            if du >= 0.0 {
+                corners.push(u);
+            }
+            if (du >= 0.0) != (dv >= 0.0) {
+                corners.push(u + (v - u) * (du / (du - dv)));
+            }
+        }
+        corners.dedup();
+        if corners.len() > 1 && corners[0] == corners[corners.len() - 1] {
+            corners.pop();
+        }
+        let m = corners.len();
+        let area: f64 = (0..m)
+            .map(|i| corners[i].perp_dot(corners[(i + 1) % m]))
+            .sum();
+        if m < 3 || area == 0.0 {
+            return None;
+        }
+        let mut sides = self.sides.clone();
+        sides.push((n, c));
+        Some(Piece {
+            sides,
+            corners,
+            along: self.along,
+        })
+    }
+
+    /// True if `v` is in the piece or within `tau` of it (outside each side
+    /// by at most `tau`).
+    fn contains(&self, v: DVec2, tau: f64) -> bool {
+        self.sides.iter().all(|&(n, c)| n.dot(v) - c >= -tau)
+    }
+
+    /// The parameters of the segment `p`–`q` (0 at `p`, 1 at `q`) whose
+    /// points are in the piece or within `tau` of it (Cyrus and Beck 1978),
+    /// if they are not empty.
+    fn clip(&self, p: DVec2, q: DVec2, tau: f64) -> Option<(f64, f64)> {
+        let d = q - p;
+        let (mut t0, mut t1) = (0.0f64, 1.0f64);
+        for &(n, c) in &self.sides {
+            // n · (p + t d) − c + tau ≥ 0.
+            let (v, dv) = (n.dot(p) - c + tau, n.dot(d));
+            if dv == 0.0 {
+                if v < 0.0 {
+                    return None;
+                }
+            } else if dv > 0.0 {
+                t0 = t0.max(-v / dv);
+            } else {
+                t1 = t1.min(-v / dv);
+            }
+        }
+        (t0 < t1).then_some((t0, t1))
+    }
+}
+
+/// The pieces of the strip of a chain whose points are at `feet`, in the
+/// coordinates of P of [`held_strip`] (x along L, y across it, each point
+/// of the face's plane at its foot on P), on the `sides` of L listed (the
+/// signs of y): the sweep of each segment ([`strip_pieces`]) or of a lone
+/// vertex ([`point_pieces`]) less its points within `eps` of L, cut by the
+/// meeting `lines`, the pair's stretches at their feet
+/// ([`beyond_meeting`]; `cos` the cosine of the angle between the planes).
+fn strip_of(
+    feet: &[DVec2],
+    sides: &[f64],
+    mut lines: Vec<(DVec2, DVec2)>,
+    eps: f64,
+    cos: f64,
+    budget: &mut Budget,
+) -> Result<Vec<Piece>, KernelError> {
+    let (band, tau) = (eps * cos, eps * (1.0 + DEEP) * DEEP * cos);
+    let mut pieces = Vec::new();
+    if let [v] = feet {
+        point_pieces(*v, band, tau, sides, &mut pieces);
+    }
+    for w in feet.windows(2) {
+        strip_pieces(w[0], w[1], band, tau, sides, &mut pieces);
+    }
+    // The stretches by their least position along L, each with the
+    // greatest end of those up to it, to find those beside a piece.
+    for l in &mut lines {
+        if l.1.x < l.0.x {
+            *l = (l.1, l.0);
+        }
+    }
+    lines.sort_by(|p, q| p.0.x.total_cmp(&q.0.x));
+    let reach: Vec<f64> = (lines.iter())
+        .scan(f64::NEG_INFINITY, |m, l| {
+            *m = m.max(l.1.x);
+            Some(*m)
+        })
+        .collect();
+    budget.spend(lines.len())?;
+    let mut cut = Vec::new();
+    for piece in pieces {
+        let (x0, x1) = piece.span();
+        let (lo, hi) = (
+            reach.partition_point(|&m| m <= x0),
+            lines.partition_point(|l| l.0.x < x1),
+        );
+        budget.spend(1 + hi.saturating_sub(lo))?;
+        let mut parts = vec![piece];
+        for &line in lines.get(lo..hi).unwrap_or(&[]) {
+            budget.spend(parts.len())?;
+            parts = (parts.into_iter())
+                .flat_map(|p| beyond_meeting(p, line, eps, cos))
+                .collect();
+        }
+        cut.extend(parts);
+    }
+    Ok(cut)
+}
+
+/// The convex pieces of the sweep of the segment `a`–`b` to the x axis
+/// (each point to its foot on it) that are at least `band` from the axis,
+/// on each of the `sides` of it (the signs of y, +1 or −1) where the
+/// segment reaches past `band` with its face on its left toward the axis,
+/// into `out`. The segment runs as its face's loop
+/// runs it, the face on its left (the x axis along L, the y axis across it
+/// in the face's plane, the face's outward normal toward the viewer); on a
+/// side where the face is on the segment's far side from the axis, the
+/// sweep lies outside the face and bounds no strip of it. Each piece is a
+/// trapezoid (or a triangle) between the segment's part beyond the band
+/// and that part's foot on the band's edge. Its sides are the band's edge,
+/// the two lines square to the axis through its ends, and the segment's
+/// own line, so no side is taken from a short edge, whose direction
+/// rounding could turn. A segment square to the axis to `tau` (its ends
+/// no farther apart along it) sweeps no area to speak of and gives none.
+fn strip_pieces(a: DVec2, b: DVec2, band: f64, tau: f64, sides: &[f64], out: &mut Vec<Piece>) {
+    let e = b - a;
+    if e.x.abs() <= tau {
+        return;
+    }
+    for &side in sides {
+        let (ya, yb) = (side * a.y, side * b.y);
+        if (ya <= band && yb <= band) || side * e.x > 0.0 {
+            continue;
+        }
+        let edge = side * band;
+        let cut = |t: f64| DVec2::new(a.x + e.x * t, edge);
+        let p = if ya < band {
+            cut((band - ya) / (yb - ya))
+        } else {
+            a
+        };
+        let q = if yb < band {
+            cut((band - ya) / (yb - ya))
+        } else {
+            b
+        };
+        let (x0, x1) = (p.x.min(q.x), p.x.max(q.x));
+        if x0 >= x1 {
+            continue;
+        }
+        // The side of the segment's line toward the axis.
+        let n = e.perp() / e.length() * (-side * e.x.signum());
+        let sides = vec![
+            (DVec2::X, x0),
+            (-DVec2::X, -x1),
+            (DVec2::new(0.0, side), band),
+            (n, n.dot(a)),
+        ];
+        let mut corners = vec![p, q, DVec2::new(q.x, edge), DVec2::new(p.x, edge)];
+        corners.dedup();
+        if corners.len() > 1 && corners[0] == corners[corners.len() - 1] {
+            corners.pop();
+        }
+        out.push(Piece {
+            sides,
+            corners,
+            along: (a, b),
+        });
+    }
+}
+
+/// The strip of a lone vertex at `v` ([`strip_runs`]): the segment from
+/// it to its foot on the x axis, less its points within `band` of the
+/// axis, as a piece `half` wide on each side of it, into `out` (none if
+/// `v` is within `band` of the axis or on none of the `sides` of it, the
+/// signs of y).
+fn point_pieces(v: DVec2, band: f64, half: f64, sides: &[f64], out: &mut Vec<Piece>) {
+    let side = v.y.signum();
+    if v.y.abs() <= band || !sides.contains(&side) {
+        return;
+    }
+    let (x0, x1, edge) = (v.x - half, v.x + half, side * band);
+    out.push(Piece {
+        sides: vec![
+            (DVec2::X, x0),
+            (-DVec2::X, -x1),
+            (DVec2::new(0.0, side), band),
+            (DVec2::new(0.0, -side), -side * v.y),
+        ],
+        corners: vec![
+            DVec2::new(x0, v.y),
+            DVec2::new(x1, v.y),
+            DVec2::new(x1, edge),
+            DVec2::new(x0, edge),
+        ],
+        along: (DVec2::new(x0, v.y), DVec2::new(x1, v.y)),
+    });
+}
+
+/// The parts of a strip's piece ([`strip_pieces`]) left by the meeting
+/// `a`–`b`, a stretch of the pair (each end at its foot on P, `a` the
+/// nearer along L; `cos` the cosine of the angle between the planes),
+/// over the stretch's span along L: those on the side of the stretch's
+/// line where the piece's own chain is, farther than `eps` from the line
+/// in the face's plane. Over a part of the span where the chain is beyond
+/// the line from L, that is all of the piece but its points within `eps`
+/// of the line; where the line is beyond L or beyond the chain, the
+/// points of the piece within `eps` of it, near L or near the chain. The
+/// piece is split where the chain crosses the line, each side kept on its
+/// own; where the chain lies on the line nothing is kept. Outside the span
+/// the piece is kept whole.
+fn beyond_meeting(piece: Piece, (a, b): (DVec2, DVec2), eps: f64, cos: f64) -> Vec<Piece> {
+    let (x0, x1) = piece.span();
+    if b.x <= a.x || x1 <= a.x || b.x <= x0 {
+        return vec![piece];
+    }
+    // The line in the face's plane (its coordinates across L scaled back by
+    // 1 / cos), and the signed distance from it there, as a linear function
+    // of the coordinates in P.
+    let (af, bf) = (DVec2::new(a.x, a.y / cos), DVec2::new(b.x, b.y / cos));
+    let nf = (bf - af).normalize().perp();
+    let n2 = DVec2::new(nf.x, nf.y / cos);
+    let g = |v: DVec2| n2.dot(v - a);
+    let (p, q) = piece.along;
+    let (gp, gq) = (g(p), g(q));
+    let mut splits = vec![a.x, b.x];
+    if (gp < 0.0) != (gq < 0.0) {
+        splits.push(p.x + (q.x - p.x) * (gp / (gp - gq)));
+    }
+    splits.retain(|&x| x > x0 && x < x1);
+    splits.sort_by(f64::total_cmp);
+    splits.dedup();
+    let mut parts = Vec::with_capacity(splits.len() + 1);
+    let mut rest = Some(piece);
+    for &x in &splits {
+        let Some(r) = rest else { break };
+        parts.extend(r.cut(-DVec2::X, -x));
+        rest = r.cut(DVec2::X, x);
+    }
+    parts.extend(rest);
+    let mut out = Vec::with_capacity(parts.len());
+    for part in parts {
+        let (u0, u1) = part.span();
+        let x = (u0 + u1) * 0.5;
+        if x <= a.x || x >= b.x {
+            out.push(part);
+            continue;
+        }
+        // The side of the line the chain is on over this part.
+        let side = g(p + (q - p) * ((x - p.x) / (q.x - p.x)));
+        if side == 0.0 {
+            continue;
+        }
+        let m = n2 * side.signum();
+        let l = m.length();
+        out.extend(part.cut(m / l, (eps + m.dot(a)) / l));
+    }
+    out
+}
+
+/// A strip's pieces, with a tree over their boxes (padded by `tau`).
+struct Strip {
+    pieces: Vec<Piece>,
+    tree: Bvh,
+    tau: f64,
+    /// The box of every piece.
+    bounds: (DVec2, DVec2),
+}
+
+impl Strip {
+    fn new(pieces: Vec<Piece>, tau: f64) -> Strip {
+        let boxes: Vec<(DVec2, DVec2)> = (pieces.iter())
+            .map(|p| {
+                (p.corners.iter()).fold(
+                    (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+                    |(lo, hi), &v| (lo.min(v), hi.max(v)),
+                )
+            })
+            .collect();
+        let bounds = (boxes.iter()).fold(
+            (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+            |(lo, hi), &(l, h)| (lo.min(l), hi.max(h)),
+        );
+        let tree = Bvh::new(
+            (boxes.iter())
+                .map(|&(lo, hi)| flat(lo - DVec2::splat(tau), hi + DVec2::splat(tau)))
+                .collect(),
+        );
+        Strip {
+            pieces,
+            tree,
+            tau,
+            bounds,
+        }
+    }
+
+    /// The pieces whose (padded) boxes meet the box `lo`–`hi`, into `out`.
+    fn meeting(&self, lo: DVec2, hi: DVec2, out: &mut Vec<usize>) {
+        let (lo, hi) = flat(lo, hi);
+        self.tree.overlapping(lo, hi, out);
+    }
+
+    /// True if `v` is in a piece, to `tau`.
+    fn contains(&self, v: DVec2, budget: &mut Budget) -> Result<bool, KernelError> {
+        let mut found = Vec::new();
+        self.meeting(v, v, &mut found);
+        budget.spend(1 + found.len())?;
+        Ok(found.iter().any(|&k| self.pieces[k].contains(v, self.tau)))
+    }
+
+    /// True unless edge `e` of `shape`, curved, is farther than `gap` from
+    /// every piece (a negative `gap`: enters none deeper than `-gap`), by
+    /// the convex hulls of its rational Bézier pieces' control points,
+    /// which hold it, taken into the strip's plane by `map`.
+    fn reached(
+        &self,
+        shape: &Shape,
+        e: usize,
+        map: &dyn Fn(DVec3) -> DVec2,
+        gap: f64,
+        budget: &mut Budget,
+    ) -> Result<bool, KernelError> {
+        let (curve, t0, t1) = shape.curve(e);
+        let Some(hulls) = quadric::hull_points(curve, t0, t1) else {
+            return Ok(true);
+        };
+        let mut found = Vec::new();
+        for hull in hulls {
+            let hull: Vec<DVec2> = hull.into_iter().map(map).collect();
+            let (lo, hi) = (hull.iter()).fold(
+                (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+                |(lo, hi), &v| (lo.min(v), hi.max(v)),
+            );
+            let pad = DVec2::splat(gap.max(0.0));
+            self.meeting(lo - pad, hi + pad, &mut found);
+            budget.spend(1 + found.len())?;
+            if (found.iter()).any(|&k| !apart(&hull, &self.pieces[k], gap)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// A box of the plane as a box of space, at height zero.
+fn flat(lo: DVec2, hi: DVec2) -> (DVec3, DVec3) {
+    (lo.extend(0.0), hi.extend(0.0))
+}
+
+/// True if the convex hull of `points` and the piece are farther apart
+/// than `gap` along some direction (a negative `gap`: overlap by less than
+/// `-gap` along it): the separating axis test over the piece's sides, the
+/// lines through two of the points, and the directions from each point to
+/// each corner of the piece. Those hold the direction of least overlap of
+/// two convex polygons and of their greatest separation, so the test is
+/// exact up to rounding.
+fn apart(points: &[DVec2], piece: &Piece, gap: f64) -> bool {
+    fn span(vs: &[DVec2], n: DVec2) -> (f64, f64) {
+        (vs.iter()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(v.dot(n)), hi.max(v.dot(n)))
+        })
+    }
+    let separates = |n: DVec2| {
+        let ((a0, a1), (b0, b1)) = (span(points, n), span(&piece.corners, n));
+        b0 - a1 > gap || a0 - b1 > gap
+    };
+    let pairs = (points.iter().enumerate())
+        .flat_map(|(i, &p)| points[i + 1..].iter().map(move |&q| (q - p).perp()));
+    let to_corners = (points.iter()).flat_map(|&p| piece.corners.iter().map(move |&c| c - p));
+    (piece.sides.iter().map(|&(n, _)| n))
+        .chain(pairs)
+        .chain(to_corners)
+        .filter_map(|n| n.try_normalize())
+        .any(separates)
+}
+
+/// The parameters of the line `p + t (q − p)` whose points are within `r`
+/// of the segment `a`–`b`, if any: the union of its meetings with the discs
+/// about the segment's ends and with the band along it, which is one
+/// interval since their union (a capsule) is convex.
+fn capsule(p: DVec2, q: DVec2, (a, b): (DVec2, DVec2), r: f64) -> Option<(f64, f64)> {
+    let d = q - p;
+    let dd = d.length_squared();
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for c in [a, b] {
+        let f = p - c;
+        let half = f.dot(d);
+        let disc = half * half - dd * (f.length_squared() - r * r);
+        if disc >= 0.0 {
+            let s = disc.sqrt();
+            lo = lo.min((-half - s) / dd);
+            hi = hi.max((-half + s) / dd);
+        }
+    }
+    let e = b - a;
+    let len = e.length();
+    if len > 0.0 {
+        let (u, n) = (e / len, e.perp() / len);
+        let (mut t0, mut t1) = (f64::NEG_INFINITY, f64::INFINITY);
+        let mut empty = false;
+        // Each as v + t dv ≥ 0.
+        for (v, dv) in [
+            ((p - a).dot(u), d.dot(u)),
+            ((b - p).dot(u), -d.dot(u)),
+            (r - (p - a).dot(n), -d.dot(n)),
+            (r + (p - a).dot(n), d.dot(n)),
+        ] {
+            if dv == 0.0 {
+                empty |= v < 0.0;
+            } else if dv > 0.0 {
+                t0 = t0.max(-v / dv);
+            } else {
+                t1 = t1.min(-v / dv);
+            }
+        }
+        if !empty && t0 <= t1 {
+            lo = lo.min(t0);
+            hi = hi.max(t1);
+        }
+    }
+    (lo <= hi).then_some((lo, hi))
+}
+
+/// The parameters in (0, 1) of the segment `p`–`q` where the segment
+/// `a`–`b` crosses or touches it, into `out`: a proper crossing, and each
+/// end of `a`–`b` within `tau` of its line (so that a part of `p`–`q`
+/// running along `a`–`b` is split from the rest at its ends).
+fn crossings(p: DVec2, q: DVec2, (a, b): (DVec2, DVec2), tau: f64, out: &mut Vec<f64>) {
+    let d = q - p;
+    let dd = d.length_squared();
+    let len = dd.sqrt();
+    let mut put = |t: f64| {
+        if t > 0.0 && t < 1.0 {
+            out.push(t);
+        }
+    };
+    for c in [a, b] {
+        if d.perp_dot(c - p).abs() <= tau * len {
+            put((c - p).dot(d) / dd);
+        }
+    }
+    let e = b - a;
+    let den = d.perp_dot(e);
+    if den != 0.0 {
+        let w = a - p;
+        let (t, u) = (w.perp_dot(e) / den, w.perp_dot(d) / den);
+        if (0.0..=1.0).contains(&u) {
+            put(t);
+        }
+    }
+}
+
+/// Sorted intervals merged where they meet or overlap.
+fn merge(mut list: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    list.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.total_cmp(&y.1)));
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(list.len());
+    for (a, b) in list {
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
+/// A point of a strip ([`Strip`]) that `holds` accepts, found among the
+/// points where a region of the strip held deeper than `rho` must reach
+/// (design note 0012 §20, *Finding a held point*), in the plane of the
+/// other face: `cuts` are the edges of the strip's face that can enter it
+/// (taken there), and `near` the edges of the other face within `rho` of
+/// it (straight).
+///
+/// Let D be the points of the other face farther than `rho` from its
+/// boundary, and K a part of D in the strip's interior, apart from the
+/// rest. K's boundary runs along the strip's boundary (the pieces' sides
+/// and the cuts) or along D's, which is made of the lines at `rho` from
+/// the near edges and arcs of radius `rho` about their ends; so it has a
+/// stretch on one of those lines, or it is bounded by arcs alone and has a
+/// corner where two of the circles cross or touch. The search tests (1) on
+/// each of
+/// those lines, the parts in the strip farther than `rho` from every near
+/// edge (a capsule about each, [`capsule`]) split where a cut crosses or
+/// touches them, each at its middle: no near edge comes within `rho` of a
+/// part and no cut crosses it, so each face holds all of it or none of it;
+/// and (2) for
+/// each two ends of near edges at most `2 rho` apart (and a margin for
+/// rounding), the two crossings of their circles (one point where they
+/// touch): a corner of K is one, and lies in K's closure, at least `rho`
+/// from every edge of the other face. So it finds a point of every such K
+/// (to the strip's `tau`).
+fn held_point(
+    strip: &Strip,
+    cuts: &[(DVec2, DVec2)],
+    near: &[(DVec2, DVec2)],
+    rho: f64,
+    budget: &mut Budget,
+    mut holds: impl FnMut(DVec2, &mut Budget) -> Result<bool, KernelError>,
+) -> Result<Option<DVec2>, KernelError> {
+    let tau = strip.tau;
+    let segment_box = |(a, b): (DVec2, DVec2), pad: f64| {
+        flat(a.min(b) - DVec2::splat(pad), a.max(b) + DVec2::splat(pad))
+    };
+    let near_tree = Bvh::new(near.iter().map(|&s| segment_box(s, rho)).collect());
+    let cut_tree = Bvh::new(cuts.iter().map(|&s| segment_box(s, tau)).collect());
+    budget.spend(strip.pieces.len() + near.len() + cuts.len())?;
+    // (1) The lines: the pieces' sides, the cuts, and the lines at `rho`
+    // on each side of each near edge, with the edge they come from.
+    let mut lines: Vec<(DVec2, DVec2, Option<usize>)> = Vec::new();
+    for piece in &strip.pieces {
+        let c = &piece.corners;
+        lines.extend((0..c.len()).map(|k| (c[k], c[(k + 1) % c.len()], None)));
+    }
+    lines.extend(cuts.iter().map(|&(a, b)| (a, b, None)));
+    for (k, &(a, b)) in near.iter().enumerate() {
+        let n = (b - a).perp().normalize_or_zero() * rho;
+        if n != DVec2::ZERO {
+            lines.push((a + n, b + n, Some(k)));
+            lines.push((a - n, b - n, Some(k)));
+        }
+    }
+    let mut found = Vec::new();
+    let mut splits = Vec::new();
+    for &(p, q, own) in &lines {
+        let d = q - p;
+        if d == DVec2::ZERO {
+            continue;
+        }
+        let (lo, hi) = (p.min(q), p.max(q));
+        strip.meeting(lo, hi, &mut found);
+        budget.spend(1 + found.len())?;
+        let inside = merge(
+            (found.iter())
+                .filter_map(|&k| strip.pieces[k].clip(p, q, tau))
+                .collect(),
+        );
+        if inside.is_empty() {
+            continue;
+        }
+        let (lo3, hi3) = flat(lo, hi);
+        near_tree.overlapping(lo3, hi3, &mut found);
+        budget.spend(found.len())?;
+        let out = merge(
+            (found.iter())
+                .filter(|&&k| Some(k) != own)
+                .filter_map(|&k| capsule(p, q, near[k], rho))
+                .collect(),
+        );
+        cut_tree.overlapping(lo3, hi3, &mut found);
+        budget.spend(found.len())?;
+        splits.clear();
+        for &k in &found {
+            crossings(p, q, cuts[k], tau, &mut splits);
+        }
+        splits.sort_by(f64::total_cmp);
+        // The parts of `inside` clear of `out`, split at `splits`.
+        let mut x = 0;
+        for &(a, b) in &inside {
+            let mut from = a;
+            while x < out.len() && out[x].1 <= a {
+                x += 1;
+            }
+            let mut ends = Vec::new();
+            for &(c, e) in out[x..].iter().take_while(|iv| iv.0 < b) {
+                if c > from {
+                    ends.push((from, c));
+                }
+                from = from.max(e);
+            }
+            ends.push((from, b));
+            for (s, t) in ends {
+                let first = splits.partition_point(|&u| u <= s);
+                let mut from = s;
+                for u in (splits[first..].iter().copied().take_while(|&u| u < t)).chain([t]) {
+                    if u > from {
+                        let m = p + d * ((from + u) * 0.5);
+                        if holds(m, budget)? {
+                            return Ok(Some(m));
+                        }
+                    }
+                    from = u;
+                }
+            }
+        }
+    }
+    // (2) The crossings of the circles about the ends of near edges.
+    let mut ends: Vec<DVec2> = near.iter().flat_map(|&(a, b)| [a, b]).collect();
+    ends.sort_by(|u, v| u.x.total_cmp(&v.x).then(u.y.total_cmp(&v.y)));
+    ends.dedup();
+    let end_tree = Bvh::new(ends.iter().map(|&v| segment_box((v, v), rho)).collect());
+    for (i, &v) in ends.iter().enumerate() {
+        let (lo, hi) = segment_box((v, v), rho);
+        end_tree.overlapping(lo, hi, &mut found);
+        budget.spend(1 + found.len())?;
+        for &j in found.iter().filter(|&&j| j > i) {
+            let w = ends[j];
+            let l = (w - v).length();
+            // Circles that touch bound a corner too (a cusp); a margin
+            // keeps rounding from skipping them.
+            if l == 0.0 || l > 2.0 * rho * (1.0 + DEEP) {
+                continue;
+            }
+            let u = (w - v).perp() / l;
+            let h = (rho * rho - l * l / 4.0).max(0.0).sqrt();
+            for side in [1.0, -1.0] {
+                let m = (v + w) * 0.5 + u * (side * h);
+                if strip.contains(m, budget)? && holds(m, budget)? {
+                    return Ok(Some(m));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f64::consts::PI;
+
+    /// A deterministic pseudo-random sequence in [0, 1).
+    fn lcg(state: &mut u64) -> f64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (*state >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// A polygon star-shaped about `c`, `n` corners at radii in
+    /// `r0`..`r1`.
+    fn star(s: &mut u64, c: DVec2, n: usize, r0: f64, r1: f64) -> Vec<DVec2> {
+        (0..n)
+            .map(|k| {
+                let a = 2.0 * PI * (k as f64 + 0.8 * lcg(s)) / n as f64;
+                c + DVec2::new(a.cos(), a.sin()) * (r0 + (r1 - r0) * lcg(s))
+            })
+            .collect()
+    }
+
+    fn edges(loops: &[Vec<DVec2>]) -> Vec<(DVec2, DVec2)> {
+        (loops.iter())
+            .flat_map(|l| (0..l.len()).map(move |k| (l[k], l[(k + 1) % l.len()])))
+            .collect()
+    }
+
+    fn distance(v: DVec2, edges: &[(DVec2, DVec2)]) -> f64 {
+        (edges.iter()).fold(f64::INFINITY, |m, &(a, b)| {
+            let t = ((v - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+            m.min((v - (a + (b - a) * t)).length())
+        })
+    }
+
+    /// Inside by the parity of the edges crossed by a ray to +x.
+    fn inside(v: DVec2, edges: &[(DVec2, DVec2)]) -> bool {
+        (edges.iter()).fold(false, |odd, &(a, b)| {
+            let cross =
+                (a.y > v.y) != (b.y > v.y) && a.x + (v.y - a.y) / (b.y - a.y) * (b.x - a.x) > v.x;
+            odd != cross
+        })
+    }
+
+    /// The strip search finds a point wherever a grid finds one of the
+    /// strip, in the strip's face, more than `rho` inside the other face
+    /// (and some margin, for the grid's rounding), and every point it finds
+    /// passes the test it was given: on random strips (bent runs, some
+    /// crossing the line) against random faces with holes.
+    #[test]
+    fn the_strip_search_finds_every_deeply_held_region() {
+        let (eps, mut s) = (1.0, 11);
+        let rho = eps * (1.0 + DEEP);
+        // Per kind of face, the cases held deeper than `rho` and the cases
+        // where the search finds a point.
+        let (mut held, mut found) = ([0; 2], [0; 2]);
+        for case in 0..200 {
+            let mut run = vec![DVec2::new(0.0, 1.0 + 4.0 * lcg(&mut s))];
+            for _ in 0..1 + case % 4 {
+                let last = *run.last().unwrap();
+                run.push(DVec2::new(
+                    last.x + 1.0 + 4.0 * lcg(&mut s),
+                    6.0 * lcg(&mut s) - (case % 5) as f64,
+                ));
+            }
+            // Half the runs go the other way: their face lies above them,
+            // so that they sweep the side above the line.
+            if (case / 2) % 2 == 1 {
+                run.reverse();
+            }
+            let mut pieces = Vec::new();
+            for w in run.windows(2) {
+                strip_pieces(w[0], w[1], eps, rho * DEEP, &[1.0, -1.0], &mut pieces);
+            }
+            if pieces.is_empty() {
+                continue;
+            }
+            let strip = Strip::new(pieces, rho * DEEP);
+            let (lo, hi) = strip.bounds;
+            let mid = (lo + hi) * 0.5;
+            let size = (hi - lo).max_element();
+            // Half the faces are a star with a few holes; the others are
+            // riddled with holes about `rho` apart, leaving small pockets
+            // deeper than `rho` between them, some bounded by arcs alone.
+            let mut g = vec![star(&mut s, mid, 5 + case % 7, 0.2 * size, 0.9 * size)];
+            let holes = if case % 2 == 0 {
+                case % 4
+            } else {
+                ((hi - lo).x * (hi - lo).y / 2.5) as usize
+            };
+            for _ in 0..holes {
+                let c = lo + (hi - lo) * DVec2::new(lcg(&mut s), lcg(&mut s));
+                g.push(star(&mut s, c, 3 + case % 3, 0.3, 1.5));
+            }
+            // The strip's face: a star around the strip, or (every third
+            // case) a small one inside it, with holes.
+            let mut f = if case % 3 == 0 {
+                let c = lo + (hi - lo) * DVec2::new(lcg(&mut s), lcg(&mut s));
+                vec![star(&mut s, c, 4, 0.3, 1.5)]
+            } else {
+                vec![star(&mut s, mid, 6, 0.4 * size, 1.2 * size)]
+            };
+            for _ in 0..case % 3 {
+                let c = lo + (hi - lo) * DVec2::new(lcg(&mut s), lcg(&mut s));
+                f.push(star(&mut s, c, 3, 0.3, 1.5));
+            }
+            let (ge, fe) = (edges(&g), edges(&f));
+            let holds = |v: DVec2| {
+                inside(v, &ge)
+                    && distance(v, &ge) > eps
+                    && (inside(v, &fe) || distance(v, &fe) <= eps)
+            };
+            let mut budget = Budget(STRIP_STEPS);
+            let got = held_point(&strip, &fe, &ge, rho, &mut budget, |v, _| Ok(holds(v))).unwrap();
+            if let Some(v) = got {
+                assert!(holds(v), "case {case}: {v} fails the test");
+                assert!(strip.contains(v, &mut Budget(STRIP_STEPS)).unwrap());
+                found[case % 2] += 1;
+            }
+            let n = 160;
+            let deep = (0..=n * n).any(|k| {
+                let v = lo + (hi - lo) * DVec2::new((k % n) as f64, (k / n) as f64) / n as f64;
+                (strip.pieces.iter()).any(|p| p.contains(v, -1e-9))
+                    && inside(v, &fe)
+                    && distance(v, &fe) > 1e-9
+                    && inside(v, &ge)
+                    && distance(v, &ge) > rho + 1e-9
+            });
+            if deep {
+                held[case % 2] += 1;
+                assert!(got.is_some(), "case {case}: a held point was missed");
+            }
+        }
+        // The cases are varied: some strips are held, some are not.
+        assert!(held.iter().all(|&h| (10..90).contains(&h)), "{held:?}");
+    }
+
+    /// A small face inside the strip, all of it deep inside the other
+    /// face, is found on its own edges (no line of the strip or of the
+    /// other face passes through it).
+    #[test]
+    fn the_strip_search_finds_a_small_face_inside_the_strip() {
+        let eps = 1.0;
+        let rho = eps * (1.0 + DEEP);
+        let mut pieces = Vec::new();
+        strip_pieces(
+            DVec2::new(10.0, 10.0),
+            DVec2::new(0.0, 10.0),
+            eps,
+            rho * DEEP,
+            &[1.0, -1.0],
+            &mut pieces,
+        );
+        let strip = Strip::new(pieces, rho * DEEP);
+        let ge = edges(&[vec![
+            DVec2::new(-20.0, -20.0),
+            DVec2::new(30.0, -20.0),
+            DVec2::new(30.0, 30.0),
+            DVec2::new(-20.0, 30.0),
+        ]]);
+        let fe = edges(&[vec![
+            DVec2::new(4.0, 4.0),
+            DVec2::new(5.0, 4.0),
+            DVec2::new(4.5, 5.0),
+        ]]);
+        let holds = |v: DVec2| {
+            inside(v, &ge) && distance(v, &ge) > eps && (inside(v, &fe) || distance(v, &fe) <= eps)
+        };
+        let mut budget = Budget(STRIP_STEPS);
+        let got = held_point(&strip, &fe, &ge, rho, &mut budget, |v, _| Ok(holds(v))).unwrap();
+        let v = got.expect("the small face is found");
+        assert!(distance(v, &fe) < 1e-9, "{v}");
+    }
+
+    /// A region of the other face deeper than `rho` bounded by arcs alone
+    /// (three holes whose tips are closer than `2 rho` in pairs, around a
+    /// point farther than `rho` from each) is found at a crossing of two
+    /// of the tips' circles, where no line the search clips passes through
+    /// it.
+    #[test]
+    fn the_strip_search_finds_a_region_bounded_by_arcs() {
+        let eps = 1.0;
+        let rho = eps * (1.0 + DEEP);
+        let r = 1.1 * rho;
+        let centre = DVec2::new(5.0, 3.0);
+        let mut g = vec![vec![
+            DVec2::new(-20.0, -20.0),
+            DVec2::new(30.0, -20.0),
+            DVec2::new(30.0, 30.0),
+            DVec2::new(-20.0, 30.0),
+        ]];
+        for k in 0..3 {
+            let axis = PI / 2.0 + 2.0 * PI * k as f64 / 3.0;
+            let dir = |a: f64| DVec2::new(a.cos(), a.sin());
+            let tip = centre + dir(axis) * r;
+            // A wedge opening away from the centre, its sides at 60° from
+            // its axis, clockwise as a hole.
+            g.push(vec![
+                tip,
+                tip + dir(axis + PI / 3.0) * 12.0,
+                tip + dir(axis - PI / 3.0) * 12.0,
+            ]);
+        }
+        let mut pieces = Vec::new();
+        strip_pieces(
+            DVec2::new(10.0, 10.0),
+            DVec2::new(0.0, 10.0),
+            eps,
+            rho * DEEP,
+            &[1.0, -1.0],
+            &mut pieces,
+        );
+        let strip = Strip::new(pieces, rho * DEEP);
+        let ge = edges(&g);
+        let f = [vec![
+            DVec2::new(3.0, 1.5),
+            DVec2::new(7.0, 1.5),
+            DVec2::new(7.0, 4.5),
+            DVec2::new(3.0, 4.5),
+        ]];
+        let fe = edges(&f);
+        let holds = |v: DVec2| inside(v, &ge) && distance(v, &ge) > eps && inside(v, &fe);
+        assert!(inside(centre, &ge) && distance(centre, &ge) > rho);
+        let mut budget = Budget(STRIP_STEPS);
+        let got = held_point(&strip, &fe, &ge, rho, &mut budget, |v, _| Ok(holds(v))).unwrap();
+        let v = got.expect("the region bounded by arcs is found");
+        assert!((v - centre).length() < 0.3 * rho, "{v}");
+    }
+
+    /// The strip of `feet` on `sides` with the meeting `lines`
+    /// ([`strip_of`]), at ε = 1 and with the planes' cosine 1.
+    fn strip(feet: &[DVec2], sides: &[f64], lines: &[(DVec2, DVec2)]) -> Vec<Piece> {
+        let mut budget = Budget(STRIP_STEPS);
+        strip_of(feet, sides, lines.to_vec(), 1.0, 1.0, &mut budget).unwrap()
+    }
+
+    /// Whether a piece of `pieces` holds `v` (by more than rounding).
+    fn holds(pieces: &[Piece], v: DVec2) -> bool {
+        pieces.iter().any(|p| p.contains(v, -1e-9))
+    }
+
+    /// A strip leaves out its points within ε of the line, and covers only
+    /// the sides of it asked for, a segment's on the side where its face
+    /// lies toward the line, a vertex's on its own side.
+    #[test]
+    fn a_strip_leaves_out_the_band_and_keeps_to_its_sides() {
+        let v = DVec2::new;
+        let both = [1.0, -1.0];
+        // The face below the segment, toward the line.
+        let above = [v(10.0, 5.0), v(0.0, 5.0)];
+        let s = strip(&above, &both, &[]);
+        assert!(holds(&s, v(5.0, 1.5)) && holds(&s, v(5.0, 4.5)));
+        assert!(!holds(&s, v(5.0, 0.5)) && !holds(&s, v(5.0, -2.0)));
+        assert!(strip(&above, &[-1.0], &[]).is_empty());
+        assert!(holds(&strip(&above, &[1.0], &[]), v(5.0, 1.5)));
+        // The face above the segment, away from the line: no strip.
+        assert!(strip(&[v(0.0, 5.0), v(10.0, 5.0)], &both, &[]).is_empty());
+        let below = strip(&[v(0.0, -5.0), v(10.0, -5.0)], &both, &[]);
+        assert!(holds(&below, v(5.0, -1.5)) && !holds(&below, v(5.0, -0.5)));
+        // A vertex.
+        let apex = [v(5.0, 5.0)];
+        let s = strip(&apex, &both, &[]);
+        assert!(holds(&s, v(5.0, 3.0)) && !holds(&s, v(5.0, 0.5)));
+        assert!(strip(&apex, &[-1.0], &[]).is_empty());
+        assert!(holds(&strip(&[v(5.0, -5.0)], &[-1.0], &[]), v(5.0, -3.0)));
+        assert!(strip(&[v(5.0, 0.5)], &both, &[]).is_empty());
+    }
+
+    /// A strip ends ε short of a meeting between its chain and the line,
+    /// over the meeting's span along the line; is split where its chain
+    /// crosses the meeting's line, each side kept on its own side of it;
+    /// and has nothing where its chain lies on that line.
+    #[test]
+    fn a_strip_ends_short_of_a_meeting() {
+        let v = DVec2::new;
+        let both = [1.0, -1.0];
+        let chain = [v(10.0, 5.0), v(0.0, 5.0)];
+        for line in [(v(-1.0, 3.0), v(11.0, 3.0)), (v(11.0, 3.0), v(-1.0, 3.0))] {
+            let s = strip(&chain, &both, &[line]);
+            assert!(holds(&s, v(5.0, 4.5)));
+            assert!(!holds(&s, v(5.0, 3.5)) && !holds(&s, v(5.0, 2.0)));
+        }
+        // A meeting over part of the span.
+        let s = strip(&chain, &both, &[(v(4.0, 3.0), v(6.0, 3.0))]);
+        assert!(holds(&s, v(2.0, 2.0)) && holds(&s, v(8.0, 2.0)));
+        assert!(!holds(&s, v(5.0, 2.0)) && holds(&s, v(5.0, 4.5)));
+        // The chain crossing the meeting's line at x = 20 / 3: beyond it
+        // to the left, between it and the line to the right.
+        let line = (v(-1.0, 3.0), v(11.0, 3.0));
+        let s = strip(&[v(10.0, 1.5), v(0.0, 6.0)], &both, &[line]);
+        assert!(holds(&s, v(2.0, 5.0)) && holds(&s, v(8.0, 1.5)));
+        assert!(!holds(&s, v(2.0, 3.5)) && !holds(&s, v(8.0, 2.2)));
+        // The chain on the meeting's line.
+        assert!(strip(&[v(10.0, 3.0), v(0.0, 3.0)], &both, &[line]).is_empty());
+    }
+
+    /// Cutting each piece by only the meetings over its span gives the same
+    /// pieces as cutting it by all of them, in the same order, on random
+    /// chains and meetings; and the meetings beside no piece cost nothing
+    /// beyond their sorting.
+    #[test]
+    fn a_strip_takes_only_the_meetings_over_each_piece() {
+        let mut s = 7;
+        let both = [1.0, -1.0];
+        let tau = (1.0 + DEEP) * DEEP;
+        let mut cut = 0;
+        for case in 0..400 {
+            let mut feet = vec![DVec2::new(
+                12.0 * lcg(&mut s) - 1.0,
+                12.0 * lcg(&mut s) - 6.0,
+            )];
+            for _ in 0..1 + case % 4 {
+                feet.push(DVec2::new(
+                    12.0 * lcg(&mut s) - 1.0,
+                    12.0 * lcg(&mut s) - 6.0,
+                ));
+            }
+            let lines: Vec<(DVec2, DVec2)> = (0..case % 30)
+                .map(|_| {
+                    let a = DVec2::new(14.0 * lcg(&mut s) - 2.0, 12.0 * lcg(&mut s) - 6.0);
+                    let b = a + DVec2::new(0.1 + 5.0 * lcg(&mut s), 4.0 * lcg(&mut s) - 2.0);
+                    if lcg(&mut s) < 0.5 {
+                        (a, b)
+                    } else {
+                        (b, a)
+                    }
+                })
+                .collect();
+            let got = strip(&feet, &both, &lines);
+            let mut all = Vec::new();
+            for w in feet.windows(2) {
+                strip_pieces(w[0], w[1], 1.0, tau, &both, &mut all);
+            }
+            let mut sorted: Vec<(DVec2, DVec2)> = (lines.iter())
+                .map(|&(a, b)| if a.x <= b.x { (a, b) } else { (b, a) })
+                .collect();
+            sorted.sort_by(|p, q| p.0.x.total_cmp(&q.0.x));
+            let before = all.len();
+            for line in sorted {
+                all = (all.into_iter())
+                    .flat_map(|p| beyond_meeting(p, line, 1.0, 1.0))
+                    .collect();
+            }
+            cut += usize::from(all.len() != before);
+            assert_eq!(got.len(), all.len(), "case {case}");
+            for (p, q) in got.iter().zip(&all) {
+                assert_eq!(
+                    (&p.corners, &p.sides),
+                    (&q.corners, &q.sides),
+                    "case {case}"
+                );
+            }
+        }
+        assert!(cut > 100, "{cut}");
+        let v = DVec2::new;
+        let lines: Vec<(DVec2, DVec2)> = (0..1000)
+            .map(|i| {
+                let x = if i % 2 == 0 { -30.0 } else { 20.0 } + 0.01 * i as f64;
+                (v(x, 3.0), v(x + 1.0, 3.0))
+            })
+            .collect();
+        let mut budget = Budget(STRIP_STEPS);
+        let pieces = strip_of(
+            &[v(10.0, 5.0), v(0.0, 5.0)],
+            &both,
+            lines.clone(),
+            1.0,
+            1.0,
+            &mut budget,
+        )
+        .unwrap();
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(STRIP_STEPS - budget.0, 1000 + 1);
+        // One step fewer left, and the boolean is refused as too large.
+        let refused = strip_of(
+            &[v(10.0, 5.0), v(0.0, 5.0)],
+            &both,
+            lines,
+            1.0,
+            1.0,
+            &mut Budget(1000),
+        );
+        assert!(
+            matches!(&refused, Err(KernelError::TooLarge(m)) if m.contains(STRIP_WORK)),
+            "{:?}",
+            refused.map(|p| p.len())
+        );
+    }
 }

@@ -86,6 +86,31 @@ impl Face {
     /// left out lies above the surface (on the side its distance grows to),
     /// and whether some lies below it.
     pub fn near_surface(&self, surface: &Quadric, eps: f64, out: &mut Vec<usize>) -> (bool, bool) {
+        self.near(surface, eps, None, out)
+    }
+
+    /// The coedges of [`Face::near_surface`] whose edges' boxes meet the
+    /// closed box `within` (all of them, as there, on a face without an
+    /// index): the walk enters only the parts of the index whose boxes meet
+    /// it, so a face with many edges near the surface costs a search near
+    /// the box, not a pass over them.
+    pub fn near_surface_in(
+        &self,
+        surface: &Quadric,
+        eps: f64,
+        within: (DVec3, DVec3),
+        out: &mut Vec<usize>,
+    ) {
+        self.near(surface, eps, Some(within), out);
+    }
+
+    fn near(
+        &self,
+        surface: &Quadric,
+        eps: f64,
+        within: Option<(DVec3, DVec3)>,
+        out: &mut Vec<usize>,
+    ) -> (bool, bool) {
         out.clear();
         let Some(index) = &self.index else {
             out.extend(0..self.coedges());
@@ -107,12 +132,15 @@ impl Face {
                 true
             }
         };
+        let meets = |lo: DVec3, hi: DVec3| {
+            within.is_none_or(|(l, h)| lo.cmple(h).all() && l.cmple(hi).all())
+        };
         match *surface {
             Quadric::Plane { point, normal } => index.visit(
                 |lo, hi| {
                     let centre = (lo + hi) * 0.5;
                     let half = (hi - lo) * 0.5;
-                    side((centre - point).dot(normal), half.dot(normal.abs()))
+                    meets(lo, hi) && side((centre - point).dot(normal), half.dot(normal.abs()))
                 },
                 |k| {
                     out.push(k);
@@ -123,7 +151,10 @@ impl Face {
             // so a box is on one side if the distance at its centre is more
             // than half its diagonal.
             _ => index.visit(
-                |lo, hi| side(surface.distance((lo + hi) * 0.5), (hi - lo).length() * 0.5),
+                |lo, hi| {
+                    meets(lo, hi)
+                        && side(surface.distance((lo + hi) * 0.5), (hi - lo).length() * 0.5)
+                },
                 |k| {
                     out.push(k);
                     true

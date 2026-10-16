@@ -203,6 +203,13 @@ fn point_refusal(at: &str) -> String {
     format!("refused: the result would be non-manifold: the bodies touch at a point near {at}")
 }
 
+fn band_refusal(at: &str) -> String {
+    format!(
+        "refused: a face of one body runs within the tolerance of the other's surface without \
+         lying on one of its faces, near {at}"
+    )
+}
+
 fn run(a: &Body, b: &Body, o: BooleanOp) -> Body {
     let r = k()
         .boolean(a, b, o)
@@ -1726,6 +1733,25 @@ fn an_edge_lying_on_a_face_ending_at_a_reflex_corner() {
     assert_eq!(six(&a, &b, 1.0), [leaves; 6]);
 }
 
+/// A wedge from x = 0.2 to 0.8 whose face rises at 10° from the x axis
+/// toward +y, its edge on that face's plane `off` tolerances short of the
+/// axis.
+fn rising_wedge(off: f64) -> Body {
+    let eps = k().tolerance().linear;
+    let t = 10f64.to_radians();
+    let up = DVec2::new(t.cos(), t.sin());
+    let at = up * (-off * eps);
+    prism(
+        yz(DVec3::new(0.2, 0.0, 0.0)),
+        &[
+            at,
+            at + up * 0.5,
+            at + DVec2::new(-0.1, 1.0).normalize() * 0.5,
+        ],
+        0.6,
+    )
+}
+
 /// Golden 30: an edge of each body lying on the other's face, the faces
 /// at 10° (found by review): the box's top edge y = 4 tolerances on the
 /// wedge's face, and the wedge's edge on the top, 4 tolerances to the
@@ -1739,26 +1765,12 @@ fn an_edge_lying_on_a_face_ending_at_a_reflex_corner() {
 fn edges_of_both_bodies_lying_on_the_others_face() {
     let eps = k().tolerance().linear;
     let a = cuboid(DVec3::new(0.0, -1.0, -1.0), DVec3::new(1.0, 4.0 * eps, 0.0));
-    let t = 10f64.to_radians();
-    let up = DVec2::new(t.cos(), t.sin());
-    let wedge = |off: f64| {
-        let at = up * (-off * eps);
-        prism(
-            yz(DVec3::new(0.2, 0.0, 0.0)),
-            &[
-                at,
-                at + up * 0.5,
-                at + DVec2::new(-0.1, 1.0).normalize() * 0.5,
-            ],
-            0.6,
-        )
-    };
     let band = "refused: a face of one body runs within the tolerance of the other's surface \
                 without lying on one of its faces, near (500.000000, -0.000001, -0.000000) mm";
-    assert_eq!(six(&a, &wedge(4.0), 1.0), [band; 6]);
+    assert_eq!(six(&a, &rising_wedge(4.0), 1.0), [band; 6]);
     let touch = edge_refusal("(500.000000, 0.000394, 0.000069) mm");
     assert_eq!(
-        six(&a, &wedge(-4.0), 1.0),
+        six(&a, &rising_wedge(-4.0), 1.0),
         [
             touch.clone(),
             touch,
@@ -1821,6 +1833,987 @@ fn a_wedge_under_a_corner_crossing_a_face_beside_it() {
         assert_eq!(
             six(x, &b, 1.0),
             [union, union, common, common, &pinch, lobes]
+        );
+    }
+}
+
+/// The tilted prism of the known fault (design note 0012 §19, §20): its
+/// face's edge from x = 0 to 1 lies `w` tolerances off the axis, away from
+/// the face, between two reflex corners past which the face's boundary
+/// turns away and the axis runs on into the face.
+fn beside(w: f64) -> Body {
+    beside_at(10.0, w)
+}
+
+/// [`beside`]'s prism tilted `t` degrees.
+fn beside_at(t: f64, w: f64) -> Body {
+    tilted(
+        t,
+        &[
+            (-0.5, -0.5, false),
+            (0.0, -w, true),
+            (1.0, -w, true),
+            (1.5, -0.5, false),
+            (2.0, -0.5, false),
+            (2.0, 0.5, false),
+            (-0.5, 0.5, false),
+        ],
+    )
+}
+
+/// Golden 32: golden 29's prism with its edge between two reflex corners,
+/// so that the line where its face crosses the box's top passes beside
+/// the edge with both its ends beyond it (§19's known fault). The strip of
+/// the face between the edge and the line lies within the tolerance of
+/// the top, and A ∩ B was one solid: the wedges beyond the corners joined
+/// by a fin under a tolerance thick along the edge. With the edge 2 and 5
+/// tolerances off the axis, the top holds the strip, and every operation
+/// is refused (design note 0012 §20), as with the box's top ending on the
+/// axis or 4 tolerances past it (found by review: that edge of the top
+/// then lies on the face and is the meeting), or ending on the axis at x
+/// = 0.5, beside the edge (A ∩ B a wedge and half the fin; found by
+/// probing), and with golden 29's prism against its box ending on the axis
+/// (found by review). Half a tolerance off the axis, edge and line are one
+/// place, the strip is empty, and B rests on the box by that edge: the
+/// unions pinch, and A ∩ B is the two wedges.
+#[test]
+fn an_edge_lying_on_a_face_beside_the_line_where_the_faces_cross() {
+    let eps = k().tolerance().linear;
+    let boxed = |y: f64| cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(1.25, y, 0.0));
+    let touch = edge_refusal("(500.000000, -0.000049, -0.000009) mm");
+    assert_eq!(
+        six(&boxed(1.0), &beside(0.5), 1.0),
+        [
+            touch.clone(),
+            touch,
+            "(8, 12, 8, 2) V=0.000918370 A=0.152569852".into(),
+            "(8, 12, 8, 2) V=0.000918370 A=0.152569852".into(),
+            "(10, 24, 16, 1) V=2.999081630 A=13.003600651".into(),
+            "(13, 31, 20, 1) V=0.874081667 A=7.203506245".into(),
+        ]
+    );
+    let at = band_refusal("(500.000000, -0.000197, -0.000035) mm");
+    assert_eq!(six(&boxed(1.0), &beside(2.0), 1.0), [at.as_str(); 6]);
+    let at = band_refusal("(500.000000, -0.000492, -0.000087) mm");
+    for y in [1.0, 0.0, 4.0 * eps] {
+        assert_eq!(six(&boxed(y), &beside(5.0), 1.0), [at.as_str(); 6]);
+    }
+    let a = cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(0.5, 0.0, 0.0));
+    let at = band_refusal("(249.999950, -0.000492, -0.000087) mm");
+    assert_eq!(six(&a, &beside(5.0), 1.0), [at.as_str(); 6]);
+    let a = cuboid(DVec3::new(0.45, -1.0, -1.0), DVec3::new(1.8, 0.0, 0.0));
+    let b = tilted(
+        10.0,
+        &[
+            (0.0, -5.0, true),
+            (1.0, -5.0, true),
+            (1.5, -0.5, false),
+            (2.0, -0.5, false),
+            (2.0, 0.5, false),
+            (0.0, 0.5, false),
+        ],
+    );
+    let at = band_refusal("(725.000050, -0.000492, -0.000087) mm");
+    assert_eq!(six(&a, &b, 1.0), [at.as_str(); 6]);
+}
+
+/// A block from x = −0.25 to 1.25 and y = −1 to 1, its top at z = 0,
+/// with a notch through it from x = −0.1 to 1.1 whose floor is at `y`.
+fn notched(y: f64) -> Body {
+    let pts = [
+        (-0.25, -1.0),
+        (-0.1, -1.0),
+        (-0.1, y),
+        (1.1, y),
+        (1.1, -1.0),
+        (1.25, -1.0),
+        (1.25, 1.0),
+        (-0.25, 1.0),
+    ]
+    .map(|(x, y)| DVec2::new(x, y));
+    let frame = Frame {
+        origin: DVec3::new(0.0, 0.0, -1.0),
+        ..Frame::WORLD
+    };
+    prism(frame, &pts, 1.0)
+}
+
+/// Golden 33: golden 32's prism, its edge 5 tolerances off the axis, on
+/// bodies whose top does or does not hold the strip between the edge and
+/// the line (design note 0012 §20). A box from y = 0 to 1, its edge on the
+/// axis and its material away from the prism's edge; a slab with a hole
+/// whose back edge is on the axis; and a block with a notch whose floor is
+/// on it (found by review): the prism's edge lies over no face of A, and B
+/// rests on that edge of A. The unions pinch; the intersections are empty
+/// and the differences the operands, but for the block, whose prongs
+/// beside the notch hold the wedges. The hole's front edge on the axis,
+/// its material on the prism's edge's side, and the notch's floor 2
+/// tolerances off the axis toward the edge (found by probing), hold the
+/// strip: every operation is refused. The notch's floor is itself an edge
+/// of A lying on the prism's face 2 tolerances beside the axis, whose own
+/// strip the face holds: with A first it is found there, with B first at
+/// the prism's edge's corner.
+#[test]
+fn an_edge_lying_beside_the_line_where_the_faces_cross_over_a_gap_in_the_face() {
+    let eps = k().tolerance().linear;
+    let b = beside(5.0);
+    let mirror = cuboid(DVec3::new(-0.25, 0.0, -1.0), DVec3::new(1.25, 1.0, 0.0));
+    let slab = cuboid(DVec3::new(-1.0, -1.0, -1.0), DVec3::new(3.0, 1.0, 0.0));
+    let holed = |y0: f64, y1: f64| {
+        let hole = cuboid(DVec3::new(-0.7, y0, -2.0), DVec3::new(2.2, y1, 1.0));
+        op(&slab, &hole, BooleanOp::Subtract)
+    };
+    let prism_b = "(9, 21, 14, 1) V=0.875000375 A=7.207107928";
+    let touch = edge_refusal("(500.000000, 0.000000, 0.000000) mm");
+    for (a, a_alone) in [
+        (&mirror, "(6, 12, 8, 1) V=1.500000000 A=8.000000000"),
+        (
+            &holed(-0.6, 0.0),
+            "(10, 24, 16, 1) V=6.260000000 A=31.520000000",
+        ),
+    ] {
+        assert_eq!(
+            six(a, &b, 1.0),
+            [
+                touch.clone(),
+                touch.clone(),
+                "empty".into(),
+                "empty".into(),
+                a_alone.into(),
+                prism_b.into(),
+            ]
+        );
+    }
+    let touch = edge_refusal("(-49.999750, 0.000000, 0.000000) mm");
+    let wedges = "(10, 22, 16, 2) V=0.000859597 A=0.131685433";
+    assert_eq!(
+        six(&notched(0.0), &b, 1.0),
+        [
+            touch.clone(),
+            touch,
+            wedges.into(),
+            wedges.into(),
+            "(16, 40, 26, 1) V=1.799140403 A=12.599497987".into(),
+            "(15, 43, 30, 1) V=0.874140778 A=7.207609909".into(),
+        ]
+    );
+    let at = band_refusal("(500.000000, -0.000492, -0.000087) mm");
+    assert_eq!(six(&holed(0.0, 0.6), &b, 1.0), [at.as_str(); 6]);
+    let (on_a, on_b) = (
+        band_refusal("(500.000000, -0.000200, 0.000000) mm"),
+        band_refusal("(0.000000, -0.000099, -0.000017) mm"),
+    );
+    assert_eq!(
+        six(&notched(-2.0 * eps), &b, 1.0),
+        [&on_a, &on_b, &on_a, &on_b, &on_a, &on_b].map(|s| s.as_str())
+    );
+}
+
+/// Golden 32's prism tilted `t` degrees, its edge `d` tolerances off the
+/// axis, with steps from `r` tolerances off it to the edge's corners,
+/// `delta` tolerances along it.
+fn stepped(t: f64, d: f64, r: f64, delta: f64) -> Body {
+    let eps = k().tolerance().linear;
+    tilted(
+        t,
+        &[
+            (-0.5, -0.5, false),
+            (-delta * eps, -r, true),
+            (0.0, -d, true),
+            (1.0, -d, true),
+            (1.0 + delta * eps, -r, true),
+            (1.5, -0.5, false),
+            (2.0, -0.5, false),
+            (2.0, 0.5, false),
+            (-0.5, 0.5, false),
+        ],
+    )
+}
+
+/// Golden 32's box with a triangular hole through it under each corner of
+/// the prism's lying edge (x = 0 and x = 1): its apex at (x, `apex`
+/// tolerances), its base from x − `half` to x + `half` at y = `base`.
+fn nicked(apex: f64, half: f64, base: f64) -> Body {
+    let eps = k().tolerance().linear;
+    let mut boxed = cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(1.25, 1.0, 0.0));
+    for x in [0.0, 1.0] {
+        let frame = Frame {
+            origin: DVec3::new(0.0, 0.0, -2.0),
+            ..Frame::WORLD
+        };
+        let tri =
+            [(x - half, base), (x, apex * eps), (x + half, base)].map(|(x, y)| DVec2::new(x, y));
+        boxed = op(&boxed, &prism(frame, &tri, 3.0), BooleanOp::Subtract);
+    }
+    boxed
+}
+
+/// Golden 34: golden 32's prism where the box's top holds only part of the
+/// strip between the edge and the line, or the line does not reach the
+/// edge (found by the second review, design note 0012 §20, where points
+/// measured at the edge's corners missed them): the edge's corners
+/// replaced by short steps nearly square to the axis (3°, the edge 18
+/// tolerances off it, the steps from 1.5; and 1°, 50 and 12); triangular
+/// nicks in the box under the edge's corners, their apexes 2 to 4
+/// tolerances off the axis toward the edge; and a box whose top's edge
+/// crosses the axis at a slant at x = 1.2, beyond the edge, 6 tolerances
+/// to either side of it at its ends, its material on either side. Main
+/// answered the steps, the nicks and the slanted edge with the material on
+/// the edge's side with A ∩ B one solid joined along the edge; every
+/// operation is refused. A nick's apex is a reflex corner of the box's top
+/// lying on the prism's face, and the face holds the top between it and
+/// the axis, so with the box first the refusal is found there, at the
+/// neck. With the edge half a tolerance off the axis, the nicked box gives
+/// the contact.
+#[test]
+fn an_edge_lying_beside_the_line_where_the_faces_cross_held_in_part() {
+    let eps = k().tolerance().linear;
+    let a = cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(1.25, 1.0, 0.0));
+    for (b, at) in [
+        (
+            stepped(3.0, 18.0, 1.5, 0.5),
+            "(1000.000025, -0.000974, -0.000051) mm",
+        ),
+        (
+            stepped(3.0, 18.0, 1.5, -0.5),
+            "(500.000000, -0.001798, -0.000094) mm",
+        ),
+        (
+            stepped(1.0, 50.0, 12.0, 0.5),
+            "(1000.000025, -0.003100, -0.000054) mm",
+        ),
+    ] {
+        let at = band_refusal(at);
+        assert_eq!(six(&a, &b, 1.0), [at.as_str(); 6]);
+    }
+    let on_b = band_refusal("(500.000000, -0.000492, -0.000087) mm");
+    for (apex, half, base, at) in [
+        (-2.0, 0.2, -0.1, "(0.000000, -0.000200, 0.000000) mm"),
+        (-3.0, 0.1, -0.02, "(0.000000, -0.000300, 0.000000) mm"),
+        (-4.0, 0.2, -0.3, "(0.000000, -0.000400, 0.000000) mm"),
+    ] {
+        let on_a = band_refusal(at);
+        assert_eq!(
+            six(&nicked(apex, half, base), &beside(5.0), 1.0),
+            [&on_a, &on_b, &on_a, &on_b, &on_a, &on_b].map(|s| s.as_str())
+        );
+    }
+    let touch = edge_refusal("(0.000117, -0.000049, -0.000009) mm");
+    assert_eq!(
+        six(&nicked(-4.0, 0.2, -0.3), &beside(0.5), 1.0),
+        [
+            touch.clone(),
+            touch,
+            "(8, 14, 10, 2) V=0.000918370 A=0.152569842".into(),
+            "(8, 14, 10, 2) V=0.000918370 A=0.152569842".into(),
+            "(16, 44, 30, 1) V=2.879081790 A=15.005820142".into(),
+            "(13, 31, 20, 1) V=0.874081667 A=7.203506245".into(),
+        ]
+    );
+    let frame = Frame {
+        origin: DVec3::new(0.0, 0.0, -1.0),
+        ..Frame::WORLD
+    };
+    let (lo, hi) = ((-1.05, -6.0 * eps), (3.45, 6.0 * eps));
+    for (pts, at) in [
+        (
+            [(-1.05, -1.0), (3.45, -1.0), hi, lo],
+            "(500.000000, -0.000492, -0.000087) mm",
+        ),
+        (
+            [lo, hi, (3.45, 1.0), (-1.05, 1.0)],
+            "(0.000000, -0.000159, -0.000028) mm",
+        ),
+    ] {
+        let a = prism(frame, &pts.map(|(x, y)| DVec2::new(x, y)), 1.0);
+        let at = band_refusal(at);
+        assert_eq!(six(&a, &beside(5.0), 1.0), [at.as_str(); 6]);
+    }
+}
+
+/// Golden 35: golden 32's prism, its edge 5 tolerances off the axis, over a
+/// gap of the other body's top whose back edge is on the axis and whose
+/// walls are flush with the edge's corners: a notch, a hole, a hole flush
+/// at one end, and a pocket whose far lip lies 0.3 tolerances beyond the
+/// edge (found by the second review: measured at the edge's corners, the
+/// first rule took the walls for the top holding the strip). The strip
+/// lies over the gap, so nothing of A bounds it, and each is answered as
+/// the contact: the unions pinch, A ∩ B is the two wedges, and the
+/// differences are the operands less the wedges.
+#[test]
+fn an_edge_lying_beside_the_line_over_a_gap_flush_with_its_corners() {
+    let eps = k().tolerance().linear;
+    let b = beside(5.0);
+    let touch = edge_refusal("(0.000250, 0.000000, 0.000000) mm");
+    let pts = [
+        (-0.25, -1.0),
+        (0.0, -1.0),
+        (0.0, 0.0),
+        (1.0, 0.0),
+        (1.0, -1.0),
+        (1.25, -1.0),
+        (1.25, 1.0),
+        (-0.25, 1.0),
+    ]
+    .map(|(x, y)| DVec2::new(x, y));
+    let frame = Frame {
+        origin: DVec3::new(0.0, 0.0, -1.0),
+        ..Frame::WORLD
+    };
+    assert_eq!(
+        six(&prism(frame, &pts, 1.0), &b, 1.0),
+        [
+            touch.clone(),
+            touch.clone(),
+            "(8, 16, 12, 2) V=0.000918373 A=0.152570232".into(),
+            "(8, 16, 12, 2) V=0.000918373 A=0.152570232".into(),
+            "(16, 38, 24, 1) V=1.999081627 A=13.003600551".into(),
+            "(13, 35, 24, 1) V=0.874082002 A=7.203507268".into(),
+        ]
+    );
+    let slab = cuboid(DVec3::new(-1.0, -1.0, -1.0), DVec3::new(3.0, 1.0, 0.0));
+    let holed = |x1: f64| {
+        let hole = cuboid(DVec3::new(0.0, -0.6, -2.0), DVec3::new(x1, 0.0, 1.0));
+        op(&slab, &hole, BooleanOp::Subtract)
+    };
+    assert_eq!(
+        six(&holed(1.0), &b, 1.0),
+        [
+            touch.clone(),
+            touch.clone(),
+            "(9, 17, 12, 2) V=0.018367401 A=1.158218263".into(),
+            "(9, 17, 12, 2) V=0.018367401 A=1.158218263".into(),
+            "(17, 41, 26, 1) V=7.381632599 A=30.142791107".into(),
+            "(11, 27, 18, 1) V=0.856632974 A=7.064316769".into(),
+        ]
+    );
+    assert_eq!(
+        six(&holed(1.5), &b, 1.0),
+        [
+            touch.clone(),
+            touch,
+            "(9, 17, 12, 2) V=0.014693919 A=0.897160054".into(),
+            "(9, 17, 12, 2) V=0.014693919 A=0.897160054".into(),
+            "(16, 39, 25, 1) V=7.085306081 A=30.491508100".into(),
+            "(12, 30, 20, 1) V=0.860306456 A=7.115599780".into(),
+        ]
+    );
+    let lip = -5.0 * eps * 10f64.to_radians().cos() - 0.3 * eps;
+    let mut a = cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(1.25, 1.0, -0.3));
+    for (lo, hi) in [
+        ((-0.25, -1.0), (1.25, lip)),
+        ((-0.25, 0.0), (1.25, 1.0)),
+        ((-0.25, -0.5), (-0.1, 0.5)),
+        ((1.1, -0.5), (1.25, 0.5)),
+    ] {
+        let part = cuboid(DVec3::new(lo.0, lo.1, -0.3), DVec3::new(hi.0, hi.1, 0.0));
+        a = op(&a, &part, BooleanOp::Union);
+    }
+    assert_eq!(
+        six(&a, &b, 1.0),
+        [
+            edge_refusal("(-49.999750, 0.000000, 0.000000) mm"),
+            edge_refusal("(500.000000, -0.000492, -0.000087) mm"),
+            "(8, 18, 14, 2) V=0.000918373 A=0.152570029".into(),
+            "(8, 18, 14, 2) V=0.000918373 A=0.152570029".into(),
+            "(16, 38, 24, 1) V=2.999081439 A=13.723600889".into(),
+            "(13, 37, 26, 1) V=0.874082002 A=7.203507268".into(),
+        ]
+    );
+}
+
+/// Golden 36: an edge lying on a face beside the line where the faces
+/// cross, with an edge of the other body lying on the face between them
+/// (found by the third review, design note 0012 §20): boxes from y = −3
+/// and −2 tolerances against golden 32's prism, its edge 5 tolerances off
+/// the axis; a box from −20 against the prism at 1°, its edge 40 off; and
+/// golden 33's notched block, its floor 5 off, against golden 30's wedge,
+/// its edge 3 and 2 off. The other edge is the meeting the imprint makes
+/// (§18.2), and the strip between the face's edge and that meeting lies
+/// over no part of the other face, so each is answered as on main: the
+/// unions pinch along the meeting, the intersections are empty and the
+/// differences are the operands. Swept on to the line, the strips were
+/// held, and every operation was refused.
+#[test]
+fn an_edge_lying_beside_the_line_with_the_meeting_between() {
+    let eps = k().tolerance().linear;
+    let boxed = |y: f64| cuboid(DVec3::new(-0.25, y, -1.0), DVec3::new(1.25, 1.0, 0.0));
+    let rests = |at: &str, a: &str, b: &str| {
+        let touch = edge_refusal(at);
+        [
+            touch.clone(),
+            touch,
+            "empty".into(),
+            "empty".into(),
+            a.into(),
+            b.into(),
+        ]
+    };
+    let prism_b = "(9, 21, 14, 1) V=0.875000375 A=7.207107928";
+    for (d, at, a) in [
+        (
+            3.0,
+            "(500.000000, -0.000300, 0.000000) mm",
+            "(6, 12, 8, 1) V=1.500000450 A=8.000001500",
+        ),
+        (
+            2.0,
+            "(500.000000, -0.000200, 0.000000) mm",
+            "(6, 12, 8, 1) V=1.500000300 A=8.000001000",
+        ),
+    ] {
+        assert_eq!(
+            six(&boxed(-d * eps), &beside(5.0), 1.0),
+            rests(at, a, prism_b)
+        );
+    }
+    assert_eq!(
+        six(&boxed(-20.0 * eps), &beside_at(1.0, 40.0), 1.0),
+        rests(
+            "(500.000000, -0.002000, 0.000000) mm",
+            "(6, 12, 8, 1) V=1.500003000 A=8.000010000",
+            "(9, 21, 14, 1) V=0.875003000 A=7.207115953",
+        )
+    );
+    for (off, at) in [
+        (3.0, "(500.000000, -0.000295, -0.000052) mm"),
+        (2.0, "(500.000000, -0.000197, -0.000035) mm"),
+    ] {
+        assert_eq!(
+            six(&notched(-5.0 * eps), &rising_wedge(off), 1.0),
+            rests(
+                at,
+                "(10, 24, 16, 1) V=1.800000600 A=12.600000200",
+                "(5, 9, 6, 1) V=0.074789923 A=1.257389214",
+            )
+        );
+    }
+}
+
+/// A plate on golden 32's plane at `t` degrees, its face from x = −0.5 to
+/// 2 and from 0.5 to either side of the axis, with a hole through it from
+/// x = 0 to 1 and from `w0` to `w1` tolerances off the axis.
+fn tilted_holed(t: f64, w0: f64, w1: f64) -> Body {
+    holed(tilted(t, &PLATE), t, w0, w1)
+}
+
+/// The profile of [`tilted_holed`]'s plate.
+const PLATE: [(f64, f64, bool); 4] = [
+    (-0.5, -0.5, false),
+    (2.0, -0.5, false),
+    (2.0, 0.5, false),
+    (-0.5, 0.5, false),
+];
+
+/// `plate`, a prism on golden 32's plane at `t` degrees half a unit thick
+/// to either side, with a hole through it from x = 0 to 1 and from `w0`
+/// to `w1` tolerances off the axis.
+fn holed(plate: Body, t: f64, w0: f64, w1: f64) -> Body {
+    let eps = k().tolerance().linear;
+    let t = t.to_radians();
+    let n = DVec3::new(0.0, -t.sin(), t.cos());
+    let frame = Frame {
+        origin: -n * 0.8,
+        x: DVec3::X,
+        y: DVec3::new(0.0, t.cos(), t.sin()),
+        z: n,
+    };
+    let hole = [(0.0, w0), (1.0, w0), (1.0, w1), (0.0, w1)].map(|(x, y)| DVec2::new(x, y * eps));
+    op(&plate, &prism(frame, &hole, 1.6), BooleanOp::Subtract)
+}
+
+/// [`tilted`]'s prism turned over: its face from the same profile on the
+/// same plane, its body below the face.
+fn tilted_below(t: f64, pts: &[(f64, f64, bool)]) -> Body {
+    let eps = k().tolerance().linear;
+    let t = t.to_radians();
+    let frame = Frame {
+        origin: DVec3::ZERO,
+        x: -DVec3::X,
+        y: DVec3::new(0.0, t.cos(), t.sin()),
+        z: DVec3::new(0.0, t.sin(), -t.cos()),
+    };
+    let mut p: Vec<DVec2> = (pts.iter())
+        .map(|&(u, w, tol)| DVec2::new(-u, if tol { w * eps } else { w }))
+        .collect();
+    p.reverse();
+    prism(frame, &p, 0.5)
+}
+
+/// Golden 37: boundaries of a face lying on the other's plane beside the
+/// line where they cross that are not runs of its outer loop (found by the
+/// third review, design note 0012 §20): a hole in a plate at 1° from 50 to
+/// 20 tolerances off the axis, its loop within 0.9 tolerances of the box's
+/// top throughout; and a reflex corner of golden 32's prism's face 5
+/// tolerances off the axis at the apex of a wide notch and of a narrow
+/// one, its edges leaving the top's tolerance. The box's top holds the
+/// face between each and the line, and main answered with A ∩ B one
+/// solid: a flap under a tolerance thick from the hole to the line, or a
+/// neck from the corner to the line joining the wedges beside it. Every
+/// operation is refused, as with the hole reaching 200 tolerances off the
+/// axis, its near edge a run. With the hole's near edge half a tolerance
+/// off the axis there is no flap, and with a hole in the box under the
+/// corner to a tenth of a tolerance off the axis the top does not hold the
+/// neck: each is answered as on main.
+#[test]
+fn a_hole_or_a_corner_lying_beside_the_line_where_the_faces_cross() {
+    let eps = k().tolerance().linear;
+    let a = cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(1.25, 1.0, 0.0));
+    let at = band_refusal("(500.000000, -0.002000, -0.000035) mm");
+    for w0 in [-50.0, -200.0] {
+        assert_eq!(
+            six(&a, &tilted_holed(1.0, w0, -20.0), 1.0),
+            [at.as_str(); 6]
+        );
+    }
+    let touch = edge_refusal("(500.000000, -0.000050, -0.000001) mm");
+    let flap = "(5, 15, 12, 1) V=0.003272825 A=1.517559231";
+    assert_eq!(
+        six(&a, &tilted_holed(1.0, -50.0, -0.5), 1.0),
+        [
+            touch.clone(),
+            touch,
+            flap.into(),
+            flap.into(),
+            "(9, 25, 18, 1) V=2.996727175 A=13.008613286".into(),
+            "(13, 36, 24, 1) V=1.246724700 A=9.491381721".into(),
+        ]
+    );
+    let notch = |half: f64| {
+        let mut pts = vec![(-0.5, -0.5, false)];
+        if half < 1.0 {
+            pts.push((0.5 - half, -0.5, false));
+        }
+        pts.extend([
+            (0.5, -5.0, true),
+            (0.5 + half, -0.5, false),
+            (2.0, -0.5, false),
+            (2.0, 0.5, false),
+            (-0.5, 0.5, false),
+        ]);
+        tilted(10.0, &pts)
+    };
+    let at = band_refusal("(500.000000, -0.000492, -0.000087) mm");
+    for half in [1.0, 0.1] {
+        assert_eq!(six(&a, &notch(half), 1.0), [at.as_str(); 6]);
+    }
+    let hole = cuboid(
+        DVec3::new(0.45, -0.3, -2.0),
+        DVec3::new(0.55, -0.1 * eps, 1.0),
+    );
+    let touch = edge_refusal("(474.999510, -0.000010, 0.000000) mm");
+    let wedges = "(10, 18, 12, 2) V=0.006197171 A=0.644425638";
+    assert_eq!(
+        six(&op(&a, &hole, BooleanOp::Subtract), &notch(1.0), 1.0),
+        [
+            touch.clone(),
+            touch,
+            wedges.into(),
+            wedges.into(),
+            "(15, 40, 26, 1) V=2.963802830 A=13.765973465".into(),
+            "(14, 36, 24, 1) V=0.993803079 A=7.592061282".into(),
+        ]
+    );
+}
+
+/// Golden 38: golden 32's run and golden 37's corner 5 tolerances off the
+/// axis, and golden 37's hole 20 to 50 off it in its plate at 1°, to
+/// either side of the axis, on the prism or plate as in those goldens and
+/// turned over, its body below its face (design note 0012 §20). The layer between the face and the
+/// box's top over a strip lies in the prism's body on one side of the axis
+/// only: below it for the prism above its face (A ∩ B holds it, golden
+/// 37), above it for the prism below (B − A holds it). There every
+/// operation is refused. On the other side the layer lies outside the
+/// prism, in the box or in neither body, and the corner and the hole are
+/// answered as on main: where the layer is in neither (the prism above,
+/// the strip above the axis) the unions pinch along the strip's edge and
+/// are refused as touching, and where it is in the box (the prism below,
+/// the strip below the axis) A − B is. A run there is refused as well:
+/// main failed every operation on it ("the faces at a lying edge leave the
+/// face it lies on to both sides").
+#[test]
+fn a_run_a_hole_or_a_corner_beside_the_line_on_either_side() {
+    let a = cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(1.25, 1.0, 0.0));
+    let body = |above: bool, pts: &[(f64, f64, bool)]| {
+        if above {
+            tilted(10.0, pts)
+        } else {
+            tilted_below(10.0, pts)
+        }
+    };
+    let run = |w: f64| {
+        let mut pts = vec![
+            (-0.5, -0.5, false),
+            (0.0, -w.abs(), true),
+            (1.0, -w.abs(), true),
+            (1.5, -0.5, false),
+            (2.0, -0.5, false),
+            (2.0, 0.5, false),
+            (-0.5, 0.5, false),
+        ];
+        if w > 0.0 {
+            pts = pts.iter().map(|&(u, w, t)| (u, -w, t)).rev().collect();
+        }
+        pts
+    };
+    let apex = |w: f64| {
+        let mut pts = vec![
+            (-0.5, -0.5, false),
+            (0.5, -w.abs(), true),
+            (1.5, -0.5, false),
+            (2.0, -0.5, false),
+            (2.0, 0.5, false),
+            (-0.5, 0.5, false),
+        ];
+        if w > 0.0 {
+            pts = pts.iter().map(|&(u, w, t)| (u, -w, t)).rev().collect();
+        }
+        pts
+    };
+    let hole = |above: bool, w: f64| {
+        let (w0, w1) = if w < 0.0 {
+            (-50.0, -20.0)
+        } else {
+            (20.0, 50.0)
+        };
+        let plate = if above {
+            tilted(1.0, &PLATE)
+        } else {
+            tilted_below(1.0, &PLATE)
+        };
+        holed(plate, 1.0, w0, w1)
+    };
+    let refused = |at: &str| -> [String; 6] { std::array::from_fn(|_| band_refusal(at)) };
+    for above in [true, false] {
+        for w in [-5.0, 5.0] {
+            let at = if w < 0.0 {
+                "(500.000000, -0.000492, -0.000087) mm"
+            } else {
+                "(500.000000, 0.000492, 0.000087) mm"
+            };
+            assert_eq!(six(&a, &body(above, &run(w)), 1.0), refused(at));
+        }
+    }
+    // The prism above: the layer below the axis is in both bodies.
+    let at = "(500.000000, -0.000492, -0.000087) mm";
+    assert_eq!(six(&a, &body(true, &apex(-5.0)), 1.0), refused(at));
+    let at = "(500.000000, -0.002000, -0.000035) mm";
+    assert_eq!(six(&a, &hole(true, -5.0), 1.0), refused(at));
+    // The prism below: the layer above the axis is in the prism alone.
+    let at = "(500.000000, 0.000492, 0.000087) mm";
+    assert_eq!(six(&a, &body(false, &apex(5.0)), 1.0), refused(at));
+    let at = "(500.000000, 0.002000, 0.000035) mm";
+    assert_eq!(six(&a, &hole(false, 5.0), 1.0), refused(at));
+    // The prism above, the layer above the axis in neither body.
+    let touch = point_refusal("(500.000000, 0.000492, 0.000087) mm");
+    let tip = "(5, 9, 6, 1) V=0.033061309 A=1.687896940";
+    assert_eq!(
+        six(&a, &body(true, &apex(5.0)), 1.0),
+        [
+            touch.clone(),
+            touch,
+            tip.into(),
+            tip.into(),
+            "(9, 21, 14, 1) V=2.966938691 A=13.076593531".into(),
+            "(11, 27, 18, 1) V=0.966938941 A=7.541441234".into(),
+        ]
+    );
+    let touch = edge_refusal("(500.000000, 0.002000, 0.000035) mm");
+    let tip = "(5, 9, 6, 1) V=0.003272825 A=1.517569311";
+    assert_eq!(
+        six(&a, &hole(true, 5.0), 1.0),
+        [
+            touch.clone(),
+            touch,
+            tip.into(),
+            tip.into(),
+            "(9, 21, 14, 1) V=2.996727175 A=13.008613286".into(),
+            "(13, 33, 22, 1) V=1.246725675 A=9.491383714".into(),
+        ]
+    );
+    // The prism below, the layer below the axis in the box alone.
+    let both = "(16, 42, 28, 1) V=3.517436325 A=16.256765401";
+    let common = "(8, 18, 12, 1) V=0.482563925 A=4.361269365";
+    assert_eq!(
+        six(&a, &body(false, &apex(-5.0)), 1.0),
+        [
+            both.into(),
+            both.into(),
+            common.into(),
+            common.into(),
+            point_refusal("(500.000000, -0.000492, -0.000087) mm"),
+            "(12, 30, 20, 1) V=0.517436325 A=6.441742078".into(),
+        ]
+    );
+    let both = "(15, 41, 28, 1) V=3.503272825 A=16.017340775";
+    let common = "(11, 27, 18, 1) V=0.746725675 A=6.482656181";
+    assert_eq!(
+        six(&a, &hole(false, -5.0), 1.0),
+        [
+            both.into(),
+            both.into(),
+            common.into(),
+            common.into(),
+            edge_refusal("(500.000000, -0.004999, -0.000087) mm"),
+            "(11, 27, 18, 1) V=0.503272825 A=6.508841778".into(),
+        ]
+    );
+}
+
+/// Golden 39: edges lying on the box's top beside the line where the faces
+/// cross, with the face beyond them from the line (found by the audit of
+/// the third rule, design note 0012 §20): in golden 32's prism at 10°, a
+/// hole from 5 tolerances below the axis, a U-notch and a tab down to 5
+/// below it, against a box from x = 0.2 to 0.8 under them; an edge 2
+/// tolerances above the axis, the face above it, against a box from −1.25
+/// to 1.25; and an edge 3 above it whose face crosses the axis farther on,
+/// against a box to x = 1.9. The sweep of each edge toward the line lies
+/// outside the face, so there is no strip, and each is answered as on
+/// main.
+#[test]
+fn an_edge_lying_beside_the_line_with_the_face_beyond_it() {
+    let eps = k().tolerance().linear;
+    let narrow = cuboid(DVec3::new(0.2, -1.0, -1.0), DVec3::new(0.8, 1.0, 0.0));
+    let common = "(5, 9, 6, 1) V=0.013224524 A=0.701607182";
+    let less = "(9, 21, 14, 1) V=1.186775476 A=7.604188344";
+    let full = tilted(10.0, &PLATE);
+    let notch = tilted(
+        10.0,
+        &[
+            (-0.5, -0.5, false),
+            (2.0, -0.5, false),
+            (2.0, 0.5, false),
+            (1.0, 0.5, false),
+            (1.0, -5.0, true),
+            (0.0, -5.0, true),
+            (0.0, 0.5, false),
+            (-0.5, 0.5, false),
+        ],
+    );
+    let tab = tilted(
+        10.0,
+        &[
+            (-0.5, -0.5, false),
+            (2.0, -0.5, false),
+            (2.0, 0.5, false),
+            (1.5, 0.5, false),
+            (1.5, -5.0, true),
+            (-0.5, -5.0, true),
+        ],
+    );
+    for (b, both, rest) in [
+        (
+            holed(full, 10.0, -5.0, 0.3 / eps),
+            "(17, 46, 30, 1) V=2.286775226 A=16.098392220",
+            "(13, 34, 22, 1) V=1.086775226 A=9.195811058",
+        ),
+        (
+            notch,
+            "(18, 46, 30, 1) V=2.186775226 A=14.898392220",
+            "(14, 34, 22, 1) V=0.986775226 A=7.995811058",
+        ),
+        (
+            tab,
+            "(16, 40, 26, 1) V=1.936774976 A=13.398390699",
+            "(12, 28, 18, 1) V=0.736774976 A=6.495809537",
+        ),
+    ] {
+        assert_eq!(
+            six(&narrow, &b, 1.0),
+            [both, both, common, common, less, rest].map(String::from)
+        );
+    }
+    let wide = cuboid(DVec3::new(-1.25, -1.0, -1.0), DVec3::new(1.25, 1.0, 0.0));
+    let step = tilted(
+        10.0,
+        &[
+            (-1.0, -0.5, false),
+            (0.0, -0.5, false),
+            (0.0, 2.0, true),
+            (1.0, 2.0, true),
+            (1.5, 0.5, false),
+            (-1.0, 0.5, false),
+        ],
+    );
+    let touch = edge_refusal("(500.000000, 0.000197, 0.000035) mm");
+    let common = "(5, 9, 6, 1) V=0.022040873 A=1.139958749";
+    assert_eq!(
+        six(&wide, &step, 1.0),
+        [
+            touch.clone(),
+            touch,
+            common.into(),
+            common.into(),
+            "(10, 21, 14, 1) V=4.977959127 A=19.124531940".into(),
+            "(9, 20, 13, 1) V=0.790459002 A=6.479020980".into(),
+        ]
+    );
+    let long = cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(1.9, 1.0, 0.0));
+    let far = tilted(
+        10.0,
+        &[
+            (0.0, 0.5, false),
+            (0.0, 3.0, true),
+            (0.5, 3.0, true),
+            (1.5, -0.01, false),
+            (2.0, -0.01, false),
+            (2.0, 0.5, false),
+        ],
+    );
+    let touch = edge_refusal("(250.000000, 0.000295, 0.000052) mm");
+    let common = "(5, 9, 6, 1) V=0.000006465 A=0.019734762";
+    assert_eq!(
+        six(&long, &far, 1.0),
+        [
+            touch.clone(),
+            touch,
+            common.into(),
+            common.into(),
+            "(9, 21, 14, 1) V=4.299993535 A=16.901439332".into(),
+            "(10, 23, 15, 1) V=0.504993385 A=4.523584919".into(),
+        ]
+    );
+}
+
+/// Golden 40: corners of golden 32's prism's face within the tolerance of
+/// the box's top beside the line, under it, that are not apexes (design
+/// note 0012 §20). A convex corner 5 and 3 tolerances across the line,
+/// its edges crossing the line, the tip of a triangle and of a wider face:
+/// the face's part across the line tapers to the corner, and B rests on
+/// the top by it (the unions touch at a point, A ∩ B is empty). A convex
+/// corner 5 and 3 tolerances off the line pointing at it, its edges
+/// running away from it under the top, the tip of a triangle and of a
+/// spike on a wider face: the face lies beyond the corner from the line,
+/// and A ∩ B is the wedge of B under the top, ending at the corner in a
+/// tip under the tolerance thick. A reflex corner 3 tolerances off the
+/// line, one of its edges crossing the line 10 tolerances short of the
+/// corner and the other running away below it (and mirrored): the region
+/// between the corner and the line is the end of the face's part across
+/// the line, bounded by that edge. Each is answered as on main; taken for
+/// an apex (the first by an earlier version of the rule, the second
+/// without its test that the corner is reflex, the third without its test
+/// that both edges run away from the plane), each is refused.
+#[test]
+fn a_corner_beside_the_line_that_is_no_apex() {
+    let a = cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(1.25, 1.0, 0.0));
+    let wide = |w: f64| {
+        [
+            (0.5, w, true),
+            (1.5, 0.2, false),
+            (2.0, 0.5, false),
+            (-0.5, 0.5, false),
+            (-0.5, 0.2, false),
+        ]
+    };
+    let tri = tilted(
+        10.0,
+        &[(0.0, 0.5, false), (0.5, -5.0, true), (1.0, 0.5, false)],
+    );
+    for (b, at, rest) in [
+        (
+            tri,
+            "(500.000000, -0.000492, -0.000087) mm",
+            "(5, 9, 6, 1) V=0.125000125 A=1.707107635",
+        ),
+        (
+            tilted(10.0, &wide(-5.0)),
+            "(500.000000, -0.000492, -0.000087) mm",
+            "(7, 15, 10, 1) V=0.437500250 A=4.461352596",
+        ),
+        (
+            tilted(10.0, &wide(-3.0)),
+            "(500.000000, -0.000295, -0.000052) mm",
+            "(7, 15, 10, 1) V=0.437500150 A=4.461352156",
+        ),
+    ] {
+        let touch = point_refusal(at);
+        assert_eq!(
+            six(&a, &b, 1.0),
+            [
+                touch.clone(),
+                touch,
+                "empty".into(),
+                "empty".into(),
+                "(6, 12, 8, 1) V=3.000000000 A=13.000000000".into(),
+                rest.into(),
+            ]
+        );
+    }
+    let spike = |w: f64| {
+        [
+            (-0.5, -0.5, false),
+            (0.0, -0.5, false),
+            (0.5, w, true),
+            (1.0, -0.5, false),
+            (2.0, -0.5, false),
+            (2.0, -0.6, false),
+            (-0.5, -0.6, false),
+        ]
+    };
+    let triangle = [(0.0, -0.5, false), (0.5, -5.0, true), (1.0, -0.5, false)];
+    for (pts, both, common, less, rest) in [
+        (
+            &triangle[..],
+            "(10, 21, 14, 1) V=3.110305967 A=14.052745310",
+            "(5, 8, 5, 1) V=0.014693908 A=0.654360618",
+            "(10, 20, 13, 1) V=2.985306092 A=13.146647804",
+            "(5, 9, 6, 1) V=0.110305967 A=1.560458123",
+        ),
+        (
+            &spike(-5.0)[..],
+            "(17, 45, 30, 1) V=3.220758991 A=15.716422813",
+            "(9, 20, 13, 1) V=0.029240884 A=1.090683115",
+            "(13, 32, 21, 1) V=2.970759116 A=13.239550382",
+            "(13, 33, 22, 1) V=0.220758991 A=3.567555546",
+        ),
+        (
+            &spike(-3.0)[..],
+            "(17, 45, 30, 1) V=3.220759038 A=15.716422943",
+            "(9, 20, 13, 1) V=0.029240887 A=1.090683326",
+            "(13, 32, 21, 1) V=2.970759113 A=13.239550396",
+            "(13, 33, 22, 1) V=0.220759038 A=3.567555873",
+        ),
+    ] {
+        assert_eq!(
+            six(&a, &tilted(10.0, pts), 1.0),
+            [both, both, common, common, less, rest].map(String::from)
+        );
+    }
+    let left = [
+        (-0.5, 0.15, false),
+        (0.0, 0.15, false),
+        (0.5, -3.0, true),
+        (0.6, -0.5, false),
+        (2.0, -0.5, false),
+        (2.0, 0.5, false),
+        (-0.5, 0.5, false),
+    ];
+    let right = [
+        (-0.5, -0.5, false),
+        (0.4, -0.5, false),
+        (0.5, -3.0, true),
+        (1.0, 0.15, false),
+        (2.0, 0.15, false),
+        (2.0, 0.5, false),
+        (-0.5, 0.5, false),
+    ];
+    let common = "(5, 9, 6, 1) V=0.015061263 A=0.807223617";
+    let less = "(9, 21, 14, 1) V=2.984938737 A=13.052343435";
+    for (pts, both, rest) in [
+        (
+            left,
+            "(15, 38, 25, 1) V=3.916188782 A=19.308735098",
+            "(11, 26, 17, 1) V=0.916188782 A=7.063615279",
+        ),
+        (
+            right,
+            "(15, 38, 25, 1) V=3.753688782 A=18.658735098",
+            "(11, 26, 17, 1) V=0.753688782 A=6.413615279",
+        ),
+    ] {
+        assert_eq!(
+            six(&a, &tilted(10.0, &pts), 1.0),
+            [both, both, common, common, less, rest].map(String::from)
         );
     }
 }
