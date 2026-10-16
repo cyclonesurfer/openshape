@@ -912,11 +912,16 @@ pub(super) fn foot_on(curve: &Curve3, t0: f64, t1: f64, p: DVec3) -> (f64, f64) 
 
 /// Distance from `p` to the segment `a`–`b`.
 pub(super) fn segment_distance(p: DVec3, a: DVec3, b: DVec3) -> f64 {
+    (p - segment_closest(p, a, b)).length()
+}
+
+/// The point of the segment `a`–`b` nearest `p`.
+pub(super) fn segment_closest(p: DVec3, a: DVec3, b: DVec3) -> DVec3 {
     let d = b - a;
     let len2 = d.length_squared();
     if len2 == 0.0 {
-        return (p - a).length();
+        return a;
     }
     let t = ((p - a).dot(d) / len2).clamp(0.0, 1.0);
-    (p - (a + d * t)).length()
+    a + d * t
 }

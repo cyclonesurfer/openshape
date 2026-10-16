@@ -30,6 +30,7 @@ use super::points::{self, Points};
 use super::quadric::{self, Quadric};
 use super::shape::{Face, Shape};
 use super::{name, other, show, slot, Pair};
+use crate::bvh::{self, Bvh};
 use crate::origin::Operand;
 use crate::KernelError;
 
@@ -811,6 +812,7 @@ struct Interval {
 pub(super) fn plane_meeting(
     pair: &Pair,
     pts: &Points,
+    outlines: &[Vec<Option<Outline>>; 2],
     fa: usize,
     fb: usize,
 ) -> Result<Vec<(usize, usize)>, KernelError> {
@@ -869,11 +871,93 @@ pub(super) fn plane_meeting(
                         }
                     }
                 }
+                beside_runs(pair, pts, outlines, (lo.1, hi.1), &spans, &runs)?;
                 out.push((lo.1, hi.1));
             }
         }
     }
     Ok(out)
+}
+
+/// The check of a stretch `lo`–`hi` of [`plane_meeting`] against the runs
+/// of each span `spans` lying on the other's plane (`runs`, by span) that
+/// are not their face's whole interval (design note 0012 §20). The stretch
+/// is straight and a run is bent only at its vertices, so how far the
+/// stretch passes beside the run is greatest at one of those vertices or
+/// at an end of the stretch: each vertex within the stretch's span along
+/// the line is measured at the stretch's point nearest it, and each end of
+/// the stretch within the run's span at itself. A point more than the
+/// tolerance inside the run's face across the run's edge nearest it has a
+/// strip of the face between it and the run that lies within the
+/// tolerance of the other plane (its edges do, and the face is flat).
+/// Where the other face holds the strip at the run (the run's point
+/// nearest the measured point is in it, or within the tolerance of its
+/// boundary), the two faces run within the tolerance of each other over
+/// the strip: joined to the pieces beyond the run, it is no piece of its
+/// own that classification could test, and the result would hold a fin
+/// under a tolerance thick between them (found by review: an edge lying on
+/// a face beside the line where its face crosses the other, between two
+/// reflex corners), so the boolean is refused there. Where the strip lies
+/// off the other face (over a hole of it, or beyond an edge of it lying on
+/// the line), nothing of the other body bounds it and the faces' contact
+/// is decided as before (found by review).
+fn beside_runs(
+    pair: &Pair,
+    pts: &Points,
+    outlines: &[Vec<Option<Outline>>; 2],
+    (lo, hi): (usize, usize),
+    spans: &[(Operand, usize, usize, &Interval); 2],
+    runs: &[Vec<Run>; 2],
+) -> Result<(), KernelError> {
+    let eps = pts.eps;
+    let (p0, p1) = (pts.rep[lo], pts.rep[hi]);
+    let (dir, len) = ((p1 - p0).normalize(), (p1 - p0).length());
+    for (k, &(op, f, _, _)) in spans.iter().enumerate() {
+        let face = &pair.get(op).faces[f];
+        let (them, g) = (spans[1 - k].0, spans[1 - k].1);
+        let (shape, outline) = (pair.get(them), outlines[slot(them)][g].as_ref());
+        for run in runs[k].iter().filter(|r| !r.exact) {
+            // Each measured point with the ends of the run's edge nearest
+            // it: an end of the stretch's by a scan of the run, a vertex's
+            // among the edges within its distance from the stretch (its own
+            // two are), found by the run's tree.
+            let (r0, r1) = run.stretch(dir);
+            let mut measured: Vec<(DVec3, (DVec3, DVec3))> = [p0, p1]
+                .into_iter()
+                .filter(|p| (r0 - eps..=r1 + eps).contains(&p.dot(dir)))
+                .map(|p| (p, run.nearest(p)))
+                .collect();
+            let mut tree = None;
+            for &v in &run.points {
+                if !(0.0..=len).contains(&(v - p0).dot(dir)) {
+                    continue;
+                }
+                let s = points::segment_closest(v, p0, p1);
+                let reach = (s - v).length();
+                if reach <= eps {
+                    continue;
+                }
+                let tree = tree.get_or_insert_with(|| run.tree());
+                measured.push((s, run.nearest_within(tree, s, reach + eps)));
+            }
+            for (s, (a, b)) in measured {
+                let into = face.normal().cross(b - a).normalize();
+                if (s - a).dot(into) <= eps {
+                    continue;
+                }
+                let q = points::segment_closest(s, a, b);
+                if locate(shape, outline, &shape.faces[g], q, eps) == Some(false) {
+                    continue;
+                }
+                return Err(KernelError::InvalidInput(format!(
+                    "{}, near {}",
+                    super::RUNS_WITHIN,
+                    show(s)
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The refusal of an edge of one body lying on a face of the other that
@@ -912,6 +996,34 @@ impl Run {
             points::segment_distance(p, a, b)
         };
         ends((0..self.edges.len()).fold(0, |best, k| if d(k) < d(best) { k } else { best }))
+    }
+
+    /// A tree over the boxes of its edges, by their order in the run.
+    fn tree(&self) -> Bvh {
+        Bvh::new(
+            (self.points.windows(2))
+                .map(|w| (w[0].min(w[1]), w[0].max(w[1])))
+                .collect(),
+        )
+    }
+
+    /// [`Run::nearest`] for a point `p` known to be within `reach` of one
+    /// of its edges, looking only at the edges `tree` ([`Run::tree`])
+    /// finds within `reach` of it.
+    fn nearest_within(&self, tree: &Bvh, p: DVec3, reach: f64) -> (DVec3, DVec3) {
+        let mut best: Option<(f64, usize)> = None;
+        tree.visit(
+            |lo, hi| bvh::near_box(p, lo, hi, reach),
+            |k| {
+                let d = points::segment_distance(p, self.points[k], self.points[k + 1]);
+                if best.is_none_or(|b| (d, k) < b) {
+                    best = Some((d, k));
+                }
+                true
+            },
+        );
+        let k = best.map_or(0, |b| b.1);
+        (self.points[k], self.points[k + 1])
     }
 }
 
@@ -1579,4 +1691,51 @@ pub(super) fn stretches(
         }
     }
     Ok((out, whole))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A deterministic pseudo-random sequence in [0, 1).
+    fn lcg(state: &mut u64) -> f64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (*state >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// The tree's search for a run's edge nearest a point, within the
+    /// point's distance from one of the run's vertices, finds the edge the
+    /// scan of every edge finds, on bent runs of 1 to 40 edges (some
+    /// doubling back) and points near and far from them.
+    #[test]
+    fn nearest_within_agrees_with_the_scan() {
+        let mut s = 7;
+        for case in 0..400 {
+            let n = 1 + case % 40;
+            let mut points = vec![DVec3::ZERO];
+            for _ in 0..n {
+                let step = DVec3::new(lcg(&mut s) - 0.3, lcg(&mut s) - 0.5, lcg(&mut s) - 0.5);
+                points.push(*points.last().unwrap() + step);
+            }
+            let run = Run {
+                edges: (0..n).collect(),
+                points,
+                exact: false,
+            };
+            let tree = run.tree();
+            for _ in 0..20 {
+                let v = run.points[(lcg(&mut s) * (n + 1) as f64) as usize % (n + 1)];
+                let p = v + DVec3::new(lcg(&mut s) - 0.5, lcg(&mut s) - 0.5, lcg(&mut s) - 0.5)
+                    * (4.0 * lcg(&mut s));
+                let reach = (p - v).length();
+                assert_eq!(
+                    run.nearest_within(&tree, p, reach),
+                    run.nearest(p),
+                    "case {case}"
+                );
+            }
+        }
+    }
 }

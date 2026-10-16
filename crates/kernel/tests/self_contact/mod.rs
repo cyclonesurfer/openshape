@@ -1,8 +1,10 @@
 //! An oracle for results that touch themselves (ADR 0024, design note
 //! 0012 §18.5), shared by the booleans' tests: a point of an edge of a
 //! result within half the tolerance of a face that does not bound the
-//! result there. It reads only the result's mesh and adjacency, so it is
-//! independent of the booleans' own decision of contacts.
+//! result there. It reads only the result (its mesh, adjacency, edge
+//! kinds, and faces' planes and tangent planes), not the operands or the
+//! booleans' records, so it is independent of the booleans' own decision
+//! of contacts.
 //!
 //! A pinch the booleans miss leaves an edge or a vertex of one operand on
 //! a face of the other in the result: along an edge, the edge lies on the
@@ -120,14 +122,17 @@ pub fn segment_triangle_distance((p, q): (DVec3, DVec3), [a, b, c]: [DVec3; 3]) 
     best
 }
 
-/// Where `r` touches itself, if it does: the first point (by edge, then
-/// along it) of an edge's mesh polyline, or the middle of one of its
-/// segments, within half the tolerance of a face that is not along the
-/// edge there (a face the edge does not bound and, for a point within the
-/// tolerance of one of the edge's ends, that is not at that end: every
-/// point that near a vertex is that near each face at it; nor a flat face
-/// that a straight edge leaves at a corner, [`touches_itself_in`]), meshed
-/// by `opts`.
+/// Where `r` touches itself, if it does: a point of an edge within half
+/// the tolerance of a face that is not along the edge there (a face the
+/// edge does not bound and, for a point within the tolerance of one of the
+/// edge's ends, that is not at that end: every point that near a vertex is
+/// that near each face at it; nor a flat face that a straight edge leaves
+/// at a corner, [`touches_itself_in`]), meshed by `opts`. Edge by edge: for
+/// a straight edge, against each flat face bounded by straight edges with
+/// no corner at the edge's ends, the edge's point nearest the first of the
+/// face's triangles within that distance (the edge measured whole); then
+/// the first point of the edge's mesh polyline, or the middle of one of its
+/// segments, within that distance of a face.
 pub fn touches_itself(
     k: &BrepKernel,
     r: &Body,
@@ -146,29 +151,32 @@ pub fn touches_itself(
 ///
 /// A straight edge is measured against such a face whole, not at sample
 /// points, where the face has no corner at the edge's ends: its nearest
-/// point to the face's triangles, wherever along it that is. (The booleans'
-/// own check of their results, `check_apart`, tests the ends and the middle
-/// of each edge; this keeps the oracle from sharing that blind spot.) Where
-/// the face has a corner at an end, the edge leaves that corner and comes
-/// within half the tolerance of the face for half the tolerance over the
-/// sine of the angle between them, which no fixed distance from the corner
-/// excuses. Where the edge's other end is more than the tolerance from the
-/// face's plane, the edge leaves the face at that corner (crossing its
-/// plane at a slant, if at all, where the tolerance puts the crossing at
-/// the corner) and the face is let off: a straight line is near a plane
-/// only over one stretch, and this one is the corner's. The booleans' own
-/// check lets these corners off for the same reason, so the oracle cannot
-/// find a fault there; it reported three results of the contact fuzz at a
-/// hundred times its default run that are of this kind (contacts 1335,
-/// 2714 and 5358, `sharp_corners_the_check_of_places_lets_off`). Where the
-/// other end is within the tolerance of the plane, the edge lies along the
-/// face's plane, and the face is tested at the sample points, as curved
-/// edges and faces are.
+/// point to the first of the face's triangles within half the tolerance,
+/// wherever along it that is. (The booleans' own check of their results,
+/// `check_apart`, tests the ends and the middle of each edge; this keeps
+/// the oracle from sharing that blind spot.) Where the face has a corner at
+/// an end, the edge leaves that corner and comes within half the tolerance
+/// of the face for half the tolerance over the sine of the angle between
+/// them, which no fixed distance from the corner excuses. Where the edge's
+/// other end is more than the tolerance from the face's plane, the edge
+/// leaves the face at that corner (crossing its plane at a slant, if at
+/// all, where the tolerance puts the crossing at the corner) and the face
+/// is let off: a straight line is near a plane only over one stretch, and
+/// this one is the corner's. The booleans' own check lets these corners off
+/// for the same reason, so the oracle cannot find a fault there; it
+/// reported three results of the contact fuzz at a hundred times its
+/// default run that are of this kind (contacts 1335, 2714 and 5358,
+/// `sharp_corners_the_check_of_places_lets_off`). Where the other end is
+/// within the tolerance of the plane, the edge lies along the face's plane,
+/// and the face is tested at the sample points, as curved edges and faces
+/// are.
 ///
-/// For any other face, a point within `chord` and half the tolerance of
-/// its mesh is a candidate, confirmed by its distance to the face's
-/// surface; so a point on the surface just outside such a face, within
-/// `chord` of its boundary, would be reported too (none has been seen).
+/// For any other face, a point within `chord` and half the tolerance of its
+/// mesh is a candidate, confirmed by its distance to the face's surface; so
+/// a point on the surface just outside such a face, within `chord` of its
+/// boundary, would be reported too. Its reports on the curved fuzzes are
+/// not yet sorted into contacts and such points, so those fuzzes do not run
+/// it yet (design note 0012 §19).
 pub fn touches_itself_in(k: &BrepKernel, r: &Body, mesh: &BodyMesh, chord: f64) -> Option<String> {
     let near = 0.5 * k.tolerance().linear;
     let adj = k.adjacency(r);

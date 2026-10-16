@@ -169,7 +169,8 @@ Trumbore & Hughes 1986).
 * Unions that returned touching solids on flat faces are refused, the
   slit is gone, and an unrelated hole no longer changes the answer.
   Contacts of edges and vertices with curved faces, refused as tangent
-  contacts, give results with no trace or a refusal as non-manifold. In
+  contacts, give results with no trace or a refusal as non-manifold
+  (not yet built; see "As built" below). In
   slice 2, surfaces that touch only outside their faces are no longer
   refused (by the census, 168 of 740 surface touches in the random
   curved pairs and 149 of 1,096 in the random revolves). Bodies stored
@@ -222,13 +223,21 @@ Three additions, each from a fault the tests found:
   of the joined edge (`join_sources`), which decision 3 implies but did
   not say.
 
-Of the consequences, the time guards of contacts (the comb and the
-grid) and the mutation checks beyond `check_apart` are not yet built;
-the rates are re-baselined (§19: at a hundred times its run the contact
-fuzz refuses 80,627 of 264,000 operations, where main refuses 53,168
-and fails 24,571). One fault is known and not fixed: a fin under the
-tolerance thick along an edge that lies beside a crossing between two
-reflex corners, returned as on main (§19).
+Of the consequences, these are not yet built: results for contacts of
+edges and vertices with curved faces (the curved pairs, still refused as
+tangent contacts); the time guards of contacts (the comb and the grid,
+with their scaling check) and the limit on the number of contacts (the
+existing limits on segments and points bound the places instead, §19);
+an oracle for faces touching faces away from an edge (the one built
+finds an edge within half the tolerance of a face); and the mutation
+checks beyond `check_apart`. The rates are re-baselined (§19: at a
+hundred times its run the contact fuzz refuses 80,627 of 264,000
+operations, where main refuses 53,168 and fails 24,571), and for this
+commit the outcomes were compared with main's, class by class (§19).
+A fin under the tolerance thick along an edge that lies beside a
+crossing between two reflex corners, returned as on main when slice 1
+landed (§19), is refused since (design note 0012 §20), where the other
+face holds the strip between the edge and the crossing.
 
 ## References
 

@@ -617,7 +617,7 @@ fn boolean_within(
             face_segs[1][fb].push(FaceSeg { seg: s, side: None });
         };
         if planes {
-            for (lo, hi) in imprint::plane_meeting(&pair, &pts, fa, fb)? {
+            for (lo, hi) in imprint::plane_meeting(&pair, &pts, &outlines, fa, fb)? {
                 for w in pts.split_segment(lo, hi)?.windows(2) {
                     imprint(segs.add(w[0], w[1], Course::Straight, Source::Meet(fa, fb)));
                 }
@@ -1060,24 +1060,24 @@ const HOLDER_TRIES: usize = 4;
 /// the other body but where [`merged`] finds [`Collapse::Leaves`] (an edge
 /// of the other body lying on the face, the bridge carrying the curves of
 /// its two faces and one end of the bridge on it): that edge, and its
-/// pieces from that end toward its point nearest the bridge's other end,
-/// up to the first point on the face's boundary, to be placed as the
-/// contact in the bridge's stead. In exact arithmetic the
-/// curves run along the edge to where it leaves the face, and the contact
-/// is the edge's; the tolerance has ended them a few tolerances from the
-/// edge's crossing of the face's boundary, which meets its neighbour at a
-/// slant (found by the contact fuzz). That holds only where the edge's
-/// faces leave the face to the side its ends are on, or the ends are on the
-/// face: where an end lies on the other side, the faces cross the face's
-/// plane a few tolerances from the edge and the bridge is no contact.
-/// `None` then, where the faces are too shallow to tell the side or leave
-/// the face to both sides (or the edge is not on two faces, which no valid
-/// operand has), and where the edge's nearest point to the bridge's other
-/// end is the bridge's own end; [`edgeless_contact`] refuses those. The
-/// test of the ends' side is a backstop: on flat faces the check of the
-/// meeting's ends (`imprint::plane_meeting`) refuses the cases found so far
-/// before a bridge forms (golden 22's crossing row), and no test, nor the
-/// contact fuzz at twenty times its default run, reaches it.
+/// pieces from that end toward its point nearest the bridge's other end, up
+/// to the first point on the face's boundary, to be placed as the contact
+/// in the bridge's stead. In exact arithmetic the curves run along the edge
+/// to where it leaves the face, and the contact is the edge's; the
+/// tolerance has ended them a few tolerances from the edge's crossing of
+/// the face's boundary, which meets its neighbour at a slant (found by the
+/// contact fuzz). That holds only where the edge's faces leave the face to
+/// the side its ends are on, or the ends are on the face: where an end lies
+/// on the other side, the faces cross the face's plane a few tolerances
+/// from the edge and the bridge is no contact. `None` then, where the faces
+/// are too shallow to tell the side or leave the face to both sides (or the
+/// edge is not on two faces, which no valid operand has), and where the
+/// edge's nearest point to the bridge's other end is the bridge's own end;
+/// [`edgeless_contact`] refuses those. The test of the ends' side is a
+/// backstop: on flat faces the check of the meeting's ends
+/// (`imprint::plane_meeting`) refuses the cases found so far before a
+/// bridge forms (golden 22's crossing row), and no test, nor the contact
+/// fuzz at twenty times its default run, reaches it.
 fn lying_pieces(
     pair: &Pair,
     pts: &Points,
@@ -1209,6 +1209,12 @@ fn edgeless_bridges(
 const LEAVES_UNPLACED: &str =
     "an edge of one body lies on a face of the other and leaves it at a point the tolerance \
      cannot place";
+
+/// The refusal of a face of one body within the tolerance of the other's
+/// surface without lying on one of its faces (`classify` and
+/// `imprint::plane_meeting`), followed by ", near" and the point.
+const RUNS_WITHIN: &str = "a face of one body runs within the tolerance of the other's surface \
+                           without lying on one of its faces";
 
 /// The error for a contact edge (a bridge, segment `seg` of face `f` of
 /// `op`, its middle `m`, `free` whether each end is off the face's loops)

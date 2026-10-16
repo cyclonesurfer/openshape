@@ -25,9 +25,11 @@ ADR 0024; the faces there all flat): the contact leaves no trace, or
 the boolean is refused as non-manifold where the result would pinch; a fuzz of such contacts
 swept across the tolerance found 24,571 faults on main in 264,000
 operations (results touching themselves, wrong origins, kernel errors)
-and none in this build. Next: a fin this build still returns along an
-edge lying beside a crossing (§19), the rest of the contacts (curved
-faces, surfaces touching), then the features that use booleans.
+and none in this build. A fin under a tolerance thick, which main
+returns where an edge lies beside the line where its face crosses a
+face of the other body, is refused (§20). Next: the rest of the
+contacts (curved faces, surfaces touching), then the features that use
+booleans.
 The product is now named OpenDatum (ADR 0017): packages `opendatum-*`,
 binary `opendatum`, documents `.odatum`; documents saved under the old
 name open unchanged.
@@ -152,18 +154,19 @@ name open unchanged.
     a place (non-manifold results, points or edges closer than the
     tolerance, slivers, faces running within the tolerance of the other
     surface, a plane through a pointed cone's apex where both bodies
-    reach it). Where an edge or a corner of one body rests on a flat
-    face of the other without crossing it, from outside or inside, the
-    faces there all flat, the contact leaves no trace in the result, or the boolean is refused as
-    non-manifold at the contact where the result would pinch there (a
-    cube on its corner united with a plate, a wedge's edge in a groove);
-    what the tolerance cannot place is refused with its own message, and
-    every result is checked for a place within the tolerance of a flat
-    face it is not on (§19). Spheres and cones with cylinders or cones
-    off their axes, cylinders at an angle to each other, and contacts
-    that do not cross where a face at the contact is curved (an edge or
-    a corner resting on a curved face, a curved edge on a flat one,
-    faces touching faces) fail as not supported yet.
+    reach it). Where an edge or a corner of one body rests on a flat face of
+    the other without crossing it, from outside or inside, the faces there
+    all flat, the contact leaves no trace in the result, or the boolean is
+    refused as non-manifold at the contact where the result would pinch
+    there (a cube on its corner united with a plate, a wedge's edge in a
+    groove); what the tolerance cannot place is refused with its own
+    message, and every result is checked for a place within the tolerance of
+    a flat face bounded by straight edges that it is not on (§19). Spheres
+    and cones with cylinders or cones off their axes, cylinders at an angle
+    to each other, and contacts that do not cross where a face at the
+    contact is curved (an edge or a corner resting on a curved face, a
+    curved edge on a flat one, faces touching faces) fail as not supported
+    yet.
 - **Features** (`opendatum-features`): regenerates a Part Studio through the
   kernel with per-feature status (ok, warning, suppressed, failed with
   message). A failing feature never blocks the others. Sketch features are
@@ -876,10 +879,10 @@ name open unchanged.
   kernel is built (`crates/kernel/tests/sources.rs`).
 - Contacts that do not cross on flat faces (design note 0012 §18 and
   §19, ADR 0024), 2026-10-16, on Mesa lavapipe: fmt, clippy with `-D
-  warnings`, {{TESTS}} tests and `cargo deny` pass, and the release time
+  warnings`, 1,072 tests and `cargo deny` pass, and the release time
   guards pass as CI runs them. 31 goldens (`tests/touching.rs`, golden
-  11 in `tests/booleans.rs`) assert all four operations in both orders
-  with counts, volumes, areas, origins, and refusal texts and places: a
+  11 in `tests/booleans.rs`) assert all six operations (union,
+  intersection and difference, each in both orders) with counts, volumes, areas, origins, and refusal texts and places: a
   wedge on its edge and a cube on its corner on a plate from outside and
   inside, a groove's root, a notch, the slit a knife left on main,
   contacts on a face's boundary, many contacts in one face, millimetre
@@ -889,7 +892,8 @@ name open unchanged.
   across the tolerance band in quarter steps): at a hundred times its
   run, all 264,000 operations answered (by the volume identities, an
   origins check and an oracle that finds results touching themselves)
-  or refused, none failing; on main the same run fails 24,571 (20,457
+  or refused, none failing; on main the same run, with the final
+  oracle, fails 24,571 (20,457
   results that validate and touch themselves, 2,148 naming origins that
   do not bound their entities, 1,926 shell-volume kernel errors, 40
   others). The flat fuzz and the motions at a hundred times refuse what
@@ -897,14 +901,15 @@ name open unchanged.
   pairs where a box's corner rests on a prism's flat face from inside,
   now answered but for the pinch, and pair 3493, where main returned a
   result touching itself, now refused. Every result is checked for a
-  place within the tolerance of a flat face it is not on; disabled one
+  place within the tolerance of a flat face bounded by straight edges
+  that it is not on; disabled one
   at a time, each of its three rules for sharp corners, and its measure
   of a point's distance, fails a test that pins it (a fourth rule,
   which none needed, was dropped). The slice costs 5.6% more
   instructions on a union of two 256-sided star prisms and 8.1% on 64
   pins cut one at a time; a union with a plate of 400 flush pins, which
   a first version of the check took quadratic time on, is guarded
-  (93–107 ms, limit 1,000 ms) with a scaling check (docs/PERFORMANCE.md,
+  (95–113 ms, limit 1,000 ms) with a scaling check (docs/PERFORMANCE.md,
   seventh pass).
 - Geometry for booleans of curved solids (design note 0012 §10.7, item
   1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
@@ -1237,12 +1242,12 @@ name open unchanged.
   cylinders at an angle (quartics); tangent contacts where a face at
   the contact is curved, faces touching without crossing (a box's face
   resting on a cylinder's side, a slot tangent to a hole) or an edge or
-  a corner resting on a face: 329 of 16,000 random operations in the fuzz
-  of planes and cylinders at 20 times, nearly all its refusals (a
-  corner resting on a flat face of such a body is decided since §19; 63 of
-  60,000 operations there and at an angle, 52 and 11, where an edge
-  touches a face without crossing it, were done before item 3b's rule
-  for touches and are refused now); planes nearly tangent along a cone's
+  a corner resting on a face: 324 of 16,000 random operations in the
+  fuzz of planes and cylinders at 20 times (292 faces touching, 32 an
+  edge or a corner), all its refusals but five non-manifold results,
+  and 4 of 8,000 at an angle (an edge or a corner resting on a flat
+  face of such a body, the faces there all flat, is decided since §19);
+  planes nearly tangent along a cone's
   ruling through or near its apex, where the cone stays within the
   tolerance of the plane out to the faces (the cone fuzz tilts them
   10⁻⁴ to 10⁻⁷ rad from tangent: 220 of its 20,000 operations on
@@ -1257,12 +1262,19 @@ name open unchanged.
 - Contacts that do not cross on flat faces (design note 0012 §19) are
   decided, but much of the tolerance band is refused: the contact fuzz
   at a hundred times its run refuses 80,627 of 264,000 operations (5,573
-  of 24,000 with the contact exact, 12,095 with the body a tolerance
-  into the face), where main refused 53,168 and failed 24,571. A fin
-  under a tolerance thick is still returned where an edge of one body
-  lies beside the line where its face crosses a face of the other,
-  between two reflex corners (§19, "Known fault"; main returns the same
-  fin). Within three quarters of a tolerance of the exact contact, 704
+  of 24,000 with the contact exact, 12,095 with the body moved a
+  tolerance against the face's normal), where main refused 53,168 and
+  failed 24,571. A fin
+  under a tolerance thick, which main returns where an edge of one body
+  lies on a face's plane beside the line where its own face crosses
+  that face, past reflex corners, and the face holds the strip between
+  them (§19's known fault, with more cases found by review: the face's
+  edge on that line, a hole's edge, a notch's floor), is refused (§20,
+  goldens 32 and 33); where the face does not hold the strip (B resting
+  on its edge, or over a hole) the contact is answered as before. The
+  check does not itself decide a corner of the face within the
+  tolerance beside that line under the strip: probes of that were
+  refused by other checks, but no proof is claimed. Within three quarters of a tolerance of the exact contact, 704
   of 83,065 results differ in their counts from the exact contact's
   (mostly an edge left split), 673 of them as on main: results are not
   yet canonical under motions within the tolerance. The oracle that
@@ -1352,14 +1364,13 @@ name open unchanged.
 2. Phase 3, in the order the design notes give (0012 §12.4 item 3:
    balls and coaxial cones, item 3a, §13; planes across cones, item 3b,
    §15, operands with conic edges on cylinders and cones, §17, and
-   contacts that do not cross on flat faces, §19, are done). Next: the
-   fin left along a lying edge between reflex corners (§19, "Known
-   fault"), with a design note first; the rest of the contacts' slice 1
+   contacts that do not cross on flat faces, §19 and §20, are done).
+   Next: the rest of the contacts' slice 1
    (§18.6 steps 5 to 8: the cut-pair filter, edges and corners on curved
-   faces, the largest share of the curved refusals, the Apart band, the
-   contact time guards and mutation checks), then slice 2, surfaces
-   that touch (§18.3); then the
-   apex left refused (a plane through a pointed cone's apex where both
+   faces, 76 of the curved fuzzes' refusals at twenty times, the Apart
+   band, the contact time guards and mutation checks), then slice 2,
+   surfaces that touch (§18.3), 1,304 of those refusals; then the apex
+   left refused (a plane through a pointed cone's apex where both
    bodies reach it: edges meeting at the cone's singular point), naming
    through booleans (design note 0013 §10 step 4), and extrude and
    revolve that add, remove and intersect. Alongside, absorb the boolean
@@ -1371,7 +1382,8 @@ name open unchanged.
    flat faces triangulated from orientation tests alone (no incircle
    test), which speeds meshing and validation; a cheaper exact stage of
    the incircle test, which curved faces' meshes reach on points of one
-   circle (18% of a ball's mesh); faces grouped by surface through a
-   hash of the surface (on main too, §19's "Cost"); booleans that work near
+   circle (18% of a ball's mesh); faces grouped by surface through an
+   index of the surfaces, not a linear search (on main too, §19's
+   "Cost"); booleans that work near
    where the bodies meet (validation and classification of untouched
    faces carried over); then lower the budgets to match.

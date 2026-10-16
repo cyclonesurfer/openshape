@@ -437,22 +437,24 @@ fn directed(f: &Out) -> impl Iterator<Item = (usize, bool)> + Clone + '_ {
 /// than four tolerances or its other end is farther than the tolerance
 /// from the face's plane; and a face at both ends of a segment shorter
 /// than four tolerances unless the middle is inside it, where the face
-/// holds the segment lying on it. A segment with an end on a face's corner and the
-/// other within the tolerance of its plane lies along that plane, and its
-/// middle counts. The rule after selection (`check_contacts`) decides the
-/// contacts the imprint records; this decides, from the result alone,
-/// those that decisions at the edge of the tolerance let through (found by
-/// the contact fuzz, on main too): an edge of one body a tolerance from a
-/// face of the other, its vertices called off the face's plane while the
-/// points where it leaves the face are within the tolerance of the face's
-/// edges and placed on them, so the result has the edge lying on the face;
-/// and a piece of an edge of one body two to four tolerances long, from a
-/// corner of the other within the tolerance of the edge to where the edge
-/// crosses a face at that corner, lying on that face. Each point is
-/// looked up in a tree of the faces' boxes, and each face it may be on in
-/// a tree of that face's edges in its plane, built when first needed: a
-/// face with many loops (islands, holes) is not walked edge by edge for
-/// every point near it (found by review: a plate with 1,600 flush pins).
+/// holds the segment lying on it. A segment at least four tolerances long
+/// with an end on a face's corner and the other within the tolerance of
+/// its plane lies along that plane, and its middle counts. The rule after
+/// selection (`check_contacts`) decides the contacts the imprint records;
+/// this decides, from the result alone, those that decisions at the edge
+/// of the tolerance let through (found by the contact fuzz, on main too):
+/// an edge of one body a tolerance from a face of the other, its vertices
+/// called off the face's plane while the points where it leaves the face
+/// are within the tolerance of the face's edges and placed on them, so the
+/// result has the edge lying on the face; and a piece of an edge of one
+/// body under four tolerances long (2.98 to 3.60 in the contact fuzz's
+/// cases), from a corner of the other within the tolerance of the edge to
+/// where the edge crosses a face at that corner, lying on that face. Each
+/// point is looked up in a tree of the faces' boxes, and each face it may
+/// be on in a tree of that face's edges in its plane, built when first
+/// needed: a face with many loops (islands, holes) is not walked edge by
+/// edge for every point near it (found by review: a plate with 1,600
+/// flush pins).
 /// It was first run only on results made wholly of exact faces, so the
 /// same contact escaped where any face of the result was curved (found by
 /// the contact fuzz's triage).

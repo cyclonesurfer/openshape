@@ -1221,9 +1221,10 @@ fn contacts_swept_across_the_band() {
 /// tolerance cannot place); the tree of a corner's bridges (161, refused
 /// by the bridge's test of a piece of the other body's edge leaving its
 /// end); 477, whose bridge carries the curves of the two faces of an edge
-/// lying on the face, refused where the edge leaves it; and 149, whose
-/// merged curves run along an edge of the other body lying on the face,
-/// refused where the faces meet. 149, 661 and 1203 at −0.75 are now
+/// lying on the face, refused where the edge leaves it (B − A as edges
+/// passing within the tolerance of each other); and 149, whose merged
+/// curves run along an edge of the other body lying on the face, refused
+/// where the faces meet. 149, 661 and 1203 at −0.75 are now
 /// refused by the check of the faces' meeting's ends
 /// (`imprint::plane_meeting`) before a bridge forms, with the same text.
 #[test]
@@ -1268,7 +1269,7 @@ fn contacts_whose_bridges_carry_no_edge() {
 /// an edge of the other body that crosses one of the box's faces at a
 /// slant a few tolerances from the corner (681, 1583, 1666, 4183, 4906),
 /// refused as an edge running within the tolerance of a face over a
-/// stretch; a prism's face within the tolerance of the other body's over
+/// stretch (1583's B − A as a sliver); a prism's face within the tolerance of the other body's over
 /// a band (2080), refused there in every operation, where one order of the
 /// operands reached the edge first; a prism's edge parallel to an edge of
 /// the face and about the tolerance from it, that edge lying on the
@@ -1296,17 +1297,18 @@ fn contacts_whose_lying_edges_leave_the_face_to_both_sides() {
     ]);
 }
 
-/// Cases of the contact fuzz where a box's corner, resting on a corner of
-/// a face of A, is pushed four tolerances through it, a metre or less from
-/// the world's origin, so that one result holds the box's tip as a
-/// tetrahedron a few tolerances across: A ∩ B where the box rests from
-/// outside (contacts 2 and 42), and B − A where it rests from inside (1,
-/// beside a larger piece of the box, and 15). Taken from the world's
-/// origin, the volume of that shell took the wrong sign, in the booleans
-/// (whose faces, projected onto their planes, fail to close by up to the
-/// tolerance) and in the validator (by rounding), and the result was
-/// refused as a void inside no solid (1, 2) or a shell turned inside out
-/// (15, 42); both now take their volumes from a corner of the shell.
+/// Cases of the contact fuzz where a box's corner, resting inside a face
+/// of A, is pushed four tolerances through it, a metre or less from the
+/// world's origin, so that one result holds the box's tip as a tetrahedron
+/// a few tolerances across: A ∩ B where the box rests from outside
+/// (contacts 2 and 42), and B − A where it rests from inside (1, beside a
+/// larger piece of the box, and 15). Taken from the world's origin, the
+/// volume of that shell took the wrong sign, in the booleans (whose faces,
+/// projected onto their planes, fail to close by up to the tolerance) and
+/// in the validator (by rounding), and the operation failed with an
+/// invalid body, a void inside no solid (1, 2) or an outer shell turned
+/// inside out (15, 42); both now take their volumes from a corner of the
+/// shell.
 #[test]
 fn corners_dipping_four_tolerances_through_a_face() {
     pinned_contacts(&[

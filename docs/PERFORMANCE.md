@@ -47,8 +47,14 @@ tilted countersunk holes to the creased revolve's validation, on
 2026-10-15, after the fifth pass). The booleans and validations of the
 dimpled, countersunk, tilted and flattened plates, and the cuts one at a
 time, were measured again after the sixth pass (2026-10-15): the lowest
-and the median of 12 runs interleaved with main's. The limit is what the
-test enforces.
+and the median of 12 runs interleaved with main's. The union with a
+plate of flush pins was measured on 2026-10-16, after the seventh pass:
+the range of six runs (three of every guard, three of the booleans' and
+the scaling tests alone), each test reporting its best repetition; in
+those runs rows already in the table often measured above their ranges
+(the flattened pins' plate validated in 4.5–8.8 ms against 3.1–3.8), so
+this row may read high against the others. The limit is what the test
+enforces.
 
 | Operation | Measured | Limit |
 |---|---|---|
@@ -64,7 +70,7 @@ test enforces.
 | Cut 64 holes into a box, one boolean each | 225–265 ms | 3,000 ms |
 | Drill 64 round holes into a plate, one boolean each | 860–1,050 ms | 10,000 ms |
 | Intersect or subtract a plate with 100 round holes and a box across them | 52–55 ms | 600 ms |
-| Unite a box with a corner of a plate of 400 flush square pins (4,012 faces; each place of the result checked against the faces near it) | 93–107 ms | 1,000 ms |
+| Unite a box with a corner of a plate of 400 flush square pins (the result has 4,012 faces; each place of it checked against the faces near it) | 95–113 ms | 1,000 ms |
 | Dimple a plate with 16 balls, one boolean each | 73–89 ms | 900 ms |
 | Mesh it (173,680 triangles) | 382–406 ms | 4,000 ms |
 | Validate it | 2.2–2.5 ms | 40 ms |
@@ -100,7 +106,7 @@ factor):
 | Mesh a plate, 16 to 121 holes (7.6 times) | 6.8–8.2 times |
 | Cut a box across a plate's round holes, 16 to 121 holes (7.6 times) | 7.8–8.4 times |
 | Mesh a ball, 13,964 to 105,556 triangles (7.6 times) | 8.6–9.6 times |
-| Unite a box with a corner of a plate of flush pins, 49 to 400 pins (8.2 times) | 8.7 times |
+| Unite a box with a corner of a plate of flush pins, 49 to 400 pins (8.2 times) | 8.4–9.2 times |
 
 One more checks the cut of a plate's 4th hole against that of its 16th,
 four times the holes counting the one cut (bound: 12, three times the
@@ -447,17 +453,17 @@ million and 18.9 million more than on main.
   review). Each face's outline is now built when a point first needs it:
   its sides in the plane, a tree of them, and a tree of its loops'
   boxes, a loop of more than 32 sides with a tree of its own; each place
-  is tested once, and the segments at each point and the faces along
-  each segment are grouped by a counting sort. From 100 to 900 pins the
+  is tested once, and the faces with a corner at each point and the
+  faces along each segment are grouped by a counting sort. From 100 to 900 pins the
   union's instructions now grow 9.7 times (179 million to 1,739
   million) for 9 times the pins, the check's 11.1 times (19.6 million
-  to 216.5 million). The 400-pin union is guarded (above), with a
+  to 216.4 million). The 400-pin union is guarded (above), with a
   scaling check.
 
 ## Known slow spots
 
-Measured by wall clock, not yet fixed; each is a candidate for a later
-pass.
+Measured by wall clock, or counted by callgrind where a bullet gives
+instructions, not yet fixed; each is a candidate for a later pass.
 
 * **Delaunay tests on points of one circle.** Every triangulation here is
   a constrained Delaunay triangulation, whose incircle test (Shewchuk's,
@@ -520,8 +526,13 @@ pass.
   looking each one up among the groups found so far, so the work grows
   with the faces times the distinct surfaces: from 100 to 900 flush pins
   it grows 14.5 times for 9 times the pins (5.7 million to 82.8 million
-  instructions), 4.8% of the 900-pin union (on main too). A hash of the
-  surface would make it linear.
+  instructions, counted by callgrind), 4.8% of the 900-pin union (on
+  main too). The candidate, not built or measured: an index of the
+  groups by their surfaces' rounded parameters. To keep today's
+  grouping it needs cells at least as wide as the matching tolerance,
+  keys that ignore a normal's sign and where a point lies along an
+  axis, and a search of the neighbouring cells for the earliest group
+  that matches.
 * **Meshing to a very fine tolerance can hit the vertex limit:** a full
   ring meshed to 1 µm needs more than 2,000,000 vertices on one face and is
   refused.
