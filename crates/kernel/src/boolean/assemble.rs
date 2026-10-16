@@ -309,11 +309,17 @@ fn directed(f: &Out) -> impl Iterator<Item = (usize, bool)> + '_ {
 /// Every place of a flat result keeps clear of the faces it is not on
 /// (design note 0012 §19): each end of a segment by more than the
 /// tolerance from every face without a corner there, and its middle from
-/// every face it does not bound (or, for a segment no longer than two
-/// tolerances, whose middle is then within the tolerance of its ends, that
-/// has no corner at its ends), else the result would touch itself and is
-/// refused as non-manifold there. The rule after
-/// selection (`check_contacts`) decides the contacts the imprint records;
+/// every face it does not bound, else the result would touch itself and is
+/// refused as non-manifold there. Two faces are let off for the middle of
+/// a short segment: one with a corner at one end of a segment shorter
+/// than four tolerances (a sharp corner there: an edge leaving a corner of
+/// a face at a slight angle stays within the tolerance of the face for the
+/// tolerance over the angle's sine), and one with a corner at either end
+/// of a segment no longer than two tolerances, whose middle is within the
+/// tolerance of both ends. A face with corners at both ends of a longer
+/// segment and its middle on it holds the segment lying on it. The rule
+/// after selection (`check_contacts`) decides the contacts the imprint
+/// records;
 /// this decides, from the result alone, those that decisions at the edge
 /// of the tolerance let through (found by the contact fuzz, on main too):
 /// an edge of one body a tolerance from a face of the other, its vertices
@@ -397,23 +403,22 @@ fn check_apart(
         let seg = &segs.list[s];
         let (a, b) = (pts.rep[seg.a], pts.rep[seg.b]);
         let ends = |c: usize| at.get(&c).map_or(&[][..], Vec::as_slice);
-        let short = (b - a).length() <= 2.0 * eps;
+        let len = (b - a).length();
+        // Whether the middle may be near face `g` at a corner at the ends.
+        let let_off = |g: usize| {
+            let (x, y) = (ends(seg.a).contains(&g), ends(seg.b).contains(&g));
+            (len <= 2.0 * eps && (x || y)) || (len < 4.0 * eps && x != y)
+        };
         let samples = [
-            (a, ends(seg.a), None, true),
-            (b, ends(seg.b), None, true),
-            (
-                (a + b) * 0.5,
-                by.as_slice(),
-                short.then_some((seg.a, seg.b)),
-                false,
-            ),
+            (a, ends(seg.a), true),
+            (b, ends(seg.b), true),
+            ((a + b) * 0.5, by.as_slice(), false),
         ];
-        for (p, allowed, also, point) in samples {
+        for (p, allowed, point) in samples {
             tree.overlapping(p, p, &mut near);
             near.sort_unstable();
             for &g in &near {
-                let skip = allowed.contains(&g)
-                    || also.is_some_and(|(x, y)| ends(x).contains(&g) || ends(y).contains(&g));
+                let skip = allowed.contains(&g) || (!point && let_off(g));
                 if skip || !on(g, p) {
                     continue;
                 }

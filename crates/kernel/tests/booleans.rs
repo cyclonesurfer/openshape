@@ -1009,8 +1009,9 @@ fn contact_case(n: usize) -> ContactCase {
 /// three to four tolerances long, from where it passes the corner or meets
 /// A's faces to where it crosses another face of A, lies on that face.
 /// A − B kept the piece with B's faces on both sides, so the result
-/// touched itself; such a piece is now checked against the faces at its
-/// ends, and A − B is refused. Every operation passes the identities.
+/// touched itself; the middle of such a piece is now checked against a
+/// face with corners at both its ends, and A − B is refused. Every
+/// operation passes the identities.
 #[test]
 fn edges_lying_on_a_face_for_a_few_tolerances() {
     let eps = k().tolerance().linear;
