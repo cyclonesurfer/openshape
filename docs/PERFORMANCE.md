@@ -544,13 +544,30 @@ edge near the plane restored, the zigzag's scaling grew 9.7 times
 against a bound of 24, and with long cycles walked whole the comb took
 71 ms against its limit of 700 (both measured in review). Each fix has a
 test of the work it saves instead, in `crates/kernel/src/boolean/mod.rs`,
-which fails with it undone: the zigzag's intersection is answered within
-300 strip steps a segment at 256 and 1,024 segments (with the walk
-restored, it needs about n² / 2 and is refused at 1,024), and the
+which fails with it undone: the zigzag's intersection, against a block
+whose top also crosses the line as many times as the edge has segments
+beyond the notch, is answered within 300 strip steps a segment at 256
+and 1,024 segments (with either face's walk restored, the steps grow
+with n², and it is refused at 1,024), and the
 coedges looked at in finding the comb's lying runs, and the sides of
 cycles looked at in placing its points, grow at most six times from 256
 to 1,024 crossings (with the runs found for each stretch, the coedges grew 15
 times; with long cycles walked whole, the sides grew 24 times).
+
+A second review found two more places doing work that grows with the
+square of their input. The pieces of a strip were cut by every meeting
+beside them, each part by each meeting, and each part carried a side for
+every split before it: a segment beside n meetings took about n² steps,
+each test of a piece took time in proportion to n, and past about 2,050
+meetings the boolean was refused as too large. And which of a face's
+lying runs are whole intervals was found by scanning the intervals for
+each run. The parts are now cut in order along the line, each meeting
+cutting only those not ended before its start, a split replacing the
+side it tightens; the intervals are sorted and searched. A unit test
+cuts a segment beside 256 and 1,024 meetings within 8 steps a meeting,
+each piece keeping at most five sides. The scan has no test of its
+work: in review it cost 27 million instructions of a 5.2 billion
+boolean built to show it.
 
 ## Known slow spots
 

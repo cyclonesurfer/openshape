@@ -948,11 +948,14 @@ name open unchanged.
   found three places doing work growing with the square of their size,
   two of them on main (the end checks finding runs again for each
   stretch, and points placed in long cycles by walking every side), all
-  fixed. Each fix has a test of the work it saves, which fails with the
-  fix undone, since the time guards need not: an edge of 256 segments
-  lying beside a crossing (11.6–13.1 ms, limit 120 ms, with a scaling
-  check) and a face crossing a block's top 1,024 times (63–68 ms, limit
-  700 ms; docs/PERFORMANCE.md, eighth pass). Classification stays
+  fixed, each with a test of the work it saves that fails with the fix
+  undone (the time guards need not fail). The time guards hold an edge
+  of 256 segments lying beside a crossing (11.6–13.1 ms, limit 120 ms,
+  with a scaling check) and a face crossing a block's top 1,024 times
+  (63–68 ms, limit 700 ms; docs/PERFORMANCE.md, eighth pass). A second
+  review found two more (the cutting of a strip by the meetings beside
+  it, and the marking of lying runs that are whole intervals), both
+  fixed, the first with a test of its work. Classification stays
   quadratic in the crossings along one line (known slow spot).
 - Geometry for booleans of curved solids (design note 0012 §10.7, item
   1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,

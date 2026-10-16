@@ -3741,7 +3741,15 @@ chain first needs them, and each chain takes those over its span by two
 searches, so a meeting beside no chain costs nothing beyond the sort.
 Each meeting splits a part at most three times (at its ends and where
 the chain crosses its line), so k meetings over a piece leave at most
-3k + 1 parts. Each line is clipped against the pieces whose boxes it
+3k + 1 parts. The meetings, sorted by their starts along L, cut a
+piece's parts in order along L, each only the parts not ended before its
+start, and a part keeps its four sides and one for each meeting that
+cuts it, a split along L replacing the side it tightens: k disjoint
+meetings over a piece take steps in proportion to k. (Found by review:
+every part was cut by every meeting, and each carried a side for every
+split before it, so a segment beside about 2,050 meetings was refused
+as too large, and each test of a piece took time in proportion to the
+meetings.) Each line is clipped against the pieces whose boxes it
 meets, cut by the capsules and split by the edges of F whose boxes it
 meets, each found by a tree over their boxes; each part tested costs a
 lookup in each face's outline (a step for each side and loop it meets,
@@ -3765,12 +3773,17 @@ million. The time guard (`tests/timing.rs`) holds the intersection at
 128 to 1,024 segments to 24 times (it grows 7.5 to 8.1 times); with the
 walk undone it grew 9.7 times (measured in review) and would pass, so a
 unit test of the boolean holds its steps to 300 a segment at 256 and
-1,024 segments, where the walk undone takes about n² / 2 steps and is
-refused at 1,024. The end checks of §19 found the faces' lying runs again for
+1,024 segments, against a block whose top also crosses L n times beyond
+the notch: with either face's walk undone, the steps grow with n² and
+the boolean is refused at 1,024 (the walk of G's edges, which the edge
+alone did not exercise, found by review). The end checks of §19 found the faces' lying runs again for
 each stretch of the pair and tested every pair of the faces' intervals
 on L, as on main; they now find the runs once per pair, sorted along L
 with their ends, and meet each interval of one face only with those of
-the other within ε of it. On a face crossing the other's top 1,024
+the other within ε of it. Which of a face's runs are whole intervals,
+for the strip checks, was found by scanning the intervals for each run;
+they are now sorted and searched (found by review). On a face crossing
+the other's top 1,024
 times (the comb of the time guards), the meeting of each pair, the
 faces' intervals on L included, took 216 million instructions, 206
 million of them in finding the runs, and takes 12.8 million, 2.5
@@ -3811,10 +3824,14 @@ a face's tree kept to a box against filtering the slab's edges by their
 boxes, and one the edges of F the check takes as entering the strip:
 with a hole of F in the strip over G's region, every line tested but
 those edges has its middle outside G or in the hole, and the check finds
-the region's corners only through the hole's edges. Tests of the
-boolean check that its strip checks draw on one budget (the fewest
-steps within which k strips are answered are at least k times those of
-one) and count the work of the three costs profiling found (above).
+the region's corners only through the hole's edges. Unit tests also
+check that a segment beside many meetings is cut in steps in proportion
+to them, each piece keeping at most five sides, and `apart` against the
+separation of a hull and a piece along 7,200 directions. Tests of the
+boolean check that its strip checks draw on one budget across its pairs
+of faces (two copies of golden 35's notch far apart need about twice
+the steps of one; found by review, an earlier test held strips of one
+pair only) and count the work of the costs profiling found (above).
 Of 27 changes to the rule and its searches (each test of a chain, a
 side, the band, a cut, a window or a search left out or turned round,
 alone or two together), the first run's tests caught all but three:
