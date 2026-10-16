@@ -310,16 +310,15 @@ fn directed(f: &Out) -> impl Iterator<Item = (usize, bool)> + '_ {
 /// (design note 0012 §19): each end of a segment by more than the
 /// tolerance from every face without a corner there, and its middle from
 /// every face it does not bound, else the result would touch itself and is
-/// refused as non-manifold there. Two faces are let off for the middle of
-/// a short segment: one with a corner at one end of a segment shorter
-/// than four tolerances (a sharp corner there: an edge leaving a corner of
-/// a face at a slight angle stays within the tolerance of the face for the
-/// tolerance over the angle's sine), and one with a corner at either end
-/// of a segment no longer than two tolerances, whose middle is within the
-/// tolerance of both ends. A face with corners at both ends of a longer
-/// segment and its middle on it holds the segment lying on it. The rule
-/// after selection (`check_contacts`) decides the contacts the imprint
-/// records;
+/// refused as non-manifold there. Faces with a corner at an end of a
+/// short segment are let off for its middle, as sharp corners there (an
+/// edge leaving a corner of a face at an angle θ stays within the
+/// tolerance of the face for the tolerance over sin θ): for a segment no
+/// longer than two tolerances, whose middle is within the tolerance of
+/// both ends, a face at either end; for one shorter than four tolerances,
+/// a face at one end, and a face at both ends unless the middle is inside
+/// it, where the face holds the segment lying on it. The rule after
+/// selection (`check_contacts`) decides the contacts the imprint records;
 /// this decides, from the result alone, those that decisions at the edge
 /// of the tolerance let through (found by the contact fuzz, on main too):
 /// an edge of one body a tolerance from a face of the other, its vertices
@@ -373,8 +372,9 @@ fn check_apart(
         }
     }
     // Whether `p` is on face `g`: within the tolerance of its plane, and
-    // inside its loops or within the tolerance of them.
-    let on = |g: usize, p: DVec3| {
+    // inside its loops or, unless `inside_only`, within the tolerance of
+    // them.
+    let on = |g: usize, p: DVec3, inside_only: bool| {
         let fr = &planes[g];
         if (p - fr.origin).dot(fr.z).abs() > eps {
             return false;
@@ -387,6 +387,9 @@ fn check_apart(
                 if (a.y > q.y) != (b.y > q.y) && q.x < a.x + (q.y - a.y) / (b.y - a.y) * (b.x - a.x)
                 {
                     inside = !inside;
+                }
+                if inside_only {
+                    continue;
                 }
                 let d = b - a;
                 let t =
@@ -404,10 +407,17 @@ fn check_apart(
         let (a, b) = (pts.rep[seg.a], pts.rep[seg.b]);
         let ends = |c: usize| at.get(&c).map_or(&[][..], Vec::as_slice);
         let len = (b - a).length();
-        // Whether the middle may be near face `g` at a corner at the ends.
-        let let_off = |g: usize| {
+        // For the middle: whether face `g` is let off (`None`), or else
+        // whether only its inside counts.
+        let middle = |g: usize| {
             let (x, y) = (ends(seg.a).contains(&g), ends(seg.b).contains(&g));
-            (len <= 2.0 * eps && (x || y)) || (len < 4.0 * eps && x != y)
+            match (x, y) {
+                _ if len >= 4.0 * eps => Some(false),
+                (false, false) => Some(false),
+                _ if len <= 2.0 * eps => None,
+                (true, true) => Some(true),
+                _ => None,
+            }
         };
         let samples = [
             (a, ends(seg.a), true),
@@ -418,8 +428,11 @@ fn check_apart(
             tree.overlapping(p, p, &mut near);
             near.sort_unstable();
             for &g in &near {
-                let skip = allowed.contains(&g) || (!point && let_off(g));
-                if skip || !on(g, p) {
+                if allowed.contains(&g) {
+                    continue;
+                }
+                let inside_only = if point { Some(false) } else { middle(g) };
+                if !inside_only.is_some_and(|i| on(g, p, i)) {
                     continue;
                 }
                 return Err(KernelError::InvalidInput(if point {
