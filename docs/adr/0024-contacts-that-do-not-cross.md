@@ -233,10 +233,17 @@ finds an edge within half the tolerance of a face); and the mutation
 checks beyond `check_apart`. The rates are re-baselined (§19: at a
 hundred times its run the contact fuzz refuses 80,627 of 264,000
 operations, where main refuses 53,168 and fails 24,571), and for this
-commit the outcomes were compared with main's, class by class (§19). One
-fault is known and not fixed: a fin under the tolerance thick along an
-edge that lies beside a crossing between two reflex corners, returned as
-on main (§19).
+commit the outcomes were compared with main's, class by class (§19).
+A fin under the tolerance thick along an edge that lies beside a
+crossing between two reflex corners, returned as on main when slice 1
+landed (§19), is refused since (design note 0012 §20), as are the flap
+between a hole and the crossing and the neck between a reflex corner
+and the crossing: wherever the other face holds the strip between them
+and the crossing (for a hole or a corner, on the side of the crossing
+where the thin layer lies in the face's body). One fault
+found there remains, as on main: a notch whose tip lies just across the
+crossing, its edges crossing it, fails every operation with one operand
+first and is refused with the other first (§20).
 
 ## References
 

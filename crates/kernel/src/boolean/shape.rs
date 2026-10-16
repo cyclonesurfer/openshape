@@ -86,6 +86,31 @@ impl Face {
     /// left out lies above the surface (on the side its distance grows to),
     /// and whether some lies below it.
     pub fn near_surface(&self, surface: &Quadric, eps: f64, out: &mut Vec<usize>) -> (bool, bool) {
+        self.near(surface, eps, None, out)
+    }
+
+    /// The coedges of [`Face::near_surface`] whose edges' boxes meet the
+    /// closed box `within` (all of them, as there, on a face without an
+    /// index): the walk enters only the parts of the index whose boxes meet
+    /// it, so a face with many edges near the surface costs a search near
+    /// the box, not a pass over them.
+    pub fn near_surface_in(
+        &self,
+        surface: &Quadric,
+        eps: f64,
+        within: (DVec3, DVec3),
+        out: &mut Vec<usize>,
+    ) {
+        self.near(surface, eps, Some(within), out);
+    }
+
+    fn near(
+        &self,
+        surface: &Quadric,
+        eps: f64,
+        within: Option<(DVec3, DVec3)>,
+        out: &mut Vec<usize>,
+    ) -> (bool, bool) {
         out.clear();
         let Some(index) = &self.index else {
             out.extend(0..self.coedges());
@@ -107,12 +132,15 @@ impl Face {
                 true
             }
         };
+        let meets = |lo: DVec3, hi: DVec3| {
+            within.is_none_or(|(l, h)| lo.cmple(h).all() && l.cmple(hi).all())
+        };
         match *surface {
             Quadric::Plane { point, normal } => index.visit(
                 |lo, hi| {
                     let centre = (lo + hi) * 0.5;
                     let half = (hi - lo) * 0.5;
-                    side((centre - point).dot(normal), half.dot(normal.abs()))
+                    meets(lo, hi) && side((centre - point).dot(normal), half.dot(normal.abs()))
                 },
                 |k| {
                     out.push(k);
@@ -123,7 +151,10 @@ impl Face {
             // so a box is on one side if the distance at its centre is more
             // than half its diagonal.
             _ => index.visit(
-                |lo, hi| side(surface.distance((lo + hi) * 0.5), (hi - lo).length() * 0.5),
+                |lo, hi| {
+                    meets(lo, hi)
+                        && side(surface.distance((lo + hi) * 0.5), (hi - lo).length() * 0.5)
+                },
                 |k| {
                     out.push(k);
                     true
@@ -535,4 +566,78 @@ pub(super) fn shape<'a>(b: &'a Brep, which: &str) -> Result<Shape<'a>, KernelErr
         bounding,
         one_surface,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::DVec2;
+
+    use super::*;
+    use crate::{BrepKernel, ExtrudeSpec, Kernel, Profile};
+
+    /// On faces with a tree over their edges, the coedges near a surface
+    /// and in a box ([`Face::near_surface_in`], one walk kept to both) are
+    /// those near the surface whose edges' boxes meet the box.
+    #[test]
+    fn a_walk_kept_to_a_box_finds_the_coedges_near_a_surface_in_it() {
+        let n = 200;
+        let pts: Vec<DVec2> = (0..n)
+            .map(|i| {
+                let a = TAU * i as f64 / n as f64;
+                DVec2::new(a.cos(), 0.5 * a.sin())
+            })
+            .collect();
+        let body = BrepKernel::default()
+            .extrude(
+                &Profile::polygon(Frame::WORLD, &pts),
+                &ExtrudeSpec {
+                    distance: 1.0,
+                    symmetric: false,
+                },
+            )
+            .expect("a prism");
+        let shape = shape(&body.brep, "prism").expect("a shape");
+        let surfaces = [
+            Quadric::Plane {
+                point: DVec3::new(0.1, 0.0, 0.5),
+                normal: DVec3::new(1.0, 0.2, 0.3).normalize(),
+            },
+            Quadric::Sphere {
+                center: DVec3::new(0.3, 0.1, 0.5),
+                radius: 0.9,
+            },
+        ];
+        let mut s = 11u64;
+        let mut lcg = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (mut all, mut got) = (Vec::new(), Vec::new());
+        let (mut found, mut fewer) = (0, 0);
+        for face in shape.faces.iter().filter(|f| f.index.is_some()) {
+            for surface in &surfaces {
+                for _ in 0..200 {
+                    let eps = [1e-3, 0.05, 0.2, 0.4][(4.0 * lcg()) as usize];
+                    let c = DVec3::new(2.4 * lcg() - 1.2, 1.4 * lcg() - 0.7, face.lo.z);
+                    let h = DVec3::new(lcg(), lcg(), lcg()) * 0.4 + DVec3::splat(0.01);
+                    let within = (c - h, c + h);
+                    face.near_surface(surface, eps, &mut all);
+                    let want: Vec<usize> = (all.iter().copied())
+                        .filter(|&k| {
+                            let (li, i) = face.coedge_at(k);
+                            let (lo, hi) = shape.edge_boxes[face.loops[li][i].0];
+                            lo.cmple(within.1).all() && within.0.cmple(hi).all()
+                        })
+                        .collect();
+                    face.near_surface_in(surface, eps, within, &mut got);
+                    assert_eq!(got, want);
+                    found += usize::from(!want.is_empty());
+                    fewer += usize::from(want.len() < all.len());
+                }
+            }
+        }
+        assert!(found > 200 && fewer > 200, "{found} {fewer}");
+    }
 }

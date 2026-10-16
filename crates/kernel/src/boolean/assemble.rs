@@ -9,6 +9,7 @@ use spade::Triangulation;
 
 use super::chart::Chart;
 use super::classify::{self, Class};
+use super::flat_outline::FlatOutline;
 use super::meet::Track;
 use super::points::{segment_distance, Points};
 use super::quadric::Quadric;
@@ -474,7 +475,7 @@ fn check_apart(
             .map(move |l| (l.iter()).map(move |&(s, fw)| to2(fr, pts.rep[segs.start(s, fw)])))
     };
     // Each exact face's loops in its plane, made when first needed.
-    let outlines: Vec<std::cell::OnceCell<Outline>> = (0..faces.len())
+    let outlines: Vec<std::cell::OnceCell<FlatOutline>> = (0..faces.len())
         .map(|_| std::cell::OnceCell::new())
         .collect();
     let outline = |g: usize| {
@@ -486,7 +487,7 @@ fn check_apart(
                 sides.extend((0..q.len()).map(|k| (q[k], q[(k + 1) % q.len()])));
                 starts.push(sides.len());
             }
-            Outline::new(sides, starts)
+            FlatOutline::new(sides, starts)
         })
     };
     // Boxes of the projected exact faces, padded by the tolerance off the
@@ -526,7 +527,9 @@ fn check_apart(
             return false;
         }
         let q = to2(&planes[g], p);
-        (!inside_only && outline(g).near(q, (eps * eps - h * h).sqrt())) || outline(g).inside(q)
+        let seen = &mut 0;
+        (!inside_only && outline(g).near(q, (eps * eps - h * h).sqrt(), seen))
+            || outline(g).inside(q, seen)
     };
     let mut near = Vec::new();
     // Each place is tested once, at the first segment that ends there.
@@ -619,106 +622,6 @@ impl ByKey {
 
     fn get(&self, key: usize) -> &[usize] {
         &self.faces[self.starts[key]..self.starts[key + 1]]
-    }
-}
-
-/// The loops of a face in its plane, for [`check_apart`]: their sides, loop
-/// after loop, with trees over them built when a point first comes within
-/// the tolerance of the plane.
-struct Outline {
-    sides: Vec<(DVec2, DVec2)>,
-    /// Where each loop's sides start in `sides`, then their end.
-    starts: Vec<usize>,
-    /// Trees of every side's box and of every loop's box.
-    trees: std::cell::OnceCell<(Bvh, Bvh)>,
-    /// A tree of each long loop's sides.
-    long: Vec<std::cell::OnceCell<Bvh>>,
-}
-
-/// Loops with more sides than this are searched through a tree of them.
-const LONG_LOOP: usize = 32;
-
-fn lift(v: DVec2) -> DVec3 {
-    DVec3::new(v.x, v.y, 0.0)
-}
-
-fn side_boxes(sides: &[(DVec2, DVec2)]) -> Vec<(DVec3, DVec3)> {
-    (sides.iter())
-        .map(|&(a, b)| (lift(a.min(b)), lift(a.max(b))))
-        .collect()
-}
-
-impl Outline {
-    fn new(sides: Vec<(DVec2, DVec2)>, starts: Vec<usize>) -> Outline {
-        Outline {
-            long: (1..starts.len())
-                .map(|_| std::cell::OnceCell::new())
-                .collect(),
-            sides,
-            starts,
-            trees: std::cell::OnceCell::new(),
-        }
-    }
-
-    fn trees(&self) -> &(Bvh, Bvh) {
-        self.trees.get_or_init(|| {
-            let loops = (self.starts.windows(2))
-                .map(|w| {
-                    (side_boxes(&self.sides[w[0]..w[1]]).into_iter()).fold(
-                        (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
-                        |(lo, hi), (a, b)| (lo.min(a), hi.max(b)),
-                    )
-                })
-                .collect();
-            (Bvh::new(side_boxes(&self.sides)), Bvh::new(loops))
-        })
-    }
-
-    /// Whether `q` is within `eps` of a side.
-    fn near(&self, q: DVec2, eps: f64) -> bool {
-        let r = DVec3::new(eps, eps, 0.0);
-        let (lo, hi) = (lift(q) - r, lift(q) + r);
-        !self.trees().0.visit(
-            |a, b| a.cmple(hi).all() && lo.cmple(b).all(),
-            |k| {
-                let (a, b) = self.sides[k];
-                let d = b - a;
-                let t =
-                    ((q - a).dot(d) / d.length_squared().max(f64::MIN_POSITIVE)).clamp(0.0, 1.0);
-                (q - (a + d * t)).length() > eps
-            },
-        )
-    }
-
-    /// Whether `q` is inside the loops: whether the ray from it toward +x
-    /// crosses an odd number of sides. A loop whose box does not hold `q`
-    /// is crossed an even number of times and is skipped, so a point among
-    /// many islands or holes meets only the loops around it (found by
-    /// review: a plate with 1,600 flush pins, whose rays crossed every hole
-    /// in their row).
-    fn inside(&self, q: DVec2) -> bool {
-        let crosses = |&(a, b): &(DVec2, DVec2)| {
-            (a.y > q.y) != (b.y > q.y) && q.x < a.x + (q.y - a.y) / (b.y - a.y) * (b.x - a.x)
-        };
-        let mut inside = false;
-        let mut held = Vec::new();
-        self.trees().1.overlapping(lift(q), lift(q), &mut held);
-        for k in held {
-            let sides = &self.sides[self.starts[k]..self.starts[k + 1]];
-            if sides.len() <= LONG_LOOP {
-                inside ^= sides.iter().filter(|s| crosses(s)).count() % 2 == 1;
-                continue;
-            }
-            let tree = self.long[k].get_or_init(|| Bvh::new(side_boxes(sides)));
-            tree.visit(
-                |lo, hi| lo.y <= q.y && q.y <= hi.y && q.x <= hi.x,
-                |i| {
-                    inside ^= crosses(&sides[i]);
-                    true
-                },
-            );
-        }
-        inside
     }
 }
 
