@@ -1087,6 +1087,57 @@ fn edges_lying_on_a_face_for_a_few_tolerances() {
     ]);
 }
 
+/// Contacts at the boundary of a face, which the checks of design note 0012
+/// §21 leave to the settling of touched points and the corners; without
+/// those exceptions, each was refused in all four operations (found by the
+/// contact fuzz at a hundred times the default run). B rests by a corner
+/// (contacts 548 and 2237 at 1 tolerance) or an edge (86 at 1) on A's
+/// face, with a corner of a face of B across the line where that face's
+/// plane meets A's face's, both its edges crossing the line (a flap), and
+/// the clustering puts the corner on the boundary of A's face. Or B rests
+/// by an edge passing a corner of A's face (4917 at −0.5 tolerance and
+/// 2383 at −0.75), the edge lying on the face's plane as the whole interval
+/// of B's face on the line, which no interval of A's face meets, so that
+/// B's face lies within the tolerance of A's over a sliver at the corner.
+/// Each outcome is main's, and the answered results pass the identities,
+/// the checks of [`measured`] and the faces-crossing check.
+#[test]
+fn contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross() {
+    let along = "the result would be non-manifold: the bodies touch along an edge";
+    let point = "the result would be non-manifold: the bodies touch at a point";
+    let cases = [
+        (
+            548,
+            1.0,
+            ["(12, 28, 18)", "(7, 14, 9)", along, "(9, 20, 13)"],
+        ),
+        (
+            2237,
+            1.0,
+            ["(14, 30, 19)", "(8, 17, 11)", along, "(11, 19, 12)"],
+        ),
+        (86, 1.0, ["(20, 45, 28)", "(7, 14, 9)", point, point]),
+        (4917, -0.5, [point, "empty", "(6, 12, 8)", "(5, 9, 6)"]),
+        (2383, -0.75, [point, "empty", "(6, 12, 8)", "(5, 9, 6)"]),
+    ];
+    pinned_contacts(&cases);
+    for (case, q, _) in cases {
+        let c = contact_case(case);
+        let b = c.body(q);
+        for (x, y, op) in [
+            (&c.a, &b, BooleanOp::Union),
+            (&c.a, &b, BooleanOp::Intersect),
+            (&c.a, &b, BooleanOp::Subtract),
+            (&b, &c.a, BooleanOp::Subtract),
+        ] {
+            if let Ok(r) = k().boolean(x, y, op) {
+                let crossing = self_contact::faces_cross(&k(), &r, 1e-8).expect("a mesh");
+                assert_eq!(crossing, None, "contact {case} ({q}) {op:?}");
+            }
+        }
+    }
+}
+
 /// Sharp corners that the check of a result's places lets off (design note
 /// 0012 §19, `check_apart`), each found by disabling its rules over longer
 /// runs of the contact fuzz: a piece of an edge shorter than four
@@ -1407,6 +1458,206 @@ fn pinned_contacts(cases: &[(usize, f64, [&str; 4])]) {
         assert_eq!(got, want, "{label}");
     }
     assert_eq!(t.bugs, Vec::<String>::new());
+}
+
+/// A prism 0.5 thick whose face lies on the plane through the x axis
+/// tilted `t` degrees toward +y, with the profile `pts` (u along x, w up
+/// the plane); `below`: the prism lies below its face.
+fn tilted_prism(t: f64, pts: &[DVec2], below: bool) -> Body {
+    let t = t.to_radians();
+    let (y, z) = (
+        DVec3::new(0.0, t.cos(), t.sin()),
+        DVec3::new(0.0, -t.sin(), t.cos()),
+    );
+    let (frame, pts) = if below {
+        let frame = Frame {
+            origin: DVec3::ZERO,
+            x: -DVec3::X,
+            y,
+            z: -z,
+        };
+        (
+            frame,
+            pts.iter().rev().map(|p| DVec2::new(-p.x, p.y)).collect(),
+        )
+    } else {
+        let frame = Frame {
+            origin: DVec3::ZERO,
+            x: DVec3::X,
+            y,
+            z,
+        };
+        (frame, pts.to_vec())
+    };
+    k().extrude(
+        &Profile::polygon(frame, &pts),
+        &ExtrudeSpec {
+            distance: 0.5,
+            symmetric: false,
+        },
+    )
+    .expect("a tilted prism")
+}
+
+/// The distance from `p` to the segment from `a` to `b`.
+fn segment_distance(p: DVec2, a: DVec2, b: DVec2) -> f64 {
+    let d = b - a;
+    let t = ((p - a).dot(d) / d.length_squared()).clamp(0.0, 1.0);
+    (a + d * t - p).length()
+}
+
+/// A random case of [`notches_and_spikes_across_the_line`]: a profile on
+/// the tilted plane and its angle, with a label. Its corners, one or two,
+/// lie within a few tolerances of the plane z = 0, across the axis or short
+/// of it: the tip of a notch from the face's far side or near side, the
+/// tip of a spike rising to the axis or falling to it, or two notches'
+/// tips (a W) a few tolerances to a few hundred apart. Every vertex of the
+/// profile is more than 10.5 tolerances from every edge it is not on (the
+/// profile's own merge distance).
+fn notch_case(r: &mut Rng, eps: f64) -> (Vec<DVec2>, f64, String) {
+    let log = |r: &mut Rng, lo: f64, hi: f64| lo * (hi / lo).powf(r.unit());
+    loop {
+        let t = if r.chance(0.5) {
+            [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 45.0][(r.next() % 7) as usize]
+        } else {
+            log(r, 0.5, 45.0)
+        };
+        let st = t.to_radians().sin();
+        // How far a tip lies across the plane z = 0, in tolerances, and so
+        // across the axis in the face's plane.
+        let depth = |r: &mut Rng| {
+            if r.chance(0.2) {
+                [-0.5, 0.0, 0.5, 1.0, 1.5][(r.next() % 5) as usize]
+            } else {
+                r.range(-1.0, 2.0)
+            }
+        };
+        let (z, z2) = (depth(r), depth(r));
+        let (d, d2) = (z * eps / st, z2 * eps / st);
+        let x = match r.next() % 4 {
+            0 => 1.25 + r.range(-10.0, 10.0) * eps,
+            1 => -0.25 + r.range(-10.0, 10.0) * eps,
+            _ => r.range(0.0, 1.0),
+        };
+        let p = DVec2::new;
+        let kind = r.next() % 5;
+        let (a, b) = (log(r, 0.005, 0.4), log(r, 0.005, 0.4));
+        let (label, pts) = match kind {
+            0 => (
+                format!("far notch at {x:.9} {a:.4}/{b:.4} depth {z:+.3}"),
+                vec![
+                    p(-1.2, -0.5),
+                    p(2.2, -0.5),
+                    p(2.2, 0.5),
+                    p(x + a, 0.5),
+                    p(x, -d),
+                    p(x - b, 0.5),
+                    p(-1.2, 0.5),
+                ],
+            ),
+            1 => (
+                format!("near notch at {x:.9} {a:.4}/{b:.4} depth {z:+.3}"),
+                vec![
+                    p(-1.2, -0.5),
+                    p(x - b, -0.5),
+                    p(x, d),
+                    p(x + a, -0.5),
+                    p(2.2, -0.5),
+                    p(2.2, 0.5),
+                    p(-1.2, 0.5),
+                ],
+            ),
+            2 => (
+                format!("spike up at {x:.9} {a:.4}/{b:.4} depth {z:+.3}"),
+                vec![
+                    p(-1.2, -0.5),
+                    p(2.2, -0.5),
+                    p(2.2, -0.4),
+                    p(x + a, -0.4),
+                    p(x, d),
+                    p(x - b, -0.4),
+                    p(-1.2, -0.4),
+                ],
+            ),
+            3 => (
+                format!("spike down at {x:.9} {a:.4}/{b:.4} depth {z:+.3}"),
+                vec![
+                    p(-1.2, 0.4),
+                    p(x - b, 0.4),
+                    p(x, -d),
+                    p(x + a, 0.4),
+                    p(2.2, 0.4),
+                    p(2.2, 0.5),
+                    p(-1.2, 0.5),
+                ],
+            ),
+            _ => {
+                let (g1, g2) = (log(r, 0.3, 150.0) * eps, log(r, 0.3, 150.0) * eps);
+                let m = match r.next() % 3 {
+                    0 => 0.5,
+                    1 => log(r, 1e-4, 0.1),
+                    _ => r.range(-0.5, 5.0) * eps / st,
+                };
+                (
+                    format!(
+                        "W at {x:.9} tips {:.3}/{:.3} tolerances apart, tooth {m:.3e}, mouths \
+                         {a:.4}, depths {z:+.3}/{z2:+.3}",
+                        g1 / eps,
+                        g2 / eps
+                    ),
+                    vec![
+                        p(-1.2, -0.5),
+                        p(2.2, -0.5),
+                        p(2.2, 0.5),
+                        p(x + g2 + a, 0.5),
+                        p(x + g2, -d2),
+                        p(x, m),
+                        p(x - g1, -d),
+                        p(x - g1 - a, 0.5),
+                        p(-1.2, 0.5),
+                    ],
+                )
+            }
+        };
+        // Each vertex more than the profile's merge distance from every
+        // edge it is not on (the profile refuses curves touching).
+        let n = pts.len();
+        let apart = (0..n).all(|i| {
+            (0..n)
+                .filter(|&j| i != j && i != (j + 1) % n)
+                .all(|j| segment_distance(pts[i], pts[j], pts[(j + 1) % n]) > 10.5 * eps)
+        });
+        if apart {
+            return (pts, t, label);
+        }
+    }
+}
+
+/// Random corners of a tilted prism's face within a few tolerances of a
+/// box's top z = 0 (x from −0.25 to 1.25), across the line where the face
+/// crosses it or short of it, beside the box's ends or over its top, the
+/// prism above or below its face ([`notch_case`]; design note 0012 §21):
+/// every operation is answered or refused, never a kernel error, and the
+/// results pass the identities, the origins check and the oracle. Before
+/// §21 the notch tips more than a tolerance across the line failed with
+/// the box first, and spikes there returned faces crossing each other.
+#[test]
+fn notches_and_spikes_across_the_line() {
+    let eps = k().tolerance().linear;
+    let a = cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(1.25, 1.0, 0.0));
+    let mut t = Tally::default();
+    let mut r = Rng(0x0DA7_0021);
+    for case in 0..scale(150) {
+        let (pts, angle, label) = notch_case(&mut r, eps);
+        let below = r.chance(0.3);
+        let b = tilted_prism(angle, &pts, below);
+        let label = format!(
+            "notch {case} ({label} at {angle:.3}°{})",
+            if below { ", below its face" } else { "" }
+        );
+        identities(&mut t, &a, &b, &label, 4.0 * (area(&a) + area(&b)) * eps);
+    }
+    report("notches and spikes across the line", &t);
 }
 
 /// Copies of a body with a hole moved by three tolerances (motions 3449

@@ -311,6 +311,34 @@ fn booleans() {
         t,
         LIMIT.comb_1024,
     );
+    // 512 notch tips across the line where a face crosses the block's top,
+    // each within the tolerance of the top: each is sorted from the face's
+    // corners and tested against the stretches along the line, and the
+    // boolean is refused at the first (design note 0012 §21).
+    let tips = notches(1024);
+    let (r, t) = best(3, || k().boolean(&block, &tips, BooleanOp::Intersect));
+    let refused = r.expect_err("refused").to_string();
+    assert!(
+        refused.contains("near (0.976562, -0.000295, -0.000052) mm"),
+        "{refused}"
+    );
+    within(
+        "intersection refused at 512 notch tips across the line",
+        t,
+        LIMIT.notches_1024,
+    );
+    // 512 spikes across the line, each sorted and its flap built.
+    let spiked = spikes(1024);
+    let (r, t) = best(3, || {
+        k().boolean(&block, &spiked, BooleanOp::Intersect)
+            .expect("a wedge")
+    });
+    assert_eq!(k().topology(&r).faces, 1031);
+    within(
+        "intersection with 512 spikes across the line",
+        t,
+        LIMIT.spikes_1024,
+    );
 }
 
 /// A block from x = −0.25 to 1.25 and y = −1 to 1 under z = 0.
@@ -403,6 +431,51 @@ fn zigzag(n: usize) -> Body {
         },
     )
     .expect("a prism")
+}
+
+/// A prism on [`zigzag`]'s plane, leaning 10° from z = 0, whose face lies
+/// below an edge over x from 0 to 1 zigzagging in `n` segments, between
+/// `even` and `odd` (in metres across the x axis) at its even and its odd
+/// corners: with odd corners 3 tolerances across the axis and even ones
+/// 1/n beyond it, `n / 2` notch tips across the line where the face
+/// crosses [`block`]'s top, within the tolerance of the top, each refused
+/// (design note 0012 §21, golden 42); with odd corners a tolerance beyond
+/// the axis and even ones 1/n across it, `n / 2` spikes whose flaps lie
+/// within the tolerance of their edges (golden 44's narrow spike).
+fn teeth(n: usize, even: f64, odd: f64) -> Body {
+    let t = 10f64.to_radians();
+    let frame = Frame {
+        origin: DVec3::ZERO,
+        x: DVec3::X,
+        y: DVec3::new(0.0, t.cos(), t.sin()),
+        z: DVec3::new(0.0, -t.sin(), t.cos()),
+    };
+    let mut pts: Vec<DVec2> = [(-0.5, -0.5), (2.0, -0.5), (2.0, 0.5), (1.0, 0.5)]
+        .map(|(x, y)| DVec2::new(x, y))
+        .to_vec();
+    pts.extend((0..=n).rev().map(|i| {
+        let w = if i % 2 == 0 { even } else { odd };
+        DVec2::new(i as f64 / n as f64, w)
+    }));
+    pts.extend([(0.0, 0.5), (-0.5, 0.5)].map(|(x, y)| DVec2::new(x, y)));
+    k().extrude(
+        &Profile::polygon(frame, &pts),
+        &ExtrudeSpec {
+            distance: 0.5,
+            symmetric: false,
+        },
+    )
+    .expect("a prism")
+}
+
+/// `n / 2` notch tips across the line ([`teeth`]).
+fn notches(n: usize) -> Body {
+    teeth(n, 1.0 / n as f64, -3.0 * k().tolerance().linear)
+}
+
+/// `n / 2` spikes across the line ([`teeth`]).
+fn spikes(n: usize) -> Body {
+    teeth(n, -1.0 / n as f64, k().tolerance().linear)
 }
 
 /// A cylinder of radius `r` about `(x, y)`, from `z0` up `h`.
@@ -968,6 +1041,29 @@ fn scaling() {
         },
     );
 
+    let (b, n128, n1024) = (block(), notches(128), notches(1024));
+    scales(
+        "intersection refused at notch tips across the line, 64 to 512 tips",
+        8.0,
+        5,
+        || k().boolean(&b, &n128, BooleanOp::Intersect),
+        || k().boolean(&b, &n1024, BooleanOp::Intersect),
+    );
+    let (s128, s1024) = (spikes(128), spikes(1024));
+    scales(
+        "intersection with spikes across the line, 64 to 512 spikes",
+        8.0,
+        5,
+        || {
+            k().boolean(&b, &s128, BooleanOp::Intersect)
+                .expect("a wedge")
+        },
+        || {
+            k().boolean(&b, &s1024, BooleanOp::Intersect)
+                .expect("a wedge")
+        },
+    );
+
     // A ball meshed eight times as finely: on a doubly curved face the
     // triangles grow as the tolerance shrinks.
     let b = ball(DVec3::ZERO, 1.0);
@@ -1003,6 +1099,8 @@ struct Limits {
     pinned_400: f64,
     zigzag_256: f64,
     comb_1024: f64,
+    notches_1024: f64,
+    spikes_1024: f64,
     drill_64: f64,
     plate_box: f64,
     dimple_16: f64,
@@ -1040,6 +1138,8 @@ const LIMIT: Limits = Limits {
     pinned_400: 1000.0,
     zigzag_256: 120.0,
     comb_1024: 700.0,
+    notches_1024: 100.0,
+    spikes_1024: 450.0,
     drill_64: 10000.0,
     plate_box: 600.0,
     dimple_16: 900.0,

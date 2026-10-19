@@ -2739,6 +2739,77 @@ mod tests {
         }
     }
 
+    /// The notch tips and the spikes of a face across the line where it
+    /// crosses a block's top, each within the tolerance of the top (design
+    /// note 0012 §21; `tests/timing.rs`' notches and spikes, here with the
+    /// face above its edge): sorting the face's corners, testing each tip
+    /// against the stretches sorted along the line, and building each
+    /// spike's flap take strip steps in proportion to the corners. The
+    /// fewest steps within which the intersection is decided (refused at a
+    /// tip, or answered), at 1,024 segments, are at most five times those
+    /// at 256 (about four times).
+    #[test]
+    fn the_corners_across_the_line_take_steps_in_proportion() {
+        let tol = Tolerance::default();
+        let eps = tol.linear;
+        let block = {
+            let frame = Frame {
+                origin: DVec3::new(-0.25, -1.0, -1.0),
+                ..Frame::WORLD
+            };
+            let body = BrepKernel::default()
+                .make_box(&frame, DVec3::new(1.5, 2.0, 1.0))
+                .expect("a block");
+            (*body.brep).clone()
+        };
+        let fewest = |b: &Brep| {
+            let within = |strip_steps: usize| {
+                let limits = Limits {
+                    strip_steps,
+                    ..LIMITS
+                };
+                match boolean_within(&block, b, BooleanOp::Intersect, &tol, &limits) {
+                    Ok(_) => true,
+                    Err(KernelError::TooLarge(m)) if m.contains(imprint::STRIP_WORK) => false,
+                    Err(KernelError::InvalidInput(m)) if m.contains(RUNS_WITHIN) => true,
+                    Err(e) => panic!("{strip_steps} steps: {e:?}"),
+                }
+            };
+            let (mut lo, mut hi) = (0, LIMITS.strip_steps);
+            assert!(within(hi) && !within(lo));
+            while hi - lo > 1 {
+                let mid = lo + (hi - lo) / 2;
+                if within(mid) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            hi
+        };
+        // Reflex corners 3 tolerances beyond the axis and convex ones 1/n
+        // across it; convex corners a tolerance across and reflex ones 1/n
+        // beyond.
+        let notches = |n: usize| {
+            teeth(n, |i| {
+                if i % 2 == 0 {
+                    -1.0 / n as f64
+                } else {
+                    3.0 * eps
+                }
+            })
+        };
+        let spikes = |n: usize| teeth(n, |i| if i % 2 == 0 { 1.0 / n as f64 } else { -eps });
+        for (what, small, large) in [
+            ("notches", notches(256), notches(1024)),
+            ("spikes", spikes(256), spikes(1024)),
+        ] {
+            let (s, l) = (fewest(&small), fewest(&large));
+            println!("{what}: {s} steps at 256, {l} at 1,024");
+            assert!(s > 0 && l <= 5 * s, "{what}: {s} to {l}");
+        }
+    }
+
     #[test]
     fn work_limits_refuse_rather_than_run_on() {
         let tol = Tolerance::default();

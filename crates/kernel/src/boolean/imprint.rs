@@ -968,10 +968,34 @@ impl StripSearch {
 
 /// The check of the strips of a pair of crossing faces on planes (design
 /// note 0012 §20): for each face, given with its operand and its intervals
-/// on the planes' common line (direction `dir`) and whether its boundary
+/// on the planes' common line L (direction `dir`) and whether its boundary
 /// has a mark within the tolerance of the other's plane, each chain of its
 /// boundary lying on the other's plane ([`strip_runs`]; none without such
-/// a mark), against the pair's `stretches` beside it ([`held_strip`]).
+/// a mark), against the pair's `stretches` beside it ([`held_strip`]). A
+/// run that is one of the face's intervals whole is tested only over the
+/// parts of its span along L that no stretch covers (each stretch grown by
+/// the tolerance): where none does, the run is no meeting, and nothing
+/// separates its strip from the other face (§21: a notch's wall within the
+/// tolerance of a box's side over a triangle beside the notch's root, the
+/// root lying on the side as the wall's whole interval with no stretch,
+/// failed as kept pieces that do not close).
+///
+/// Then the notch tips of either face across L ([`strip_runs`], §21): a
+/// vertex V of the face within the tolerance of the other's plane P, at a
+/// reflex corner, both its edges crossing L. The tolerance puts V on P, so
+/// its edges meet P only at V, and the face, whose interior wraps around
+/// V's other side, crosses P through V: the faces' meeting must pass
+/// through V. Where no stretch does, as an end or as a cluster its split
+/// takes ([`Points::on_split`]; a tip within the tolerance of a stretch
+/// bends it and is answered), V's cluster is no point of the other face's
+/// boundary (as the clustering decided it), and V's foot on P is not
+/// outside that face, the boolean is refused before any face is split:
+/// the meeting along L would leave V touching P from the side its edges
+/// leave to while the face lies on both, and a meeting bent through V
+/// would leave a strip of the face between it and L lying within the
+/// tolerance of the other face, which holds it (§20's fin). The tip with
+/// the least coordinates is reported, so the two orders of the operands
+/// report one point.
 fn held_strips(
     pair: &Pair,
     pts: &Points,
@@ -982,26 +1006,37 @@ fn held_strips(
     stretches: &[(usize, usize)],
 ) -> Result<(), KernelError> {
     let eps = pts.eps;
-    // The stretches along L, sorted when a chain first needs them: a chain
-    // takes those over its span along L (and ε more), whose meetings are
-    // the only ones that can cut its strip.
+    // The stretches along L, sorted when a chain or a tip first needs them:
+    // a chain takes those over its span along L (and ε more), whose
+    // meetings are the only ones that can cut its strip.
     let mut along: Option<Spans> = None;
+    let mut tips = Vec::new();
     for (k, &(op, f, ivs, zero)) in sides.iter().enumerate() {
         if !zero {
             continue;
         }
         let (them, g, _, _) = sides[1 - k];
         let surface = pair.get(them).faces[g].surface;
-        for chain in strip_runs(pair, pts, op, f, surface, ivs) {
-            if along.is_none() {
-                strips.budget.spend(stretches.len())?;
+        let (chains, corners) = strip_runs(pair, pts, op, f, surface, ivs);
+        tips.extend(corners.into_iter().map(|v| (op, v, them, g)));
+        for chain in chains {
+            // A flap whose corner is a point of g's boundary, and a run
+            // that is one of f's intervals whole passing a corner of g,
+            // touch g's boundary where the clustering put it: the
+            // settling of touched points and the corners decide them, as
+            // for a notch tip (§21).
+            if let Some(v) = chain.corner {
+                strips.budget.spend(1)?;
+                if on_boundary(pair, pts, (them, g), pts.vertex_cluster(op, v)) {
+                    continue;
+                }
             }
-            let along = along.get_or_insert_with(|| {
-                Spans::new(stretches.iter().map(|&(c, d)| {
-                    let (s, t) = (pts.rep[c].dot(dir), pts.rep[d].dot(dir));
-                    (s.min(t), s.max(t))
-                }))
-            });
+            if chain.kind == Kind::Whole
+                && corner_on(pair, pts, op, &chain.edges, (them, g), &mut strips.budget)?
+            {
+                continue;
+            }
+            let along = sorted(&mut along, pts, dir, stretches, &mut strips.budget)?;
             let (lo, hi) = (chain.points.iter())
                 .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), p| {
                     (l.min(p.dot(dir)), h.max(p.dot(dir)))
@@ -1013,6 +1048,23 @@ fn held_strips(
             let mut beside: Vec<usize> = over.collect();
             beside.sort_unstable();
             let beside: Vec<(usize, usize)> = beside.into_iter().map(|i| stretches[i]).collect();
+            // A run that is one of the face's intervals whole is the meeting
+            // only where a stretch of the pair runs along it (§18.2); there
+            // what lies between it and L is left to classification, and its
+            // strip is tested over the rest of its span alone.
+            let gaps = if chain.kind == Kind::Whole {
+                let spans = beside.iter().map(|&(c, d)| {
+                    let (s, t) = (pts.rep[c].dot(dir), pts.rep[d].dot(dir));
+                    (s.min(t), s.max(t))
+                });
+                let gaps = uncovered((lo, hi), spans, eps);
+                if gaps.is_empty() {
+                    continue;
+                }
+                Some(gaps)
+            } else {
+                None
+            };
             held_strip(
                 pair,
                 pts,
@@ -1022,40 +1074,250 @@ fn held_strips(
                 [(op, f), (them, g)],
                 &chain,
                 &beside,
+                gaps.as_deref(),
             )?;
         }
     }
-    Ok(())
+    let mut least: Option<DVec3> = None;
+    for (op, v, them, g) in tips {
+        let along = sorted(&mut along, pts, dir, stretches, &mut strips.budget)?;
+        let p = pair.get(op).points[v];
+        if tip_refused(
+            pair,
+            pts,
+            outlines,
+            strips,
+            along,
+            stretches,
+            dir,
+            (op, v),
+            (them, g),
+        )? && least.is_none_or(|q| {
+            (p.x.total_cmp(&q.x))
+                .then(p.y.total_cmp(&q.y))
+                .then(p.z.total_cmp(&q.z))
+                .is_lt()
+        }) {
+            least = Some(p);
+        }
+    }
+    match least {
+        Some(p) => Err(KernelError::InvalidInput(format!(
+            "{}, near {}",
+            super::RUNS_WITHIN,
+            show(p)
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// The pair's `stretches` sorted by their spans along `dir` ([`Spans`]),
+/// kept in `along` once made (a step for each).
+fn sorted<'s>(
+    along: &'s mut Option<Spans>,
+    pts: &Points,
+    dir: DVec3,
+    stretches: &[(usize, usize)],
+    budget: &mut Budget,
+) -> Result<&'s Spans, KernelError> {
+    if along.is_none() {
+        budget.spend(stretches.len())?;
+    }
+    Ok(along.get_or_insert_with(|| {
+        Spans::new(stretches.iter().map(|&(c, d)| {
+            let (s, t) = (pts.rep[c].dot(dir), pts.rep[d].dot(dir));
+            (s.min(t), s.max(t))
+        }))
+    }))
+}
+
+/// Whether the notch tip at vertex `v` of `op` ([`held_strips`]) is
+/// refused against face `g` of `them`: no stretch of the pair (`along`,
+/// sorted from `stretches`) whose span along L comes within the tolerance
+/// of the tip's takes the tip's cluster, the cluster holds no vertex of
+/// `g` and lies on no edge of `g`, and the tip's foot on `g`'s plane is
+/// not outside `g` (to the rounding margin of the strip search).
+#[allow(clippy::too_many_arguments)]
+fn tip_refused(
+    pair: &Pair,
+    pts: &Points,
+    outlines: &[Vec<Option<Outline>>; 2],
+    strips: &mut StripSearch,
+    along: &Spans,
+    stretches: &[(usize, usize)],
+    dir: DVec3,
+    (op, v): (Operand, usize),
+    (them, g): (Operand, usize),
+) -> Result<bool, KernelError> {
+    let eps = pts.eps;
+    let (flat, budget) = (&strips.flat, &mut strips.budget);
+    let p = pair.get(op).points[v];
+    let c = pts.vertex_cluster(op, v);
+    let t = p.dot(dir);
+    let (mut over, passed) = along.meeting(t - eps, t + eps);
+    budget.spend(1 + passed)?;
+    if over.any(|j| pts.on_split(stretches[j].0, stretches[j].1, c)) {
+        return Ok(false);
+    }
+    // A point of g's boundary: the settling of touched points and the
+    // corners decide it.
+    budget.spend(1)?;
+    if on_boundary(pair, pts, (them, g), c) {
+        return Ok(false);
+    }
+    let theirs = pair.get(them);
+    let gf = &theirs.faces[g];
+    let ng = gf.normal();
+    let foot = p - ng * (p - gf.frame.origin).dot(ng);
+    let against = match &outlines[slot(them)][g] {
+        Some(o) => Against::Chart(o),
+        None => {
+            let (o, fresh) = flat.get(pair, them, g);
+            if fresh {
+                budget.spend(o.len())?;
+            }
+            Against::Flat(o)
+        }
+    };
+    Ok(place(&against, gf, foot, eps * DEEP, budget)? != Some(false))
+}
+
+/// Whether cluster `c` is a point of face `g` of `them`'s boundary, as the
+/// clustering decided it: it holds a corner of `g` ([`holds_corner`]), or
+/// lies on an edge bounding `g` between its ends.
+fn on_boundary(pair: &Pair, pts: &Points, (them, g): (Operand, usize), c: usize) -> bool {
+    let theirs = pair.get(them);
+    holds_corner(pair, pts, (them, g), c)
+        || (pts.inside_edge(them, c))
+            .is_some_and(|e| theirs.edge_faces(e).iter().any(|&(h, _)| h == g))
+}
+
+/// Whether cluster `c` holds a corner of face `g` of `them`: a vertex of an
+/// edge bounding `g`.
+fn holds_corner(pair: &Pair, pts: &Points, (them, g): (Operand, usize), c: usize) -> bool {
+    let theirs = pair.get(them);
+    let vertex = match them {
+        Operand::First => pts.vertices_of(c).0,
+        Operand::Second => pts.vertices_of(c).1,
+    };
+    vertex.is_some_and(|u| {
+        (theirs.edges_at(u).iter()).any(|&e| theirs.edge_faces(e).iter().any(|&(h, _)| h == g))
+    })
+}
+
+/// Whether a corner of face `g` of `them` lies on one of `edges` of `op`,
+/// at an end or between: one of the clusters on them holds it
+/// ([`holds_corner`]). A step for each cluster looked at.
+fn corner_on(
+    pair: &Pair,
+    pts: &Points,
+    op: Operand,
+    edges: &[usize],
+    (them, g): (Operand, usize),
+    budget: &mut Budget,
+) -> Result<bool, KernelError> {
+    for &e in edges {
+        let on = pts.on_edge(op, e);
+        budget.spend(on.len())?;
+        if on.iter().any(|&c| holds_corner(pair, pts, (them, g), c)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// A chain of a face's boundary lying on the other operand's plane, whose
 /// strip [`held_strip`] tests ([`strip_runs`]).
 struct Chain {
-    /// The places of its points in order: one for a vertex alone, and a
-    /// closed loop's first again at its end.
+    /// The places of its points in order: one for a vertex alone, a closed
+    /// loop's first again at its end, and for a flap the crossing of the
+    /// corner's edge before it with the line, the corner, and the crossing
+    /// of its edge after it.
     points: Vec<DVec3>,
-    /// True if its strip is tested on both sides of the planes' common
-    /// line (a run), false if only on the side where the layer between the
-    /// faces lies in the face's own body.
-    either: bool,
+    kind: Kind,
+    /// A run's edges, in loop order (none for a loop or a vertex).
+    edges: Vec<usize>,
+    /// A flap's corner, the vertex across the line.
+    corner: Option<usize>,
+}
+
+/// What a chain is ([`strip_runs`]), which decides where its strip is
+/// tested ([`held_strip`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    /// A run of edges lying on the plane: on both sides of the planes'
+    /// common line.
+    Run,
+    /// A run that is one of the face's intervals on the line whole: on
+    /// both sides, over the parts of its span that no stretch covers.
+    Whole,
+    /// A loop lying on the plane whole (a hole) or an apex: on the side of
+    /// the line where the layer between the faces lies in the face's own
+    /// body.
+    Inner,
+    /// The flap of a corner across the line at a convex corner (design
+    /// note 0012 §21): the triangle between the corner's edges and the
+    /// line, less its points within the tolerance of the edges, where the
+    /// layer between it and the other face lies outside the face's body.
+    Flap,
+}
+
+/// The parts of the span `lo`..`hi` along the planes' common line that no
+/// span of `spans`, each grown by `eps` at both ends (its end clusters'
+/// reach), covers, in order along the line.
+fn uncovered(
+    (lo, hi): (f64, f64),
+    spans: impl Iterator<Item = (f64, f64)>,
+    eps: f64,
+) -> Vec<(f64, f64)> {
+    let mut spans: Vec<(f64, f64)> = spans.map(|(s, t)| (s - eps, t + eps)).collect();
+    spans.sort_by(|p, q| p.0.total_cmp(&q.0));
+    let mut gaps = Vec::new();
+    let mut at = lo;
+    for (s, t) in spans {
+        if at >= hi {
+            break;
+        }
+        if s > at {
+            gaps.push((at, s.min(hi)));
+        }
+        at = at.max(t);
+    }
+    if at < hi {
+        gaps.push((at, hi));
+    }
+    gaps
 }
 
 /// The chains of face `f` of `op`'s boundary lying on plane `surface` of
-/// the other operand whose strips [`held_strip`] tests:
+/// the other operand whose strips [`held_strip`] tests, and its notch tips
+/// across the planes' common line L that [`held_strips`] tests:
 ///
-/// - each run of its straight edges lying on the plane ([`lying_runs`])
-///   that is not one of its intervals `ivs` on the planes' common line
-///   whole (§18.2 takes such a run itself as the meeting, so no line is
-///   imprinted beside it, and what lies between it and the other face is
-///   left to classification), on either side;
+/// - each run of its straight edges lying on the plane ([`lying_runs`]),
+///   on either side, marked whole where it is one of its intervals `ivs`
+///   on L whole: §18.2 takes such a run itself as the meeting where a
+///   stretch of the pair runs along it, so no line is imprinted beside it
+///   there and what lies between it and the other face is left to
+///   classification, and [`held_strips`] tests its strip only over the
+///   rest of its span;
 /// - each loop lying on the plane whole, closed: a hole of the face (an
 ///   outer loop lies there whole only where the whole face does, which
 ///   [`relation`] takes for coplanar or refuses before this);
-/// - a vertex within the tolerance of the plane whose two edges are
-///   straight and run away from the plane (the other end of each farther
-///   from it than the vertex, on its side), at a reflex corner of the
-///   face: the boundary touches the plane there without crossing it, and
-///   the face lies on both sides of the vertex's way to the line (a neck).
+/// - the vertices within the tolerance of the plane whose two edges are
+///   straight, sorted in one pass (design note 0012 §21), with `d` a
+///   vertex's distance from the plane: an apex where `d` is not 0 and both
+///   edges run away from the plane (the other end of each farther from it
+///   than the vertex, on its side), at a reflex corner of the face, where
+///   the boundary touches the plane without crossing it and the face lies
+///   on both sides of the vertex's way to L (a neck); and a corner across
+///   L where `d` is not 0 and both neighbours lie beyond the tolerance on
+///   the plane's other side, so that both edges cross L and, by the
+///   signs, the boundary meets the plane at the vertex alone: a notch tip
+///   at a reflex corner, the face crossing the plane through it, or at a
+///   convex corner the flap of the face across L between its edges. The
+///   two are exclusive: neighbours beyond the tolerance on the vertex's
+///   side are farther than it from the plane, so for them the first is
+///   exactly `d` on their side and the second `d` on the other.
 ///
 /// Only the coedges near the plane are looked at.
 fn strip_runs(
@@ -1065,7 +1327,7 @@ fn strip_runs(
     f: usize,
     surface: usize,
     ivs: &[Interval],
-) -> Vec<Chain> {
+) -> (Vec<Chain>, Vec<usize>) {
     let shape = pair.get(op);
     let face = &shape.faces[f];
     let plane = &pair.get(other(op)).surfaces[surface];
@@ -1077,12 +1339,14 @@ fn strip_runs(
             && pts.sign(op, vs[(i + 1) % vs.len()], surface) == 0
     };
     let mut runs: Vec<Chain> = (lying_runs(pair, pts, op, f, surface, ivs).into_iter())
-        .filter(|run| !run.exact)
         .map(|run| Chain {
             points: run.points,
-            either: true,
+            kind: if run.exact { Kind::Whole } else { Kind::Run },
+            edges: run.edges,
+            corner: None,
         })
         .collect();
+    let mut tips = Vec::new();
     let mut near = Vec::new();
     face.near_surface(plane, pts.eps, &mut near);
     let mut seen = vec![false; face.loops.len()];
@@ -1098,39 +1362,59 @@ fn strip_runs(
                 points.push(points[0]);
                 runs.push(Chain {
                     points,
-                    either: false,
+                    kind: Kind::Inner,
+                    edges: Vec::new(),
+                    corner: None,
                 });
             }
         }
-        // The vertex the coedge starts at: an apex if both its edges run
-        // away from the plane (and so from L).
+        // The vertex the coedge starts at.
         let (v, a, b) = (vs[i], vs[before], vs[(i + 1) % n]);
         let p = shape.points[v];
         let d = plane.distance(p);
-        let away = |u: usize| {
-            let du = plane.distance(shape.points[u]);
-            du.signum() == d.signum() && du.abs() > d.abs()
-        };
         if pts.sign(op, v, surface) != 0
             || d == 0.0
             || !shape.straight[face.loops[li][before].0]
             || !shape.straight[face.loops[li][i].0]
-            || !away(a)
-            || !away(b)
         {
             continue;
         }
+        let away = |u: usize| {
+            let du = plane.distance(shape.points[u]);
+            du.signum() == d.signum() && du.abs() > d.abs()
+        };
+        let beyond = -d.signum() as i8;
+        let across = pts.sign(op, a, surface) == beyond && pts.sign(op, b, surface) == beyond;
         // Reflex: the loop turns clockwise about the face's outward normal
         // (holes run clockwise, so this holds for their corners too).
         let turn = (p - shape.points[a]).cross(shape.points[b] - p);
-        if turn.dot(face.normal()) < 0.0 {
+        let turn = turn.dot(face.normal());
+        if away(a) && away(b) {
+            if turn < 0.0 {
+                runs.push(Chain {
+                    points: vec![p],
+                    kind: Kind::Inner,
+                    edges: Vec::new(),
+                    corner: None,
+                });
+            }
+        } else if across && turn < 0.0 {
+            tips.push(v);
+        } else if across && turn > 0.0 {
+            // Where each edge crosses the plane: on L.
+            let cross = |u: usize| {
+                let q = shape.points[u];
+                p + (q - p) * (d / (d - plane.distance(q)))
+            };
             runs.push(Chain {
-                points: vec![p],
-                either: false,
+                points: vec![cross(a), p, cross(b)],
+                kind: Kind::Flap,
+                edges: Vec::new(),
+                corner: Some(v),
             });
         }
     }
-    runs
+    (runs, tips)
 }
 
 /// The check of the strip of `run`, a chain of face `f` of `op`'s boundary
@@ -1144,13 +1428,19 @@ fn strip_runs(
 /// over the chain's span along L) lies between the chain and L, no farther
 /// than that stretch
 /// ([`beyond_meeting`]); less its points within the tolerance of L or of
-/// the stretch. Every point of it lies within the tolerance of P (the
-/// chain does, L and each stretch are on P, and the distance from P is
-/// linear along each segment). Where `g` holds a point of it more than the
-/// tolerance inside its boundary (the point's foot on P), the faces lie
-/// flush over a region that neither the meeting's imprint nor
-/// classification separates, and the result would hold a fin thinner than
-/// the tolerance between them, so the boolean is refused there.
+/// the stretch; and, for a run that is one of `f`'s intervals whole, only
+/// over `gaps`, the parts of its span along L (as positions along `dir`)
+/// that no stretch covers. A flap's is the triangle between the corner's
+/// edges and L, less its points within the tolerance of either edge
+/// ([`flap_piece`]; its points on L are kept, since no meeting lies
+/// there), cut by the stretches likewise. Every point of it lies within
+/// the tolerance of P (the chain does, L and each stretch are on P, and
+/// the distance from P is linear along each segment). Where `g` holds a
+/// point of it more than the tolerance inside its boundary (the point's
+/// foot on P), the faces lie flush over a region that neither the
+/// meeting's imprint nor classification separates, or cross there, and
+/// the result would hold a fin thinner than the tolerance between them,
+/// so the boolean is refused there.
 ///
 /// The search runs in P ([`held_point`]), each point of `f`'s plane taken
 /// to its foot there, which is linear and keeps straight edges straight.
@@ -1168,6 +1458,7 @@ fn held_strip(
     [(op, f), (them, g)]: [(Operand, usize); 2],
     chain: &Chain,
     stretches: &[(usize, usize)],
+    gaps: Option<&[(f64, f64)]>,
 ) -> Result<(), KernelError> {
     let eps = pts.eps;
     let rho = eps * (1.0 + DEEP);
@@ -1209,17 +1500,37 @@ fn held_strip(
     // lies in f's body (behind f, against `nf`) where sign(t sin) nf·ng is
     // positive: on the side of L whose sign is `inner`.
     let inner = sin.signum() * nf.dot(ng).signum();
-    let sides: &[f64] = if chain.either {
-        &[1.0, -1.0]
-    } else if inner > 0.0 {
-        &[1.0]
-    } else {
-        &[-1.0]
+    // A flap, across L from the rest of f, is tested on its side where the
+    // layer lies outside f's body (§21): on the other, the one operation
+    // that would keep it and the piece of g beside it has them touch at
+    // the corner from f's side, and is refused as touching at a point.
+    let sides: &[f64] = match chain.kind {
+        Kind::Run | Kind::Whole => &[1.0, -1.0],
+        Kind::Inner | Kind::Flap if (inner > 0.0) == (chain.kind == Kind::Inner) => &[1.0],
+        Kind::Inner | Kind::Flap => &[-1.0],
     };
     let lines: Vec<(DVec2, DVec2)> = (stretches.iter())
         .map(|&(c, d)| (foot(pts.rep[c]), foot(pts.rep[d])))
         .collect();
-    let pieces = strip_of(&feet, sides, lines, eps, cos, budget)?;
+    let mut pieces = strip_of(&feet, chain.kind, sides, lines, eps, cos, budget)?;
+    if let Some(gaps) = gaps {
+        // A whole run's strip over its span's parts that no stretch
+        // covers, their positions along L taken to the coordinates in P:
+        // each piece meets the gaps found by a search, and is cut to each.
+        let base = o.dot(dir);
+        let mut kept = Vec::new();
+        for piece in pieces {
+            let (x0, x1) = piece.span();
+            let first = gaps.partition_point(|g| g.1 - base <= x0);
+            for &(u0, u1) in gaps[first..].iter().take_while(|g| g.0 - base < x1) {
+                budget.spend(1)?;
+                let part =
+                    (piece.cut(DVec2::X, u0 - base)).and_then(|p| p.cut(-DVec2::X, base - u1));
+                kept.extend(part);
+            }
+        }
+        pieces = kept;
+    }
     if pieces.is_empty() {
         return Ok(());
     }
@@ -2299,15 +2610,17 @@ impl Piece {
     }
 }
 
-/// The pieces of the strip of a chain whose points are at `feet`, in the
-/// coordinates of P of [`held_strip`] (x along L, y across it, each point
-/// of the face's plane at its foot on P), on the `sides` of L listed (the
-/// signs of y): the sweep of each segment ([`strip_pieces`]) or of a lone
-/// vertex ([`point_pieces`]) less its points within `eps` of L, cut by the
-/// meeting `lines`, the pair's stretches at their feet
+/// The pieces of the strip of a chain of `kind` whose points are at
+/// `feet`, in the coordinates of P of [`held_strip`] (x along L, y across
+/// it, each point of the face's plane at its foot on P), on the `sides` of
+/// L listed (the signs of y): the sweep of each segment
+/// ([`strip_pieces`]) or of a lone vertex ([`point_pieces`]) less its
+/// points within `eps` of L, or a flap's piece ([`flap_piece`]), cut by
+/// the meeting `lines`, the pair's stretches at their feet
 /// ([`beyond_meeting`]; `cos` the cosine of the angle between the planes).
 fn strip_of(
     feet: &[DVec2],
+    kind: Kind,
     sides: &[f64],
     mut lines: Vec<(DVec2, DVec2)>,
     eps: f64,
@@ -2316,11 +2629,18 @@ fn strip_of(
 ) -> Result<Vec<Piece>, KernelError> {
     let (band, tau) = (eps * cos, eps * (1.0 + DEEP) * DEEP * cos);
     let mut pieces = Vec::new();
-    if let [v] = feet {
-        point_pieces(*v, band, tau, sides, &mut pieces);
-    }
-    for w in feet.windows(2) {
-        strip_pieces(w[0], w[1], band, tau, sides, &mut pieces);
+    match (kind, feet) {
+        (Kind::Flap, &[x0, v, x1]) => {
+            if sides.contains(&v.y.signum()) {
+                pieces.extend(flap_piece(x0, v, x1, eps, cos));
+            }
+        }
+        (_, &[v]) => point_pieces(v, band, tau, sides, &mut pieces),
+        _ => {
+            for w in feet.windows(2) {
+                strip_pieces(w[0], w[1], band, tau, sides, &mut pieces);
+            }
+        }
     }
     // The stretches by their least position along L, each with the
     // greatest end of those up to it, to find those beside a piece.
@@ -2453,6 +2773,56 @@ fn point_pieces(v: DVec2, band: f64, half: f64, sides: &[f64], out: &mut Vec<Pie
         ],
         along: (DVec2::new(x0, v.y), DVec2::new(x1, v.y)),
     });
+}
+
+/// The flap of a corner across the x axis at `v` whose edges cross the
+/// axis at `x0` and `x1` ([`strip_runs`]), in the coordinates of
+/// [`strip_of`]: the triangle between the edges and the axis, less its
+/// points within `eps` of either edge in the face's plane (its coordinates
+/// across the axis scaled by 1 / `cos`), a triangle with its base on the
+/// axis or nothing. The axis carries no meeting there, so its points on
+/// the axis are kept. A half-plane in the face's plane is one in P (the
+/// map between them is linear), so each side is taken there and mapped.
+fn flap_piece(x0: DVec2, v: DVec2, x1: DVec2, eps: f64, cos: f64) -> Option<Piece> {
+    let side = v.y.signum();
+    let (x0, x1) = (DVec2::new(x0.x, 0.0), DVec2::new(x1.x, 0.0));
+    let in_face = |u: DVec2| DVec2::new(u.x, u.y / cos);
+    let vf = in_face(v);
+    // The half-plane `n · u ≥ c` of the face's plane (n a unit vector
+    // there), in P's coordinates.
+    let to_p = |n: DVec2, c: f64| {
+        let m = DVec2::new(n.x, n.y / cos);
+        let l = m.length();
+        (m / l, c / l)
+    };
+    // The unit normal of the edge from `v` to `x` toward `other`, in the
+    // face's plane.
+    let inward = |x: DVec2, other: DVec2| {
+        let e = in_face(x) - vf;
+        let n = e.perp() / e.length();
+        if n.dot(in_face(other) - vf) < 0.0 {
+            -n
+        } else {
+            n
+        }
+    };
+    let (n0, n1) = (inward(x0, x1), inward(x1, x0));
+    let (lo, hi) = (x0.x.min(x1.x).min(v.x), x0.x.max(x1.x).max(v.x));
+    if lo >= hi {
+        return None;
+    }
+    let whole = Piece {
+        sides: vec![
+            (DVec2::new(0.0, side), 0.0),
+            to_p(n0, n0.dot(vf)),
+            to_p(n1, n1.dot(vf)),
+        ],
+        corners: vec![v, x0, x1],
+        along: (DVec2::new(lo, v.y), DVec2::new(hi, v.y)),
+    };
+    let (m0, c0) = to_p(n0, n0.dot(vf) + eps);
+    let (m1, c1) = to_p(n1, n1.dot(vf) + eps);
+    whole.cut(m0, c0)?.cut(m1, c1)
 }
 
 /// The parts of a strip's piece ([`strip_pieces`]) left by the meeting
@@ -3105,7 +3475,12 @@ mod tests {
     /// ([`strip_of`]), at ε = 1 and with the planes' cosine 1.
     fn strip(feet: &[DVec2], sides: &[f64], lines: &[(DVec2, DVec2)]) -> Vec<Piece> {
         let mut budget = Budget::new(STRIP_STEPS);
-        strip_of(feet, sides, lines.to_vec(), 1.0, 1.0, &mut budget).unwrap()
+        let kind = if feet.len() == 1 {
+            Kind::Inner
+        } else {
+            Kind::Run
+        };
+        strip_of(feet, kind, sides, lines.to_vec(), 1.0, 1.0, &mut budget).unwrap()
     }
 
     /// Whether a piece of `pieces` holds `v` (by more than rounding).
@@ -3138,6 +3513,205 @@ mod tests {
         assert!(strip(&apex, &[-1.0], &[]).is_empty());
         assert!(holds(&strip(&[v(5.0, -5.0)], &[-1.0], &[]), v(5.0, -3.0)));
         assert!(strip(&[v(5.0, 0.5)], &both, &[]).is_empty());
+    }
+
+    /// A flap's piece ([`flap_piece`]) is the triangle between the corner's
+    /// edges and L on the corner's side, less its points within ε of
+    /// either edge, its points on L kept, in P's coordinates (the face's
+    /// across L scaled by the planes' cosine); and nothing where no point
+    /// of the triangle is farther than ε from both edges.
+    #[test]
+    fn a_flap_is_its_triangle_less_the_band_of_its_edges() {
+        let v = DVec2::new;
+        // To rounding: L bounds the piece, and its points on L are in it.
+        let holds = |p: &Option<Piece>, u: DVec2| p.as_ref().is_some_and(|p| p.contains(u, 1e-12));
+        // A right angle 4 from L, its bisector square to L: points to 2.83
+        // from both edges.
+        let flap = flap_piece(v(-4.0, 0.0), v(0.0, 4.0), v(4.0, 0.0), 1.0, 1.0);
+        assert!(holds(&flap, v(0.0, 1.5)) && holds(&flap, v(0.0, 0.0)));
+        assert!(holds(&flap, v(1.0, 0.0)) && holds(&flap, v(-1.0, 0.5)));
+        // Within ε of an edge, across L, or beyond the corner.
+        for u in [
+            v(0.0, 3.0),
+            v(-2.5, 0.5),
+            v(2.5, 0.5),
+            v(0.0, -0.5),
+            v(0.0, 4.5),
+        ] {
+            assert!(!holds(&flap, u), "{u}");
+        }
+        // The corner 1.3 from L: no point farther than 0.92 from both.
+        assert!(flap_piece(v(-1.3, 0.0), v(0.0, 1.3), v(1.3, 0.0), 1.0, 1.0).is_none());
+        // Below L, and with the bisector slanting (the edges to x = −1 and
+        // 12 from the corner at (0, 4)).
+        let below = flap_piece(v(-4.0, 0.0), v(0.0, -4.0), v(4.0, 0.0), 1.0, 1.0);
+        assert!(holds(&below, v(0.0, -1.5)) && !holds(&below, v(0.0, 1.5)));
+        let slant = flap_piece(v(-1.0, 0.0), v(0.0, 4.0), v(12.0, 0.0), 1.0, 1.0);
+        assert!(holds(&slant, v(1.5, 1.0)) && !holds(&slant, v(0.0, 1.0)));
+        // A face at 60° to P: the right angle 4 from L in the face is 2
+        // from it in P, and its points 1.5 and 3 from L in the face are 0.75
+        // and 1.5 from it in P.
+        let steep = flap_piece(v(-4.0, 0.0), v(0.0, 2.0), v(4.0, 0.0), 1.0, 0.5);
+        assert!(holds(&steep, v(0.0, 0.75)) && !holds(&steep, v(0.0, 1.5)));
+    }
+
+    /// The parts of a whole run's span that no stretch covers, each
+    /// stretch grown by the tolerance: none where one stretch or several
+    /// overlapping ones (in any order) cover it, the gaps between and
+    /// beyond stretches otherwise, and the whole span with no stretch.
+    #[test]
+    fn a_whole_run_is_tested_where_no_stretch_covers_it() {
+        // Binary fractions, so the sums are exact.
+        let eps = 0.0625;
+        let gaps = |spans: &[(f64, f64)]| uncovered((0.0, 1.0), spans.iter().copied(), eps);
+        assert_eq!(gaps(&[]), vec![(0.0, 1.0)]);
+        assert_eq!(gaps(&[(0.0, 1.0)]), vec![]);
+        assert_eq!(gaps(&[(0.0625, 0.9375)]), vec![]);
+        assert_eq!(gaps(&[(0.5, 1.0), (0.0, 0.5)]), vec![]);
+        assert_eq!(
+            gaps(&[(0.625, 0.96875), (0.0, 0.25)]),
+            vec![(0.3125, 0.5625)]
+        );
+        assert_eq!(gaps(&[(0.5, 1.0)]), vec![(0.0, 0.4375)]);
+        assert_eq!(
+            gaps(&[(0.3125, 0.5), (0.25, 0.375)]),
+            vec![(0.0, 0.1875), (0.5625, 1.0)]
+        );
+        assert_eq!(gaps(&[(-0.5, -0.25), (1.25, 1.5)]), vec![(0.0, 1.0)]);
+    }
+
+    /// The chains and notch tips ([`strip_runs`]) of the bottom face of a
+    /// prism, its profile `pts` (w in tolerances where marked) on the
+    /// plane through the x axis tilted 10° toward +y, against the top
+    /// z = 0 of a box: each chain's kind and points, and each tip's place.
+    fn corners(pts: &[(f64, f64, bool)]) -> (Vec<(Kind, Vec<DVec3>)>, Vec<DVec3>) {
+        use crate::math::Frame;
+        use crate::{BrepKernel, ExtrudeSpec, Kernel, Profile};
+        let kernel = BrepKernel::default();
+        let eps = kernel.tolerance().linear;
+        let t = 10f64.to_radians();
+        let tilted = Frame {
+            origin: DVec3::ZERO,
+            x: DVec3::X,
+            y: DVec3::new(0.0, t.cos(), t.sin()),
+            z: DVec3::new(0.0, -t.sin(), t.cos()),
+        };
+        let profile: Vec<DVec2> = (pts.iter())
+            .map(|&(u, w, tol)| DVec2::new(u, if tol { w * eps } else { w }))
+            .collect();
+        let spec = ExtrudeSpec {
+            distance: 0.5,
+            symmetric: false,
+        };
+        let prism = (kernel.extrude(&Profile::polygon(tilted, &profile), &spec)).expect("a prism");
+        let block = kernel
+            .make_box(
+                &Frame {
+                    origin: DVec3::new(-0.25, -1.0, -1.0),
+                    ..Frame::WORLD
+                },
+                DVec3::new(1.5, 2.0, 1.0),
+            )
+            .expect("a box");
+        let pair = Pair {
+            first: super::super::shape::shape(&block.brep, "first").expect("a shape"),
+            second: super::super::shape::shape(&prism.brep, "second").expect("a shape"),
+        };
+        let pts = Points::new(&pair, eps);
+        let facing = |s: &Shape, n: DVec3| {
+            (s.faces.iter())
+                .position(|f| f.normal().dot(n) > 1.0 - 1e-12)
+                .expect("a face")
+        };
+        let (g, f) = (
+            facing(&pair.first, DVec3::Z),
+            facing(&pair.second, -tilted.z),
+        );
+        let surface = pair.first.faces[g].surface;
+        let (chains, tips) = strip_runs(&pair, &pts, Operand::Second, f, surface, &[]);
+        (
+            chains.into_iter().map(|c| (c.kind, c.points)).collect(),
+            tips.into_iter().map(|v| pair.second.points[v]).collect(),
+        )
+    }
+
+    /// [`strip_runs`] sorts each corner within the tolerance of the plane
+    /// once (design note 0012 §21): a reflex corner across L from its
+    /// neighbours is a notch tip; a convex one, a flap from its edges'
+    /// crossings of the plane through it; a reflex corner whose edges run
+    /// away from the plane on its side, an apex; and nothing else is either
+    /// (a convex corner pointing at L, a corner on L, a corner whose edges
+    /// leave it to both sides of the plane).
+    #[test]
+    fn the_corners_within_the_tolerance_of_the_plane_are_sorted_once() {
+        let eps = crate::Tolerance::default().linear;
+        let t = 10f64.to_radians();
+        let at = |u: f64, w: f64| DVec3::new(u, w * eps * t.cos(), w * eps * t.sin());
+        let notch = |w: f64| {
+            corners(&[
+                (-0.5, -0.5, false),
+                (2.0, -0.5, false),
+                (2.0, 0.5, false),
+                (0.6, 0.5, false),
+                (0.5, w, true),
+                (0.4, 0.5, false),
+                (-0.5, 0.5, false),
+            ])
+        };
+        let spike = |w: f64| {
+            corners(&[
+                (-0.5, -0.5, false),
+                (2.0, -0.5, false),
+                (2.0, -0.2, false),
+                (0.6, -0.2, false),
+                (0.5, w, true),
+                (0.4, -0.2, false),
+                (-0.5, -0.2, false),
+            ])
+        };
+        let close = |p: DVec3, q: DVec3| (p - q).length() < 1e-15;
+        // Across: a notch tip, and a flap whose ends are on the plane.
+        let (chains, tips) = notch(-3.0);
+        assert!(chains.is_empty() && tips.len() == 1 && close(tips[0], at(0.5, -3.0)));
+        let (chains, tips) = spike(3.0);
+        assert!(tips.is_empty() && chains.len() == 1, "{chains:?}");
+        let (kind, points) = &chains[0];
+        assert_eq!(*kind, Kind::Flap);
+        assert!(points.len() == 3 && close(points[1], at(0.5, 3.0)));
+        // The edges cross the plane 3 / 0.2 tolerances' worth of 0.1 along
+        // x from the corner, one to either side.
+        let reach = 0.1 * 3.0 * eps / (3.0 * eps + 0.2);
+        let mut ends = [points[0], points[2]];
+        ends.sort_by(|p, q| p.x.total_cmp(&q.x));
+        assert!(ends.iter().all(|p| p.z.abs() < 1e-18), "{ends:?}");
+        assert!((ends[0].x - (0.5 - reach)).abs() < 1e-15, "{ends:?}");
+        assert!((ends[1].x - (0.5 + reach)).abs() < 1e-15, "{ends:?}");
+        // An apex: the notch's tip short of L.
+        let (chains, tips) = notch(3.0);
+        assert!(tips.is_empty() && chains.len() == 1);
+        assert_eq!(chains[0].0, Kind::Inner);
+        assert!(chains[0].1.len() == 1 && close(chains[0].1[0], at(0.5, 3.0)));
+        // Neither: a spike pointing at L short of it, a tip on L, and a
+        // corner whose edges leave it to both sides.
+        let pointing = corners(&[
+            (-0.5, 0.2, false),
+            (0.4, 0.2, false),
+            (0.5, 3.0, true),
+            (0.6, 0.2, false),
+            (2.0, 0.2, false),
+            (2.0, 0.5, false),
+            (-0.5, 0.5, false),
+        ]);
+        let bent = corners(&[
+            (-0.5, -0.5, false),
+            (2.0, -0.5, false),
+            (2.0, 0.5, false),
+            (-0.5, 0.5, false),
+            (-0.4, -3.0, true),
+        ]);
+        for (chains, tips) in [pointing, notch(0.0), spike(0.0), bent] {
+            assert!(chains.is_empty() && tips.is_empty(), "{chains:?} {tips:?}");
+        }
     }
 
     /// A strip ends ε short of a meeting between its chain and the line,
@@ -3191,6 +3765,7 @@ mod tests {
             let mut budget = Budget::new(STRIP_STEPS);
             let pieces = strip_of(
                 &[v(10.0, 5.0), v(0.0, 5.0)],
+                Kind::Run,
                 &[1.0, -1.0],
                 lines,
                 1.0,
@@ -3338,7 +3913,9 @@ mod tests {
                 .normalize();
             let chain = Chain {
                 points: [1.0, 0.0].map(|x| tilted.x * x - tilted.y * 0.2).to_vec(),
-                either: true,
+                kind: Kind::Run,
+                edges: Vec::new(),
+                corner: None,
             };
             held_strip(
                 &pair,
@@ -3349,6 +3926,7 @@ mod tests {
                 [(Operand::Second, f), (Operand::First, g)],
                 &chain,
                 &[],
+                None,
             )
         };
         let diamond = [(0.5, -0.175), (0.72, -0.1), (0.5, -0.025), (0.28, -0.1)];
@@ -3428,6 +4006,7 @@ mod tests {
         let mut budget = Budget::new(STRIP_STEPS);
         let pieces = strip_of(
             &[v(10.0, 5.0), v(0.0, 5.0)],
+            Kind::Run,
             &both,
             lines.clone(),
             1.0,
@@ -3440,6 +4019,7 @@ mod tests {
         // One step fewer left, and the boolean is refused as too large.
         let refused = strip_of(
             &[v(10.0, 5.0), v(0.0, 5.0)],
+            Kind::Run,
             &both,
             lines,
             1.0,
