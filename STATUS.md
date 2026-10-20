@@ -1,6 +1,6 @@
 # OpenDatum status
 
-Updated 2026-10-16. Phase 2 (sketcher) is done but for the tools that
+Updated 2026-10-19. Phase 2 (sketcher) is done but for the tools that
 need model faces (project/convert, intersection curves, pierce). Phase 3
 has begun: the design notes for intersections (0011), booleans (0012)
 and persistent naming (0013) are written; every region of the random
@@ -28,9 +28,10 @@ operations (results touching themselves, wrong origins, kernel errors)
 and none in this build. Fins, flaps and necks under a tolerance thick,
 which main returns where an edge, a hole or a reflex corner of a face
 lies within the tolerance of the other face's plane beside the line
-where the faces cross, are refused (§20). A known fault, also on main:
-a notch whose tip lies a few tolerances across that line makes every
-operation fail or be refused. Next: that fault, the rest of the
+where the faces cross, are refused (§20), and so are a notch's tip and
+a spike's flap lying within the tolerance of the other face's plane a
+few tolerances across that line, where main failed every operation or
+returned faces crossing each other (§21). Next: the rest of the
 contacts (curved faces, surfaces touching), then the features that use
 booleans.
 The product is now named OpenDatum (ADR 0017): packages `opendatum-*`,
@@ -1324,13 +1325,24 @@ name open unchanged.
   chain (a curved edge lying there, a corner one of whose edges is
   curved); and a run on the side of that line where the thin layer lies
   outside the face's body is refused, where main failed every
-  operation. A known fault, also on main: a notch of a face whose tip
-  lies 3 to 4 tolerances across that line from the face's part beyond
-  it, within the tolerance of the plane, its edges crossing the line,
-  makes every operation fail ("a contact's pieces disagree on their
-  side", an invalid result) with the plain body first, and is refused
-  as edges within the tolerance of each other with the notched body
-  first (§20, "A fault on main"). Within three quarters of a tolerance of the exact contact, 704
+  operation. A notch's tip and a spike's flap across that line, within
+  the tolerance of the plane, are refused (§21, goldens 42 to 45), and
+  so is a run lying on the plane that no meeting covers. Known, also on
+  main (§21, "Not decided"): results whose faces fold at a knife edge
+  within the tolerance of each other over a band wider than the
+  tolerance (a notch's wall within a few degrees of the box's end, up to
+  56 tolerances wide in the notch fuzz at a hundred times; the kernel's
+  suites held 1,441 such results at 77a27b7), which the check for faces
+  crossing measures but which a valid tolerant solid may hold; whether
+  to refuse them is open. A notch's wall 1.09° from the box's end,
+  its root on the end's plane but 51 tolerances from the line where the
+  planes cross (case 7268 of the notch fuzz at a hundred times), fails
+  every operation as kept pieces that do not close. The flap's test is
+  conservative: it refused 30 cases of the probes' sweeps (180
+  operations) whose results on main crossed less than a tolerance. A
+  round face's rim passing within a few tolerances of a tip is a
+  contact with curved edges, with oracle reports on main and here
+  alike. Within three quarters of a tolerance of the exact contact, 704
   of 83,065 results differ in their counts from the exact contact's
   (mostly an edge left split), 673 of them as on main: results are not
   yet canonical under motions within the tolerance. The oracle that
@@ -1426,11 +1438,14 @@ name open unchanged.
    balls and coaxial cones, item 3a, §13; planes across cones, item 3b,
    §15, operands with conic edges on cylinders and cones, §17, and
    contacts that do not cross on flat faces, §19 and §20, are done).
-   Next: the notch tip that fails on main too (§20, "A fault on main",
-   in deciding the contact's side, §19); the rest of the contacts' slice 1
+   Corners across that line, §21, are done but for the faults it
+   records. Next: the rest of the contacts' slice 1
    (§18.6 steps 5 to 8: the cut-pair filter, edges and corners on curved
    faces, 76 of the curved fuzzes' refusals at twenty times, the Apart
-   band, the contact time guards and mutation checks), then slice 2,
+   band, the contact time guards and mutation checks), with the wall
+   whose root lies on a face's plane far from the line where they cross
+   (case 7268 of the notch fuzz) and the decision on folds wider than
+   the tolerance (§21, "Not decided"), then slice 2,
    surfaces that touch (§18.3), 1,304 of those refusals; then the apex
    left refused (a plane through a pointed cone's apex where both
    bodies reach it: edges meeting at the cone's singular point), naming

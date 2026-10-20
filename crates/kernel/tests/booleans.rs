@@ -1088,17 +1088,18 @@ fn edges_lying_on_a_face_for_a_few_tolerances() {
 }
 
 /// Contacts at the boundary of a face, which the checks of design note 0012
-/// §21 leave to the settling of touched points and the corners; without
-/// those exceptions, each was refused in all four operations (found by the
-/// contact fuzz at a hundred times the default run). B rests by a corner
-/// (contacts 548 and 2237 at 1 tolerance) or an edge (86 at 1) on A's
-/// face, with a corner of a face of B across the line where that face's
-/// plane meets A's face's, both its edges crossing the line (a flap), and
-/// the clustering puts the corner on the boundary of A's face. Or B rests
-/// by an edge passing a corner of A's face (4917 at −0.5 tolerance and
-/// 2383 at −0.75), the edge lying on the face's plane as the whole interval
-/// of B's face on the line, which no interval of A's face meets, so that
-/// B's face lies within the tolerance of A's over a sliver at the corner.
+/// §21 leave to the settling of touched points and the corners within
+/// their reach; testing the points there too, each was refused in all four
+/// operations (found by the contact fuzz at a hundred times the default
+/// run). B rests by a corner (contacts 548 and 2237 at 1 tolerance) or an
+/// edge (86 at 1) on A's face, with a corner of a face of B across the line
+/// where that face's plane meets A's face's, both its edges crossing the
+/// line (a flap), and the clustering puts the corner on the boundary of A's
+/// face. Or B rests by an edge passing a corner of A's face (4917 at −0.5
+/// tolerance and 2383 at −0.75), the edge lying on the face's plane as the
+/// whole interval of B's face on the line, which no interval of A's face
+/// meets, so that B's face lies within the tolerance of A's over a sliver
+/// at the corner.
 /// Each outcome is main's, and the answered results pass the identities,
 /// the checks of [`measured`] and the faces-crossing check.
 #[test]

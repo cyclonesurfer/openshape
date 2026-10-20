@@ -3467,6 +3467,106 @@ fn a_notch_wall_within_the_tolerance_of_a_side() {
     }
 }
 
+/// A prism from z = −1 up to the plane z = 0, its top the polygon `pts`.
+fn slab(pts: &[DVec2]) -> Body {
+    let frame = Frame {
+        origin: DVec3::new(0.0, 0.0, -1.0),
+        ..Frame::WORLD
+    };
+    prism(frame, pts, 1.0)
+}
+
+/// Golden 46: golden 44's rising spike at 2°, its tip V 28 tolerances
+/// across the line and 0.98 above the top, over a slab whose top's edge
+/// runs at 45° to the line through V's foot, the top holding all of the
+/// flap on its side of that edge (found by review, design note 0012 §21).
+/// V's cluster lies on the top's edge, which once let the whole flap off
+/// as a contact at the top's boundary: A ∩ B validated with the flap and
+/// the top crossing 12.5 tolerances inside both, as on main. Only the
+/// flap's points within three tolerances of the cluster are the
+/// contact's; the top holds the rest, and every operation is refused.
+#[test]
+fn a_spike_tip_on_the_edge_of_a_face_holding_its_flap() {
+    let eps = k().tolerance().linear;
+    let (t, d) = (2.0f64, 28.0);
+    let y0 = d * eps * t.to_radians().cos();
+    let x = |y: f64| 0.5 + d * eps - y * (d * eps) / y0;
+    let a = slab(&[
+        DVec2::new(-3.0, -1.0),
+        DVec2::new(x(-1.0), -1.0),
+        DVec2::new(x(1.0), 1.0),
+        DVec2::new(-3.0, 1.0),
+    ]);
+    let at = band_refusal("(500.000000, 0.000000, 0.000000) mm");
+    assert_eq!(
+        six(&a, &spiked(t, d, true, false), 1.0),
+        [(); 6].map(|_| at.clone())
+    );
+}
+
+/// Golden 47: a run that is its face's whole interval on the line where
+/// the face crosses a slab's top, and passes a corner of the top (found by
+/// review, design note 0012 §21). B, tilted `t` degrees, has an edge R at
+/// `h` tolerances across the line from x = 0 to 1, within the tolerance of
+/// the top, its face crossing the top only beyond x = 5. The top lies 20
+/// tolerances beyond R, but for a tongue entering the strip between R and
+/// the line from x > 1, its tip `w2` tolerances from the line at x = 0.7,
+/// and a bump whose apex lies on R at x = 0.3. No meeting covers R, and the
+/// tongue holds R's strip more than a tolerance inside: every operation
+/// is refused, with the bump as without it. Main, and this rule while it
+/// let a run passing a corner of the top off whole, failed A ∩ B, B ∩ A
+/// and B − A as kept pieces that do not close.
+#[test]
+fn a_run_no_meeting_covers_passing_a_corner_of_the_face_holding_it() {
+    let eps = k().tolerance().linear;
+    for (t, h, w2, at) in [
+        (1.0f64, 55.0, 30.0, "(1000.000000, -0.004875, -0.000085) mm"),
+        (0.5, 110.0, 40.0, "(1000.000000, -0.007750, -0.000068) mm"),
+    ] {
+        let yr = -h * eps * t.to_radians().cos();
+        let ym = yr - 20.0 * eps;
+        let b = tilted(
+            t,
+            &[
+                (0.0, -h, true),
+                (1.0, -h, true),
+                (1.0, 0.3, false),
+                (5.0, 0.3, false),
+                (5.0, -0.5, false),
+                (6.0, -0.5, false),
+                (6.0, 0.5, false),
+                (0.0, 0.5, false),
+            ],
+        );
+        for bump in [false, true] {
+            let mut top = vec![
+                DVec2::new(-0.5, -1.0),
+                DVec2::new(4.0, -1.0),
+                DVec2::new(4.0, 0.5),
+                DVec2::new(3.5, 0.5),
+                DVec2::new(3.5, ym),
+                DVec2::new(1.6, ym),
+                DVec2::new(0.7, -w2 * eps),
+                DVec2::new(1.3, ym),
+            ];
+            if bump {
+                top.extend([
+                    DVec2::new(0.301, ym),
+                    DVec2::new(0.3, yr),
+                    DVec2::new(0.299, ym),
+                ]);
+            }
+            top.push(DVec2::new(-0.5, ym));
+            let refused = band_refusal(at);
+            assert_eq!(
+                six(&slab(&top), &b, 1.0),
+                [(); 6].map(|_| refused.clone()),
+                "{t} {bump}"
+            );
+        }
+    }
+}
+
 /// A kernel a hundred times finer than the default, which builds bodies
 /// that the default tolerance takes for touching themselves: the oracle's
 /// own tests.

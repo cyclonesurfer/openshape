@@ -4050,9 +4050,12 @@ tolerance of the other's surface without lying on one of its faces"),
 where:
 
 1. *The meeting misses V.* No stretch of the pair whose span along L
-   comes within ε of V's has V's cluster as an end or as a cluster its
-   split takes, by `split_segment`'s own test, shared. A tip within ε of
-   a stretch bends it and is answered as on main.
+   comes within ε of the place of V's cluster has the cluster as an end
+   or as a cluster its split takes, by `split_segment`'s own test,
+   shared. A tip within ε of a stretch bends it and is answered as on
+   main. The window is about the cluster's place, which the split
+   measures, not about V, which may lie 2 ε from it (a reviewer's
+   finding; no case in the sweeps tells the two apart).
 2. *V is no point of G's boundary.* V's cluster holds no vertex of G and
    lies on no edge of G, as the clustering decided it
    (`Points::incidences`). Where it does, main's outcomes stand: the
@@ -4131,39 +4134,51 @@ none covers it, all of it. §18.2's reason for skipping a whole interval
 where a meeting is made along the run.
 
 *At G's boundary* (found by the contact fuzz at a hundred times its
-run, while building). Two configurations are left to main's outcomes,
-where the clustering has already put G's boundary on the chain and the
-settling of touched points and the corners decides the contact, as
-rule 2 leaves a notch tip there:
+run, while building; narrowed after review). Where the clustering has
+already put G's boundary on the chain, the settling of touched points
+and the corners decide the contact there, as rule 2 leaves a notch tip
+there. So the strip is tested less its points within 3 ε of those
+places, measured in P as the search measures: a cluster spreads at most
+2 ε about its representative (`Points::settle` refuses wider), and these
+are the points within the tolerance of it. The places are:
 
-- *a flap whose corner V is a point of G's boundary*, by rule 2's own
-  test (`on_boundary`, shared): B resting by a corner or an edge on A's
-  face, a face of B crossing that face's plane at a slant with a corner
-  across L, the clustering putting the corner on an edge or a corner of
-  A's face (contacts 548 and 2237 at 1 tolerance, 86 at 1);
-- *a run no meeting covers that passes a corner of G*: a cluster on the
-  run's edges holds a vertex of an edge bounding G (`corner_on`). B
-  rests by an edge passing a corner of A's face, the edge lying on the
-  face's plane as its face's whole interval on L, which no interval of
-  A's face meets (contacts 4917 at −0.5 tolerance and 2383 at −0.75). In
-  4917 B's face crosses A's at 14°, and lies within ε of it over a
-  sliver at the corner about 100 ε long and 1 ε wide, where A's face
-  holds the run's strip just over ε inside. Nothing splits either face
-  along the sliver, so each is classified whole, and the outcomes are
-  the contact's: the unions refused as touching at a point, the
-  intersections empty, the differences the operands unchanged.
+- *the corner V of a flap that is a point of G's boundary*, by rule 2's
+  own test (`on_boundary`, shared): B resting by a corner or an edge on
+  A's face, a face of B crossing that face's plane at a slant with a
+  corner across L, the clustering putting the corner on an edge or a
+  corner of A's face (contacts 548 and 2237 at 1 tolerance, 86 at 1);
+- *each cluster on a whole run's edges that holds a corner of G*: a
+  vertex of an edge bounding G (`corners_on`). B rests by an edge
+  passing a corner of A's face, the edge lying on the face's plane as
+  its face's whole interval on L, which no interval of A's face meets
+  (contacts 4917 at −0.5 tolerance and 2383 at −0.75). In 4917 B's face
+  crosses A's at 14° and lies within ε of it over a sliver at the
+  corner, where A's face holds the run's strip just over ε inside.
+  Nothing splits either face along the sliver, so each is classified
+  whole, and the outcomes are the contact's: the unions refused as
+  touching at a point, the intersections empty, the differences the
+  operands unchanged.
 
-Without them the contact fuzz at a hundred times refused 55 operations
-that main answers (these five cases among them), every result of main
-passing the oracle and the faces-crossing check; with them it refuses
-exactly main's operations, in 45 of them with §20's text where main
-gave another refusal's (`contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross`
-in `tests/booleans.rs`, which fails without either). The run's
-exception is wider than the sliver: it skips the whole run, so a run
-that passes a corner of G and that G holds elsewhere along its span is
-left to classification, as on main. No sweep or fuzz has one: every
-failure of an uncovered run on main (455 operations, in sweeps 12 and 6)
-is refused, and none of those runs passes a corner of G.
+In these five, the points the search found held, with nothing left
+out, lay 1.5 ε to 2.5 ε from the place. Leaving nothing out, the
+contact fuzz at a hundred times refused 55 operations that main answers
+(these five cases among them), every result of main passing the oracle
+and the faces-crossing check; with the places' discs left out it
+refuses exactly main's operations, in 45 of them with §20's text where
+main gave another refusal's
+(`contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross`
+in `tests/booleans.rs`, which fails without either place). The first
+build left out the whole flap or the whole run instead, which review
+showed too wide, each case as on main: a slab's edge at 45° to L passing
+under the corner of golden 44's spike at 2°, 28 ε across, the slab
+holding the rest of the flap, returned A ∩ B with the faces crossing
+12.5 ε inside both (golden 46); and a tongue of a slab's top holding a
+whole run's strip 0.4 m from a corner of the top on the run failed
+three operations as kept pieces that do not close (golden 47). Both are
+refused now. The search leaves out a place's disc exactly: each line it
+clips loses the disc's chord, and the crossings of the disc's circle
+with the circles about the ends of G's edges and with the other discs'
+are tested as corners of what is left (`held_point`).
 
 *The oracle* (`tests/self_contact`).
 
@@ -4251,6 +4266,20 @@ is refused, and none of those runs passes a corner of G.
   whose results on main crossed less than ε: the sweeps' 30 such cases
   (180 operations) crossed 0.71 ε to 0.997 ε inside both on main.
   Narrowing it would need those stretches.
+- *A flap held only near its corner on G's boundary.* Where the
+  clustering put a flap's corner V on G's boundary, the points within
+  3 ε of its place are left out (*At G's boundary*), so a flap whose
+  points G holds more than ε inside all lie there is answered as on
+  main. A reviewer's scan of slabs whose edge passes V's foot on a
+  slant, crossing L 0.1 to 2 times V's distance from L along it, found
+  it at 10° with V 3 ε across L, the edge crossing L 1.8 ε, 3 ε and 6 ε
+  from the spike's axis: A ∩ B returned with the faces crossing 1.40,
+  1.31 and 1.31 ε inside both, as on main; nearer edges, and every
+  other angle and distance scanned (2° to 10°, V 3 ε to 28 ε across),
+  were refused. Such a crossing lies within 3 ε of the place, where the
+  clustering decided V and G's boundary to be one point; refusing it
+  would mean deciding that point a second time by geometry, which rule
+  2 declines for a notch tip.
 
 **Cost.** The pass over F's vertices is §20's, and sorting a vertex
 costs a few tests. A notch tip costs two searches of the pair's
@@ -4258,9 +4287,14 @@ stretches sorted along L (sorted once per pair, shared with the strips'
 cuts and charged to their budget), the clustering's look-up, and one
 placing in G's outline. A flap is one convex piece searched as a vertex
 chain's strip is. A run no meeting covers costs a strip's search over
-its uncovered parts, where §20 skipped it. The excuses at G's boundary
+its uncovered parts, where §20 skipped it. The places at G's boundary
 cost a look-up for a flap's corner and a step for each cluster on a
-whole run's edges. All of it draws on §20's budget of steps. Measured
+whole run's edges; in the search, each line within a place's reach
+loses one chord, found by a tree of the places' boxes, and the places'
+circles join the ends' in the search for corners, each crossing
+checked against the discs that may hold it. All of it draws on §20's
+budget of steps, and with no places the search takes the steps it
+took before. Measured
 (callgrind, one run each), `held_strips`, with §20's work and this
 rule's, takes 4.9 % of the instructions of an intersection refused at
 512 notch tips across L, 8.3 thousand for each of its 1,030 pairs of
@@ -4292,7 +4326,12 @@ operations each:
   F's body, main's outcomes;
 - 45, `a_notch_wall_within_the_tolerance_of_a_side`: the run no meeting
   covers 0.8 ε beyond the box's side (refused) and 1.2 ε beyond
-  (answered).
+  (answered);
+- 46, `a_spike_tip_on_the_edge_of_a_face_holding_its_flap`, and 47,
+  `a_run_no_meeting_covers_passing_a_corner_of_the_face_holding_it`,
+  refused: the two cases review found (*At G's boundary*), the tongue
+  at 1° and at 0.5°, with and without the bump that puts a corner of
+  the top on the run.
 
 In `tests/booleans.rs`: the generator of notches and spikes,
 `notches_and_spikes_across_the_line` (150 cases, run in CI at ten
@@ -4316,8 +4355,14 @@ property test over random segments and points
 (`the_tip_test_takes_the_clusters_the_split_takes`); the flap's piece
 (`a_flap_is_its_triangle_less_the_band_of_its_edges`); the covering of
 runs by stretches (`a_whole_run_is_tested_where_no_stretch_covers_it`);
-and the steps in proportion to the corners
-(`the_corners_across_the_line_take_steps_in_proportion`).
+the steps in proportion to the corners
+(`the_corners_across_the_line_take_steps_in_proportion`); and the
+search with places left out: §20's property test of the search, two
+cases in three now with up to eight places of a reach from ρ to 4ρ,
+each point found outside every disc, and found wherever a grid finds a
+point held deeper than ρ outside them (`the_strip_search_finds_every_deeply_held_region`), and a
+region whose only corners are crossings of the places' circles
+(`the_strip_search_finds_a_region_bounded_by_the_arcs_of_places`).
 
 References: C. M. Hoffmann, *Geometric and Solid Modeling*, 1989, ch.
 4; A. A. G. Requicha, "Representations for rigid solids", *ACM

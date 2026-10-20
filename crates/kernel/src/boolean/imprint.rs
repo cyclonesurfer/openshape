@@ -1020,21 +1020,30 @@ fn held_strips(
         let (chains, corners) = strip_runs(pair, pts, op, f, surface, ivs);
         tips.extend(corners.into_iter().map(|v| (op, v, them, g)));
         for chain in chains {
-            // A flap whose corner is a point of g's boundary, and a run
-            // that is one of f's intervals whole passing a corner of g,
-            // touch g's boundary where the clustering put it: the
-            // settling of touched points and the corners decide them, as
-            // for a notch tip (§21).
+            // Where the clustering put g's boundary on the chain: a flap's
+            // corner that is a point of it, and the corners of g on a run
+            // that is one of f's intervals whole. The settling of touched
+            // points and the corners decide the contact there, as for a
+            // notch tip, so the strip is tested less its points within
+            // their reach (§21).
+            let mut spots = Vec::new();
             if let Some(v) = chain.corner {
                 strips.budget.spend(1)?;
-                if on_boundary(pair, pts, (them, g), pts.vertex_cluster(op, v)) {
-                    continue;
+                let c = pts.vertex_cluster(op, v);
+                if on_boundary(pair, pts, (them, g), c) {
+                    spots.push(pts.rep[c]);
                 }
             }
-            if chain.kind == Kind::Whole
-                && corner_on(pair, pts, op, &chain.edges, (them, g), &mut strips.budget)?
-            {
-                continue;
+            if chain.kind == Kind::Whole {
+                corners_on(
+                    pair,
+                    pts,
+                    op,
+                    &chain.edges,
+                    (them, g),
+                    &mut spots,
+                    &mut strips.budget,
+                )?;
             }
             let along = sorted(&mut along, pts, dir, stretches, &mut strips.budget)?;
             let (lo, hi) = (chain.points.iter())
@@ -1075,6 +1084,7 @@ fn held_strips(
                 &chain,
                 &beside,
                 gaps.as_deref(),
+                &spots,
             )?;
         }
     }
@@ -1153,7 +1163,10 @@ fn tip_refused(
     let (flat, budget) = (&strips.flat, &mut strips.budget);
     let p = pair.get(op).points[v];
     let c = pts.vertex_cluster(op, v);
-    let t = p.dot(dir);
+    // The stretches whose spans come within the tolerance of the cluster's
+    // place, which the split measures (its representative may lie up to
+    // twice the tolerance from V).
+    let t = pts.rep[c].dot(dir);
     let (mut over, passed) = along.meeting(t - eps, t + eps);
     budget.spend(1 + passed)?;
     if over.any(|j| pts.on_split(stretches[j].0, stretches[j].1, c)) {
@@ -1205,25 +1218,32 @@ fn holds_corner(pair: &Pair, pts: &Points, (them, g): (Operand, usize), c: usize
     })
 }
 
-/// Whether a corner of face `g` of `them` lies on one of `edges` of `op`,
-/// at an end or between: one of the clusters on them holds it
-/// ([`holds_corner`]). A step for each cluster looked at.
-fn corner_on(
+/// The places of the clusters on `edges` of `op`, at their ends or
+/// between, that hold a corner of face `g` of `them` ([`holds_corner`]),
+/// each once, added to `spots`. A step for each cluster looked at.
+fn corners_on(
     pair: &Pair,
     pts: &Points,
     op: Operand,
     edges: &[usize],
     (them, g): (Operand, usize),
+    spots: &mut Vec<DVec3>,
     budget: &mut Budget,
-) -> Result<bool, KernelError> {
+) -> Result<(), KernelError> {
+    let mut held = Vec::new();
     for &e in edges {
         let on = pts.on_edge(op, e);
         budget.spend(on.len())?;
-        if on.iter().any(|&c| holds_corner(pair, pts, (them, g), c)) {
-            return Ok(true);
-        }
+        held.extend(
+            on.iter()
+                .copied()
+                .filter(|&c| holds_corner(pair, pts, (them, g), c)),
+        );
     }
-    Ok(false)
+    held.sort_unstable();
+    held.dedup();
+    spots.extend(held.into_iter().map(|c| pts.rep[c]));
+    Ok(())
 }
 
 /// A chain of a face's boundary lying on the other operand's plane, whose
@@ -1433,7 +1453,10 @@ fn strip_runs(
 /// that no stretch covers. A flap's is the triangle between the corner's
 /// edges and L, less its points within the tolerance of either edge
 /// ([`flap_piece`]; its points on L are kept, since no meeting lies
-/// there), cut by the stretches likewise. Every point of it lies within
+/// there), cut by the stretches likewise. Its points within three times
+/// the tolerance of `spots` (places where the clustering put `g`'s
+/// boundary on the chain, whose contact the settling of touched points
+/// decides) are left out. Every point of it lies within
 /// the tolerance of P (the chain does, L and each stretch are on P, and
 /// the distance from P is linear along each segment). Where `g` holds a
 /// point of it more than the tolerance inside its boundary (the point's
@@ -1459,6 +1482,7 @@ fn held_strip(
     chain: &Chain,
     stretches: &[(usize, usize)],
     gaps: Option<&[(f64, f64)]>,
+    spots: &[DVec3],
 ) -> Result<(), KernelError> {
     let eps = pts.eps;
     let rho = eps * (1.0 + DEEP);
@@ -1633,7 +1657,13 @@ fn held_strip(
         }
     };
     let (against_f, against_g) = (against(op, f)?, against(them, g)?);
-    let found = held_point(&strip, &cuts, &near, rho, budget, |v, budget| {
+    // The points within the reach of a place where the clustering put g's
+    // boundary on the chain are the contact's there: a cluster spreads at
+    // most twice the tolerance about its place, so they lie within three
+    // times it, measured in P as the search measures.
+    let spots: Vec<DVec2> = spots.iter().map(|&p| in_p(p)).collect();
+    let around = (&spots[..], 3.0 * eps);
+    let found = held_point(&strip, &cuts, &near, around, rho, budget, |v, budget| {
         Ok(place(&against_g, gf, on_g(v), eps, budget)? == Some(true)
             && place(&against_f, face, on_f(v), eps, budget)? != Some(false))
     })?;
@@ -3095,31 +3125,33 @@ fn merge(mut list: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
 /// points where a region of the strip held deeper than `rho` must reach
 /// (design note 0012 §20, *Finding a held point*), in the plane of the
 /// other face: `cuts` are the edges of the strip's face that can enter it
-/// (taken there), and `near` the edges of the other face within `rho` of
-/// it (straight).
+/// (taken there), `near` the edges of the other face within `rho` of it
+/// (straight), and `around` places with a reach, whose discs are left out
+/// of the strip (§21).
 ///
 /// Let D be the points of the other face farther than `rho` from its
-/// boundary, and K a part of D in the strip's interior, apart from the
-/// rest. K's boundary runs along the strip's boundary (the pieces' sides
-/// and the cuts) or along D's, which is made of the lines at `rho` from
-/// the near edges and arcs of radius `rho` about their ends; so it has a
-/// stretch on one of those lines, or it is bounded by arcs alone and has a
-/// corner where two of the circles cross or touch. The search tests (1) on
-/// each of
-/// those lines, the parts in the strip farther than `rho` from every near
-/// edge (a capsule about each, [`capsule`]) split where a cut crosses or
-/// touches them, each at its middle: no near edge comes within `rho` of a
-/// part and no cut crosses it, so each face holds all of it or none of it;
-/// and (2) for
-/// each two ends of near edges at most `2 rho` apart (and a margin for
-/// rounding), the two crossings of their circles (one point where they
-/// touch): a corner of K is one, and lies in K's closure, at least `rho`
-/// from every edge of the other face. So it finds a point of every such K
-/// (to the strip's `tau`).
+/// boundary and farther than the reach from every place, and K a part of
+/// D in the strip's interior, apart from the rest. K's boundary runs along
+/// the strip's boundary (the pieces' sides and the cuts) or along D's,
+/// which is made of the lines at `rho` from the near edges, arcs of radius
+/// `rho` about their ends and arcs of the reach about the places; so it
+/// has a stretch on one of those lines, or it is bounded by arcs alone and
+/// has a corner where two of the circles cross or touch. The search tests
+/// (1) on each of those lines, the parts in the strip farther than `rho`
+/// from every near edge (a capsule about each, [`capsule`]) and farther
+/// than the reach from every place, split where a cut crosses or touches
+/// them, each at its middle: no near edge comes within `rho` of a part and
+/// no cut crosses it, so each face holds all of it or none of it; and (2)
+/// for each two of the circles that meet (and a margin for rounding), the
+/// two crossings (one point where they touch) that no place's disc holds
+/// (to the margin): a corner of K is one, and lies in K's closure, at
+/// least `rho` from every edge of the other face. So it finds a point of
+/// every such K (to the strip's `tau`).
 fn held_point(
     strip: &Strip,
     cuts: &[(DVec2, DVec2)],
     near: &[(DVec2, DVec2)],
+    (spots, reach): (&[DVec2], f64),
     rho: f64,
     budget: &mut Budget,
     mut holds: impl FnMut(DVec2, &mut Budget) -> Result<bool, KernelError>,
@@ -3130,7 +3162,8 @@ fn held_point(
     };
     let near_tree = Bvh::new(near.iter().map(|&s| segment_box(s, rho)).collect());
     let cut_tree = Bvh::new(cuts.iter().map(|&s| segment_box(s, tau)).collect());
-    budget.spend(strip.pieces.len() + near.len() + cuts.len())?;
+    let spot_tree = Bvh::new(spots.iter().map(|&v| segment_box((v, v), reach)).collect());
+    budget.spend(strip.pieces.len() + near.len() + cuts.len() + spots.len())?;
     // (1) The lines: the pieces' sides, the cuts, and the lines at `rho`
     // on each side of each near edge, with the edge they come from.
     let mut lines: Vec<(DVec2, DVec2, Option<usize>)> = Vec::new();
@@ -3167,12 +3200,14 @@ fn held_point(
         let (lo3, hi3) = flat(lo, hi);
         near_tree.overlapping(lo3, hi3, &mut found);
         budget.spend(found.len())?;
-        let out = merge(
-            (found.iter())
-                .filter(|&&k| Some(k) != own)
-                .filter_map(|&k| capsule(p, q, near[k], rho))
-                .collect(),
-        );
+        let mut out: Vec<(f64, f64)> = (found.iter())
+            .filter(|&&k| Some(k) != own)
+            .filter_map(|&k| capsule(p, q, near[k], rho))
+            .collect();
+        spot_tree.overlapping(lo3, hi3, &mut found);
+        budget.spend(found.len())?;
+        out.extend((found.iter()).filter_map(|&k| capsule(p, q, (spots[k], spots[k]), reach)));
+        let out = merge(out);
         cut_tree.overlapping(lo3, hi3, &mut found);
         budget.spend(found.len())?;
         splits.clear();
@@ -3210,28 +3245,46 @@ fn held_point(
             }
         }
     }
-    // (2) The crossings of the circles about the ends of near edges.
+    // (2) The crossings of the circles about the ends of near edges, of
+    // radius `rho`, and about the places, of the reach.
     let mut ends: Vec<DVec2> = near.iter().flat_map(|&(a, b)| [a, b]).collect();
     ends.sort_by(|u, v| u.x.total_cmp(&v.x).then(u.y.total_cmp(&v.y)));
     ends.dedup();
-    let end_tree = Bvh::new(ends.iter().map(|&v| segment_box((v, v), rho)).collect());
-    for (i, &v) in ends.iter().enumerate() {
-        let (lo, hi) = segment_box((v, v), rho);
-        end_tree.overlapping(lo, hi, &mut found);
+    let circles: Vec<(DVec2, f64)> = (ends.iter().map(|&v| (v, rho)))
+        .chain(spots.iter().map(|&v| (v, reach)))
+        .collect();
+    let circle_tree = Bvh::new(
+        (circles.iter())
+            .map(|&(v, r)| segment_box((v, v), r))
+            .collect(),
+    );
+    let mut inside = Vec::new();
+    for (i, &(v, r)) in circles.iter().enumerate() {
+        // Boxes padded by each radius meet where the centres are within
+        // the two radii in each coordinate.
+        let (lo, hi) = segment_box((v, v), r);
+        circle_tree.overlapping(lo, hi, &mut found);
         budget.spend(1 + found.len())?;
         for &j in found.iter().filter(|&&j| j > i) {
-            let w = ends[j];
+            let (w, s) = circles[j];
             let l = (w - v).length();
             // Circles that touch bound a corner too (a cusp); a margin
             // keeps rounding from skipping them.
-            if l == 0.0 || l > 2.0 * rho * (1.0 + DEEP) {
+            if l == 0.0 || l > (r + s) * (1.0 + DEEP) || l < (r - s).abs() {
                 continue;
             }
-            let u = (w - v).perp() / l;
-            let h = (rho * rho - l * l / 4.0).max(0.0).sqrt();
+            let (e, u) = ((w - v) / l, (w - v).perp() / l);
+            let a = (r * r - s * s + l * l) / (2.0 * l);
+            let h = (r * r - a * a).max(0.0).sqrt();
             for side in [1.0, -1.0] {
-                let m = (v + w) * 0.5 + u * (side * h);
-                if strip.contains(m, budget)? && holds(m, budget)? {
+                let m = v + e * a + u * (side * h);
+                // A crossing in a place's disc is no corner of D.
+                let (lo, hi) = flat(m, m);
+                spot_tree.overlapping(lo, hi, &mut inside);
+                budget.spend(inside.len())?;
+                let clear =
+                    (inside.iter()).all(|&k| (m - spots[k]).length() >= reach * (1.0 - DEEP));
+                if clear && strip.contains(m, budget)? && holds(m, budget)? {
                     return Ok(Some(m));
                 }
             }
@@ -3290,7 +3343,8 @@ mod tests {
     /// strip, in the strip's face, more than `rho` inside the other face
     /// (and some margin, for the grid's rounding), and every point it finds
     /// passes the test it was given: on random strips (bent runs, some
-    /// crossing the line) against random faces with holes.
+    /// crossing the line) against random faces with holes, most with discs
+    /// about a few places left out.
     #[test]
     fn the_strip_search_finds_every_deeply_held_region() {
         let (eps, mut s) = (1.0, 11);
@@ -3349,15 +3403,31 @@ mod tests {
                 f.push(star(&mut s, c, 3, 0.3, 1.5));
             }
             let (ge, fe) = (edges(&g), edges(&f));
+            // Two cases in three leave out the discs about a few places
+            // (§21), on the strip or near it, of a reach from `rho` to four
+            // times it.
+            let spots: Vec<DVec2> = (0..(case % 3) * (1 + case % 4))
+                .map(|_| lo + (hi - lo) * DVec2::new(lcg(&mut s), lcg(&mut s)))
+                .collect();
+            let reach = rho * (1.0 + 3.0 * lcg(&mut s));
+            let clear = |v: DVec2, r: f64| spots.iter().all(|&c| (v - c).length() > r);
             let holds = |v: DVec2| {
                 inside(v, &ge)
                     && distance(v, &ge) > eps
                     && (inside(v, &fe) || distance(v, &fe) <= eps)
             };
             let mut budget = Budget::new(STRIP_STEPS);
-            let got = held_point(&strip, &fe, &ge, rho, &mut budget, |v, _| Ok(holds(v))).unwrap();
+            let around = (&spots[..], reach);
+            let got = held_point(&strip, &fe, &ge, around, rho, &mut budget, |v, _| {
+                Ok(holds(v))
+            })
+            .unwrap();
             if let Some(v) = got {
                 assert!(holds(v), "case {case}: {v} fails the test");
+                assert!(
+                    clear(v, reach * (1.0 - 2.0 * DEEP)),
+                    "case {case}: {v} in a disc"
+                );
                 assert!(strip.contains(v, &mut Budget::new(STRIP_STEPS)).unwrap());
                 found[case % 2] += 1;
             }
@@ -3369,6 +3439,7 @@ mod tests {
                     && distance(v, &fe) > 1e-9
                     && inside(v, &ge)
                     && distance(v, &ge) > rho + 1e-9
+                    && clear(v, reach + 1e-9)
             });
             if deep {
                 held[case % 2] += 1;
@@ -3411,7 +3482,10 @@ mod tests {
             inside(v, &ge) && distance(v, &ge) > eps && (inside(v, &fe) || distance(v, &fe) <= eps)
         };
         let mut budget = Budget::new(STRIP_STEPS);
-        let got = held_point(&strip, &fe, &ge, rho, &mut budget, |v, _| Ok(holds(v))).unwrap();
+        let got = held_point(&strip, &fe, &ge, (&[], 0.0), rho, &mut budget, |v, _| {
+            Ok(holds(v))
+        })
+        .unwrap();
         let v = got.expect("the small face is found");
         assert!(distance(v, &fe) < 1e-9, "{v}");
     }
@@ -3466,9 +3540,103 @@ mod tests {
         let holds = |v: DVec2| inside(v, &ge) && distance(v, &ge) > eps && inside(v, &fe);
         assert!(inside(centre, &ge) && distance(centre, &ge) > rho);
         let mut budget = Budget::new(STRIP_STEPS);
-        let got = held_point(&strip, &fe, &ge, rho, &mut budget, |v, _| Ok(holds(v))).unwrap();
+        let got = held_point(&strip, &fe, &ge, (&[], 0.0), rho, &mut budget, |v, _| {
+            Ok(holds(v))
+        })
+        .unwrap();
         let v = got.expect("the region bounded by arcs is found");
         assert!((v - centre).length() < 0.3 * rho, "{v}");
+    }
+
+    /// The region of [`the_strip_search_finds_a_region_bounded_by_arcs`]
+    /// with a place's disc (§21) over each of its corners, so that what is
+    /// left of it is bounded by arcs whose corners are crossings of a
+    /// place's circle with a tip's: it is found at one of those, clear of
+    /// the discs; and nothing is found when the discs grow to cover it.
+    #[test]
+    fn the_strip_search_finds_a_region_bounded_by_the_arcs_of_places() {
+        let eps = 1.0;
+        let rho = eps * (1.0 + DEEP);
+        let r = 1.1 * rho;
+        let centre = DVec2::new(5.0, 3.0);
+        let dir = |a: f64| DVec2::new(a.cos(), a.sin());
+        let mut g = vec![vec![
+            DVec2::new(-20.0, -20.0),
+            DVec2::new(30.0, -20.0),
+            DVec2::new(30.0, 30.0),
+            DVec2::new(-20.0, 30.0),
+        ]];
+        let tips = [0, 1, 2].map(|k| PI / 2.0 + 2.0 * PI * k as f64 / 3.0);
+        for axis in tips {
+            let tip = centre + dir(axis) * r;
+            g.push(vec![
+                tip,
+                tip + dir(axis + PI / 3.0) * 12.0,
+                tip + dir(axis - PI / 3.0) * 12.0,
+            ]);
+        }
+        // The region's corners: the crossings of the tips' circles nearest
+        // the centre.
+        let corners = [0, 1, 2].map(|k| {
+            let (u, w) = (
+                centre + dir(tips[k]) * r,
+                centre + dir(tips[(k + 1) % 3]) * r,
+            );
+            let m = (u + w) * 0.5;
+            let half = (w - u).length() * 0.5;
+            centre
+                + (m - centre).normalize()
+                    * ((m - centre).length() - (rho * rho - half * half).sqrt())
+        });
+        let mut pieces = Vec::new();
+        strip_pieces(
+            DVec2::new(10.0, 10.0),
+            DVec2::new(0.0, 10.0),
+            eps,
+            rho * DEEP,
+            &[1.0, -1.0],
+            &mut pieces,
+        );
+        let strip = Strip::new(pieces, rho * DEEP);
+        let ge = edges(&g);
+        let fe = edges(&[vec![
+            DVec2::new(3.0, 1.5),
+            DVec2::new(7.0, 1.5),
+            DVec2::new(7.0, 4.5),
+            DVec2::new(3.0, 4.5),
+        ]]);
+        let holds = |v: DVec2| inside(v, &ge) && distance(v, &ge) > eps && inside(v, &fe);
+        let mut budget = Budget::new(STRIP_STEPS);
+        let reach = 0.1 * rho;
+        let got = held_point(
+            &strip,
+            &fe,
+            &ge,
+            (&corners, reach),
+            rho,
+            &mut budget,
+            |v, _| Ok(holds(v)),
+        )
+        .unwrap();
+        let v = got.expect("the region bounded by the places' arcs is found");
+        assert!((v - centre).length() < 0.3 * rho, "{v}");
+        for c in corners {
+            assert!(
+                (v - c).length() >= reach * (1.0 - 2.0 * DEEP),
+                "{v} in a disc"
+            );
+        }
+        let got = held_point(
+            &strip,
+            &fe,
+            &ge,
+            (&corners, 0.3 * rho),
+            rho,
+            &mut budget,
+            |v, _| Ok(holds(v)),
+        )
+        .unwrap();
+        assert_eq!(got, None);
     }
 
     /// The strip of `feet` on `sides` with the meeting `lines`
@@ -3927,6 +4095,7 @@ mod tests {
                 &chain,
                 &[],
                 None,
+                &[],
             )
         };
         let diamond = [(0.5, -0.175), (0.72, -0.1), (0.5, -0.025), (0.28, -0.1)];

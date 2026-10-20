@@ -59,7 +59,9 @@ this row may read high against the others. The two rows of a face
 lying or crossing along one line, and the scaling row of the first,
 were measured on 2026-10-16, after the eighth pass: the range of three
 runs of the booleans' and the scaling tests, each the best of three
-repetitions. The limit is what the test enforces.
+repetitions. The two rows of notch tips and spikes across the line, and
+their scaling rows (design note 0012 §21), were measured the same way on
+2026-10-19 on a quiet machine. The limit is what the test enforces.
 
 | Operation | Measured | Limit |
 |---|---|---|
@@ -78,6 +80,8 @@ repetitions. The limit is what the test enforces.
 | Unite a box with a corner of a plate of 400 flush square pins (the result has 4,012 faces; each place of it checked against the faces near it) | 95–113 ms | 1,000 ms |
 | Intersect a notched block with a prism whose face's edge of 256 segments lies on the block's top beside the line where they cross (the strip check searches the whole strip) | 11.7–13.1 ms | 120 ms |
 | Intersect a block with a prism whose face crosses its top 1,024 times along one line (513 solids) | 65–71 ms | 700 ms |
+| Intersect a block with a prism whose face has 512 notch tips across the line where it crosses the block's top, each within the tolerance of the top (refused at the first; each tip sorted and tested against the stretches along the line) | 9.95–10.5 ms | 100 ms |
+| The same with 512 spikes across the line, each one's flap built (the result has 1,031 faces) | 42.9–44.3 ms | 450 ms |
 | Dimple a plate with 16 balls, one boolean each | 73–89 ms | 900 ms |
 | Mesh it (173,680 triangles) | 382–406 ms | 4,000 ms |
 | Validate it | 2.2–2.5 ms | 40 ms |
@@ -115,6 +119,8 @@ factor):
 | Mesh a ball, 13,964 to 105,556 triangles (7.6 times) | 8.6–9.6 times |
 | Unite a box with a corner of a plate of flush pins, 49 to 400 pins (8.2 times) | 8.4–9.2 times |
 | Intersect a notched block with a prism whose lying edge has 128 to 1,024 segments | 7.7–7.8 times |
+| Intersect a block with a prism refused at notch tips across the line, 64 to 512 tips | 8.0–8.1 times |
+| Intersect a block with a prism with spikes across the line, 64 to 512 spikes | 7.8–8.6 times |
 
 One more checks the cut of a plate's 4th hole against that of its 16th,
 four times the holes counting the one cut (bound: 12, three times the
