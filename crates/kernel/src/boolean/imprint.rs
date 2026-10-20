@@ -3495,7 +3495,7 @@ fn flap_piece(x0: DVec2, v: DVec2, x1: DVec2, eps: f64, cos: f64) -> Option<Piec
 
 /// The parts of the convex `piece` outside the triangle `tri`, which the
 /// strip search excludes as the other face's flap (design note 0012 §21,
-/// rule D): at most three convex pieces, the first outside the triangle's
+/// flaps under strips): at most three convex pieces, the first outside the triangle's
 /// first side, each next outside its next side and inside those before, so
 /// they are disjoint and with the triangle's part make up the piece. A
 /// triangle without area takes nothing, and the piece is kept whole.
@@ -4348,8 +4348,8 @@ mod tests {
         assert!(strip(&[v(5.0, 0.5)], &both, &[]).is_empty());
     }
 
-    /// A piece less a triangle ([`without`]; design note 0012 §21, rule D)
-    /// is at most three convex parts, none overlapping another or the
+    /// A piece less a triangle ([`without`]; design note 0012 §21,
+    /// flaps under strips) is at most three convex parts, none overlapping another or the
     /// triangle, which with the triangle's part make up the piece: on
     /// random triangles over a square, every point of a grid over it
     /// (away from the triangle's sides' lines, where rounding decides) lies

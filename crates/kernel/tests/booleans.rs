@@ -1088,27 +1088,29 @@ fn edges_lying_on_a_face_for_a_few_tolerances() {
 }
 
 /// Contacts at the boundary of a face, which the checks of design note 0012
-/// §21 leave to the settling of touched points and the corners within
-/// their reach (found by the contact fuzz at a hundred times the default
-/// run). B rests by a corner (contacts 548 and 2237 at 1 tolerance) or an
-/// edge (86 at 1) on A's face, with a corner of a face of B across the line
-/// where that face's plane meets A's face's, both its edges crossing the
-/// line (a flap), and the clustering puts the corner on the boundary of A's
-/// face. Main answered these, A − B touching along an edge or at a point;
-/// the flap's strip now leaves out only its points within the tolerance of
-/// a member of the corner's cluster, the same in either order of the
-/// operands (§21, rule E), A's face holds the flap beyond those, and each is
-/// refused in all four operations: the cost of that rule (with discs of
-/// three tolerances about the cluster's place, main's outcomes). Or B
-/// rests by an edge passing a corner of A's face (4917 at −0.5 tolerance
-/// and 2383 at −0.75), the edge lying on the face's plane as the whole
-/// interval of B's face on the line, which no interval of A's face meets,
-/// so that B's face lies within the tolerance of A's over a sliver at the
-/// corner, A's flap there, which its own rule decides and the run's strip
-/// leaves out (§21, rule D; tested as a part of the run's strip, each was
-/// refused in all four operations). Their outcomes are main's, and the
-/// answered results pass the identities, the checks of [`measured`] and
-/// the faces-crossing check.
+/// §21 leave to the settling of touched points and the corners within their
+/// reach (found by the contact fuzz at a hundred times the default run). B
+/// rests by a corner (contacts 548 and 2237 at 1 tolerance) or an edge (86
+/// at 1) on A's face, with a corner of a face of B across the line where
+/// that face's plane meets A's face's, both its edges crossing the line (a
+/// flap), and the clustering puts the corner on the boundary of A's face.
+/// Main answered A ∪ B and A ∩ B, and B − A of 548 and 2237, each without a
+/// crossing, and refused A − B as touching along an edge (548, 2237) and
+/// both differences as touching at a point (86); the flap's strip now
+/// leaves out only its points within the tolerance of a member of the
+/// corner's cluster, the same in either order of the operands (§21, at G's
+/// boundary), A's face holds the flap beyond those, and each is refused in
+/// all four operations: the cost of that rule (discs of three tolerances
+/// about the cluster's place gave main's outcomes). Or B rests by an edge
+/// passing a corner of A's face (4917 at −0.5 tolerance and 2383 at −0.75),
+/// the edge lying on the face's plane as the whole interval of B's face on
+/// the line, which no interval of A's face meets, so that B's face lies
+/// within the tolerance of A's over a sliver at the corner, A's flap there,
+/// which its own rule decides and the run's strip leaves out (§21, flaps
+/// under strips; tested as a part of the run's strip, each was refused in
+/// all four operations). Their outcomes are main's, and the answered
+/// results pass the identities, the checks of [`measured`] and the
+/// faces-crossing check.
 #[test]
 fn contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross() {
     let point = "the result would be non-manifold: the bodies touch at a point";
@@ -1141,19 +1143,19 @@ fn contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross() {
 
 /// Contacts at the boundary of a face held beyond the reach of its places
 /// (design note 0012 §21), found by the contact fuzz at a hundred times the
-/// default run. A flap held 3.2 tolerances from its corner's place
-/// (contact 3129 at 0.5 tolerance), where main returned A − B with the
-/// flap's face and A's crossing 1.36 tolerances inside both, as the first
-/// build did, which left the whole flap out; and a flap held 3.3
-/// tolerances from its corner's place (5385 at 1), where main refused
-/// three operations as a point within the tolerance of an edge and B − A
-/// with the strip's text: each is refused with the strip's text in all
-/// four. And B resting by an edge that passes a corner of A's face as the
-/// whole interval of its face on the line, 3.1 and 3.9 tolerances from the
-/// corner (3613 and 3492 at −0.75) and, the edge 0.55° from the face's
-/// edge, 54 and 105 tolerances along it (4917 at −0.75 and −1): what A's
-/// face holds of the run's strip there is A's flap at the corner, which
-/// its own rule decides and the run's strip leaves out (§21, rule D), and
+/// default run. A flap held 3.2 tolerances from its corner's place (contact
+/// 3129 at 0.5 tolerance), where main returned A − B with the flap's face
+/// and A's crossing 1.36 tolerances inside both, as the first build did,
+/// which left the whole flap out; and a flap held 3.3 tolerances from its
+/// corner's place (5385 at 1), where main refused three operations as a
+/// point within the tolerance of an edge and answered B − A without a
+/// crossing: each is refused with the strip's text in all four. And B
+/// resting by an edge that passes a corner of A's face as the whole
+/// interval of its face on the line, 3.1 and 3.9 tolerances from the corner
+/// (3613 and 3492 at −0.75) and, the edge 0.55° from the face's edge, 54
+/// and 105 tolerances along it (4917 at −0.75 and −1): what A's face holds
+/// of the run's strip there is A's flap at the corner, which its own rule
+/// decides and the run's strip leaves out (§21, flaps under strips), and
 /// the outcomes are main's, A ∪ B touching at a point (tested as a part of
 /// the run's strip, the flap refused every operation).
 #[test]

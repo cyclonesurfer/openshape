@@ -1,6 +1,6 @@
 # OpenDatum status
 
-Updated 2026-10-19. Phase 2 (sketcher) is done but for the tools that
+Updated 2026-10-20. Phase 2 (sketcher) is done but for the tools that
 need model faces (project/convert, intersection curves, pierce). Phase 3
 has begun: the design notes for intersections (0011), booleans (0012)
 and persistent naming (0013) are written; every region of the random
@@ -1326,7 +1326,7 @@ name open unchanged.
   curved); and a run on the side of that line where the thin layer lies
   outside the face's body is refused, where main failed every
   operation. A notch's tip and a spike's flap across that line, within
-  the tolerance of the plane, are refused (§21, goldens 42 to 45), and
+  the tolerance of the plane, are refused (§21, goldens 42 to 55), and
   so is a run lying on the plane that no meeting covers. Known, also on
   main (§21, "Not decided"): results whose faces fold at a knife edge
   within the tolerance of each other over a band wider than the
@@ -1337,12 +1337,18 @@ name open unchanged.
   to refuse them is open. A notch's wall 1.09° from the box's end,
   its root on the end's plane but 51 tolerances from the line where the
   planes cross (case 7268 of the notch fuzz at a hundred times), fails
-  every operation as kept pieces that do not close. The flap's test is
-  conservative: it refused 30 cases of the probes' sweeps (180
-  operations) whose results on main crossed less than a tolerance. A
-  round face's rim passing within a few tolerances of a tip is a
-  contact with curved edges, with oracle reports on main and here
-  alike. Within three quarters of a tolerance of the exact contact, 704
+  every operation as kept pieces that do not close. The rule is
+  conservative, and its price is refusals (§21, "Measured" and "Not
+  decided"): of the 37,712 contacts of the 27 families its review built
+  at each rule's edges, 1,274 that main answered right in all six
+  operations are refused (590 of them flaps held near a corner of the
+  other face, which the rule tests beyond a tolerance of each point
+  merged into that corner), and so are 37 contacts of the map's sweeps
+  whose results on main crossed 0.71 to 1 tolerance (the flap's band)
+  and 35 contacts of the contact fuzz at a hundred times that main
+  answered right. A round face's rim passing within a few tolerances of
+  a tip is a contact with curved edges, with oracle reports on main and
+  here alike. Within three quarters of a tolerance of the exact contact, 704
   of 83,065 results differ in their counts from the exact contact's
   (mostly an edge left split), 673 of them as on main: results are not
   yet canonical under motions within the tolerance. The oracle that

@@ -3503,8 +3503,10 @@ fn slab(pts: &[DVec2]) -> Body {
 /// V's cluster lies on the top's edge, which once let the whole flap off
 /// as a contact at the top's boundary: A ∩ B validated with the flap and
 /// the top crossing 12.5 tolerances inside both, as on main. Only the
-/// flap's points within three tolerances of the cluster are the
-/// contact's; the top holds the rest, and every operation is refused.
+/// flap's points within the tolerance of the place of a member of V's
+/// cluster are the contact's (the members' discs; the first build took
+/// those within three tolerances of the cluster's place); the top holds
+/// the rest, and every operation is refused.
 #[test]
 fn a_spike_tip_on_the_edge_of_a_face_holding_its_flap() {
     let eps = k().tolerance().linear;
@@ -3826,18 +3828,18 @@ fn touching(refusal: String, a_less_b: &str, b_less_a: &str) -> [String; 6] {
 /// Tilted 3° (1°), the tip 15 (30) tolerances across L in the face's
 /// plane, under the top, over a box pierced under it by a triangle whose
 /// apex lies half (0.49) of the way from the tip's foot to L: the foot
-/// lies in the hole, and the tip's edges leave it over the top. Tilted 1°,
-/// the tip 17.2 tolerances across L: under a top cut along a line from 6
+/// lies in the hole, and the tip's edges leave it over the top. Tilted 1°:
+/// the tip 17.2 tolerances across L under a top cut along a line from 6
 /// tolerances along L from the tip to a quarter of the way to its foot and
-/// pierced likewise (the hole's apex 0.3 of the way); and under a top cut
-/// by a line from 6 tolerances before the tip along L to half way to its
-/// foot and by a line at 70° (140°) to L beyond the foot, the tip from the
-/// near side above the top (from the far side under it). Main failed every
-/// operation of each but the 140° case, where it refused A ∪ B and B ∪ A,
-/// found A ∩ B and B ∩ A empty and answered A − B and B − A, though the
-/// faces lie within the tolerance of each other over the tip's edges'
-/// feet, which neither the meeting nor classification separates; every
-/// operation is now refused at the tip. Without rule 3, without its test
+/// pierced likewise (the hole's apex 0.3 of the way); and the tip 34.4
+/// (17.2) tolerances across L, from the near side above the top (from the
+/// far side under it), under a top cut by a line from 6 tolerances before
+/// the tip along L to half way to its foot and by a line at 70° (140°) to
+/// L beyond the foot. Main failed every operation of each but the 140°
+/// case, where it refused A ∪ B and B ∪ A, found A ∩ B and B ∩ A empty and
+/// answered A − B and B − A, though the faces lie within the tolerance of
+/// each other over the tip's edges' feet, which neither the meeting nor
+/// classification separates; every operation is now refused at the tip. Without rule 3, without its test
 /// of V's edges (V's foot alone), or passing a notch tip with no stretch
 /// in front of it as an apex is passed, an operation fails as on main.
 #[test]
@@ -4015,10 +4017,10 @@ fn an_apex_across_the_line_is_refused_where_the_top_holds_its_foot() {
 /// along the top's edge refuses the unions. Two notches the fuzz found at 1° and
 /// 0.5°, their tips within the tolerance of a stretch of the meeting: the
 /// split refuses them, at the tip or (its stretch meeting the top's cut
-/// edge) 250 mm away. Without rule 3's isolation the tip over the top's
-/// edge is refused in every operation with the strip's text, and with V's
-/// foot tested a rounding margin from the top's edges rather than at ρ so
-/// is the fuzz's notch at 1°.
+/// edge) at the box's end, about 740 mm away. Without rule 3's isolation
+/// the tip over the top's edge is refused in every operation with the
+/// strip's text, and with V's foot tested a rounding margin from the top's
+/// edges rather than at ρ so is the fuzz's notch at 1°.
 #[test]
 fn a_notch_tip_left_to_the_meeting_or_the_split() {
     let eps = k().tolerance().linear;
@@ -4122,19 +4124,19 @@ fn a_notch_tip_left_to_the_meeting_or_the_split() {
 /// one side only). A notch tip from the near side 0.7 tolerances above the
 /// top at 30°, its prism leaning 75° so its edge out of the face at the tip
 /// leaves the tip to its neighbours' side, a touch the record holds, though
-/// the normals call it isolated: main failed A ∪ B, A ∩ B and A − B as a
-/// contact's pieces that disagree on their side. A notch tip from the far
-/// side 0.3 tolerances under the top at 10°, its prism below its face
+/// the normals do not call it isolated: main failed A ∪ B, A ∩ B and A − B
+/// as a contact's pieces that disagree on their side. A notch tip from the
+/// far side 0.3 tolerances under the top at 10°, its prism below its face
 /// leaning 85°: main failed the same three. An apex of a notch 0.3
 /// tolerances above a top ending 3 tolerances beyond its foot at 5°, its
 /// prism leaning 87.5° so its edge out of the face leaves the apex to P's
 /// other side, which the record does not count a touch while the normals
-/// do not call it isolated: main failed every operation as kept pieces
-/// that do not close. Every operation is now refused at the corner. With
-/// the normals' test alone the near tip fails as on main, and with the
+/// call it isolated: main failed every operation as kept pieces that do
+/// not close. Every operation is now refused at the corner. With the
+/// normals' test alone the near tip fails as on main, and with the
 /// record's alone the apex does.
 #[test]
-fn an_oblique_corner_is_refused_unless_both_tests_call_it_isolated() {
+fn an_oblique_corner_is_refused_unless_both_tests_call_it_no_isolated_touch() {
     let eps = k().tolerance().linear;
     let p = DVec2::new;
     {
@@ -4214,7 +4216,7 @@ fn a_spike_flap_is_tested_unless_the_touch_at_its_tip_decides_it() {
         let yv = d * eps * t.to_radians().cos();
         let n = p(20f64.to_radians().cos(), 20f64.to_radians().sin()).perp();
         let a = slab(&ccw(clip(&top_rect(), p(0.5, yv), n)));
-        outcomes("outside the face's body", &a, &b, zero.clone());
+        outcomes("outside the top's body, unpinched", &a, &b, zero.clone());
     }
     let up_10 = |alpha: f64, phi: f64| {
         let h = 0.9 * eps / 10f64.to_radians().sin();

@@ -3870,7 +3870,7 @@ References: M. Segal, "Using tolerances to guarantee valid polyhedral
 modeling results", *Computer Graphics* (Proc. SIGGRAPH) 24(4), 1990;
 Jackson 1995 (§2).
 
-## 21. Corners across the line, and runs no meeting covers (design and build, 2026-10-19)
+## 21. Corners across the line, and runs no meeting covers (design and build, 2026-10-19 to 20)
 
 §20's fault on main, taken up next. Mapping it found three more.
 
@@ -3977,7 +3977,7 @@ every operation is answered.
   vertex where θ < 30°. In B alone the same points lie at the same
   distances and are excused. These predate b032fc6. And the oracle
   tests edges against faces, so it cannot see two faces crossing away
-  from their edges: the spike's flap, and the fold of option 1 below.
+  from their edges: the spike's flap, and the fin of option 1 below.
 
 **Options for the tip.** Five; the first and the last were built and
 measured on every sweep, and judged by three reviewers, each of whom
@@ -4013,74 +4013,224 @@ built both and ran checks of their own.
 5. *Refuse before any face is split*, where the meeting misses V and the
    box's top holds V's foot. Chosen. The prototype turned every failure
    of the sweeps (32,109 operations) into one refusal, reported at V in
-   both orders, changed no result that returned, and changed the text
-   of about 41,000 refusals to its own. It is §20's choice (Segal 1990:
+   both orders, changed no result that returned, and changed the text of
+   about 41,000 refusals to its own. It is §20's choice (Segal 1990:
    what the tolerance merges is merged consistently, and what it cannot
-   is reported), with §20's consequence that the refusal does not
-   depend on the operation: A ∩ B and the differences have answers
-   within the tolerance (option 1's), which "bend, and refuse only the
-   unions" could give later as a design of its own.
+   is reported), with §20's consequence that the refusal does not depend
+   on the operation: A ∩ B and the differences have answers within the
+   tolerance (option 1's), which "bend, and refuse only the unions"
+   could give later as a design of its own. The first build refused so,
+   testing V's foot; the review (*The first build*) kept the refusal
+   before any face is split but replaced that test by rule 3 (*A notch
+   tip or an apex*), which also takes apexes, passes some tips whose
+   foot G holds, and refuses some whose foot it does not hold where G
+   holds their edges.
+
+**The first build, and the review that redesigned it** (2026-10-19 to
+20). The first build refused a notch tip wherever G held V's foot,
+tested a flap only where the layer between the flap and P lay outside
+F's body, and left out of a strip the points within 3 ε of a contact's
+place, about the representative of its cluster. Its goldens and fuzz
+passed. A review in breadth then built 27 families of cases aimed at the
+edges of each rule, 37,712 contacts (34,734 run as all six operations;
+2,530, in four families drawn from the fuzzes of `tests/booleans.rs`, as
+those fuzzes' four, A ∪ B, A ∩ B, A − B and B − A; and 448 of one
+family, whose first body could not be built, as none), three tracers
+found the deciding line of each fault on main and on the first build,
+and three judges built five designs as switches of one prototype and
+measured them on the families, the soundness judge adding six families
+of its own against the leading design (9,016 contacts). Each operation
+is graded failed (an invalid result), crossing (faces crossing more than
+ε inside both, the faces-crossing check below, at a pinch or a region),
+folded (*Not decided*), refused or answered; a contact is bad when an
+operation of it fails or crosses. The review found three faults in the
+first build, and a fourth, of cost, in all five designs.
+
+- *The first build's test of V's foot tested the wrong fact.* Traced on
+  main, a notch tip fails, in the check of a contact's side, exactly
+  where V is an isolated touch of G, no stretch at V's place along L
+  lies behind V (F lower over it than at V), and G's region about V's
+  foot, after the split, reaches past the band on the side of L away
+  from V's touch: the region's own test point and the point the check
+  takes 4 ε across P from V then see opposite sides of F. The first
+  build refused wherever G held V's foot, so it refused tips that are no
+  isolated touch (F's walls cross P through V, and main refuses them as
+  edges crossing or answers them right; 106 contacts) and tips with a
+  stretch behind V, which cuts the region off (232 contacts); it missed
+  tips whose foot lies in a hole or a window of G while V's edges enter
+  G (68 contacts failing as on main); and it never tested apexes, which
+  fail the same way behind a run of G lying along L (105 contacts
+  failing as on main).
+- *The flap's side was half the table.* A flap whose layer lies in F's
+  body but outside G's was left untested, on the ground that the touch
+  at V refuses the one operation keeping both, a difference, as touching
+  at a point. It does only where the touch survives the settling of
+  touched points and a piece of G holds it: settling drops a touch whose
+  cluster ends a segment of G, which is exactly where the clustering put
+  V on G's boundary, and a touch whose foot G does not hold refuses
+  nothing. There A − B returned the flap and G's piece crossing, up to
+  57 ε inside both.
+- *3 ε about the representative.* A cluster's representative is its
+  first operand's vertex, so the disc depended on the operands' order,
+  and it reaches farther than the cluster's own reach: it let crossings
+  up to 2.03 ε through (682 contacts of one family) and answered B ∩ A
+  crossing 1.29 ε where it refused A ∩ B.
+- *Work across coplanar faces* (a fault of the five designs, not of the
+  first build, which had neither cause). The designs collected the flaps
+  of every pair of faces and passed a tip only where the box of its
+  foot and its neighbours' feet missed G's box, so the steps grew with
+  the tips times the other body's coplanar faces: in P1 to P3 (the
+  table below), a comb of 512 spikes took 4,614 steps against a top of
+  one face and 135,858 against a top split into 256 coplanar faces,
+  where the first build took 1,026 against each, and P3 refused 2,048
+  spikes against a top of 2,048 coplanar faces as too large, where the
+  first build answered.
+
+The designs measured, by contacts bad and their deepest crossing:
+
+| design | notch tips | flap's side | places | bad, 27 families | deepest | bad, 6 families |
+|---|---|---|---|---|---|---|
+| main | none | none | none | 4,552 | 57 ε | 537 |
+| first build | foot | outside F | 3 ε about rep | 1,368 | 57 ε | 77 |
+| P1 | plane | first, + pinch | 3 ε about rep | 854 | 2.03 ε | 46 |
+| P2 | record, backstop | first, + pinch, all strips | members | 135 | 1.20 ε | 41 |
+| P3 | plane | first, + pinch, all strips | members | 108 | 1.20 ε | 36 |
+| P4 | record, backstop | first, + pinch, all strips | 3 ε about rep | 881 | 2.03 ε | 51 |
+| P5 | plane, backstop | first, + pinch, all strips | members | 108 | 1.20 ε | 31 |
+| as built | plane or record | + isolation, crossing | members | 69 | 1.20 ε | 15 |
+
+Each fault the judges found in a design is a rule below, with the case
+that forced it. The judges' families and harness are not in the tree;
+the cases that decided each rule are goldens (*Tests*), all but the
+notch tips of rule 3's item 4 (*A stretch lies behind V*), which no
+golden holds.
 
 **The rule (as built).** Let F be a face of a pair of faces on planes that
-cross, G the other face, on the plane P, and L the planes' common line.
+cross, G the other face, on the plane P, θ the planes' angle, L their
+common line, and ρ = ε(1 + 2⁻¹⁰) the strips' depth (§20).
 
-*One pass over F's vertices.* §20's pass over F's coedges within ε of P,
-which finds its vertex chains, now sorts each vertex V of F whose sign
-on P is 0 and whose two edges are straight, with d its distance from P
-and a, b its neighbours, so that this rule's tests and §20's are made
-once and cannot disagree:
+*One pass over F's vertices* (as first built). §20's pass over F's
+coedges within ε of P, which finds its vertex chains, sorts each vertex
+V of F whose sign on P is 0 and whose two edges are straight, with d its
+distance from P and a, b its neighbours, so that this rule's tests and
+§20's are made once and cannot disagree:
 
-- *an apex* (§20, unchanged): d ≠ 0, both edges running away from P on
-  V's side (the other end of each farther than V from P, with d's sign),
-  at a reflex corner of F: a vertex chain;
+- *an apex*: d ≠ 0, both edges running away from P on V's side (the
+  other end of each farther than V from P, with d's sign), at a reflex
+  corner of F: a vertex chain of §20, and now tested as a notch tip is;
 - *across*: d ≠ 0, and a and b both with the sign −sign(d): V lies
   across L from its edges' other ends, both edges cross L, and by the
-  signs F's boundary meets P at V alone;
+  signs F's boundary meets P at V alone; a notch tip at a reflex corner,
+  a spike's flap at a convex one;
 - neither: d = 0 (V is on L, and every meeting along L passes through
   it); a neighbour on P no farther from P than V (V is on a run, a
-  chain of §20; a neighbour on P farther than V on V's side still runs
-  away, and V may then be an apex too); neighbours on
-  two sides (F's boundary crosses P at V, and both half-open rules end
-  an interval there); or both on V's side at a convex corner (a tip
-  pointing at L, answered: golden 40). Neighbours on V's side with sign
-  s ≠ 0 are farther from P than V, so for them an apex is exactly
-  sign(d) = s at a reflex corner and across exactly sign(d) = −s.
+  chain of §20); neighbours on two sides (F's boundary crosses P at V,
+  and both half-open rules end an interval there); or both on V's side
+  at a convex corner (a tip pointing at L, answered: golden 40).
+  Neighbours on V's side with sign s ≠ 0 are farther from P than V, so
+  for them an apex is exactly sign(d) = s at a reflex corner and across
+  exactly sign(d) = −s.
 
-*A notch tip.* An across V at a reflex corner of F is refused before any
-face is split, with the text of §20 ("a face of one body runs within the
-tolerance of the other's surface without lying on one of its faces"),
-where:
+*The touch record.* §18.2's `touches` decides which vertices of F within
+ε of P touch P from one side alone (isolated: the sign s of V's
+neighbour along F, V not smooth, and no edge at V leaving to −s), and
+the settling of touched points reads that decision. The rules below read
+it too, rather than deciding it again: for each pair of crossing planes,
+`touches` runs once for each side, before the strips, and the strips and
+the settling share its record, the touched clusters in order, searched
+by halving. (A prototype that asked `touches` at each tip spent 73 % of
+its instructions there at 2,048 tips, and 124 ms on the guard of 512
+tips, whose limit is 100 ms.)
 
-1. *The meeting misses V.* No stretch of the pair whose span along L
-   comes within ε of the place of V's cluster has the cluster as an end
-   or as a cluster its split takes, by `split_segment`'s own test,
-   shared. A tip within ε of a stretch bends it and is answered as on
-   main. The window is about the cluster's place, which the split
-   measures, not about V, which may lie 2 ε from it (a reviewer's
-   finding; no case in the sweeps tells the two apart).
-2. *V is no point of G's boundary.* V's cluster holds no vertex of G and
-   lies on no edge of G, as the clustering decided it
-   (`Points::incidences`). Where it does, main's outcomes stand: the
-   settling of touched points and the corners decide it, refusing every
-   operation in the cases a reviewer probed from 0.2 ε to 0.8 ε inside
-   the box's end (but see *Not decided*); from about 0.9 ε inside, at 10°
-   with V 3 ε across, V's cluster is no point of the end's edge, and the
-   tip is refused by this rule (golden 42 at 2 ε and 4 ε), where main
-   failed. The prototype decided this a
-   second time by geometry, from V's distance to P; reviewers asked for
-   the clustering's decision.
-3. *G is under V.* V's foot on P is not placed outside G, against G's
-   outline as the strips place points (§20), to the rounding margin
-   2⁻¹⁰ ε. Where it is outside, main answers: a box whose edge
-   parallel to L lies between L and the foot, at 1° with V 50 ε across,
-   gives the contact's outcomes (the unions refused as touching along an
-   edge, the intersections empty, the differences valid).
+*A notch tip or an apex* (rule 3). A notch tip, or an apex, V of F is
+refused before any face is split, with §20's text ("a face of one body
+runs within the tolerance of the other's surface without lying on one of
+its faces"), unless one of the following items passes it, in this order:
 
-The text is true here: V's edges and F's walls at them lie within ε of
-P over G between V and L, on none of G's faces. Of the pair's refused
-tips, the one with the least coordinates is reported, so both orders
-report one point; where tips lie in two pairs of faces, the place can
-depend on the order, as §20's can.
+0. *G is out of reach.* V's foot on P and the feet of V's edges from V
+   up to where F's height over P (along s n_G) reaches the greatest
+   height of F over the pair's stretches, at their clusters'
+   representatives, lie in a box that, grown by 4 ε, misses G's. Every
+   point the last test places lies in that box: the test set below
+   reaches no higher than a stretch's height or L's, 0. An apex where
+   the pair has no stretch, and a pair whose planes are square
+   (n_F · n_G = 0, so F has no height over P), are passed here where
+   V's foot alone, grown by 4 ε, misses G's box; otherwise they go on,
+   and the items below pass them all the same: a square pair right after
+   item 2, unless item 1 or 2 has passed it, and such an apex by item 5
+   at the latest. The greatest height is found once for each side of
+   each pair, when a tip first needs it.
+1. *The meeting takes V* (as first built). A stretch of the pair whose
+   span along L comes within ε of the place of V's cluster has the
+   cluster as an end or as a cluster its split takes, by
+   `split_segment`'s own test, shared: the split bends the meeting
+   through V, and main's outcomes stand.
+2. *V is a point of G's boundary* (as first built). V's cluster holds a
+   vertex of G or lies on an edge of G, as the clustering decided it
+   (`Points::incidences`): the settling of touched points and the corners
+   decide it (but see *Not decided*).
+3. *V is no isolated touch.* Both tests say so: the touch record does
+   not hold V's cluster, and s (n_F · n_G) ≥ 0, F's body behind V lying
+   on the side −s of P or along it. Where V is no isolated touch, F's
+   walls cross P at V, and the split's intervals decide it: main refuses
+   such tips as edges crossing or answers them right (106 contacts the
+   first build refused). Each test alone misses a case that fails on
+   main. The record alone: an edge leaving V on the other side at a
+   shallow angle φ stays within ε of P for ε / sin φ, so `touches`
+   counts it a crossing though no meeting is made along it; F's body
+   still lies on V's side within the tolerance, and an apex 87.5°
+   oblique so failed every operation as kept pieces that do not close.
+   The plane alone reads F's plane and not the other faces at V, which
+   can make V an isolated touch where F's plane says not: an oblique
+   prism's notch tip, leaning 75° to 85°, failed each operation in one
+   order, in the side check. Together they refuse six contacts that the
+   plane alone passes: five of them fail so on main, and main refuses
+   the sixth.
+4. *A stretch lies behind V.* A stretch over the span ±ε about V's place
+   along L over which F's height (along s n_G) is below V's own: the
+   meeting there lies on the side of V where F falls, away from V's
+   edges, and the split cuts G's region about V's foot along it, so the
+   region does not reach past the band and the side check sees one side
+   (232 contacts the first build refused, answered right on main). A
+   stretch over V's place at or above V's height is *in front*. (A
+   stretch is a piece of the meeting; within the tolerance it can lie
+   off L, along a run of G lying within ε of F.)
+5. *An apex with nothing in front.* An apex with no stretch in front is
+   passed. The apexes that fail on main have a meeting in front, along a
+   run of G lying in F's band, through which G's region about the foot
+   reaches back across L (traced); with none, no measured apex failed,
+   and the test set below would have no front to end at. This is
+   measured, not proven. A notch tip with nothing in front goes on, with
+   L as its front.
+
+Otherwise V is refused where G holds a point of the test set more than ρ
+from every edge of G: V's foot on P, and the feet of the parts of V's
+edges from V up to where F's height reaches the front's less ε sin θ
+(the front being the nearest stretch over V's place, or L). "Holds" is
+`place(…, ε)` = inside, at the middle of each part of the feet left
+outside the capsules of radius ρ about G's straight edges near them,
+found by G's tree; V's foot is the part's end at V, and is tested at the
+same depth. A curved edge of G near them is refused as not supported, as
+§20's strips are. The foot catches a tip whose region reaches back past
+the band (§20: the tolerance puts F within ε of P over G there, on none
+of G's faces, so the text is true), among them an apex behind a run of G
+lying along L (105 contacts failing on main and in the first build); the
+edges catch a tip whose foot lies in a hole or a window of G while V's
+edges enter G (68 contacts failing on main and in the first build). The
+test set lies within ε of P (V does, and every front is a stretch's
+height or L's), so the text is true of every point it refuses. The tip
+with the least coordinates among the pair's refused tips is reported, so
+both orders report one point; where tips lie in two pairs of faces, the
+place can depend on the order, as §20's can.
+
+The text is §20's, and the refusal does not depend on the operation
+(*Options for the tip*, 5). A narrower test, that G's region about the
+foot has a clear way back past the band, was built (a tracer's
+candidate) and refused fewer: it failed 66 contacts of a soundness
+family where an edge of G ending inside the region's way back left the
+region reaching around it. The tips refused here whose results on main
+were right (26 contacts, a foot held deeper than ρ with V within ε of P)
+are §20's runs within the tolerance, correct by its text.
 
 *A spike's flap.* An across V at a convex corner of F has a flap: the
 triangle of F's plane between V's two edges and L, F's part across L.
@@ -4089,127 +4239,122 @@ V's neighbours, s), so F is classified whole with that side, and the
 piece of G about the flap's foot, which no meeting splits at L, takes
 its class from where F lies on side s. In each configuration exactly
 one operation keeps both (the one keeping F's class against A and G's
-against B), and in it they cross along L. Which operation that is
-depends on where the layer between the flap and P lies:
+against B), and in it they cross along L, by the depth to which G holds
+the flap's base. Which operation that is depends on where the layer
+between the flap and P lies:
 
-| the layer between the flap and P | the operation keeping both | on main |
+| the layer between the flap and P | the operation keeping both | its outcome on main |
 |---|---|---|
-| in both bodies (V below P, B above its face: golden 40) | A ∪ B (both orders) | refused, as touching at a point |
+| in both bodies (V below P, B above its face: golden 40) | A ∪ B (both orders) | refused, as touching at a point (or along an edge), where the touch at V is isolated (but see *Not decided*: two such contacts, the touch not pinched, returned crossing up to 1.83 ε); else returned, crossing |
 | in neither (V above P, B above its face) | A ∩ B (both orders) | returned, the faces crossing |
-| in B only (V above P, B below its face) | A − B | refused, as touching at a point |
+| in B only (V above P, B below its face) | A − B | refused where the touch at V is isolated and pinches and G's boundary stays out of the tolerance's reach of the flap; failing in every operation (a contact's pieces disagreeing on their side) where the touch is isolated and pinches and an edge of G comes within ρ of the flap; else returned, crossing |
 | in A only (V below P, B below its face) | B − A | returned, the faces crossing |
 
-Measured on a spike of B's face whose edges leave V at 26.6° to L's
-normal, at 10° with V 3 ε and 5 ε across L and at 1° with 30 ε and
-50 ε: the faces cross 1.31, 2.18, 13.4 and 22.4 ε inside both in the
-two configurations that return them, and every other result is clean
-under the reviewer's check. So where the layer lies in F's body, the
-operation that would keep both touches at V from F's side and is
-refused, and the others are answered within the tolerance (golden 40);
-where it lies outside F's body, F's flap and G's piece are returned
-crossing. With the sides of §20 (`across`
-= n_F × L's direction in F's plane), the layer from V runs along
-−sign(d) n_G, into F's body where sign(d) (n_F · n_G) is positive. The
-flap is tested only where that is negative, the opposite of §20's
-vertex chains, because here F lies across L from the flap: its points
-within ε of either of V's edges are left out, the rest is cut by the
-pair's stretches as a strip is (§20: ending ε short of a meeting's line
-over the part of its span the meeting covers), and the boolean is
-refused with the band text where G holds a point of it more than ε
-inside, found by §20's search. Points on L are kept, unlike a strip's,
-since no meeting lies there: F's interval at the spike is a single
-point, so no stretch is made, and F crosses P along the flap's base
-unsplit. Where G holds such a point, the result keeps faces that lie
-flush over a region, or cross, more than ε from both faces' boundaries
-(§20's fin). A flap within ε of V's edges throughout is answered as on
-main, a tip under the tolerance thick (§20's list of regions that are
-no strip). No point of the flap is farther than ε from both edges
-unless V is farther than ε from L: the farthest from both lies on the
-bisector of V's angle α where it meets L, h sin(α/2) / cos β from each,
-with h the distance from V to L and β the bisector's angle from L's
-normal, and sin(α/2) < cos β since both edges reach L (β + α/2 < 90°).
+(B is F's body in the table.) With t = ±1 the side of L the flap lies on
+in F's plane and `across` = n_F × the direction of L in F's plane, as in
+§20, the layer lies in F's body where t (across · n_G)(n_F · n_G) > 0
+and outside G's body where t (across · n_G) > 0 (§20, *The sides
+tested*). The touch at V *pinches* where V's cluster is no point of G's
+boundary and G holds the foot of the cluster's place (`place` inside, at
+depth 2⁻¹⁰ ε, as the split places the touch); it is *isolated* where the
+touch record holds V's cluster. The flap is tested on its own side (its
+points within ε of either of V's edges left out, the rest cut by the
+pair's stretches as a strip is, and the boolean refused with §20's text
+where G holds a point of it more than ε inside, found by §20's search;
+points on L are kept, since no meeting lies there) where:
 
-*A run no meeting covers.* A run R of F lying on P that is one of F's
-whole intervals on L is skipped by §20 only where the pair's stretches
-cover it: the stretches whose spans come within ε of R's, each grown by
-ε at both ends. Where they leave parts of R's span uncovered, R's strip
-over those parts is tested as any run's (§20, both sides of L); where
-none covers it, all of it. §18.2's reason for skipping a whole interval
-(the run is the meeting, so nothing is imprinted beside it) holds only
-where a meeting is made along the run.
+1. the layer lies outside F's body: the operation keeping both is
+   answered on main (A ∩ B, B − A);
+2. or the touch is not isolated: nothing settles a touch at V, so
+   nothing refuses the operation keeping both (an oblique prism leaning
+   85°: A − B crossing 4.50 ε; leaning 88.5°, with the layer in both
+   bodies, A ∪ B crossing 14.9 ε, seen only where the check ranks a
+   crossing of faces that share no edge above a fold);
+3. or the layer lies outside G's body and the touch does not pinch:
+   settling drops the touch on G's boundary, and a foot outside G
+   refuses nothing (A − B crossing up to 57 ε, the first build's
+   fault).
 
-*At G's boundary* (found by the contact fuzz at a hundred times its
-run, while building; narrowed after review). Where the clustering has
-already put G's boundary on the chain, the settling of touched points
-and the corners decide the contact there, as rule 2 leaves a notch tip
-there. So the strip is tested less its points within 3 ε of those
-places, measured in P as the search measures: a cluster spreads at most
-2 ε about its representative (`Points::settle` refuses wider), and these
-are the points within the tolerance of it. The places are:
+Where the layer lies in F's body and outside G's and the touch is
+isolated and pinches, the touch refuses A − B, provided G's boundary
+stays out of the tolerance's reach of the flap: where an edge of G comes
+within ρ of the flap's tested piece (its triangle less its points within
+ε of V's edges, its base on L kept, cut by the pair's stretches),
+settling and assembly disagree ("a contact's pieces disagree on their
+side": 35, 15, 3 and 1 contacts of four families, every operation
+failing on main and in every design without this test), so the boolean
+is refused with §20's text there instead. The edges are found by G's
+tree; a curved one that may reach the flap is refused as not supported.
 
-- *the corner V of a flap that is a point of G's boundary*, by rule 2's
-  own test (`on_boundary`, shared): B resting by a corner or an edge on
-  A's face, a face of B crossing that face's plane at a slant with a
-  corner across L, the clustering putting the corner on an edge or a
-  corner of A's face (contacts 548 and 2237 at 1 tolerance, 86 at 1);
-- *each cluster on a whole run's edges that holds a corner of G*: a
-  vertex of an edge bounding G (`corners_on`). B rests by an edge
-  passing a corner of A's face, the edge lying on the face's plane as
-  its face's whole interval on L, which no interval of A's face meets
-  (contacts 4917 at −0.5 tolerance and 2383 at −0.75). In 4917 B's face
-  crosses A's at 14° and lies within ε of it over a sliver at the
-  corner, where A's face holds the run's strip just over ε inside.
-  Nothing splits either face along the sliver, so each is classified
-  whole, and the outcomes are the contact's: the unions refused as
-  touching at a point, the intersections empty, the differences the
-  operands unchanged.
+Where the layer lies in both bodies and the touch is isolated, the flap
+is not tested: assembly refuses A ∪ B as touching at a point or along an
+edge (held in 377 measured contacts, though not in the two of *Not
+decided* where the touch does not pinch and A ∪ B crosses up to
+1.83 ε). Testing it too, where the touch does not pinch, refused 1,329
+more contacts of the 27 families (5,291 operations) and mended none of
+their bad ones; of the six families it mended only those two.
 
-In these five, the points the search found held, with nothing left
-out, lay 1.5 ε to 2.5 ε from the place
-(`contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross`
-in `tests/booleans.rs`, which fails without either place). The first
-build left out the whole flap or the whole run instead, which review
-showed too wide, each case as on main: a slab's edge at 45° to L passing
-under the corner of golden 44's spike at 2°, 28 ε across, the slab
-holding the rest of the flap, returned A ∩ B with the faces crossing
-12.5 ε inside both (golden 46); and a tongue of a slab's top holding a
-whole run's strip 0.4 m from a corner of the top on the run failed
-three operations as kept pieces that do not close (golden 47). Both are
-refused now.
+A flap within ε of V's edges throughout is answered as on main, a tip
+under the tolerance thick (§20's list of regions that are no strip). No
+point of the flap is farther than ε from both edges unless V is farther
+than ε from L: the farthest from both lies on the bisector of V's angle
+α where it meets L, h sin(α/2) / cos β from each, with h the distance
+from V to L and β the bisector's angle from L's normal, and
+sin(α/2) < cos β since both edges reach L (β + α/2 < 90°).
 
-Leaving nothing out, the contact fuzz at a hundred times refused 55
-operations that main answers, in 21 pairs (these five among them).
-Main's results there pass the oracle, and the faces-crossing check but
-for two: A − B of contact 3129 at 0.5 tolerance, where a flap's face
-and A's cross 1.36 ε inside both at a vertex they share (planes at
-16.4°), and A ∪ B of 792 at 0.75, a fold (1.2 ε, the faces sharing an
-edge; *Not decided*). With the places' discs left out it refuses 17 of
-the 55, in six pairs, and otherwise exactly main's operations, 25 of
-them with §20's text where main gave another refusal's. The 17, each
-held beyond the reach of its place
-(`contacts_at_the_boundary_of_a_face_held_beyond_the_reach_of_its_places`):
+*Flaps under strips.* A flap of G's face lies across L from G, under F's
+strips near L. Its triangle (V and its edges' two crossings of L) is
+decided by the flap's rule above, so every strip of F (a run's, a whole
+run's, a hole's or an apex's) leaves it out, exactly: each convex piece
+of the strip loses the triangle, leaving at most three convex parts.
+Without it, two rules decided one fact, and the strip, which has no side
+rule, refused what the flap's rule answers: the first build refused 84
+contacts of one family so, through whole runs' strips, and a tracer's
+fix that left flaps out of whole runs' strips alone still refused every
+operation of 136 contacts of another, through runs' strips, as main
+does; of their 816 operations this build answers 612, and the touch at
+the tip refuses the rest (golden 54). The flaps are collected only from
+the other face's chains whose strips can come within the search's reach
+of F (`strip_near`: the box of the chain's points and of their feet on
+L, taken in the chain's own face's plane square to L, grown by the
+points' greatest distance from F's plane and by 4ρ, the search's reach
+of 2ρ and as much again for rounding, meets F's box; the same test, made
+once for each chain of either face before any step, passes every chain
+whose strip cannot reach the other face). They are sorted by their spans
+along L when a strip first needs them, and each strip piece takes only
+those whose spans meet its own, in order of their starts; a part of the
+piece that ends before a triangle starts is final, since later triangles
+start later.
 
-- all four of 3129 at 0.5, the flap held 3.2 ε from its corner's place,
-  among them the crossing A − B, which the first build returned as main
-  does;
-- B − A of 5385 at 1, a flap held 3.3 ε from its corner's place, whose
-  other operations main refuses too;
-- A ∩ B (empty) and the differences of 3613 and 3492 at −0.75, B
-  resting by an edge that passes a corner of A's face as the whole
-  interval of its face, held 3.1 ε and 3.9 ε from the corner; and of
-  4917 at −0.75 and −1, held 54 ε and 105 ε from the corner along A's
-  face's edge, which the run follows 0.55° from it. Main returned the
-  contact's outcomes there, the differences right within the tolerance,
-  and refused the unions, as touching at a point (*Not decided*).
+*A run no meeting covers* (as first built). A run R of F lying on P that
+is one of F's whole intervals on L is skipped by §20 only where the
+pair's stretches cover it: the stretches whose spans come within ε of
+R's, each grown by ε at both ends. Where they leave parts of R's span
+uncovered, R's strip over those parts is tested as any run's (§20, both
+sides of L); where none covers it, all of it. §18.2's reason for
+skipping a whole interval (the run is the meeting, so nothing is
+imprinted beside it) holds only where a meeting is made along the run.
 
-So no reach about a place separates the results main got right from
-those it got wrong: 3129's flap, held 3.2 ε from its place, is a
-defect, and the runs held 3.1 ε and 3.9 ε are not. The reach is the
-tolerance about the cluster's spread, where the clustering decided the
-contact. The search leaves out a place's disc exactly: each line it
-clips loses the disc's chord, and the crossings of the disc's circle
-with the circles about the ends of G's edges and with the other discs'
-are tested as corners of what is left (`held_point`).
+*At G's boundary.* Where the clustering has already put G's boundary on
+the chain, the settling of touched points and the corners decide the
+contact there, as rule 3's item 2 (*V is a point of G's boundary*)
+leaves a notch tip there. So the strip is tested less its points within
+ε of each member place of those clusters (`Points::member_places`): the
+clustering decided that its members are one point, and these are the
+points within the tolerance of one of them. The first build left out 3 ε
+about the cluster's representative (a cluster spreads at most 2 ε about
+it), which depends on which operand's vertex is the representative and
+reaches past every member (*The first build*). The places are:
+
+- *the corner V of a flap that is a point of G's boundary*, by the test
+  of rule 3's item 2 (`on_boundary`, shared);
+- *each cluster on a strip's chain that holds a corner of G*: a vertex
+  of an edge bounding G (`corners_on`), on a whole run.
+
+The search leaves out a place's discs exactly: each line it clips loses
+each disc's chord, and the crossings of the discs' circles with the
+circles about the ends of G's edges and with each other are tested as
+corners of what is left (`held_point`).
 
 *The oracle* (`tests/self_contact`).
 
@@ -4243,13 +4388,139 @@ are tested as corners of what is left (`held_point`).
   is a defect for another reason: the exact configuration it
   approximates is a pinch at V, where F and G meet at a point and share
   no edge. So the check measures; it does not judge, and it is asserted
-  only where a result holds no fold (below). Over the sweeps, the
-  operations whose results cross more than ε fall from 1,346 on main to
-  184, each a result of main's too; in the notch fuzz at a hundred
-  times, from 311 to 11, the same (*Not decided*).
+  only where a result holds no fold (below). Over the map's sweeps
+  (457,968 operations), the operations whose results cross more than ε
+  fall from 1,338 on main to 184, each crossing so on main too; in the
+  notch fuzz at a hundred times, from 311 to 11, the same (*Not
+  decided*).
 
-**Not decided.**
+**Measured** (the built rule). Of the 37,712 contacts of the 27
+families, 69 are bad, against 4,552 on main and 1,368 in the first
+build: 294 operations fail (main 6,660) and 16 cross, the deepest 1.20 ε
+(main 4,063, up to 57 ε). Of the 9,016 of the soundness judge's six
+families, 15 are bad (main 537, the first build 77), the deepest
+crossing 1.83 ε. Every operation that fails or crosses here fails or
+crosses on main too. 636 operations main refused are answered in the 27
+families, and 44 in the six. The two orders of a union or an
+intersection, one refused and one answered, differ in 89 contacts of the
+27 families, against 152 on main (96 of the six, against 102). And the
+first build's open case of a flap held only near its corner, a slab
+whose edge passes under a spike's foot on a slant, re-run as a family of
+1,536 contacts (2° to 20°, V 2 ε to 10 ε across L, the edge crossing L
+away from the point of L nearest V by 0.1 to 2 times V's distance from
+L, G on either side of it): 102 bad on main, crossing up to 7.93 ε, 40
+in the first build, none here.
 
+The notch fuzz at a hundred times (15,000 notches and spikes across L,
+four operations each) fails 3,140 operations of 1,046 cases on main and
+returns 311 crossing more than ε, up to 56 ε; here 4 fail, all of case
+7268, as on main (*Not decided*), and 11 cross, each a fold at the box's
+end that main returns too, and the refusals are the first build's line
+for line. Of its cases refused in some operation main answers, 300
+crossed on main and 3 did not (spikes at the box's end, below their
+face, where main refused one difference as touching at a point). Over
+the map's sweeps no operation main refuses or fails is answered, and of
+the 650 contacts refused in some operation main answers, 613 crossed
+more than ε on main, up to 76 ε, and 37 between 0.71 ε and ε (*Not
+decided*, the flap's test). The contact fuzz at a hundred times refuses
+259 operations of 76 contacts that main answers: in 41, main returned a
+result crossing 1.00 ε to 2.05 ε, mostly A − B, as the first build did;
+in 35, main's results were right (*Not decided*, the members' discs).
+The flat fuzz and the motions, at a hundred times, and the curved
+fuzzes, at twenty and fifty times, refuse exactly main's operations with
+main's texts (10,059, 8,290 and 20,522 refusals, none failing).
+
+The price is refusals. 4,566 contacts of the 27 families (21,753
+operations) are refused in some operation that main answered without
+failing, crossing or folding, and 403 of the six families (1,895). A
+refusal refuses all six operations (*Options for the tip*, 5), and in
+3,292 of the 4,566 main got another of the six wrong or folded it (2,941
+crossing more than ε, 351 folding, which *Not decided* leaves open). Of
+the 1,274 where it got all six right, 1,059 have no crossing even at a
+twentieth of the tolerance, 61 cross less than ε, and in 154 two faces
+that share an edge lie flush over a band, less than ε deep in 139 and
+1.01 ε to 15.5 ε deep in 15, each of those a sharp wedge whose planes
+meet at 2° to 23°, and none is §20's fin. 590 of the 1,274 are of one
+family, flaps held at a corner of G and refused under the members' discs
+(*Not decided*). Of the slab family above, 298 contacts are so refused,
+135 of them right on main in all six operations. The first build refused
+6 contacts of the six families that this build answers as main does,
+wrongly (*Not decided*: the shallow edge, and the in-both row): it
+refused them by accident, through its foot test and through a whole
+run's strip testing a flap. Where the layer lies in both bodies, a
+pinched flap is left to the touch at V even where its touch is isolated
+and G's edge comes within ρ (the pinch's crossing test runs only where
+the layer lies outside G's body). A prototype that tested those too
+refused 109 contacts more, 436 operations: their intersections and
+differences, which this build answers as main does, while assembly
+refuses their unions as touching along an edge (76 contacts) or at a
+point (33). It left the same contacts bad. In 379 other contacts both
+refuse every operation and only the texts differ, the prototype giving
+§20's text and this build main's texts.
+
+**Not decided.** Each of the first eight is bad on main in the same
+operations; none was made bad by this rule.
+
+- *A W astride a lying edge* (6 contacts of the 27 families): two tips
+  of a W of F, one either side of a run lying on P; every operation
+  fails, "the faces at a lying edge leave the face it lies on to both
+  sides".
+- *A pinched flap that still fails* (1 contact, a spike across L at
+  20°): every operation fails, "a contact's pieces disagree on their
+  side", though no edge of G comes within ρ of the flap. The pinch's
+  crossing test mended the others of its kind (above).
+- *Flap crossings just over ε* (16 operations of 16 contacts, 1.01 ε
+  to 1.20 ε): 15 where a corner of G lies 0.6 ε to 1 ε beyond a flap's
+  foot, away from L, G holding the flap's base; one where an edge of G
+  parallel to L lies half an ε short of the foot. The strip is tested on
+  the operands' points, which G holds less than ε inside, while the
+  result is built from the clusters' places, which lie up to 2 ε from
+  them.
+- *A vertex of a hole of G at a notch tip* (44 contacts): V's cluster
+  holds a vertex of a triangular hole of G, so rule 3's item 2 leaves V
+  to the settling and the corners, and every operation fails (or one
+  order of each), "the kept pieces do not close along an edge". The
+  premise of rule 3's item 2, that the corners decide a tip on G's
+  boundary, fails at a reflex corner of G.
+- *An edge of G parallel to L, ε short of a flap's foot* (2 contacts at
+  30°, G holding L's side): every operation fails, "the kept pieces do
+  not close along an edge"; not traced.
+- *The layer in both bodies, the touch isolated and not pinched* (2
+  contacts, at 30° with a corner of G 0.8 ε from V's foot): A ∪ B
+  returned crossing 1.83 ε and 1.63 ε in its two orders. And two
+  contacts at 30° with a corner of G 1.2 ε from the foot, where the
+  layer lies in both bodies and nothing isolates the touch: a side
+  face's flap left out of a whole run's strip is tested on its own side
+  only, and A ∪ B crosses 1.29 ε. Testing the first pair's row too mends
+  that pair and refuses 1,329 more contacts of the 27 families (above);
+  leaving out of the strips only the flaps the table decides mends the
+  second pair instead and refuses 242. The first build refused the
+  second pair, through the whole run's strip, and returned the first
+  pair crossing 1.83 ε, as main does.
+- *An edge leaving V at a shallow angle* (4 contacts, prisms leaning 85°
+  to 87.5°): an edge leaving V to the other side of P at an angle φ
+  stays within ε of P for ε / sin φ, and `touches` counts it a crossing,
+  so the record holds no touch; two unions and B − A fail, the oracle
+  finding an edge within ε / 4 of a face. The first build refused them,
+  by its foot test, by accident. Ranked crossings (below) show 8 more
+  operations of such prisms crossing 1.35 ε to 7.16 ε, on main as here.
+- *A prism leaning 75° to 88.5° over half a box's top* (7 contacts):
+  every operation fails, or one, "the kept pieces do not close along an
+  edge" (once "an edge with no origin"); not traced.
+- *The members' discs refuse results main got right.* 590 contacts of
+  one family (flaps held near a corner of G that the clustering put on
+  V; 538 of them right on main even at a twentieth of the tolerance, and
+  367 of them answered by the first build's 3 ε disc), and 35 of the
+  contact fuzz at a hundred times (548, 2237 and 86 at one tolerance
+  among them) are refused: G holds the flap more than ε inside and more
+  than ε from every member of the corner's cluster. No reach between
+  the members' and 3 ε about the representative was found that is
+  independent of the operands' order and keeps the crossings above out.
+- *Feet held deep at an isolated tip* (26 contacts): refused, where main
+  answers right; G holds V's foot more than ρ inside while V lies within
+  ε of P, so F runs within the tolerance of G there, on none of its
+  faces: §20's refusal, which does not depend on the operation. If §20
+  is read otherwise, these are the cases that decide it.
 - A corner across L one of whose edges is curved (a notch with an arc
   for a wall) falls through to main, which refused the case measured as
   an unsupported tangent contact. A curved edge of G that may come
@@ -4257,20 +4528,20 @@ are tested as corners of what is left (`held_point`).
   by the same test of control-point hulls; V's foot is placed in a face
   with curved edges by its chart outline (§20).
 - *Folds at the box's end.* Notch tips within ε of the box's end, which
-  rule 2 leaves to main's outcomes, and notch walls within a few
-  degrees of the end's plane. The faces-crossing check reports the same
-  results there on main and in this build: over the sweeps, 184
+  rule 3's item 2 leaves to main's outcomes, and notch walls within a
+  few degrees of the end's plane. The faces-crossing check reports the
+  same results there on main and in this build: over the sweeps, 184
   operations (mostly unions, V 0.1 ε to 0.7 ε either side of the end),
   1.02 ε to 1.90 ε inside both faces; in the notch fuzz at a hundred
   times, 11 results, 1.04 ε to 56 ε, the deepest where a wall leaves V
   at 0.9° to 1.6° from the end's plane with V 0.15 ε to 0.9 ε off it.
-  Each is a fold within the check's bound: the faces meet along an
-  edge, here at a knife edge 1° thin whose edge stands V's offset off
-  the end's plane, and they lie within ε of each other over a band from
-  it as wide as V lies from their planes' common line. Where such a
-  band lies beside a line two faces cross along, §20 refuses it as a
-  fin; where it is the operands' own sharp edge, as here, nothing does,
-  on main or in this build. Whether to refuse a fold wider than ε
+  Each is a fold within the check's bound: the faces meet along an edge,
+  here at a knife edge 1° thin whose edge stands V's offset off the
+  end's plane, and they lie within ε of each other over a band from it
+  as wide as V lies from their planes' common line. Where such a band
+  lies beside a line two faces cross along, §20 refuses it as a fin;
+  where it is the operands' own sharp edge, as here, nothing does, on
+  main or in this build. Whether to refuse a fold wider than ε
   everywhere, or keep it as a tolerant solid's sharp edge, is open: the
   suites held 1,441 such results at 77a27b7, golden 39's A ∩ B among
   them (`faces_cross_measures_a_fold_and_finds_no_spike`).
@@ -4291,120 +4562,132 @@ are tested as corners of what is left (`held_point`).
   meeting runs through them and V, and the case is a contact with
   curved edges, not a tip across L. Left to the contacts on curved
   faces.
-- *The flap's band is conservative.* It measures depth into G, not into
+- *The flap's test is conservative.* It measures depth into G, not into
   G's part between the walls across V's edges, whose tolerant stretches
   are not at hand where the flap is built. So it refuses some flaps
-  whose results on main crossed less than ε: the sweeps' 30 such cases
-  (180 operations) crossed 0.71 ε to 0.997 ε inside both on main.
+  whose results on main crossed less than ε: the sweeps' 37 such
+  contacts (222 operations) crossed 0.71 ε to ε inside both on main.
   Narrowing it would need those stretches.
-- *A flap held only near its corner on G's boundary.* Where the
-  clustering put a flap's corner V on G's boundary, the points within
-  3 ε of its place are left out (*At G's boundary*), so a flap whose
-  points G holds more than ε inside all lie there is answered as on
-  main. A reviewer's scan of slabs whose edge passes V's foot on a
-  slant, crossing L 0.1 to 2 times V's distance from L along it, found
-  it at 10° with V 3 ε across L, the edge crossing L 1.8 ε, 3 ε and 6 ε
-  from the spike's axis: A ∩ B returned with the faces crossing 1.40,
-  1.31 and 1.31 ε inside both, as on main; nearer edges, and every
-  other angle and distance scanned (2° to 10°, V 3 ε to 28 ε across),
-  were refused. Such a crossing lies within 3 ε of the place, where the
-  clustering decided V and G's boundary to be one point; refusing it
-  would mean deciding that point a second time by geometry, which rule
-  2 declines for a notch tip.
-- *A run passing a corner of G, held beyond its reach.* Where G holds a
-  whole run's strip more than 3 ε from the corner, every operation is
-  refused, though the differences main returns there are right within
-  the tolerance: B rests by an edge pushed no more than ε into A, so
-  the bodies overlap in a sliver no thicker than ε, and A − B and B − A
-  are the operands (contacts 3492, 3613 and 4917 above; A ∩ B is empty,
-  and the unions are refused as touching at a point on main too). The refusal is §20's, which does not depend on the operation
-  (*Options for the tip*, 5); keeping the differences would need a
-  refusal that depends on it.
+- *Ranking crossings.* The faces-crossing check reports the deepest
+  crossing of a result, so a fold deeper than a crossing hides it. The
+  review's harness ranked a crossing of faces that share no edge above
+  any fold; the committed check does not, and whether it should is
+  open with the folds.
 
 **Cost.** The pass over F's vertices is §20's, and sorting a vertex
-costs a few tests. A notch tip costs two searches of the pair's
-stretches sorted along L (sorted once per pair, shared with the strips'
-cuts and charged to their budget), the clustering's look-up, and one
-placing in G's outline. A flap is one convex piece searched as a vertex
-chain's strip is. A run no meeting covers costs a strip's search over
-its uncovered parts, where §20 skipped it. The places at G's boundary
-cost a look-up for a flap's corner and a step for each cluster on a
-whole run's edges; in the search, each line within a place's reach
-loses one chord, found by a tree of the places' boxes, and the places'
-circles join the ends' in the search for corners, each crossing
-checked against the discs that may hold it. All of it draws on §20's
-budget of steps, and with no places the search takes the steps it
-took before. Measured
+costs a few tests. The touch record is `touches`' own work, now done
+before the strips and shared with the settling, which did it alone
+before; each look-up in it is a search by halving. A tip costs a test of
+a box against G's (rule 3's item 0, *G is out of reach*), which takes no
+step but for the greatest height below; one that item 0 does not pass
+costs a search of the pair's stretches sorted along L (sorted once per
+pair, shared with the strips' cuts), the clustering's look-up, the
+record's where F's plane calls V no isolated touch, and, where no later
+item passes it, a placing of its foot and of the parts of its two edges
+between the edges of G near them, found by G's tree; the greatest height
+of F over the stretches costs a step for each stretch, once for each
+side of a pair, when a tip first needs it. A flap is one convex piece
+searched as a vertex chain's strip is, and the pinch's crossing test a
+step for each edge of G that G's tree finds near the flap. Leaving flaps
+out of strips costs a step for each flap, collected only from the other
+face's chains near F and sorted when a strip first needs them, a search
+of their spans for each strip piece, and a step for each live part of
+the piece looked at for each triangle; a part is retired once it ends
+before a triangle starts, so the work is in proportion to the parts and
+the triangles, not to their product (on a comb of n segments, whose
+n / 2 spikes reach a tolerance across L, about 0.4 n of them under one
+strip, 8,833, 35,501 and 140,285 steps at n = 256, 1,024 and 4,096,
+against 13,883, 118,937 and 1,479,351 without retiring). All of it draws
+on §20's budget of steps, and the steps grow with the other body's
+coplanar faces by a step or two for each face, not for each tip and
+face: under 64 notch tips (a face of 128 segments), 385 steps against
+one face and 858 against 256 (one step of each face's 1.8 is the
+greatest height, found where a tip's foot leaves G's box); under 512
+tips, 3,073 and 3,500; under 64 spikes, 130 and 172. Measured
 (callgrind, one run each), `held_strips`, with §20's work and this
-rule's, takes 4.9 % of the instructions of an intersection refused at
-512 notch tips across L, 8.3 thousand for each of its 1,030 pairs of
-faces, and 1.3 % of one answered with 512 spikes, 6.0 thousand for each
-of 1,032. Time guards in `tests/timing.rs`, with their budgets in
+rule's, takes 10.3 % of the instructions of an intersection refused at
+512 notch tips across L, 10.6 thousand for each of its 1,030 pairs of
+faces, and 2.2 % of one answered with 512 spikes, 6.8 thousand for each
+of 1,032; the touch record takes 8.9 % and 2.5 %, `touches` itself
+called once for each marked face of a pair (1,025 calls) and never by a
+tip. Time guards in `tests/timing.rs`, with their budgets in
 docs/PERFORMANCE.md: those two combs (`notches(1024)` and
 `spikes(1024)`), and their scaling from 64 to 512 teeth.
 
-**Tests (as built).** Goldens in `tests/touching.rs`, all six
-operations each:
+**Tests (as built).** Goldens in `tests/touching.rs`, all six operations
+each, each with main's outcomes in its doc comment; the doc comments of
+46 to 55 also name the change to the rule each catches, those of 42 to
+45 none:
 
-- 42, `a_notch_tip_across_the_line_where_the_faces_cross`, refused:
-  notch tips at 10° with V 2, 3 and 5 ε across, at 1° with 5, 30 and
-  50 ε, the notch mirrored from the face's near side (V above the top),
-  the tip of a triangular hole of F, walls leaning (one meeting L at
-  120°), B below its face, V 2 and 4 ε inside the box's end, and a W
-  over the box's top and over the two faces of a box grooved between
-  the tips (reported at the tip with the least coordinates in both
-  orders);
-- 43, `a_notch_tip_across_the_line_that_is_answered`, main's outcomes:
-  V half and one ε across at 10° and at 1° (answered), 5 ε beyond the
-  end (answered), half an ε inside or beyond it (refused as on main),
-  the box's top ending between L and V's foot at 1° with V 50 ε across
-  (the contact's outcomes), B below its face with V half an ε across;
-- 44, `a_spike_tip_across_the_line_where_the_faces_cross`: spikes 3 ε
-  across at 10° and 30 ε at 1°, B above and below its face, refused
-  where the layer lies outside F's body; 1.5 ε at 10°, every point of
-  the flap within ε of V's edges, answered; where the layer lies in
-  F's body, main's outcomes;
-- 45, `a_notch_wall_within_the_tolerance_of_a_side`: the run no meeting
-  covers 0.8 ε beyond the box's side (refused) and 1.2 ε beyond
-  (answered);
-- 46, `a_spike_tip_on_the_edge_of_a_face_holding_its_flap`, and 47,
-  `a_run_no_meeting_covers_passing_a_corner_of_the_face_holding_it`,
-  refused: the two cases review found (*At G's boundary*), the tongue
-  at 1° and at 0.5°, with and without the bump that puts a corner of
-  the top on the run.
+- 42, `a_notch_tip_across_the_line_where_the_faces_cross`, refused at the
+  tip: as first built, but the notch mirrored from the face's near side
+  and the prism below its face, at 10° with V 3 ε across, are no
+  isolated touch of the top and are left to the split, which refuses
+  them as edges passing within the tolerance of each other;
+- 43 to 47 as first built (`a_notch_tip_across_the_line_that_is_answered`,
+  `a_spike_tip_across_the_line_where_the_faces_cross`,
+  `a_notch_wall_within_the_tolerance_of_a_side`,
+  `a_spike_tip_on_the_edge_of_a_face_holding_its_flap`,
+  `a_run_no_meeting_covers_passing_a_corner_of_the_face_holding_it`);
+- 48, `a_notch_tip_is_refused_where_the_top_holds_its_edges`: tips whose
+  foot lies in a hole of the top while their edges leave it over the
+  top, and tips over a top cut short of L with no stretch in front;
+- 49, `an_apex_across_the_line_is_refused_where_the_top_holds_its_foot`;
+- 50, `a_notch_tip_left_to_the_meeting_or_the_split`: tips that are no
+  isolated touch (a notch from the near side over a top ending 1.05 ε
+  beyond its foot, and one at 0.5° over the top's edge), and the notch
+  fuzz's tips within the tolerance of a stretch, which rule 3 passes and
+  the split refuses, all with main's outcomes. No golden holds a notch
+  tip passed by a stretch behind it (rule 3's item 4); item 4 passes
+  only apexes in the goldens (golden 38) and in the notch fuzz;
+- 51, `an_oblique_corner_is_refused_unless_both_tests_call_it_no_isolated_touch`;
+- 52, `a_spike_flap_is_tested_unless_the_touch_at_its_tip_decides_it`:
+  the rows of the flap's table with the layer in F's body, tested and
+  left to the touch (the rows outside F's body are golden 44's);
+- 53, `a_pinched_flap_is_refused_where_the_tops_edge_comes_within_its_strip`;
+- 54, `a_strip_leaves_out_the_other_faces_flap`;
+- 55, `a_flap_is_excused_only_within_the_tolerance_of_its_tips_members`.
 
 In `tests/booleans.rs`: the generator of notches and spikes,
-`notches_and_spikes_across_the_line` (150 cases, run in CI at ten
-times with the other fuzzes), asserting no failure, validity, the
-identities, the origins and the oracle; and
-`contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross`
-(*At G's boundary*), which asserts the faces-crossing check, and
+`notches_and_spikes_across_the_line` (150 cases, run in CI at ten times
+with the other fuzzes), asserting no failure, validity, the identities,
+the origins and the oracle; its case 1376, a tip whose foot lies within
+ρ of the top's edge, passed by rule 3 and refused by the split as on
+main (`a_notch_tip_whose_foot_lies_within_rho_of_the_tops_edge`); and
+the contacts at G's boundary
+(`contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross`,
 `contacts_at_the_boundary_of_a_face_held_beyond_the_reach_of_its_places`,
-the six pairs refused beyond the places' reach. The fuzz
-does not assert it: it holds main's folds at the box's end (*Not
+two of `contacts_whose_bridges_carry_no_edge`), whose outcomes the
+flap's side and the members' discs change, and those of the first two
+also the exclusion; the first asserts the faces-crossing check. The
+fuzz does not assert it: it holds main's folds at the box's end (*Not
 decided*), which the check cannot tell from a flap; the check was run
-over it at a hundred times instead (above). The oracle's tests in
-`tests/touching.rs`: `the_oracle_lets_off_a_notch_tip_split_by_a_meeting`,
+over it at a hundred times instead (*Measured*). The oracle's tests in
+`tests/touching.rs`:
+`the_oracle_lets_off_a_notch_tip_split_by_a_meeting`,
 `the_oracle_finds_an_edge_running_along_a_faces_edge_from_their_corner`,
 `faces_cross_passes_faces_meeting_at_their_edges`,
 `pair_crossing_measures_exactly` and
-`faces_cross_measures_a_fold_and_finds_no_spike`. Unit tests: the
-sorting of vertices, apex and across exclusive and exact where the
-neighbours' signs are not 0
-(`the_corners_within_the_tolerance_of_the_plane_are_sorted_once`);
-that a cluster `split_segment` takes is one the shared test takes, a
-property test over random segments and points
+`faces_cross_measures_a_fold_and_finds_no_spike`. Unit tests: the sorting of
+vertices, apex and across exclusive, an apex both a chain and a corner of
+rule 3 (`the_corners_within_the_tolerance_of_the_plane_are_sorted_once`);
+that a cluster `split_segment` takes is one the shared test takes
 (`the_tip_test_takes_the_clusters_the_split_takes`); the flap's piece
-(`a_flap_is_its_triangle_less_the_band_of_its_edges`); the covering of
-runs by stretches (`a_whole_run_is_tested_where_no_stretch_covers_it`);
-the steps in proportion to the corners
-(`the_corners_across_the_line_take_steps_in_proportion`); and the
-search with places left out: §20's property test of the search, two
-cases in three now with up to eight places of a reach from ρ to 4ρ,
-each point found outside every disc, and found wherever a grid finds a
-point held deeper than ρ outside them (`the_strip_search_finds_every_deeply_held_region`), and a
-region whose only corners are crossings of the places' circles
-(`the_strip_search_finds_a_region_bounded_by_the_arcs_of_places`).
+(`a_flap_is_its_triangle_less_the_band_of_its_edges`); a piece less a
+triangle (`a_piece_less_a_triangle_is_its_parts_outside_it`); the
+covering of runs by stretches
+(`a_whole_run_is_tested_where_no_stretch_covers_it`); the strip search
+with places left out (`the_strip_search_finds_every_deeply_held_region`,
+`the_strip_search_finds_a_region_bounded_by_the_arcs_of_places`); and the
+work: the steps in proportion to the corners
+(`the_corners_across_the_line_take_steps_in_proportion`), flat in the
+other body's coplanar faces
+(`the_strip_checks_take_no_steps_for_faces_far_from_them`,
+`the_strip_checks_take_steps_flat_in_coplanar_faces`), in proportion to
+the flaps a strip leaves out
+(`the_flap_exclusion_takes_steps_in_proportion_to_the_flaps`), and the
+touch record found once for each face of a pair
+(`the_touch_record_is_found_once_for_each_face_of_a_pair`).
 
 References: C. M. Hoffmann, *Geometric and Solid Modeling*, 1989, ch.
 4; A. A. G. Requicha, "Representations for rigid solids", *ACM

@@ -77,7 +77,7 @@ pub(crate) mod work {
         /// Faces of pairs on planes whose boundary has a mark within the
         /// tolerance of the other's plane: each has its touches found once,
         /// for both the strip checks and the touched points (design note
-        /// 0012 §21, rule A).
+        /// 0012 §21, the touch record).
         pub static MARKED: Cell<usize> = const { Cell::new(0) };
     }
 
@@ -3068,7 +3068,8 @@ mod tests {
 
     /// The strip checks of a face against a block's top of `m` coplanar
     /// faces take about the steps they take against a top of one face
-    /// (design note 0012 §21, rules B and D; the cost review's probes,
+    /// (design note 0012 §21, rule 3 and flaps under strips; the cost
+    /// review's probes,
     /// each intersection answered): 128 spikes hanging a tolerance across
     /// the line (130, 130 and 172 steps at 1, 16 and 256 faces
     /// ([`split_top`]), 128 notch tips half a tolerance across it whose
@@ -3120,7 +3121,7 @@ mod tests {
     }
 
     /// The flaps a run's strip leaves out take steps in proportion to them
-    /// (design note 0012 §21, rule D): a block whose top's edge lies 3
+    /// (design note 0012 §21, flaps under strips): a block whose top's edge lies 3
     /// tolerances across the line from x = 0.1 to 0.9, a run within the
     /// tolerance of a face with `n` spikes a tolerance across the line
     /// ([`teeth`]), whose strip holds each spike's flap, the intersection
@@ -3152,7 +3153,7 @@ mod tests {
 
     /// Each face of a pair on crossing planes whose boundary has a mark
     /// within the tolerance of the other's plane has its touches of it
-    /// found once ([`imprint::TouchRecord`]; design note 0012 §21, rule A),
+    /// found once ([`imprint::TouchRecord`]; design note 0012 §21, the touch record),
     /// for both the strip checks and the touched points: 256 spikes and
     /// 256 notch tips within the tolerance of a block's top, each
     /// intersection decided (the spikes' answered, the notches' refused by
