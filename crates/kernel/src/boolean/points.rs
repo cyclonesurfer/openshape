@@ -94,6 +94,10 @@ pub(super) struct Points {
     has_vertex: Vec<[bool; 2]>,
     /// Per operand, per edge: the clusters on it from its start to its end.
     on_edges: [Vec<Vec<usize>>; 2],
+    /// Per operand, per cluster: the edge of the operand it lies on
+    /// strictly between the edge's ends, or [`NO_EDGE`] (at most one: a
+    /// cluster on two is refused).
+    inside: [Vec<usize>; 2],
     /// Per operand, per curved edge: the parameters of those clusters (the
     /// edge's own at its ends, of their nearest points between); empty for
     /// a straight edge.
@@ -135,6 +139,7 @@ impl Points {
             members: Vec::new(),
             has_vertex: Vec::new(),
             on_edges: [Vec::new(), Vec::new()],
+            inside: [Vec::new(), Vec::new()],
             on_params: [Vec::new(), Vec::new()],
             index: Bvh::new(Vec::new()),
         }
@@ -492,6 +497,13 @@ impl Points {
         first
     }
 
+    /// The places of cluster `c`'s points, before the clustering moved
+    /// them to its place: where each of the vertices, crossings and other
+    /// points the cluster merged lies.
+    pub fn member_places(&self, c: usize) -> impl Iterator<Item = DVec3> + '_ {
+        self.members[c].iter().map(|&i| self.pos[i])
+    }
+
     /// The cluster of vertex `v` of `op`.
     pub fn vertex_cluster(&self, op: Operand, v: usize) -> usize {
         self.cluster[self.offset[slot(op)] + v]
@@ -613,14 +625,14 @@ impl Points {
             // A point on two edges of one body away from its vertices (near
             // a corner, within the tolerance of both edges) belongs to
             // neither more than the other: refused rather than guessed.
-            let mut edge_of: FxHashMap<usize, usize> = FxHashMap::default();
+            let mut edge_of = vec![NO_EDGE; self.rep.len()];
             let mut out = Vec::with_capacity(ons.len());
             let mut params = Vec::with_capacity(ons.len());
             for (e, on) in ons.into_iter().enumerate() {
                 let (_, b) = shape.edge_points(e);
                 let list = self.spaced(on, b)?;
                 for &c in &list[1..list.len() - 1] {
-                    if edge_of.insert(c, e).is_some() {
+                    if std::mem::replace(&mut edge_of[c], e) != NO_EDGE {
                         return Err(KernelError::InvalidInput(format!(
                             "a point where the bodies meet lies within the tolerance of two \
                              edges of the {} body near {}",
@@ -646,6 +658,7 @@ impl Points {
             }
             self.on_edges[slot(op)] = out;
             self.on_params[slot(op)] = params;
+            self.inside[slot(op)] = edge_of;
         }
         Ok(())
     }
@@ -782,11 +795,7 @@ impl Points {
                     continue;
                 }
             }
-            let t = (*p - a).dot(d) / len2;
-            if t <= 0.0 || t >= 1.0 {
-                continue;
-            }
-            if (*p - (a + d * t)).length() <= eps {
+            if let Some(t) = inside_segment(*p, a, d, len2, eps) {
                 found.push((t, c));
             }
         }
@@ -841,6 +850,41 @@ impl Points {
     pub fn split_segment(&self, lo: usize, hi: usize) -> Result<Vec<usize>, KernelError> {
         self.along(self.rep[lo], self.rep[hi], lo, hi, None)
     }
+
+    /// Whether [`Points::split_segment`] of the segment between clusters
+    /// `lo` and `hi` holds cluster `c`: an end of it, or a cluster it takes
+    /// by the same test, so that the segments imprinted along it meet at
+    /// `c`.
+    pub fn on_split(&self, lo: usize, hi: usize, c: usize) -> bool {
+        if c == lo || c == hi {
+            return true;
+        }
+        let (a, b) = (self.rep[lo], self.rep[hi]);
+        let d = b - a;
+        inside_segment(self.rep[c], a, d, d.length_squared(), self.eps).is_some()
+    }
+
+    /// The edge of `op` that cluster `c` lies on strictly between the
+    /// edge's ends, as [`Points::incidences`] decided it, if any (none for
+    /// a cluster made after it, a seam's).
+    pub fn inside_edge(&self, op: Operand, c: usize) -> Option<usize> {
+        (self.inside[slot(op)].get(c).copied()).filter(|&e| e != NO_EDGE)
+    }
+}
+
+/// No edge ([`Points::inside_edge`]).
+const NO_EDGE: usize = usize::MAX;
+
+/// The parameter of point `p` along the segment from `a` along `d` (`len2`
+/// its length squared, 0 at `a` and 1 at its other end), if `p` lies
+/// strictly between the segment's ends along it and within `eps` of it:
+/// the test of [`Points::on_segment`], shared by [`Points::on_split`].
+fn inside_segment(p: DVec3, a: DVec3, d: DVec3, len2: f64, eps: f64) -> Option<f64> {
+    let t = (p - a).dot(d) / len2;
+    if t <= 0.0 || t >= 1.0 {
+        return None;
+    }
+    ((p - (a + d * t)).length() <= eps).then_some(t)
 }
 
 /// Rounds of joining clusters close along an edge
@@ -919,4 +963,73 @@ pub(super) fn segment_distance(p: DVec3, a: DVec3, b: DVec3) -> f64 {
     }
     let t = ((p - a).dot(d) / len2).clamp(0.0, 1.0);
     (p - (a + d * t)).length()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::math::Frame;
+    use crate::{BrepKernel, Kernel};
+
+    fn lcg(state: &mut u64) -> f64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (*state >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// [`Points::on_split`] holds exactly the ends of a segment between two
+    /// clusters and the clusters [`Points::split_segment`] of it takes
+    /// (design note 0012 §21: the notch tip's test of the meeting is the
+    /// split's own), on clusters placed at random about random segments,
+    /// within and beyond the tolerance across them and about their ends.
+    #[test]
+    fn the_tip_test_takes_the_clusters_the_split_takes() {
+        let kernel = BrepKernel::default();
+        let block = (kernel.make_box(&Frame::WORLD, DVec3::ONE)).expect("a box");
+        let shape = |name| super::super::shape::shape(&block.brep, name).expect("a shape");
+        let pair = Pair {
+            first: shape("first"),
+            second: shape("second"),
+        };
+        let eps = 1e-3;
+        let mut s = 5;
+        let (mut taken, mut left) = (0, 0);
+        for _ in 0..200 {
+            let mut points = Points::new(&pair, eps);
+            let a = DVec3::new(lcg(&mut s), lcg(&mut s), lcg(&mut s));
+            let dir = DVec3::new(lcg(&mut s) - 0.5, lcg(&mut s) - 0.5, lcg(&mut s) - 0.5);
+            let (dir, len) = (dir.normalize(), 0.5 + lcg(&mut s));
+            let across = dir.any_orthonormal_vector();
+            let mut rep = vec![a, a + dir * len];
+            // Spaced more than ε along the segment and from its ends, so the
+            // split takes them without refusing two as too close.
+            for k in 0..40 {
+                let mut along = len * (-0.1 + 1.2 * (k as f64 + 0.5 * lcg(&mut s)) / 40.0);
+                for end in [0.0, len] {
+                    if (along - end).abs() < 2.0 * eps {
+                        along = end + 2.0 * eps * (along - end).signum();
+                    }
+                }
+                let angle = std::f64::consts::TAU * lcg(&mut s);
+                let off = (across * angle.cos() + dir.cross(across) * angle.sin())
+                    * eps
+                    * (2.0 * lcg(&mut s));
+                rep.push(a + dir * along + off);
+            }
+            points.index = Bvh::of_points(&rep);
+            points.rep = rep;
+            let split = points.split_segment(0, 1).expect("spaced clusters");
+            for c in 0..points.rep.len() {
+                let on = points.on_split(0, 1, c);
+                assert_eq!(on, split.contains(&c), "cluster {c}");
+                if on {
+                    taken += 1;
+                } else {
+                    left += 1;
+                }
+            }
+        }
+        assert!(taken > 2000 && left > 2000, "{taken} {left}");
+    }
 }

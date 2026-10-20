@@ -59,7 +59,10 @@ this row may read high against the others. The two rows of a face
 lying or crossing along one line, and the scaling row of the first,
 were measured on 2026-10-16, after the eighth pass: the range of three
 runs of the booleans' and the scaling tests, each the best of three
-repetitions. The limit is what the test enforces.
+repetitions. The two rows of notch tips and spikes across the line, and
+their scaling rows (design note 0012 §21), were measured the same way on
+2026-10-20 on a quiet machine, on the final build of that rule. The
+limit is what the test enforces.
 
 | Operation | Measured | Limit |
 |---|---|---|
@@ -78,6 +81,8 @@ repetitions. The limit is what the test enforces.
 | Unite a box with a corner of a plate of 400 flush square pins (the result has 4,012 faces; each place of it checked against the faces near it) | 95–113 ms | 1,000 ms |
 | Intersect a notched block with a prism whose face's edge of 256 segments lies on the block's top beside the line where they cross (the strip check searches the whole strip) | 11.7–13.1 ms | 120 ms |
 | Intersect a block with a prism whose face crosses its top 1,024 times along one line (513 solids) | 65–71 ms | 700 ms |
+| Intersect a block with a prism whose face has 512 notch tips across the line where it crosses the block's top, each within the tolerance of the top (refused at the least by its coordinates, so every tip is tested; each tip sorted and tested against the stretches along the line) | 9.9–11.0 ms | 100 ms |
+| The same with 512 spikes across the line, each one's flap built (the result has 1,031 faces) | 39.8–45.3 ms | 450 ms |
 | Dimple a plate with 16 balls, one boolean each | 73–89 ms | 900 ms |
 | Mesh it (173,680 triangles) | 382–406 ms | 4,000 ms |
 | Validate it | 2.2–2.5 ms | 40 ms |
@@ -115,6 +120,8 @@ factor):
 | Mesh a ball, 13,964 to 105,556 triangles (7.6 times) | 8.6–9.6 times |
 | Unite a box with a corner of a plate of flush pins, 49 to 400 pins (8.2 times) | 8.4–9.2 times |
 | Intersect a notched block with a prism whose lying edge has 128 to 1,024 segments | 7.7–7.8 times |
+| Intersect a block with a prism refused at notch tips across the line, 64 to 512 tips | 7.7–7.9 times |
+| Intersect a block with a prism with spikes across the line, 64 to 512 spikes | 7.6–8.1 times |
 
 One more checks the cut of a plate's 4th hole against that of its 16th,
 four times the holes counting the one cut (bound: 12, three times the
@@ -571,6 +578,61 @@ each piece keeping at most five sides. The scan has no test of its
 work: in review it cost 27 million instructions of a 5.2 billion
 boolean built to show it.
 
+## What changed, 2026-10-20
+
+### Ninth pass: corners across the line (design note 0012 §21)
+
+The tests of a notch's tip and of a spike's flap lying a few tolerances
+across the line where two faces cross (§21) run inside §20's strip
+checks and draw on their budget of steps. Their costs, and the three
+places where a prototype or an earlier build did more work than the
+input needs, are in §21's *Cost*; in brief:
+
+* **The touches of a face were found again for each tip.** Which corners
+  of a face within the tolerance of the other's plane touch it from one
+  side alone (`touches`, §18.2) was asked at each tip: 73% of a
+  boolean's instructions at 2,048 tips, and 124 ms on the guard of 512
+  tips, whose limit is 100 ms. Each marked face of a pair now has its
+  touches found once, before the strips, in a record the strips and the
+  settling of touched points share and search by halving. Measured by
+  callgrind, the strip checks (§20's and §21's) take 10.3% of the
+  intersection refused at 512 notch tips and 2.2% of the one answered
+  with 512 spikes, and the touch record 8.9% and 2.5%. A unit test
+  (`the_touch_record_is_found_once_for_each_face_of_a_pair`) counts the
+  calls.
+* **A long flap made every strip piece pass the flaps under it.** The
+  flaps the strips leave out were searched by their spans, sorted by
+  their starts, so where one flap's span along the line covered the
+  others, every piece passed every flap starting before it: under one
+  needle flap over n teeth, each with an apex of the other face,
+  217,720, 697,720 and 2,444,152 steps from n = 512 to 2,048, and
+  refused as too large at 4,096. The flaps are now kept in a tree (the
+  kernel's `Bvh`) over their spans, built when a strip first needs
+  them, which each piece walks: 103,035 to 874,363 steps from n = 512
+  to 4,096, twice for each doubling. On a comb whose spikes lie under
+  strips it costs what the sorted spans did (8,896, 35,756 and 141,308
+  steps at 256, 1,024 and 4,096 segments, against 8,833, 35,501 and
+  140,285).
+* **A flap near a corner of the other face tested a disc about every
+  member of its tip's cluster.** Members that coincide to rounding are
+  now taken as one place (merged through a grid of cells, in order), and
+  a crossing of two discs' circles is looked at against the discs only
+  until one holds it: 32 spikes whose clusters each hold a slab's corner
+  take 3,946 steps, against 48,906 before (1,444 with the corners half
+  a period from the tips).
+
+Each has a unit test of its work that fails with it undone
+(`a_long_flap_over_the_others_costs_each_strip_a_walk_of_the_tree`,
+`a_flap_at_a_corner_of_the_other_face_takes_a_few_dozen_steps_more`,
+`a_crossing_is_looked_at_against_the_discs_until_one_holds_it`), and
+two more pin the costs left (below): `leaning_flaps_take_steps_in_proportion_to_their_overlap`
+and `apexes_under_leaning_flaps_take_steps_in_proportion_at_a_fixed_overlap`.
+The time guards hold 512 notch tips and 512 spikes across the line, each
+with a scaling check (above). The steps grow with the other body's
+coplanar faces by a step or two for each face, not for each tip and
+face: under 512 notch tips, 3,073 steps against one face and 3,500
+against 256.
+
 ## Known slow spots
 
 Measured by wall clock, or counted by callgrind where a bullet gives
@@ -657,6 +719,25 @@ instructions, not yet fixed; each is a candidate for a later pass.
   first piece of each group, would make it linear; it needs a design
   note first (which edges carry a side, and how a contact edge stops
   it). The comb's guard has no scaling check until then.
+* **Flaps leaning along the line where the faces cross** (design note
+  0012 §21, *Cost*). The strip search's first loop takes, for each of
+  its lines, the near edges whose boxes meet the line's box, so flaps
+  whose teeth lean along the line make the work the product of the
+  lines and the teeth each line passes: under n teeth at 0.5° leaning a
+  tenth of the run, 6,697 to 1,238,593 steps from n = 32 to 512, about
+  four times for each doubling, and refused as too large at 1,024
+  (which the first build, leaving no flaps out of the strips, found
+  empty in 2,420,895). With the lean fixed the steps are linear, about
+  450 a tooth; an apex of the other face under each flap costs about
+  the square of the flaps over it (about 1,300 steps an apex at a lean
+  of 10 periods). The candidate, not built: take only the near edges
+  that come within ρ of each line, by a finer search than their boxes.
+* **Placing a point casts a ray across the other face** (`place`, on
+  main too): a step for each side of the face the ray crosses, so tips
+  whose feet lie in a channel that m slots cross beyond them take steps
+  for each tip and slot: 11,401, 36,361 and 136,201 at 256 tips and
+  m = 16, 64 and 256 (each refused as a sliver). The candidate: the
+  outline search that places points in long cycles (eighth pass).
 * **Meshing to a very fine tolerance can hit the vertex limit:** a full
   ring meshed to 1 µm needs more than 2,000,000 vertices on one face and is
   refused.
