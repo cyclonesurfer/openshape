@@ -2949,19 +2949,19 @@ mod tests {
         )
     }
 
-    /// The strip checks of one face against a face of the other body that
-    /// lies far from a chain, a notch tip or a spike take no steps for it
-    /// (design note 0012 §21): against a block whose top is 16 coplanar
-    /// faces side by side, the fewest steps within which the intersection
-    /// with a face whose edge has 128 runs lying on the top, each one of
-    /// the face's intervals on the line whole, 128 answered notch tips or
-    /// 128 spikes ([`leaning`]) is decided are at most twice those
-    /// against a top of one face (searching each run against every face of
-    /// the top took 58 times, found by review). And where such a run passes
-    /// the corners of `m` coplanar faces (`rim`), the steps within which the
-    /// cube less the wedge is answered grow in proportion to `m`, not to its
-    /// square: at most five times from 64 faces to 256 (14 times when every
-    /// cluster on the run was looked at in each pair).
+    /// The strip checks of one face against a face of the other body that lies
+    /// far from a chain, a notch tip or a spike take no steps for it (design
+    /// note 0012 §21): against a block whose top is 16 coplanar faces side by
+    /// side, the fewest steps within which the intersection with a face whose
+    /// edge has 128 runs lying on the top, each one of the face's intervals on
+    /// the line whole, 64 answered notch tips or 64 spikes ([`leaning`],
+    /// [`hanging`] of 128 segments) is decided are at most twice those against
+    /// a top of one face (searching each run against every face of the top took
+    /// 58 times, found by review). And where such a run passes the corners of
+    /// `m` coplanar faces (`rim`), the steps within which the cube less the
+    /// wedge is answered grow in proportion to `m`, not to its square: at most
+    /// five times from 64 faces to 256 (14 times when every cluster on the run
+    /// was looked at in each pair).
     #[test]
     fn the_strip_checks_take_no_steps_for_faces_far_from_them() {
         let eps = Tolerance::default().linear;
@@ -3069,23 +3069,25 @@ mod tests {
     /// The strip checks of a face against a block's top of `m` coplanar
     /// faces take about the steps they take against a top of one face
     /// (design note 0012 §21, rule 3 and flaps under strips; the cost
-    /// review's probes,
-    /// each intersection answered): 128 spikes hanging a tolerance across
-    /// the line (130, 130 and 172 steps at 1, 16 and 256 faces
-    /// ([`split_top`]), 128 notch tips half a tolerance across it whose
-    /// neighbours lie far along it ([`fan`]; 769, 794 and 1,152), and 128
+    /// review's probes, each intersection answered), measured in this
+    /// build: 64 spikes hanging a tolerance across the line ([`hanging`]
+    /// of 128 segments; 130, 130 and 172 steps at 1, 16 and 256 faces,
+    /// [`split_top`]), 128 notch tips half a tolerance across it whose
+    /// neighbours lie far along it ([`fan`]; 769, 794 and 1,152), and 64
     /// slots between such tips against a top whose faces are bands along
     /// the line ([`split_across`]; 908 at 16 faces and at 256). Each grows
     /// by at most a tenth from 1 face (16 for the bands) to 16 (256), and
-    /// at most doubles to 256. The cost review measured, where the flaps of
-    /// every chain were collected for each pair rather than those near the
-    /// other face, 582, 1,586 and 16,976 steps for the spikes; where each
-    /// tip's test was bounded by its neighbours' feet rather than by the
-    /// pair's tallest stretch, 2,565, 7,795 and 83,791 for the fan; and
-    /// where every flap of a face was sorted for each pair, 1,548 and 9,740
-    /// for the slots. And 1,024 spikes against 256 faces are decided within
-    /// 20,000 steps (1,026; 135,858 when flaps were collected for each
-    /// pair, refused as too large).
+    /// at most doubles to 256. The judges' prototypes of the review took,
+    /// where the flaps of every chain were collected for each pair rather
+    /// than those near the other face, 582, 1,586 and 16,976 steps for the
+    /// spikes; where each tip's test was bounded by its neighbours' feet
+    /// rather than by the pair's tallest stretch, 2,565, 7,795 and 83,791
+    /// for the fan; and where every flap of a face was sorted for each
+    /// pair, 1,548 and 9,740 for the slots. And 512 spikes ([`hanging`] of
+    /// 1,024 segments) against 256 faces are decided within 20,000 steps
+    /// (this build takes 1,026 against a top of one face and against 256;
+    /// the prototypes, collecting flaps for each pair, took 135,858, which
+    /// this bound refuses as too large).
     #[test]
     fn the_strip_checks_take_steps_flat_in_coplanar_faces() {
         let eps = Tolerance::default().linear;
@@ -3123,12 +3125,13 @@ mod tests {
     /// The flaps a run's strip leaves out take steps in proportion to them
     /// (design note 0012 §21, flaps under strips): a block whose top's edge lies 3
     /// tolerances across the line from x = 0.1 to 0.9, a run within the
-    /// tolerance of a face with `n` spikes a tolerance across the line
-    /// ([`teeth`]), whose strip holds each spike's flap, the intersection
-    /// found empty. The fewest steps within which it is decided at 1,024
-    /// spikes are at most five times those at 256 (8,833 and 35,501;
-    /// keeping every part of the strip's pieces met so far and looking at
-    /// each for each flap, the cost review measured 16,337 and 128,783).
+    /// tolerance of a face with `n` / 2 spikes a tolerance across the line
+    /// ([`teeth`] of `n` segments), whose strip holds each spike's flap,
+    /// the intersection found empty. The fewest steps within which it is
+    /// decided at 512 spikes are at most five times those at 128 (8,833
+    /// and 35,501, measured in this build; keeping every part of the strip's
+    /// pieces met so far and looking at each for each flap, it took 13,883
+    /// and 118,937, and the judges' prototype 16,337 and 128,783).
     #[test]
     fn the_flap_exclusion_takes_steps_in_proportion_to_the_flaps() {
         let eps = Tolerance::default().linear;
@@ -3147,15 +3150,16 @@ mod tests {
         let most = 5 * small;
         assert!(
             decided_within(&block, &comb(1024), BooleanOp::Intersect, most),
-            "{small} steps at 256 spikes, more than {most} at 1,024"
+            "{small} steps at 128 spikes, more than {most} at 512"
         );
     }
 
     /// Each face of a pair on crossing planes whose boundary has a mark
     /// within the tolerance of the other's plane has its touches of it
     /// found once ([`imprint::TouchRecord`]; design note 0012 §21, the touch record),
-    /// for both the strip checks and the touched points: 256 spikes and
-    /// 256 notch tips within the tolerance of a block's top, each
+    /// for both the strip checks and the touched points: 128 spikes and
+    /// 128 notch tips ([`teeth`] of 256 segments) within the tolerance of
+    /// a block's top, each
     /// intersection decided (the spikes' answered, the notches' refused by
     /// the split), find them 257 times, once for each pair. Found again for
     /// each tip the strip checks test, they took most of a boolean's time
@@ -3223,5 +3227,201 @@ mod tests {
                 other => panic!("{limits:?}: {:?}", other.map(|_| ())),
             }
         }
+    }
+
+    /// The other face's flaps a strip leaves out are sorted by their spans
+    /// along the line once for each pair, a step for each (design note
+    /// 0012 §21, flaps under strips): a block whose top's edge lies 3
+    /// tolerances across the line from x = 1.1 to 1.8, a run within the
+    /// tolerance of a face of `n` segments between x = 0 and 1 whose
+    /// `n` / 2 spikes lie a tolerance across the line (each spike's flap
+    /// touching the top, so not tested itself) and a notch under the run,
+    /// takes more steps than a block whose top's edge there lies far from
+    /// the line: the run's strip, its placing against the face's outline,
+    /// built then (a step for each of the face's `n` + 11 edges), and the
+    /// sort of the face's `n` / 2 flaps (a step each). The run lies beyond
+    /// the spikes along the line, so its strip passes no flap's span. From
+    /// 32 to 64 segments (64 to 128) that difference grows by 32 + 16 steps
+    /// (64 + 32).
+    #[test]
+    fn the_flaps_a_strip_leaves_out_are_sorted_once_a_step_each() {
+        use crate::{ExtrudeSpec, Profile};
+        let eps = Tolerance::default().linear;
+        let block = |y: f64| {
+            let pts: Vec<DVec2> = [
+                (-0.25, -0.3),
+                (1.1, -0.3),
+                (1.1, y),
+                (1.8, y),
+                (1.8, 1.0),
+                (-0.25, 1.0),
+            ]
+            .map(|(x, y)| DVec2::new(x, y))
+            .to_vec();
+            let frame = Frame {
+                origin: DVec3::new(0.0, 0.0, -1.0),
+                ..Frame::WORLD
+            };
+            let body = BrepKernel::default()
+                .extrude(
+                    &Profile::polygon(frame, &pts),
+                    &ExtrudeSpec {
+                        distance: 1.0,
+                        symmetric: false,
+                    },
+                )
+                .expect("a block");
+            (*body.brep).clone()
+        };
+        let comb = |n: usize| {
+            let mut pts = vec![(-0.5, -0.5), (0.0, -0.5)];
+            pts.extend((0..=n).map(|i| {
+                let w = if i % 2 == 0 { 1.0 / n as f64 } else { -eps };
+                (i as f64 / n as f64, w)
+            }));
+            pts.extend([
+                (1.0, -0.5),
+                (1.05, -0.5),
+                (1.05, 0.3),
+                (1.85, 0.3),
+                (1.85, -0.5),
+                (2.0, -0.5),
+                (2.0, 0.5),
+                (-0.5, 0.5),
+            ]);
+            leaning(pts)
+        };
+        let (run, far) = (block(-3.0 * eps), block(-0.2));
+        let more = |n: usize| {
+            let face = comb(n);
+            let with = fewest_strip_steps(&run, &face, BooleanOp::Intersect);
+            let without = fewest_strip_steps(&far, &face, BooleanOp::Intersect);
+            with as i64 - without as i64
+        };
+        let (d32, d64, d128) = (more(32), more(64), more(128));
+        assert_eq!(
+            d64 - d32,
+            32 + 16,
+            "{d32} steps more at 32 segments, {d64} at 64"
+        );
+        assert_eq!(
+            d128 - d64,
+            64 + 32,
+            "{d64} steps more at 64 segments, {d128} at 128"
+        );
+    }
+
+    /// The touch record holds each touch of a face's boundary however its loop
+    /// runs (design note 0012 §21, the touch record): the clusters of its
+    /// touches, found in the loop's order, are sorted before they are searched.
+    /// A face with 32 spikes `d` tolerances across the line ([`teeth`]'s comb
+    /// of 64 segments, whose face's loop runs the spikes against the order of
+    /// their clusters), over a block whose top's edge lies 5 tolerances across
+    /// the line from x = 0.1 to 0.9: each spike's flap lies in the face's body,
+    /// outside the top's, and touches the top at its tip, so the touch decides
+    /// it and the intersection is found empty. (Searched in the loop's order,
+    /// the record held almost none of the touches, and the flaps, tested as
+    /// strips the top holds, were refused.)
+    #[test]
+    fn the_touch_record_holds_every_touch_however_the_loop_runs() {
+        let tol = Tolerance::default();
+        let eps = tol.linear;
+        let block = {
+            let frame = Frame {
+                origin: DVec3::new(0.1, -5.0 * eps, -1.0),
+                ..Frame::WORLD
+            };
+            let body = BrepKernel::default()
+                .make_box(&frame, DVec3::new(0.8, 1.0 + 5.0 * eps, 1.0))
+                .expect("a block");
+            (*body.brep).clone()
+        };
+        let n = 64;
+        for d in [1.0, 3.0, 4.0] {
+            let face = teeth(n, |i| if i % 2 == 0 { 1.0 / n as f64 } else { -d * eps });
+            let r = boolean(&block, &face, BooleanOp::Intersect, &tol);
+            assert!(
+                matches!(&r, Err(KernelError::InvalidInput(m)) if m == EMPTY),
+                "spikes {d} tolerances across: {:?}",
+                r.map(|_| ())
+            );
+        }
+    }
+
+    /// The flaps a strip leaves out are those of the other face's chains whose
+    /// own strips can come within the search's reach of the strip's face
+    /// (design note 0012 §21, flaps under strips): the run and the comb of
+    /// [`the_flaps_a_strip_leaves_out_are_sorted_once_a_step_each`] of 32
+    /// segments (16 spikes), the comb's face carrying `m` segments more from x
+    /// = 2.2 to 2.8, beyond the block's top, whose corners a tolerance across
+    /// the line are flaps far from the top. From 32 to 64 such segments the
+    /// run's strip takes 32 steps more, its placing against the face's 32 more
+    /// edges, and none for the far flaps, which are not sorted with those it
+    /// leaves out.
+    #[test]
+    fn the_flaps_a_strip_leaves_out_are_those_near_its_face() {
+        use crate::{ExtrudeSpec, Profile};
+        let eps = Tolerance::default().linear;
+        let block = |y: f64| {
+            let pts: Vec<DVec2> = [
+                (-0.25, -0.3),
+                (1.1, -0.3),
+                (1.1, y),
+                (1.8, y),
+                (1.8, 1.0),
+                (-0.25, 1.0),
+            ]
+            .map(|(x, y)| DVec2::new(x, y))
+            .to_vec();
+            let frame = Frame {
+                origin: DVec3::new(0.0, 0.0, -1.0),
+                ..Frame::WORLD
+            };
+            let body = BrepKernel::default()
+                .extrude(
+                    &Profile::polygon(frame, &pts),
+                    &ExtrudeSpec {
+                        distance: 1.0,
+                        symmetric: false,
+                    },
+                )
+                .expect("a block");
+            (*body.brep).clone()
+        };
+        let comb = |m: usize| {
+            let n = 32;
+            let mut pts = vec![(-0.5, -0.5), (0.0, -0.5)];
+            pts.extend((0..=n).map(|i| {
+                let w = if i % 2 == 0 { 1.0 / n as f64 } else { -eps };
+                (i as f64 / n as f64, w)
+            }));
+            pts.extend([
+                (1.0, -0.5),
+                (1.05, -0.5),
+                (1.05, 0.3),
+                (1.85, 0.3),
+                (1.85, -0.5),
+                (2.2, -0.5),
+            ]);
+            pts.extend((0..=m).map(|i| {
+                let w = if i % 2 == 0 { 0.05 } else { -eps };
+                (2.2 + 0.6 * i as f64 / m as f64, w)
+            }));
+            pts.extend([(2.8, -0.5), (3.0, -0.5), (3.0, 0.5), (-0.5, 0.5)]);
+            leaning(pts)
+        };
+        let (run, far) = (block(-3.0 * eps), block(-0.2));
+        let more = |m: usize| {
+            let face = comb(m);
+            let with = fewest_strip_steps(&run, &face, BooleanOp::Intersect);
+            let without = fewest_strip_steps(&far, &face, BooleanOp::Intersect);
+            with as i64 - without as i64
+        };
+        let (d32, d64) = (more(32), more(64));
+        assert_eq!(
+            d64 - d32,
+            32,
+            "{d32} steps more at 32 far segments, {d64} at 64"
+        );
     }
 }

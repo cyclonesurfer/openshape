@@ -3767,23 +3767,6 @@ fn oblique(t: f64, pts: &[DVec2], below: bool, alpha: f64, phi: f64) -> Body {
     )
 }
 
-/// The refusal of edges where the bodies meet passing within the tolerance
-/// of each other, near `at`.
-fn crossing_refusal(at: &str) -> String {
-    format!(
-        "refused: edges where the bodies meet pass within the tolerance of each other near {at}"
-    )
-}
-
-/// The refusal of a point where the bodies meet within the tolerance of an
-/// edge it is not on, near `at`.
-fn near_edge_refusal(at: &str) -> String {
-    format!(
-        "refused: a point where the bodies meet lies within the tolerance of an edge it is not \
-         on, near {at}"
-    )
-}
-
 /// Six times `s`.
 fn all(s: String) -> [String; 6] {
     [(); 6].map(|_| s.clone())
@@ -4008,19 +3991,29 @@ fn an_apex_across_the_line_is_refused_where_the_top_holds_its_foot() {
 }
 
 /// Golden 50: notch tips across L within the tolerance of the top that
-/// rule 3 does not refuse, every outcome as on main (design note 0012
-/// §21; found by the synthesis families and the notch fuzz). The tip from
-/// the near side 0.3 tolerances above the top at 1°, the top ending 1.05
-/// tolerances beyond the tip's foot: every operation answered. At 0.5°,
-/// the top's edge 2 tolerances across L on the side away from the tip: the
-/// tip is no isolated touch of the top (rule 3's isolation), and a touch
-/// along the top's edge refuses the unions. Two notches the fuzz found at 1° and
-/// 0.5°, their tips within the tolerance of a stretch of the meeting: the
-/// split refuses them, at the tip or (its stretch meeting the top's cut
-/// edge) at the box's end, about 740 mm away. Without rule 3's isolation
-/// the tip over the top's edge is refused in every operation with the
-/// strip's text, and with V's foot tested a rounding margin from the top's
-/// edges rather than at ρ so is the fuzz's notch at 1°.
+/// rule 3 leaves to the meeting or the split, every outcome as on main,
+/// and two it refuses first (design note 0012 §21; found by the synthesis
+/// families and the notch fuzz). The tip from the near side 0.3
+/// tolerances above the top at 1°, the top ending 1.05 tolerances beyond
+/// the tip's foot: every operation answered. At 0.5°, the top's edge 2
+/// tolerances across L on the side away from the tip: the tip is no
+/// isolated touch of the top (rule 3's isolation), and a touch along the
+/// top's edge refuses the unions. Two notches the fuzz found, which rule 3,
+/// testing V's foot to a rounding margin of the top's edges (§21, *V's
+/// foot*), now refuses at the tip first, with the strip's text: at 0.5°,
+/// its tip 0.5 tolerances above the top, 57 across L, its foot 0.93
+/// tolerances inside the top's cut edge, within the tolerance of a stretch
+/// of the meeting that meets that edge (main refused every operation at
+/// the box's end, about 740 mm away, as edges passing within the tolerance
+/// of each other); and at 1°, its prism below its face, its tip 0.95
+/// tolerances under the top and its foot 0.6 tolerances inside the top's
+/// edge (main refused it at the tip, as a point within the tolerance of an
+/// edge it is not on in A ∪ B, A ∩ B and A − B, and as edges passing within
+/// the tolerance of each other in B ∪ A, B ∩ A and B − A). Without rule 3's
+/// isolation the tip over the top's edge is refused in every operation
+/// with the strip's text; with V's foot tested at ρ from the top's edges,
+/// as the edges' parts are (as built before), both fuzz notches are
+/// refused as on main.
 #[test]
 fn a_notch_tip_left_to_the_meeting_or_the_split() {
     let eps = k().tolerance().linear;
@@ -4085,15 +4078,7 @@ fn a_notch_tip_left_to_the_meeting_or_the_split() {
         DVec3::new(1.25, -5.353927718941095e-6, 0.0),
     );
     let at = "(473.509982, -0.005414, -0.000094) mm";
-    let (near, cross) = (near_edge_refusal(at), crossing_refusal(at));
-    let want = [0, 1, 2, 3, 4, 5].map(|i| {
-        if i % 2 == 0 {
-            near.clone()
-        } else {
-            cross.clone()
-        }
-    });
-    outcomes("fuzz at 1°", &a, &b, want);
+    outcomes("fuzz at 1°", &a, &b, all(band_refusal(at)));
     let b = on_plane(
         0.5,
         &[
@@ -4110,8 +4095,8 @@ fn a_notch_tip_left_to_the_meeting_or_the_split() {
     let o = p(0.4504514275595844, 5.550401201270718e-6);
     let n = p(-0.31746232165223376, -0.9482708865778668);
     let a = slab(&ccw(clip(&top_rect(), o, n)));
-    let at = "(-250.000000, 234.502823, 0.000000) mm";
-    outcomes("fuzz at 0.5°", &a, &b, all(crossing_refusal(at)));
+    let at = "(450.451185, 0.005729, 0.000050) mm";
+    outcomes("fuzz at 0.5°", &a, &b, all(band_refusal(at)));
 }
 
 /// Golden 51: corners of oblique prisms' faces across L within the
@@ -4171,36 +4156,38 @@ fn an_oblique_corner_is_refused_unless_both_tests_call_it_no_isolated_touch() {
     }
 }
 
-/// Golden 52: spike tips V across L within the tolerance of the top, whose
-/// flap (the face across L between V's edges) the flap rule's table
-/// decides (design note 0012 §21; found by the synthesis and oblique
-/// families). The flap's own side is tested where the layer between it
-/// and the top lies outside the face's body, where the touch record does
-/// not hold V, or where the layer lies outside the top's body and the
-/// touch at V is unpinched, and each of these is refused: a rising spike
-/// 50 tolerances across at 1°, its prism below its face, under a top cut
-/// along a line at 20° through V's foot (the layer in the face's body and
-/// outside the top's, V on the top's edge; main crossed the flap and the
-/// top 22.4 tolerances inside in A − B); spikes 0.9 tolerances from the
-/// top at 10° and 3°, their prisms leaning 85° and 88.5° so that the record
-/// does not hold V (main crossed them 4.5 tolerances inside in A − B, and
-/// answered every operation with the flap crossing the top 14.9 tolerances
-/// inside). Where the record holds V and the layer lies in both bodies, or
+/// Golden 52: spike tips V across L within the tolerance of the top, whose flap
+/// (the face across L between V's edges) the flap rule's table decides (design
+/// note 0012 §21; found by the synthesis and oblique families). The flap's own
+/// side is tested where the layer between it and the top lies outside the
+/// face's body, where the touch record does not hold V, or where the layer lies
+/// outside the top's body and the touch at V is unpinched, and each of these is
+/// refused: a rising spike 50 tolerances across at 1°, its prism below its
+/// face, under a top cut along a line at 20° through V's foot (the layer in the
+/// face's body and outside the top's, V on the top's edge; main crossed the
+/// flap and the top 22.4 tolerances inside in A − B); spikes 0.9 tolerances
+/// from the top at 10° and 3°, their prisms leaning 85° and 88.5° so that the
+/// record does not hold V (main crossed the first 4.5 tolerances inside in A −
+/// B, and answered every operation of the second, the faces-crossing check
+/// finding a fold of two faces sharing an edge 29.8 tolerances deep in A ∪ B
+/// and in B ∪ A, under the flap crossing the top 14.9 tolerances inside that a
+/// check ranking crossings above folds found there, and no crossing in the
+/// other four). Where the record holds V and the layer lies in both bodies, or
 /// outside the top's with the touch pinched and the top's edges out of the
-/// tolerance's reach of the flap, the touch at V decides it, every outcome
-/// as on main: a spike 0.3 tolerances above the top at 0.5° with a
-/// lopsided root, its prism below its face, the same 0.9 tolerances from the top at 10° unleaning,
-/// and 0.5 tolerances at 10° under a top ending 3 tolerances beyond V's
-/// foot (A − B touching at V, refused); a falling spike 3 tolerances
-/// across L at 10° under a top cut along L 0.75 of the way to V's foot, and the walls of a notch
-/// whose tip lies 0.3 tolerances above the top at 30° under a top ending
-/// at a corner 0.4 tolerances beyond its foot (the union touching at V,
-/// refused, or every operation answered). Letting the touch decide a flap
-/// the record does not hold answers the 85° spike as main did; testing
-/// only flaps outside the face's body answers the 50-tolerance spike as
-/// main did; testing every flap, or a pinched one's side whole, refuses
-/// the lopsided spike; and testing an unpinched flap in both bodies
-/// refuses the falling spike with the strip's text.
+/// tolerance's reach of the flap, the touch at V decides it, every outcome as
+/// on main: a spike 0.3 tolerances above the top at 0.5° with a lopsided root,
+/// its prism below its face, the same 0.9 tolerances from the top at 10°
+/// unleaning, and 0.5 tolerances at 10° under a top ending 3 tolerances beyond
+/// V's foot (A − B touching at V, refused); a falling spike 3 tolerances across
+/// L at 10° under a top cut along L 0.75 of the way to V's foot, and the walls
+/// of a notch whose tip lies 0.3 tolerances above the top at 30° under a top
+/// ending at a corner 0.4 tolerances beyond its foot (the union touching at V,
+/// refused, or every operation answered). Letting the touch decide a flap the
+/// record does not hold answers the 85° spike as main did; testing only flaps
+/// outside the face's body answers the 50-tolerance spike as main did; testing
+/// every flap, or a pinched one's side whole, refuses the lopsided spike; and
+/// testing an unpinched flap in both bodies refuses the falling spike with the
+/// strip's text.
 #[test]
 fn a_spike_flap_is_tested_unless_the_touch_at_its_tip_decides_it() {
     let eps = k().tolerance().linear;
@@ -4388,19 +4375,24 @@ fn a_pinched_flap_is_refused_where_the_tops_edge_comes_within_its_strip() {
     }
 }
 
-/// Golden 54: spike tips whose flap lies over the strip of a run of the
-/// other face (design note 0012 §21, the exclusion; found by the
-/// synthesis families and the fuzz). The run's strip leaves out the flap's
-/// triangle, which the flap's own rule decides by the touch at its tip: a
-/// falling spike 0.3 tolerances under the top at 0.5°, under a slab whose
-/// top has a notch from x = 0.3 to 0.7 ending 1.05 tolerances beyond the
-/// tip's foot; and a notch the fuzz found at 2°, under a box turned 12.7°
-/// whose corner lies at its tip. Main refused every operation, the run's
-/// strip held over the flap; now the touch at the tip refuses the unions,
-/// A ∩ B and B ∩ A are empty, and A − B and B − A are answered. Without the
-/// exclusion, or with only runs that are their face's whole interval
-/// leaving flaps out, the slab's case is refused in every operation as on
-/// main.
+/// Golden 54: flaps that lie over the strip of a chain of the other face
+/// (design note 0012 §21, flaps under strips; found by the synthesis
+/// families and the fuzz). The chain's strip leaves out the flap's
+/// triangle, which the flap's own rule decides by the touch at its
+/// corner: a falling spike 0.3 tolerances under the top at 0.5°, under a
+/// slab whose top has a notch from x = 0.3 to 0.7 ending 1.05 tolerances
+/// beyond the tip's foot, the spike's flap under the strip of a run of the
+/// slab's top; and, found by the fuzz at 2°, a box turned 12.7° whose top's
+/// corner lies at the apex of a notch of the face from its near side, the
+/// apex 0.9 tolerances under the top and the corner 0.9 tolerances from
+/// the face's plane: the corner's edges cross L, and the top's flap there
+/// lies under the strip of the apex, a vertex chain. Main refused
+/// every operation, the chain's strip held over the flap; now the touch at
+/// the corner refuses the unions, A ∩ B and B ∩ A are empty, and A − B
+/// and B − A are answered. Without the exclusion, or with only runs that
+/// are their face's whole interval leaving flaps out, the slab's case is
+/// refused in every operation as on main; with only vertex chains keeping
+/// flaps in their strips, the fuzz's is, as on main.
 #[test]
 fn a_strip_leaves_out_the_other_faces_flap() {
     let eps = k().tolerance().linear;
@@ -4472,8 +4464,10 @@ fn a_strip_leaves_out_the_other_faces_flap() {
 /// foot. Main answered A ∩ B and B ∩ A, or A − B, or B − A, with the flap
 /// crossing the top up to 2 tolerances inside; every operation is now
 /// refused at V. With a disc of three tolerances about the cluster's
-/// place, the rising spike at 3° is refused in one order of the operands
-/// and answered in the other, as main did.
+/// place, as built before (c91e454), the rising spike at 3° is refused in
+/// one order of the operands and answered in the other; main answered
+/// every operation of it, A ∩ B and B ∩ A with the flap crossing the top
+/// 1.70 and 1.29 tolerances inside.
 #[test]
 fn a_flap_is_excused_only_within_the_tolerance_of_its_tips_members() {
     let eps = k().tolerance().linear;
@@ -4514,6 +4508,648 @@ fn a_flap_is_excused_only_within_the_tolerance_of_its_tips_members() {
         let n = p(20f64.to_radians().cos(), 20f64.to_radians().sin()).perp();
         let a = slab(&ccw(clip(&top_rect(), p(0.5, yv), n)));
         outcomes("at 20°", &a, &b, zero);
+    }
+}
+
+/// Golden 56: notch tips across L within the tolerance of a box's top whose
+/// cluster holds a corner of the top, which the settling of touched points
+/// decides (design note 0012 §21, rule 3's item 2, *V is a point of G's
+/// boundary*; found by the second verification of §21). The notch of golden
+/// 50's fuzz shape at x = 0.718446 with a lopsided mouth from the far side, at
+/// 1° its tip 0.164 tolerances under the top, at 3° 0.5 under it, over a box
+/// whose top's corner lies at the tip's foot, its sides turned 65.7° (82°) from
+/// x: the bodies touch at the tip, A ∪ B and B ∪ A are refused as non-manifold
+/// there, A ∩ B and B ∩ A are empty, and A − B and B − A are the operands; main
+/// had the same outcomes. Without rule 3's item 2, every operation is refused
+/// at the tip with the strip's text.
+#[test]
+fn a_notch_tip_whose_cluster_holds_the_tops_corner_is_left_to_the_touch() {
+    let eps = k().tolerance().linear;
+    let box_ = "(6, 12, 8, 1) V=1.000000000 A=6.000000000";
+    for (t, z, phi, want) in [
+        (
+            1.0f64,
+            0.164f64,
+            65.7f64,
+            [
+                point_refusal("(718.446000, -0.000940, 0.000000) mm"),
+                point_refusal("(718.446000, -0.000940, -0.000016) mm"),
+                "empty".into(),
+                "empty".into(),
+                box_.into(),
+                "(9, 21, 14, 1) V=1.690737483 A=11.627594726".into(),
+            ],
+        ),
+        (
+            3.0,
+            0.5,
+            82.0,
+            [
+                edge_refusal("(718.446045, -0.000595, -0.000003) mm"),
+                edge_refusal("(718.446045, -0.000595, -0.000028) mm"),
+                "empty".into(),
+                "empty".into(),
+                box_.into(),
+                "(9, 21, 14, 1) V=1.690737482 A=11.627594740".into(),
+            ],
+        ),
+    ] {
+        let tr = t.to_radians();
+        let (x, d) = (0.718446, z * eps / tr.sin());
+        let b = on_plane(
+            t,
+            &notch_profile((1.2, 2.2), x, -d, (0.0551, 0.019), false),
+            false,
+        );
+        let ph = phi.to_radians();
+        let frame = Frame {
+            origin: DVec3::new(x, -d * tr.cos(), -1.0),
+            x: DVec3::new(ph.cos(), ph.sin(), 0.0),
+            y: DVec3::new(-ph.sin(), ph.cos(), 0.0),
+            z: DVec3::Z,
+        };
+        let a = k().make_box(&frame, DVec3::ONE).expect("a box");
+        outcomes(&format!("{t}° {phi}°"), &a, &b, want);
+    }
+}
+
+/// Golden 57: golden 48's notch tip at 1°, 30 tolerances across L in the
+/// face's plane, over tops that hold only part of its test set (design
+/// note 0012 §21, rule 3's test set): a box ending 1.5 tolerances short
+/// of the tip's foot along L, to either side, which holds the feet of
+/// one of its edges and not its own foot, and one ending 3.9 tolerances
+/// short of it, which holds that edge's feet at most 1.9 tolerances deep;
+/// and, at 3° (15 tolerances across) and 1°, a top cut parallel to the
+/// feet of one edge 1.5 tolerances beyond them, which holds them and the
+/// tip's foot 1.5 tolerances inside its edge, and not the other edge's
+/// feet. Every operation is refused at the tip. Main refused every
+/// operation over the boxes at a corner of the notch's mouth, where edges
+/// where the bodies meet pass within the tolerance of each other, and
+/// failed A ∪ B, A ∩ B and A − B over the cut tops, a contact's pieces
+/// disagreeing on their side, refusing the other three at the tip as such
+/// edges. Testing only the edge the box does not hold, every operation
+/// over the box is refused as on main; placing the edges' parts at twice
+/// the tolerance's depth, so is every operation over the box ending 3.9
+/// tolerances short (the cut tops, which hold V's foot, are refused at the
+/// tip all the same, the foot placed to a rounding margin).
+#[test]
+fn a_notch_tip_is_refused_where_the_top_holds_one_edges_feet() {
+    let eps = k().tolerance().linear;
+    let at = |t: f64| {
+        if t == 1.0 {
+            "(500.000000, -0.003000, -0.000052) mm"
+        } else {
+            "(500.000000, -0.001498, -0.000079) mm"
+        }
+    };
+    let tip = |t: f64, v: f64| {
+        on_plane(
+            t,
+            &notch_profile((0.5, 2.0), 0.5, v * eps, (0.1, 0.1), false),
+            false,
+        )
+    };
+    let b = tip(1.0, -30.0);
+    for (side, a) in [
+        (
+            "right",
+            cuboid(
+                DVec3::new(0.5 + 1.5 * eps, -1.0, -1.0),
+                DVec3::new(1.25, 1.0, 0.0),
+            ),
+        ),
+        (
+            "left",
+            cuboid(
+                DVec3::new(-0.25, -1.0, -1.0),
+                DVec3::new(0.5 - 1.5 * eps, 1.0, 0.0),
+            ),
+        ),
+        (
+            "right, shallow",
+            cuboid(
+                DVec3::new(0.5 + 3.9 * eps, -1.0, -1.0),
+                DVec3::new(1.25, 1.0, 0.0),
+            ),
+        ),
+    ] {
+        outcomes(side, &a, &b, all(band_refusal(at(1.0))));
+    }
+    for (t, v) in [(3.0f64, -15.0f64), (1.0, -30.0)] {
+        let tr = t.to_radians();
+        let foot = DVec2::new(0.5, v * eps * tr.cos());
+        let u = (DVec2::new(0.6, 0.5 * tr.cos()) - foot).normalize();
+        let m = u.perp();
+        let a = slab(&ccw(clip(&top_rect(), foot + m * (1.5 * eps), m)));
+        outcomes(
+            &format!("cut {t}°"),
+            &a,
+            &tip(t, v),
+            all(band_refusal(at(t))),
+        );
+    }
+}
+
+/// Golden 58: golden 55's spike tips whose cluster lies on the top's edge along
+/// L, the top ending half a tolerance beyond V's foot, at 10° (V 3 tolerances
+/// across L, its mouth even or lopsided) and 1° (30 across): the touch at V
+/// decides the flap's points within the tolerance of its cluster's members, and
+/// the top holds the rest, so every operation is refused at V (design note 0012
+/// §21, the flap rule: a flap whose touch lies on the other face's boundary is
+/// unpinched, and its own side is tested). Main answered every operation;
+/// testing it instead as a pinched flap, by the crossing of the top's edges, so
+/// does this build, with main's results.
+#[test]
+fn a_flap_whose_touch_lies_on_the_tops_edge_is_tested_on_its_side() {
+    let eps = k().tolerance().linear;
+    let p = DVec2::new;
+    for (t, d, (wa, wb), at) in [
+        (
+            10.0f64,
+            3.0f64,
+            (0.1, 0.1),
+            "(500.000000, 0.000000, 0.000000) mm",
+        ),
+        (
+            10.0,
+            3.0,
+            (0.02, 0.3),
+            "(499.999830, 0.000000, 0.000000) mm",
+        ),
+        (1.0, 30.0, (0.1, 0.1), "(500.000000, 0.000000, 0.000000) mm"),
+    ] {
+        let b = on_plane(
+            t,
+            &spiked_profile((0.5, 2.0), 0.5, d * eps, (wa, wb), 0.2, true),
+            true,
+        );
+        let yv = d * eps * t.to_radians().cos();
+        let a = slab(&ccw(clip(&top_rect(), p(0.5, yv + 0.5 * eps), p(0.0, 1.0))));
+        outcomes(&format!("{t}° {wa}/{wb}"), &a, &b, all(band_refusal(at)));
+    }
+}
+
+/// Golden 59: notch tips with wide mouths (their edges at about 63° to L), at
+/// 1° 30 and at 3° 15 tolerances across L, over a box ending 6 tolerances
+/// beyond the tip's foot along L: the foot lies beyond the pre-filter's pad of
+/// the top's box, and the feet of one edge, up to the tolerance's reach of L,
+/// enter the top, which holds them (design note 0012 §21, rule 3's item 0, *G
+/// is out of reach*, by the box of the whole test set). Every operation is
+/// refused at the tip. Passing the tip by its foot's box alone, the operations
+/// are refused 750 mm along L, at the box's far side, where edges where the
+/// bodies meet pass within the tolerance of each other, as on main.
+#[test]
+fn a_notch_tip_whose_edges_reach_the_top_beyond_the_pad_is_tested() {
+    let eps = k().tolerance().linear;
+    for (t, v, at) in [
+        (1.0f64, -30.0f64, "(500.000000, -0.003000, -0.000052) mm"),
+        (3.0, -15.0, "(500.000000, -0.001498, -0.000079) mm"),
+    ] {
+        let b = on_plane(
+            t,
+            &notch_profile((1.0, 2.0), 0.5, v * eps, (1.0, 1.0), false),
+            false,
+        );
+        let a = cuboid(
+            DVec3::new(0.5 + 6.0 * eps, -1.0, -1.0),
+            DVec3::new(1.25, 1.0, 0.0),
+        );
+        outcomes(&format!("{t}°"), &a, &b, all(band_refusal(at)));
+    }
+}
+
+/// Golden 60: golden 57's notch tips at 1° (30 tolerances across L) and
+/// 3° (15 across) over the box, with two round holes of radius 50 mm
+/// either side of the tip's foot, their rims 3.5 tolerances from it along
+/// L and reaching to 3 tolerances short of L, beside the tip's edges and
+/// not its foot (design note 0012 §21, rule 3's test set): the top holds
+/// the foot, and every operation is refused at the tip as a band. Main
+/// refused every operation as a tangent contact at the top of a hole's
+/// rim. Leaving the foot out of the test set, the edges' parts are tested
+/// first, and every operation is refused as unsupported beside the holes'
+/// rims.
+#[test]
+fn a_notch_tip_whose_foot_the_top_holds_beside_round_holes_is_refused() {
+    let eps = k().tolerance().linear;
+    for (t, v, at) in [
+        (1.0f64, -30.0f64, "(500.000000, -0.003000, -0.000052) mm"),
+        (3.0, -15.0, "(500.000000, -0.001498, -0.000079) mm"),
+    ] {
+        let b = on_plane(
+            t,
+            &notch_profile((0.5, 2.0), 0.5, v * eps, (0.1, 0.1), false),
+            false,
+        );
+        let r = 0.05;
+        let cy = v * eps * t.to_radians().cos() + (v.abs() - 3.0) * eps - r;
+        let mut a = the_box();
+        for s in [1.0f64, -1.0] {
+            let c = DVec2::new(0.5 + s * (3.5 * eps + r), cy);
+            a = op(&a, &rod(c, r), BooleanOp::Subtract);
+        }
+        outcomes(&format!("{t}°"), &a, &b, all(band_refusal(at)));
+    }
+}
+
+/// Golden 61: the same notch tips over the box with a round hole of radius
+/// 50 mm under the tip's foot, its rim crossing the tip's edges a quarter
+/// of the way from L to the foot: the foot lies over the hole, the top
+/// holds the edges' parts beyond the rim, and the test meets the rim, so
+/// every operation is refused at the tip as unsupported beside a curved
+/// edge (design note 0012 §20 and §21, rule 3). Passing over the rim's
+/// curved edge in the test, every operation is refused at a corner of
+/// the notch's mouth instead, as on main.
+#[test]
+fn a_notch_tip_whose_test_meets_a_round_holes_rim_is_unsupported() {
+    let eps = k().tolerance().linear;
+    for (t, v, at) in [
+        (1.0f64, -30.0f64, "(500.000000, -0.003000, -0.000052) mm"),
+        (3.0, -15.0, "(500.000000, -0.001498, -0.000079) mm"),
+    ] {
+        let b = on_plane(
+            t,
+            &notch_profile((0.5, 2.0), 0.5, v * eps, (0.1, 0.1), false),
+            false,
+        );
+        let r = 0.05;
+        let rim = v * eps * t.to_radians().cos() + 0.75 * v.abs() * eps;
+        let a = op(
+            &the_box(),
+            &rod(DVec2::new(0.5, rim - r), r),
+            BooleanOp::Subtract,
+        );
+        let curved = format!(
+            "unsupported: booleans where a face of one body runs within the tolerance of the \
+             other's surface beside a curved edge (design note 0012 §20) near {at}"
+        );
+        outcomes(&format!("{t}°"), &a, &b, all(curved));
+    }
+}
+
+/// Golden 62: goldens 48's, 49's and 51's corners over a top that faces against
+/// the normal its body records for its plane (design note 0012 §21, *Three
+/// faults of the built rule*, the side): a block from z = 0 to 0.5 straddling
+/// the top's edge y = −1, joined to the slab under the top, leaves its bottom
+/// beyond that edge on the plane z = 0, facing down, and the body records the
+/// plane with that face's normal, against the top's. Golden 51's near tip at
+/// 30° and far tip at 10°, golden 49's apex at 1° over a top ending 3
+/// tolerances beyond its foot, and golden 48's tip at 1° over the top pierced
+/// under its foot: every operation is refused at the corner, as over the plain
+/// top. Main failed A ∪ B, A ∩ B and A − B of each tip, a contact's pieces
+/// disagreeing on their side, refusing the other three as edges where the
+/// bodies meet passing within the tolerance of each other, and failed every
+/// operation of the apex likewise and of the pierced tip as kept pieces that do
+/// not close along an edge. Taking each corner's side along the plane's record
+/// rather than along the top's outward normal (as built before), rule 3
+/// measured every height mirrored and passed each corner, and every outcome is
+/// main's.
+#[test]
+fn a_corner_over_a_top_facing_against_its_planes_record_is_refused() {
+    let eps = k().tolerance().linear;
+    let p = DVec2::new;
+    let block = cuboid(DVec3::new(0.45, -1.05, 0.0), DVec3::new(0.55, -0.95, 0.5));
+    let behind = |top: &[DVec2]| op(&block, &slab(&ccw(top.to_vec())), BooleanOp::Union);
+    {
+        let t = 30.0f64;
+        let h = 0.7 * eps / t.to_radians().sin();
+        let prof = notch_profile((0.5, 2.0), 0.5, h, (0.35, 0.35), true);
+        let b = oblique(t, &prof, false, 75.0, -90.0);
+        let at = "(500.000000, 0.000121, 0.000070) mm";
+        outcomes("near tip", &behind(&top_rect()), &b, all(band_refusal(at)));
+    }
+    {
+        let t = 10.0f64;
+        let h = 0.3 * eps / t.to_radians().sin();
+        let prof = notch_profile((0.5, 2.0), 0.5, -h / eps * eps, (0.35, 0.35), false);
+        let b = oblique(t, &prof, true, 85.0, 90.0);
+        let at = "(500.000000, -0.000170, -0.000030) mm";
+        outcomes("far tip", &behind(&top_rect()), &b, all(band_refusal(at)));
+    }
+    {
+        let t = 1.0f64;
+        let h = 0.3 * eps / t.to_radians().sin();
+        let b = on_plane(
+            t,
+            &notch_profile((1.2, 2.2), 0.5, h, (0.1, 0.1), false),
+            false,
+        );
+        let y = h * t.to_radians().cos();
+        let a = behind(&clip(&top_rect(), p(0.5, y + 3.0 * eps), p(0.0, 1.0)));
+        let at = "(500.000000, 0.001719, 0.000030) mm";
+        outcomes("apex", &a, &b, all(band_refusal(at)));
+    }
+    {
+        let (t, v) = (1.0f64, -30.0);
+        let b = on_plane(
+            t,
+            &notch_profile((0.5, 2.0), 0.5, v * eps, (0.1, 0.1), false),
+            false,
+        );
+        let yv = v * eps * t.to_radians().cos();
+        let hole = vec![p(0.3, -0.5), p(0.7, -0.5), p(0.5, 0.51 * yv)];
+        let a = pierced_by(&behind(&top_rect()), hole);
+        let at = "(500.000000, -0.003000, -0.000052) mm";
+        outcomes("notch tip", &a, &b, all(band_refusal(at)));
+    }
+}
+
+/// A Z-shaped block: a lower bar x from −0.25 to 1.25, y from −1 to 1.5
+/// and z from −1 to 0, and an upper bar y from 1.25 to 3 and z from 0 to
+/// 1, so the plane z = 0 holds its top (y from −1 to 1.25, facing up) and
+/// the upper bar's underside (y from 1.5 to 3, facing down). With
+/// `top_first` its profile starts at the top's edge, so that the top comes
+/// first among the body's faces on the plane; otherwise the underside
+/// does.
+fn z_block(top_first: bool) -> Body {
+    let frame = Frame {
+        origin: DVec3::new(-0.25, 0.0, 0.0),
+        x: DVec3::Y,
+        y: DVec3::Z,
+        z: DVec3::X,
+    };
+    let p = DVec2::new;
+    let mut pts = vec![
+        p(-1.0, -1.0),
+        p(1.5, -1.0),
+        p(1.5, 0.0),
+        p(3.0, 0.0),
+        p(3.0, 1.0),
+        p(1.25, 1.0),
+        p(1.25, 0.0),
+        p(-1.0, 0.0),
+    ];
+    if top_first {
+        pts.rotate_left(6);
+    }
+    prism(frame, &pts, 1.5)
+}
+
+/// Golden 63: golden 42's notch tips at 10° and 1° (3 and 30 tolerances across
+/// L) and golden 51's near tip at 30°, over the top of a Z-shaped block
+/// ([`z_block`]) that shares its plane with the block's underside facing down
+/// (design note 0012 §21, *Three faults of the built rule*, the side). Every
+/// operation is refused at the tip, over the box's top and over the block's
+/// whether the top or the underside comes first among its faces on the plane.
+/// Main failed A ∪ B, A ∩ B and A − B of each over each top, a contact's pieces
+/// disagreeing on their side, refusing the other three as edges where the
+/// bodies meet passing within the tolerance of each other. Taking each tip's
+/// side along the plane's record (as built before), the tips over the block
+/// whose underside comes first have main's outcomes.
+#[test]
+fn a_notch_tip_over_a_top_sharing_its_plane_with_a_face_turned_down() {
+    let eps = k().tolerance().linear;
+    let near = {
+        let t = 30.0f64;
+        let h = 0.7 * eps / t.to_radians().sin();
+        let prof = notch_profile((0.5, 2.0), 0.5, h, (0.35, 0.35), true);
+        oblique(t, &prof, false, 75.0, -90.0)
+    };
+    for (what, b, at) in [
+        (
+            "10°",
+            notch_at(10.0, 0.5, -3.0),
+            "(500.000000, -0.000295, -0.000052) mm",
+        ),
+        (
+            "1°",
+            notch_at(1.0, 0.5, -30.0),
+            "(500.000000, -0.003000, -0.000052) mm",
+        ),
+        ("near", near, "(500.000000, 0.000121, 0.000070) mm"),
+    ] {
+        let want = all(band_refusal(at));
+        outcomes(&format!("{what} box"), &the_box(), &b, want.clone());
+        outcomes(
+            &format!("{what} top first"),
+            &z_block(true),
+            &b,
+            want.clone(),
+        );
+        outcomes(&format!("{what} top second"), &z_block(false), &b, want);
+    }
+}
+
+/// Golden 64: golden 57's notch tips under a top cut parallel to the feet
+/// of V's right edge, `d` tolerances beyond them, so that the top holds
+/// V's foot `d` tolerances inside its edge, for `d` from the tolerance to
+/// ρ: 1, 1 + 2⁻⁴⁰, 1 + 2⁻²⁰, 1 + 2⁻¹³, 1 + 2⁻¹¹ and 1 + 2⁻¹⁰ (design note
+/// 0012 §21, *V's foot*; found by the mutation review). The tip lies 60,
+/// 30, 15 and 3 tolerances across L at 0.5°, 1°, 3° and 10° (0.52, 0.52,
+/// 0.79 and 0.52 tolerances under the top), and 5 across at 1° (0.087
+/// under). Every operation is refused at V. Main refused the tips at 0.5°
+/// and 3° at d = 1 and 1 + 2⁻⁴⁰ as a point within the tolerance of an edge
+/// it is not on; failed A ∪ B, A ∩ B and A − B of the tip 5 across at those
+/// d, a contact's pieces disagreeing on their side, refusing the others so;
+/// and failed A ∪ B, A ∩ B and A − B of every other case likewise, refusing
+/// the other three as edges where the bodies meet passing within the
+/// tolerance of each other. With V's foot tested at ρ from the top's edges
+/// as the edges' parts are (as built before), each case has main's
+/// outcomes but two at 1 + 2⁻¹⁰: at 0.5° every operation is refused at V,
+/// and at 10° A ∪ B, A ∩ B and A − B fail and the others are refused at V.
+/// At 10°, d = 1 and 1 + 2⁻⁴⁰ are left out: the clustering refuses them
+/// first, as a point within the tolerance of two edges.
+#[test]
+fn a_notch_tip_whose_foot_lies_within_rho_inside_the_tops_edge() {
+    let eps = k().tolerance().linear;
+    let h = |k: i32| 2f64.powi(-k);
+    for (t, v, at) in [
+        (0.5f64, -60.0f64, "(500.000000, -0.006000, -0.000052) mm"),
+        (1.0, -30.0, "(500.000000, -0.003000, -0.000052) mm"),
+        (3.0, -15.0, "(500.000000, -0.001498, -0.000079) mm"),
+        (10.0, -3.0, "(500.000000, -0.000295, -0.000052) mm"),
+        (1.0, -5.0, "(500.000000, -0.000500, -0.000009) mm"),
+    ] {
+        let tr = t.to_radians();
+        let b = on_plane(
+            t,
+            &notch_profile((0.5, 2.0), 0.5, v * eps, (0.1, 0.1), false),
+            false,
+        );
+        let foot = DVec2::new(0.5, v * eps * tr.cos());
+        let m = (DVec2::new(0.6, 0.5 * tr.cos()) - foot).normalize().perp();
+        let ds = [
+            1.0,
+            1.0 + h(40),
+            1.0 + h(20),
+            1.0 + h(13),
+            1.0 + h(11),
+            1.0 + h(10),
+        ];
+        // At 10° the clustering refuses the first two, as a point within
+        // the tolerance of two edges (the doc comment).
+        let from = if t == 10.0 { 2 } else { 0 };
+        for d in ds[from..].iter() {
+            let a = slab(&ccw(clip(&top_rect(), foot + m * (d * eps), m)));
+            outcomes(&format!("{t}° {v} {d}"), &a, &b, all(band_refusal(at)));
+        }
+    }
+}
+
+/// Golden 65: notch tips from the far side under the box's top, over a
+/// round hole of radius 0.2 in the top centred 0.05 beyond the tip's foot
+/// along y (design note 0012 §21, *V's foot* and *A curved edge beside the
+/// test*; found by review): the foot lies in the hole, 0.15 from its rim,
+/// inside the box of the rim's arcs. The tip lies 0.3 tolerances under the
+/// top at 30°, 0.1 and 0.3 under it at 10° and at 3°. Every operation is
+/// answered, with main's counts, volumes and areas: rule 3 places the foot
+/// against the rim, which the placing follows, and tests the parts of V's
+/// edges against the rim's arcs only where the arcs may come within 2ρ of
+/// them. Testing the foot as the edges' parts are, and refusing wherever
+/// the box of a curved edge met the test's (as built before), every
+/// operation of each case is refused as not supported beside a curved
+/// edge; with the foot placed and that box test kept, so is each at 10° and
+/// 0.3 under and at 3°, whose edges' parts meet the box of the rim's arcs.
+/// Golden 61 keeps a rim the test meets.
+#[test]
+fn a_notch_tip_over_a_round_hole_in_the_top_is_answered() {
+    let eps = k().tolerance().linear;
+    let a = op(
+        &the_box(),
+        &rod(DVec2::new(0.5, 0.05), 0.2),
+        BooleanOp::Subtract,
+    );
+    for (t, z, want) in [
+        (
+            30.0f64,
+            0.3f64,
+            answered(
+                "(18, 51, 34, 1) V=3.992635680 A=20.685077926",
+                "(6, 12, 8, 1) V=0.106700611 A=2.130133721",
+                "(11, 30, 20, 1) V=2.767635683 A=14.141799665".into(),
+                "(13, 33, 22, 1) V=1.118299386 A=8.673411983",
+            ),
+        ),
+        (
+            10.0,
+            0.1,
+            answered(
+                "(18, 51, 34, 1) V=4.066749146 A=21.205053229",
+                "(6, 12, 8, 1) V=0.032587144 A=1.610158416",
+                "(11, 30, 20, 1) V=2.841749149 A=14.072229345".into(),
+                "(13, 33, 22, 1) V=1.192412853 A=8.742982301",
+            ),
+        ),
+        (
+            10.0,
+            0.3,
+            answered(
+                "(18, 51, 34, 1) V=4.066749141 A=21.205053319",
+                "(6, 12, 8, 1) V=0.032587144 A=1.610158416",
+                "(11, 30, 20, 1) V=2.841749149 A=14.072229345".into(),
+                "(13, 33, 22, 1) V=1.192412847 A=8.742982391",
+            ),
+        ),
+        (
+            3.0,
+            0.1,
+            answered(
+                "(18, 51, 34, 1) V=4.089650756 A=21.345240250",
+                "(6, 12, 8, 1) V=0.009685528 A=1.469971499",
+                "(11, 30, 20, 1) V=2.864650766 A=14.027747312".into(),
+                "(13, 33, 22, 1) V=1.215314463 A=8.787464438",
+            ),
+        ),
+        (
+            3.0,
+            0.3,
+            answered(
+                "(18, 51, 34, 1) V=4.089650737 A=21.345240549",
+                "(6, 12, 8, 1) V=0.009685528 A=1.469971499",
+                "(11, 30, 20, 1) V=2.864650766 A=14.027747312".into(),
+                "(13, 33, 22, 1) V=1.215314444 A=8.787464736",
+            ),
+        ),
+    ] {
+        let w = -z / t.to_radians().sin();
+        let b = on_plane(
+            t,
+            &notch_profile((0.5, 2.0), 0.5, w * eps, (0.1, 0.1), false),
+            false,
+        );
+        outcomes(&format!("{t}° {z}"), &a, &b, want);
+    }
+}
+
+/// Golden 66: wide spike tips V (their edges at 72° to the spike's axis)
+/// at 30°, 1.06 tolerances across L in the face's plane (0.53 above the
+/// top, the spike rising, or under it, falling), over a slab whose top has
+/// a reflex corner W 0.3 tolerances beyond V's foot on the line through
+/// the foot square to L, the quarter of the top beyond W to one side of
+/// that line removed (design note 0012 §21, the member discs; found by
+/// this review's mutation tests). V and W lie in one cluster on the top's
+/// boundary, so the touch at V decides the flap's points within the
+/// tolerance of the cluster's members. The flap's points on L about the
+/// spike's axis lie 1.008 tolerances from V's edges in the face's plane
+/// and, in the top's plane, 0.92 from V's foot and 1.22 from W; the top
+/// holds them. Every operation is answered, the same in either order of
+/// the operands up to rounding, as on main. Excusing only the disc about
+/// the cluster's place, which is the first operand's vertex (W in A ∪ B,
+/// A ∩ B and A − B, V in the other three), A ∪ B, A ∩ B and A − B are
+/// refused on L at the spike's axis and the other three are answered.
+#[test]
+fn a_flap_is_excused_about_each_member_of_its_tips_cluster() {
+    let eps = k().tolerance().linear;
+    let p = DVec2::new;
+    let (t, half): (f64, f64) = (30.0, 72.0);
+    for (up, left, want) in [
+        (
+            true,
+            true,
+            [
+                "(20, 51, 33, 1) V=2.660280890 A=14.476932429",
+                "(20, 51, 33, 1) V=2.660280890 A=14.476932469",
+                "(9, 20, 13, 1) V=0.105107651 A=2.000460035",
+                "(9, 20, 13, 1) V=0.105107651 A=2.000460026",
+                "(16, 38, 24, 1) V=2.144892440 A=11.766615235",
+                "(13, 33, 22, 1) V=0.410280799 A=4.710777200",
+            ],
+        ),
+        (
+            false,
+            false,
+            [
+                "(20, 50, 32, 1) V=2.555107743 A=13.843743364",
+                "(20, 50, 32, 1) V=2.555107743 A=13.843743331",
+                "(9, 21, 14, 1) V=0.210280799 A=2.633649100",
+                "(9, 21, 14, 1) V=0.210280799 A=2.633649071",
+                "(16, 39, 25, 1) V=2.039719292 A=12.154060559",
+                "(13, 32, 21, 1) V=0.305107651 A=4.323331897",
+            ],
+        ),
+    ] {
+        let w = if up { 1.06 * eps } else { -1.06 * eps };
+        let wa = (0.1 + 1.06 * eps) * half.to_radians().tan();
+        let b = on_plane(
+            t,
+            &spiked_profile((0.5, 2.0), 0.5, w, (wa, wa), 0.1, up),
+            !up,
+        );
+        let yv = w * t.to_radians().cos();
+        let s = yv.signum();
+        let yw = yv + s * 0.3 * eps;
+        // The top less the quarter beyond W, to the left or the right of
+        // the line through V's foot square to L.
+        let top = if left {
+            vec![
+                p(-0.25, -s),
+                p(1.25, -s),
+                p(1.25, s),
+                p(0.5, s),
+                p(0.5, yw),
+                p(-0.25, yw),
+            ]
+        } else {
+            vec![
+                p(-0.25, -s),
+                p(1.25, -s),
+                p(1.25, yw),
+                p(0.5, yw),
+                p(0.5, s),
+                p(-0.25, s),
+            ]
+        };
+        let a = slab(&ccw(top));
+        outcomes(&format!("up {up}"), &a, &b, want.map(String::from));
     }
 }
 

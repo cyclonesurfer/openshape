@@ -1148,8 +1148,10 @@ fn contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross() {
 /// and A's crossing 1.36 tolerances inside both, as the first build did,
 /// which left the whole flap out; and a flap held 3.3 tolerances from its
 /// corner's place (5385 at 1), where main refused three operations as a
-/// point within the tolerance of an edge and answered B − A without a
-/// crossing: each is refused with the strip's text in all four. And B
+/// point within the tolerance of an edge and answered B − A as (6, 12, 8)
+/// without a crossing (the build with discs of three tolerances about the
+/// cluster's place, c91e454, refused that one with the strip's text):
+/// each is refused with the strip's text in all four. And B
 /// resting by an edge that passes a corner of A's face as the whole
 /// interval of its face on the line, 3.1 and 3.9 tolerances from the corner
 /// (3613 and 3492 at −0.75) and, the edge 0.55° from the face's edge, 54
@@ -1705,19 +1707,21 @@ fn notches_and_spikes_across_the_line() {
 
 /// A notch tip of the notch fuzz ([`notches_and_spikes_across_the_line`],
 /// case 1376, found at ten times its default run) whose foot on the box's
-/// top lies within ρ = ε (1 + 2⁻¹⁰) of the top's edge: a notch from the
+/// top lies within the tolerance inside the top's edge: a notch from the
 /// face's near side at 45°, its tip a tolerance across the line and 0.63
 /// tolerances inside the box's end x = −0.25, the prism below its face.
-/// Rule 3 of design note 0012 §21 tests V's foot as the end of V's edges,
-/// at ρ from the top's edges as the strip search tests its points, and
-/// passes it; the split refuses it as main did, as a point within the
-/// tolerance of an edge it is not on. Testing the foot to a rounding margin
-/// of the edges refused it at the tip, with the strip's text.
+/// Rule 3 of design note 0012 §21 tests V's foot to a rounding margin of
+/// the top's edges (*V's foot*), so the top holds it, and every operation
+/// is refused at the tip with the strip's text. Main refused each as a
+/// point within the tolerance of an edge it is not on, and so did the
+/// build that tested the foot at ρ = ε (1 + 2⁻¹⁰) from the top's edges, as
+/// the edges' parts are, which passed the tip and left it to the split.
 #[test]
-fn a_notch_tip_whose_foot_lies_within_rho_of_the_tops_edge() {
+fn a_notch_tip_whose_foot_lies_within_the_tolerance_inside_the_tops_edge() {
     let eps = k().tolerance().linear;
     let a = cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(1.25, 1.0, 0.0));
-    let edge = "a point where the bodies meet lies within the tolerance of an edge it is not on,";
+    let band = "a face of one body runs within the tolerance of the other's surface without lying \
+                on one of its faces,";
     let mut r = Rng(0x0DA7_0021);
     let mut t = Tally::default();
     for case in 0..=1376 {
@@ -1730,7 +1734,7 @@ fn a_notch_tip_whose_foot_lies_within_rho_of_the_tops_edge() {
             );
             let b = tilted_prism(angle, &pts, below);
             let slack = 4.0 * (area(&a) + area(&b)) * eps;
-            assert_eq!(identities_with(&mut t, &a, &b, &label, slack), [edge; 4]);
+            assert_eq!(identities_with(&mut t, &a, &b, &label, slack), [band; 4]);
         }
     }
     assert_eq!(t.bugs, Vec::<String>::new());
@@ -1790,4 +1794,17 @@ fn a_slight_crease_stays_a_crease() {
     assert_eq!(counts(&u), (12, 27, 18));
     let expect = (2.0 - 0.5 * turn) + 0.25 - 0.125;
     assert!(close(volume(&u), expect), "{} vs {expect}", volume(&u));
+}
+
+/// A case of the contact fuzz (contact 9, a tolerance off) whose flap's corner
+/// touches the other face where its foot's place on the other face cannot be
+/// decided, within a rounding margin of its boundary: the flap is pinched only
+/// where the foot lies inside, so it is unpinched and its own side is tested,
+/// and every operation is refused where the bodies meet in points closer than
+/// the tolerance (design note 0012 §21, the flap rule). Taken as pinched, the
+/// crossing of the other face's edges refuses it with the strip's text.
+#[test]
+fn a_flap_whose_foot_cannot_be_placed_is_unpinched() {
+    let closer = "the bodies meet in points closer than the tolerance";
+    pinned_contacts(&[(9, 1.0, [closer; 4])]);
 }

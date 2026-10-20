@@ -1111,9 +1111,8 @@ fn held_strips(
         if !zero {
             continue;
         }
-        let (them, g, _, _) = sides[1 - k];
-        let surface = pair.get(them).faces[g].surface;
-        let (found, corners) = strip_runs(pair, pts, op, f, surface, ivs);
+        let (_, g, _, _) = sides[1 - k];
+        let (found, corners) = strip_runs(pair, pts, op, f, g, ivs);
         chains[k] = found;
         tips.extend(corners.into_iter().map(|tip| (k, tip)));
     }
@@ -1400,8 +1399,10 @@ struct Tip {
     v: usize,
     /// V's neighbours along the face's loop.
     ends: [usize; 2],
-    /// The side of P that V's edges leave it to, along P's normal (+1 or
-    /// −1): its neighbours' side, as the sort found it.
+    /// The side of P that V's edges leave it to (+1 or −1), along the
+    /// outward normal of the other face `g` (`gf.normal()`), along which
+    /// rule 3 measures every height: its neighbours' side, as the sort
+    /// found it ([`strip_runs`], which turns it from P's record).
     side: f64,
     /// True for an apex.
     apex: bool,
@@ -1531,17 +1532,25 @@ fn tip_refused(
 }
 
 /// Whether face `g` of `them` holds a point of rule 3's test set at the
-/// corner `tip` of face `f` of `op` ([`tip_refused`]) more than the
-/// tolerance inside it and farther than ρ from each of its edges, placed
-/// against it by `against`: V's foot on `g`'s plane P, and the feet of the
-/// parts of V's edges from V up to where `f`'s height over P, along the
-/// side V's edges leave to, reaches `top` less the tolerance's reach in
-/// `f`'s plane (ε sin θ, θ the planes' angle), `hv` V's own height. Each
-/// is tested as a segment of P ([`held_clear`]). V's foot is the end of
-/// both edges' parts, and is tested at ρ as they are, as the strip search
-/// tests its points (design note 0012 §21; tested a rounding margin from
-/// `g`'s boundary instead, it refused at V where the edges were found
-/// held elsewhere, or where something else refuses).
+/// corner `tip` of face `f` of `op` ([`tip_refused`]), placed against it
+/// by `against`, which follows curved edges: V's foot on `g`'s plane P,
+/// held where it lies more than a rounding margin (ε 2⁻¹⁰) inside `g`;
+/// and the feet of the parts of V's edges from V up to where `f`'s height
+/// over P, along the side V's edges leave to, reaches `top` less the
+/// tolerance's reach in `f`'s plane (ε sin θ, θ the planes' angle), `hv`
+/// V's own height, each tested as a segment of P, held where a point of
+/// it lies more than the tolerance inside `g` and farther than ρ from
+/// each of its edges ([`held_clear`]).
+///
+/// V's foot is not tested at ρ as the edges' parts are (design note 0012
+/// §21, *V's foot*): tested so, where an edge of `g` passed between ε and
+/// ρ beyond it (and at ε, by rounding), nothing held the foot, the edge
+/// lay beyond the reach of the contact of edges passing within ε of each
+/// other (closed, in space) from V's edges, nothing refused at V, and
+/// A ∪ B, A ∩ B and A − B failed, a contact's pieces disagreeing on their
+/// side (found by the mutation review). At the margin the foot's test
+/// overlaps that contact's reach; where both apply, rule 3 refuses first,
+/// with the strip's text, where the split or the clustering refused before.
 #[allow(clippy::too_many_arguments)]
 fn tip_held(
     pair: &Pair,
@@ -1561,20 +1570,11 @@ fn tip_held(
     let on_p = |q: DVec3| q - ng * (q - gf.frame.origin).dot(ng);
     let reach = top - pts.eps * nf.cross(ng).length();
     let foot = on_p(p);
-    let surface = &shape.surfaces[face.surface];
-    let at = (them, g, p);
-    if held_clear(
-        pair,
-        pts,
-        against,
-        surface,
-        at,
-        (foot, foot),
-        hv.abs(),
-        budget,
-    )? {
+    if place(against, gf, foot, pts.eps * DEEP, budget)? == Some(true) {
         return Ok(true);
     }
+    let surface = &shape.surfaces[face.surface];
+    let at = (them, g, p);
     for q in tip.ends.map(|u| shape.points[u]) {
         budget.spend(1)?;
         let hq = tip.side * (q - gf.frame.origin).dot(ng);
@@ -1603,8 +1603,14 @@ fn tip_held(
 /// and 2ρ of `surface` (a step for each), and the segment is cut by the
 /// capsule of radius ρ about each ([`capsule`]): each part left is held
 /// whole or not at all, and is placed at its middle (a step and those of
-/// [`place`]). A curved edge of `g` there refuses the boolean as not
-/// supported, near `p`.
+/// [`place`]). A curved edge of `g` whose box meets the segment's grown
+/// by 2ρ refuses the boolean as not supported, near `p`, where it may come
+/// within 2ρ of the segment by the strip search's own test of the hulls of
+/// its pieces' control points ([`Strip::reached`], a step and one for each
+/// hull); one farther cuts nothing, and the placing, which follows it,
+/// decides each part (found by review: refused wherever its box met the
+/// segment's, a round hole's rim refused tips whose test set lay deep
+/// inside the hole).
 #[allow(clippy::too_many_arguments)]
 fn held_clear(
     pair: &Pair,
@@ -1634,13 +1640,21 @@ fn held_clear(
     edges.dedup();
     let (u0, u1) = (gf.to2(s0), gf.to2(s1));
     let mut covered = Vec::new();
+    // The segment as a strip of one piece without area, made when a curved
+    // edge is first met.
+    let mut segment: Option<Strip> = None;
     for e in edges {
         let (l, h) = theirs.edge_boxes[e];
         if !(l.cmple(bx.1).all() && bx.0.cmple(h).all()) {
             continue;
         }
         if !theirs.straight[e] {
-            return Err(curved_beside(p));
+            let segment =
+                segment.get_or_insert_with(|| Strip::new(vec![Piece::segment(u0, u1)], 0.0));
+            if segment.reached(theirs, e, &|q: DVec3| gf.to2(q), 2.0 * rho, budget)? {
+                return Err(curved_beside(p));
+            }
+            continue;
         }
         let (a, b) = theirs.edge_points(e);
         let within = if s0 == s1 {
@@ -1879,10 +1893,10 @@ fn uncovered(
     gaps
 }
 
-/// The chains of face `f` of `op`'s boundary lying on plane `surface` of
-/// the other operand whose strips [`held_strip`] tests, and its corners
-/// that rule 3 tests ([`tip_refused`]), its notch tips across the planes'
-/// common line L and its apexes:
+/// The chains of face `f` of `op`'s boundary lying on the plane P of face
+/// `g` of the other operand whose strips [`held_strip`] tests, and its
+/// corners that rule 3 tests ([`tip_refused`]), its notch tips across the
+/// planes' common line L and its apexes:
 ///
 /// - each run of its straight edges lying on the plane ([`lying_runs`]),
 ///   on either side, marked whole where it is one of its intervals `ivs`
@@ -1911,18 +1925,29 @@ fn uncovered(
 ///   the plane, so for them the first is exactly `d` on their side and the
 ///   second `d` on the other.
 ///
+/// The signs and distances are those of P as `g`'s body records it (along
+/// the outward normal of its first face on P, [`Face::outward`]); a
+/// corner's side ([`Tip::side`]) is turned to `g`'s own outward normal,
+/// along which rule 3 measures heights (found by review: where `g` faced
+/// against its plane's record, a body with an earlier face on P facing the
+/// other way, every verdict of rule 3 was mirrored).
+///
 /// Only the coedges near the plane are looked at.
 fn strip_runs(
     pair: &Pair,
     pts: &Points,
     op: Operand,
     f: usize,
-    surface: usize,
+    g: usize,
     ivs: &[Interval],
 ) -> (Vec<Chain>, Vec<Tip>) {
     let shape = pair.get(op);
     let face = &shape.faces[f];
+    let gf = &pair.get(other(op)).faces[g];
+    let surface = gf.surface;
     let plane = &pair.get(other(op)).surfaces[surface];
+    // From P's record to g's outward normal.
+    let up = if gf.outward { 1.0 } else { -1.0 };
     let lies = |li: usize, i: usize| {
         let (e, _) = face.loops[li][i];
         let vs = &face.verts[li];
@@ -1992,7 +2017,7 @@ fn strip_runs(
                 tips.push(Tip {
                     v,
                     ends: [a, b],
-                    side: d.signum(),
+                    side: up * d.signum(),
                     apex: true,
                 });
             }
@@ -2000,7 +2025,7 @@ fn strip_runs(
             tips.push(Tip {
                 v,
                 ends: [a, b],
-                side: f64::from(beyond),
+                side: up * f64::from(beyond),
                 apex: false,
             });
         } else if across && turn > 0.0 {
@@ -3200,6 +3225,31 @@ struct Piece {
 }
 
 impl Piece {
+    /// The segment `p`–`q` as a piece without area, for [`apart`] (which
+    /// reads only its corners and its sides' normals): its corners its
+    /// ends, its sides along and across it; a point where they are one,
+    /// with no side.
+    fn segment(p: DVec2, q: DVec2) -> Piece {
+        let (sides, corners) = match (q - p).try_normalize() {
+            Some(u) => {
+                let n = u.perp();
+                let sides = vec![
+                    (n, n.dot(p)),
+                    (-n, -n.dot(p)),
+                    (u, u.dot(p)),
+                    (-u, -u.dot(q)),
+                ];
+                (sides, vec![p, q])
+            }
+            None => (Vec::new(), vec![p]),
+        };
+        Piece {
+            sides,
+            corners,
+            along: (p, q),
+        }
+    }
+
     /// The least and greatest x of its corners.
     fn span(&self) -> (f64, f64) {
         (self.corners.iter()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
@@ -4531,8 +4581,7 @@ mod tests {
             facing(&pair.first, DVec3::Z),
             facing(&pair.second, -tilted.z),
         );
-        let surface = pair.first.faces[g].surface;
-        let (chains, tips) = strip_runs(&pair, &pts, Operand::Second, f, surface, &[]);
+        let (chains, tips) = strip_runs(&pair, &pts, Operand::Second, f, g, &[]);
         (
             chains.into_iter().map(|c| (c.kind, c.points)).collect(),
             (tips.into_iter())
@@ -4945,5 +4994,392 @@ mod tests {
             "{:?}",
             refused.map(|p| p.len())
         );
+    }
+
+    /// The other face's flaps a strip leaves out cost, for each piece, a
+    /// step for the search of their sorted spans and one for each span it
+    /// passes, and a step for each part of the piece looked at against
+    /// each flap over its span: k flaps over the span of every piece of a
+    /// strip, beside none of them (so each piece stays one part), take
+    /// 1 + 2k steps a piece more than none; k flaps ending half a
+    /// tolerance short of the strip's span along L are taken by the search
+    /// of its first piece, which reaches the tolerance beyond its span, and
+    /// cost two steps each there and none elsewhere (design note 0012 §21,
+    /// flaps under strips).
+    #[test]
+    fn the_flaps_a_strip_leaves_out_take_a_step_for_each_span_and_part() {
+        use crate::math::Frame;
+        use crate::{BrepKernel, ExtrudeSpec, Kernel, Profile, Tolerance};
+        let tol = Tolerance {
+            linear: 1e-3,
+            ..Tolerance::default()
+        };
+        let kernel = BrepKernel::with_tolerance(tol);
+        let t = 0.25f64.to_radians();
+        let tilted = Frame {
+            origin: DVec3::ZERO,
+            x: DVec3::X,
+            y: DVec3::new(0.0, t.cos(), t.sin()),
+            z: DVec3::new(0.0, -t.sin(), t.cos()),
+        };
+        let v = |pts: &[(f64, f64)]| -> Vec<DVec2> {
+            pts.iter().map(|&(x, y)| DVec2::new(x, y)).collect()
+        };
+        let outer = v(&[
+            (-0.5, -0.5),
+            (0.0, -0.2),
+            (1.0, -0.2),
+            (1.5, -0.5),
+            (2.0, -0.5),
+            (2.0, 0.5),
+            (-0.5, 0.5),
+        ]);
+        let hole = v(&[(0.29, -0.18), (0.71, -0.18), (0.71, -0.02), (0.29, -0.02)]);
+        let block = kernel
+            .make_box(
+                &Frame {
+                    origin: DVec3::new(0.3, -0.17, -1.0),
+                    ..Frame::WORLD
+                },
+                DVec3::new(0.4, 0.14, 1.0),
+            )
+            .expect("a block");
+        let prism = kernel
+            .extrude(
+                &Profile::polygon(tilted, &outer).with(Profile::polygon(tilted, &hole)),
+                &ExtrudeSpec {
+                    distance: 0.5,
+                    symmetric: false,
+                },
+            )
+            .expect("a prism");
+        let pair = Pair {
+            first: super::super::shape::shape(&block.brep, "first").expect("a shape"),
+            second: super::super::shape::shape(&prism.brep, "second").expect("a shape"),
+        };
+        let pts = Points::new(&pair, tol.linear);
+        let outlines = [
+            outlines(&pair.first).expect("outlines"),
+            outlines(&pair.second).expect("outlines"),
+        ];
+        let facing = |s: &Shape, n: DVec3| {
+            (s.faces.iter())
+                .position(|f| f.normal().dot(n) > 1.0 - 1e-12)
+                .expect("a face")
+        };
+        let (g, f) = (
+            facing(&pair.first, DVec3::Z),
+            facing(&pair.second, -tilted.z),
+        );
+        let dir = (pair.first.faces[g].normal())
+            .cross(pair.second.faces[f].normal())
+            .normalize();
+        let chain = Chain {
+            points: [1.0, 0.0].map(|x| tilted.x * x - tilted.y * 0.2).to_vec(),
+            kind: Kind::Run,
+            edges: Vec::new(),
+            corner: None,
+        };
+        // The steps of the strip's test leaving out `k` flaps on the top's
+        // plane from x = `x0` to `x1`, far beside the strip.
+        let steps = |k: usize, (x0, x1): (f64, f64)| {
+            let flaps: Vec<[DVec3; 3]> = (0..k)
+                .map(|i| {
+                    let y = 5.0 + i as f64;
+                    [
+                        DVec3::new(x0, y, 0.0),
+                        DVec3::new(x1, y, 0.0),
+                        DVec3::new(0.5 * (x0 + x1), y + 0.5, 0.0),
+                    ]
+                })
+                .collect();
+            let spans = Spans::new(flaps.iter().map(|t| {
+                let x = t.map(|p| p.dot(dir));
+                (x[0].min(x[1]).min(x[2]), x[0].max(x[1]).max(x[2]))
+            }));
+            let mut strips = StripSearch::new(STRIP_STEPS);
+            held_strip(
+                &pair,
+                &pts,
+                &outlines,
+                &mut strips,
+                dir,
+                [(Operand::Second, f), (Operand::First, g)],
+                &chain,
+                &[],
+                None,
+                Excused {
+                    spots: &[],
+                    flaps: (k > 0).then_some((&flaps[..], &spans)),
+                },
+                Test::Held,
+            )
+            .expect("the strip is not held");
+            STRIP_STEPS - strips.budget.left
+        };
+        let over = (-0.1, 1.1);
+        let none = steps(0, over);
+        let one = steps(1, over) - none;
+        assert!(one > 0 && one % 3 == 0, "{one}");
+        let pieces = one / 3;
+        for k in 2..6 {
+            assert_eq!(steps(k, over) - none, pieces * (1 + 2 * k), "{k} flaps");
+        }
+        // The strip runs along L from x = 0 to 1 (`dir` is −x).
+        let short = (1.0 + 0.5 * tol.linear, 1.6);
+        for k in 1..4 {
+            assert_eq!(steps(k, short) - none, pieces + 2 * k, "{k} flaps short");
+        }
+    }
+
+    /// The test of a pinched flap's strip ([`Test::Crossing`]) refuses it
+    /// where an edge of the other face comes within ρ of it, and takes, for
+    /// each edge whose box comes within ρ of the strip's (each found among
+    /// the face's coedges near the plane, a step), a step and one for each
+    /// piece its box comes within ρ of: a block whose top's side lies
+    /// 1.5 ρ beyond the end of a run's strip, in `k` collinear edges, each
+    /// apart from the strip and its box from every piece's, takes two
+    /// steps more for each edge; the side halfway between the tolerance and
+    /// ρ beyond the strip's end refuses it (design note 0012 §21, the flap
+    /// rule's crossing test).
+    #[test]
+    fn a_pinched_flaps_test_takes_a_step_for_each_edge_beside_its_strip() {
+        use crate::math::Frame;
+        use crate::{BrepKernel, ExtrudeSpec, Kernel, Profile, Tolerance};
+        let tol = Tolerance {
+            linear: 1e-3,
+            ..Tolerance::default()
+        };
+        let rho = tol.linear * (1.0 + DEEP);
+        let kernel = BrepKernel::with_tolerance(tol);
+        let t = 0.25f64.to_radians();
+        let tilted = Frame {
+            origin: DVec3::ZERO,
+            x: DVec3::X,
+            y: DVec3::new(0.0, t.cos(), t.sin()),
+            z: DVec3::new(0.0, -t.sin(), t.cos()),
+        };
+        let v = |pts: &[(f64, f64)]| -> Vec<DVec2> {
+            pts.iter().map(|&(x, y)| DVec2::new(x, y)).collect()
+        };
+        let outer = v(&[
+            (-0.5, -0.5),
+            (0.0, -0.2),
+            (1.0, -0.2),
+            (1.5, -0.5),
+            (2.0, -0.5),
+            (2.0, 0.5),
+            (-0.5, 0.5),
+        ]);
+        let prism = kernel
+            .extrude(
+                &Profile::polygon(tilted, &outer),
+                &ExtrudeSpec {
+                    distance: 0.5,
+                    symmetric: false,
+                },
+            )
+            .expect("a prism");
+        // The test with the top's side at x = `x0` in `k` edges: its steps,
+        // or its refusal.
+        let test = |x0: f64, k: usize| {
+            let mut top = v(&[(x0, -0.17), (1.5, -0.17), (1.5, -0.03)]);
+            top.extend((0..k).map(|j| DVec2::new(x0, -0.03 - 0.14 * j as f64 / k as f64)));
+            let block = kernel
+                .extrude(
+                    &Profile::polygon(
+                        Frame {
+                            origin: DVec3::new(0.0, 0.0, -1.0),
+                            ..Frame::WORLD
+                        },
+                        &top,
+                    ),
+                    &ExtrudeSpec {
+                        distance: 1.0,
+                        symmetric: false,
+                    },
+                )
+                .expect("a block");
+            let pair = Pair {
+                first: super::super::shape::shape(&block.brep, "first").expect("a shape"),
+                second: super::super::shape::shape(&prism.brep, "second").expect("a shape"),
+            };
+            let pts = Points::new(&pair, tol.linear);
+            let outlines = [
+                outlines(&pair.first).expect("outlines"),
+                outlines(&pair.second).expect("outlines"),
+            ];
+            let facing = |s: &Shape, n: DVec3| {
+                (s.faces.iter())
+                    .position(|f| f.normal().dot(n) > 1.0 - 1e-12)
+                    .expect("a face")
+            };
+            let (g, f) = (
+                facing(&pair.first, DVec3::Z),
+                facing(&pair.second, -tilted.z),
+            );
+            let dir = (pair.first.faces[g].normal())
+                .cross(pair.second.faces[f].normal())
+                .normalize();
+            let chain = Chain {
+                points: [1.0, 0.0].map(|x| tilted.x * x - tilted.y * 0.2).to_vec(),
+                kind: Kind::Run,
+                edges: Vec::new(),
+                corner: None,
+            };
+            let mut strips = StripSearch::new(STRIP_STEPS);
+            held_strip(
+                &pair,
+                &pts,
+                &outlines,
+                &mut strips,
+                dir,
+                [(Operand::Second, f), (Operand::First, g)],
+                &chain,
+                &[],
+                None,
+                Excused {
+                    spots: &[],
+                    flaps: None,
+                },
+                Test::Crossing,
+            )
+            .map(|()| STRIP_STEPS - strips.budget.left)
+        };
+        let steps = |k: usize| {
+            test(1.0 + 1.5 * rho, k).expect("no edge of the top comes within ρ of the strip")
+        };
+        let one = steps(1);
+        assert_eq!(steps(4) - one, 2 * 3);
+        assert_eq!(steps(8) - one, 2 * 7);
+        let within = test(1.0 + 0.5 * (tol.linear + rho), 1);
+        assert!(
+            matches!(&within, Err(KernelError::InvalidInput(m)) if m.starts_with(super::super::RUNS_WITHIN)),
+            "{within:?}"
+        );
+    }
+
+    /// Rule 3's test of a segment of P ([`held_clear`]) holds a point that
+    /// lies farther than ρ from each straight edge of the other face and
+    /// more than the tolerance inside it, and refuses beside a curved edge
+    /// that may come within 2ρ of it (design note 0012 §21, rule 3): against
+    /// a top whose edge lies along L, a point 1 + 2⁻¹¹ tolerances inside
+    /// lies within ρ of the edge and is not held, and one 1.5 tolerances
+    /// inside is held (placed at the tolerance's depth, not at twice it); a
+    /// point, and a segment, 1.5 tolerances beside a round hole's rim, 3.5
+    /// inside the top's edge, are refused as not supported; and a segment
+    /// along L in a round notch of the top's edge, 0.13 from its rim and
+    /// inside the box of the rim's arcs, is not held and not refused (by
+    /// the arcs' boxes alone, it was).
+    #[test]
+    fn a_tips_test_holds_points_beyond_rho_of_the_edges_and_refuses_beside_a_curve() {
+        use crate::math::Frame;
+        use crate::{BrepKernel, ExtrudeSpec, Kernel, Profile};
+        let kernel = BrepKernel::default();
+        let eps = kernel.tolerance().linear;
+        let t = 1f64.to_radians();
+        let tilted = Frame {
+            origin: DVec3::ZERO,
+            x: DVec3::X,
+            y: DVec3::new(0.0, t.cos(), t.sin()),
+            z: DVec3::new(0.0, -t.sin(), t.cos()),
+        };
+        let v = |pts: &[(f64, f64)]| -> Vec<DVec2> {
+            pts.iter().map(|&(x, y)| DVec2::new(x, y)).collect()
+        };
+        let spec = |distance: f64| ExtrudeSpec {
+            distance,
+            symmetric: false,
+        };
+        let square = v(&[(-0.5, -0.5), (2.0, -0.5), (2.0, 0.5), (-0.5, 0.5)]);
+        let prism =
+            (kernel.extrude(&Profile::polygon(tilted, &square), &spec(0.5))).expect("a prism");
+        let base = Frame {
+            origin: DVec3::new(0.0, 0.0, -1.0),
+            ..Frame::WORLD
+        };
+        let top = v(&[(-0.25, -1.0), (1.25, -1.0), (1.25, 0.0), (-0.25, 0.0)]);
+        let plain = (kernel.extrude(&Profile::polygon(base, &top), &spec(1.0))).expect("a block");
+        let rod = kernel
+            .extrude(
+                &Profile::circle(
+                    Frame {
+                        origin: DVec3::new(0.0, 0.0, -2.0),
+                        ..Frame::WORLD
+                    },
+                    DVec2::new(0.8, -0.2 - 5.0 * eps),
+                    0.2,
+                ),
+                &spec(3.0),
+            )
+            .expect("a rod");
+        let holed = (kernel.boolean(&plain, &rod, crate::BooleanOp::Subtract)).expect("a hole");
+        let notch = kernel
+            .extrude(
+                &Profile::circle(
+                    Frame {
+                        origin: DVec3::new(0.0, 0.0, -2.0),
+                        ..Frame::WORLD
+                    },
+                    DVec2::new(0.8, 0.05),
+                    0.2,
+                ),
+                &spec(3.0),
+            )
+            .expect("a rod");
+        let notched =
+            (kernel.boolean(&plain, &notch, crate::BooleanOp::Subtract)).expect("a notch");
+        let held = |block: &crate::Body, (s0, s1): (DVec2, DVec2)| -> Result<bool, KernelError> {
+            let pair = Pair {
+                first: super::super::shape::shape(&block.brep, "first").expect("a shape"),
+                second: super::super::shape::shape(&prism.brep, "second").expect("a shape"),
+            };
+            let pts = Points::new(&pair, eps);
+            let outlines = [outlines(&pair.first)?, outlines(&pair.second)?];
+            let facing = |s: &Shape, n: DVec3| {
+                (s.faces.iter())
+                    .position(|f| {
+                        is_plane(&s.surfaces[f.surface]) && f.normal().dot(n) > 1.0 - 1e-12
+                    })
+                    .expect("a face")
+            };
+            let (g, f) = (
+                facing(&pair.first, DVec3::Z),
+                facing(&pair.second, -tilted.z),
+            );
+            let mut strips = StripSearch::new(STRIP_STEPS);
+            let against = against(
+                &pair,
+                &outlines,
+                &strips.flat,
+                &mut strips.budget,
+                (Operand::First, g),
+            )?;
+            let surface = &pair.second.surfaces[pair.second.faces[f].surface];
+            let (p, q) = (s0.extend(0.0), s1.extend(0.0));
+            held_clear(
+                &pair,
+                &pts,
+                &against,
+                surface,
+                (Operand::First, g, p),
+                (p, q),
+                eps,
+                &mut strips.budget,
+            )
+        };
+        let at = |x: f64, y: f64| (DVec2::new(x, y), DVec2::new(x, y));
+        let edge = |d: f64| held(&plain, at(0.5, -d * eps)).expect("no curved edge");
+        assert!(!edge(1.0 + 1.0 / 2048.0));
+        assert!(edge(1.5));
+        let along = (DVec2::new(0.79, -3.5 * eps), DVec2::new(0.81, -3.5 * eps));
+        for beside in [held(&holed, at(0.8, -3.5 * eps)), held(&holed, along)] {
+            assert!(
+                matches!(&beside, Err(KernelError::Unsupported(_))),
+                "{beside:?}"
+            );
+        }
+        let deep = (DVec2::new(0.75, -eps), DVec2::new(0.85, -2.0 * eps));
+        assert!(!held(&notched, deep).expect("no arc within 2ρ"));
     }
 }

@@ -4107,7 +4107,11 @@ golden holds.
 
 **The rule (as built).** Let F be a face of a pair of faces on planes that
 cross, G the other face, on the plane P, θ the planes' angle, L their
-common line, and ρ = ε(1 + 2⁻¹⁰) the strips' depth (§20).
+common line, and ρ = ε(1 + 2⁻¹⁰) the strips' depth (§20). n_F and n_G
+are the faces' own outward normals, and s, the side of P that a
+corner's edges leave it to, is taken along n_G: where G faces against
+the normal its body records for P, the side the sort finds along that
+record is turned over (*Three faults of the built rule*, the side).
 
 *One pass over F's vertices* (as first built). §20's pass over F's
 coedges within ε of P, which finds its vertex chains, sorts each vertex
@@ -4209,11 +4213,15 @@ edges from V up to where F's height reaches the front's less ε sin θ
 (the front being the nearest stretch over V's place, or L). "Holds" is
 `place(…, ε)` = inside, at the middle of each part of the feet left
 outside the capsules of radius ρ about G's straight edges near them,
-found by G's tree; V's foot is the part's end at V, and is tested at the
-same depth. A curved edge of G near them is refused as not supported, as
-§20's strips are. The foot catches a tip whose region reaches back past
-the band (§20: the tolerance puts F within ε of P over G there, on none
-of G's faces, so the text is true), among them an apex behind a run of G
+found by G's tree. V's foot is tested apart from the parts: it is held
+where `place(…, ε 2⁻¹⁰)` = inside, a rounding margin, the depth at
+which the split places a touch (*V's foot*, below). A curved edge of G
+is refused as not supported only where it may come within 2ρ of a
+part (*A curved edge beside the test*, below); the foot is placed
+against curved edges by G's chart outline (§20). The foot catches a tip
+whose region reaches back past the band (§20: the tolerance puts F
+within ε of P over G there, on none of G's faces, so the text is true),
+among them an apex behind a run of G
 lying along L (105 contacts failing on main and in the first build); the
 edges catch a tip whose foot lies in a hole or a window of G while V's
 edges enter G (68 contacts failing on main and in the first build). The
@@ -4231,6 +4239,37 @@ family where an edge of G ending inside the region's way back left the
 region reaching around it. The tips refused here whose results on main
 were right (26 contacts, a foot held deeper than ρ with V within ε of P)
 are §20's runs within the tolerance, correct by its text.
+
+*V's foot.* The parts of V's edges are held only farther than ρ from
+G's edges, as §20's strips are. V's foot is held wherever G holds it
+more than ε 2⁻¹⁰ inside. Tested at ρ, as the parts are (as first built
+here), the foot left a window: where an edge of G passed V's foot
+between ε and ρ away (and at ε, by rounding), with V's edges leaving G
+there, nothing held the foot or the parts, that edge lay beyond the
+reach of the split's refusal of edges passing within ε of each other,
+which is closed and measured in space from V's edges, and nothing
+refused at V. A ∪ B, A ∩ B and A − B then failed, "a contact's pieces
+disagree on their side", as on main (golden 64: notch tips at 0.5° to
+10° under a top cut parallel to the feet of one of V's edges, V's foot
+1 to 1 + 2⁻¹⁰ tolerances inside the cut). At the margin the foot's test
+overlaps the split's reach. Where both apply, rule 3 refuses first, with
+§20's text, where main and the build that tested the foot at ρ refused
+as a point within the tolerance of an edge it is not on or as edges
+passing within the tolerance of each other: golden 50's two notches of
+the fuzz, the fuzz's case 1376 and golden 64's tips at 0.5° and 3° with
+V's foot 1 and 1 + 2⁻⁴⁰ tolerances inside the cut.
+
+*A curved edge beside the test.* Each part of the edges' feet is a
+segment of P. A curved edge of G whose box meets the segment's, grown
+by 2ρ, is tested by §20's own test of the hulls of its pieces' control
+points (`Strip::reached`, the segment taken as a piece without area),
+and refuses the boolean as not supported only where it may come within
+2ρ. An edge farther away cuts nothing, and the placing, which follows
+it, decides each part. The foot needs no such test, since `place`
+follows curved edges by G's chart outline. As first built here, any
+curved edge whose box met the test's refused, so a round hole's rim
+refused tips whose test set lay deep inside the hole, which main
+answered right (golden 65).
 
 *A spike's flap.* An across V at a convex corner of F has a flap: the
 triangle of F's plane between V's two edges and L, F's part across L.
@@ -4394,6 +4433,32 @@ corners of what is left (`held_point`).
   notch fuzz at a hundred times, from 311 to 11, the same (*Not
   decided*).
 
+**Three faults of the built rule** (2026-10-20). A review of the rule
+as built found three faults, each fixed above with a golden that fails
+without its fix:
+
+- *The side.* Rule 3 took the side of a corner's edges, and so every
+  height it measures, along the normal G's body records for P: the
+  outward normal of the body's first face on P. Where G faces against
+  that record (the body has an earlier face on P facing the other way:
+  a block joined beside the top whose underside lies on P, golden 62,
+  or a Z-shaped block, golden 63), every height was mirrored. Rule 3
+  then passed tips it should refuse, and A ∪ B, A ∩ B and A − B failed
+  as on main. The side is now turned to G's own outward normal where
+  the corners are sorted (`strip_runs`). Every height of rule 3 (item
+  0's reach, items 3 to 5 and the test set) reads that side, so the one
+  change sets them all. The other sides the rule reads were checked and
+  were right: the flap's table, the pinch and the strips use G's own
+  normal, the touch record turns P's record by each face's outward
+  flag, the strips' own tests compare signs with each other, and item
+  0's greatest height of F over the stretches is taken as a size.
+- *The foot's window* between ε and ρ (*V's foot*).
+- *Curved edges beside the test*, refused wherever their boxes met the
+  test's (*A curved edge beside the test*).
+
+The figures under *Measured* below were taken before these three
+changes and have not been taken again.
+
 **Measured** (the built rule). Of the 37,712 contacts of the 27
 families, 69 are bad, against 4,552 on main and 1,368 in the first
 build: 294 operations fail (main 6,660) and 16 cross, the deepest 1.20 ε
@@ -4524,9 +4589,24 @@ operations; none was made bad by this rule.
 - A corner across L one of whose edges is curved (a notch with an arc
   for a wall) falls through to main, which refused the case measured as
   an unsupported tangent contact. A curved edge of G that may come
-  within ρ of a flap is refused as not supported, as §20's strips are,
-  by the same test of control-point hulls; V's foot is placed in a face
-  with curved edges by its chart outline (§20).
+  within ρ of a flap, or within 2ρ of a part of rule 3's test set, is
+  refused as not supported, as §20's strips are, by the same test of
+  control-point hulls; V's foot is placed in a face with curved edges
+  by its chart outline (§20).
+- *The members' discs at a whole run's corners.* Golden 66 shows that
+  a flap's points must be left out about every member of V's cluster:
+  about its place alone, which is the first operand's vertex, the
+  boolean is refused in one order of the operands and answered in the
+  other. For the corners of G on a whole run (`corners_on`) the same
+  change, or a disc of 3 ε about the place, changed no outcome of any
+  test or of a probe of 800 tops whose convex or reflex corner lies
+  within ε of the run's end, turned each way, at 1° to 10°. Part of the
+  reason is known: a point G holds more than ε inside lies at least ε
+  from every corner of G, so the disc about G's corner leaves nothing
+  out (to rounding), and only the discs about the run's own points
+  can. Whether such a point can lie within ε of the run's vertex and in
+  a part of the run that no stretch covers is not settled; the members
+  are kept there for the reason they are kept for flaps.
 - *Folds at the box's end.* Notch tips within ε of the box's end, which
   rule 3's item 2 leaves to main's outcomes, and notch walls within a
   few degrees of the end's plane. The faces-crossing check reports the
@@ -4616,7 +4696,7 @@ docs/PERFORMANCE.md: those two combs (`notches(1024)` and
 
 **Tests (as built).** Goldens in `tests/touching.rs`, all six operations
 each, each with main's outcomes in its doc comment; the doc comments of
-46 to 55 also name the change to the rule each catches, those of 42 to
+46 to 66 also name the change to the rule each catches, those of 42 to
 45 none:
 
 - 42, `a_notch_tip_across_the_line_where_the_faces_cross`, refused at the
@@ -4635,26 +4715,54 @@ each, each with main's outcomes in its doc comment; the doc comments of
 - 49, `an_apex_across_the_line_is_refused_where_the_top_holds_its_foot`;
 - 50, `a_notch_tip_left_to_the_meeting_or_the_split`: tips that are no
   isolated touch (a notch from the near side over a top ending 1.05 ε
-  beyond its foot, and one at 0.5° over the top's edge), and the notch
-  fuzz's tips within the tolerance of a stretch, which rule 3 passes and
-  the split refuses, all with main's outcomes. No golden holds a notch
-  tip passed by a stretch behind it (rule 3's item 4); item 4 passes
-  only apexes in the goldens (golden 38) and in the notch fuzz;
+  beyond its foot, and one at 0.5° over the top's edge), with main's
+  outcomes, and two tips of the notch fuzz that rule 3, testing V's foot
+  to the rounding margin, refuses first, where main refused them as a
+  point within the tolerance of an edge or as edges passing within the
+  tolerance of each other. No golden holds a notch tip passed by a
+  stretch behind it (rule 3's item 4); item 4 passes only apexes in the
+  goldens (golden 38) and in the notch fuzz;
 - 51, `an_oblique_corner_is_refused_unless_both_tests_call_it_no_isolated_touch`;
 - 52, `a_spike_flap_is_tested_unless_the_touch_at_its_tip_decides_it`:
   the rows of the flap's table with the layer in F's body, tested and
   left to the touch (the rows outside F's body are golden 44's);
 - 53, `a_pinched_flap_is_refused_where_the_tops_edge_comes_within_its_strip`;
 - 54, `a_strip_leaves_out_the_other_faces_flap`;
-- 55, `a_flap_is_excused_only_within_the_tolerance_of_its_tips_members`.
+- 55, `a_flap_is_excused_only_within_the_tolerance_of_its_tips_members`;
+- 56, `a_notch_tip_whose_cluster_holds_the_tops_corner_is_left_to_the_touch`:
+  rule 3's item 2 at a corner of G;
+- 57, `a_notch_tip_is_refused_where_the_top_holds_one_edges_feet`: each
+  of V's edges in the test set, and the depth of their parts;
+- 58, `a_flap_whose_touch_lies_on_the_tops_edge_is_tested_on_its_side`: a
+  flap whose touch lies on G's boundary is not pinched;
+- 59, `a_notch_tip_whose_edges_reach_the_top_beyond_the_pad_is_tested`:
+  item 0's box of the whole test set;
+- 60, `a_notch_tip_whose_foot_the_top_holds_beside_round_holes_is_refused`:
+  V's foot in the test set;
+- 61, `a_notch_tip_whose_test_meets_a_round_holes_rim_is_unsupported`: a
+  curved edge the test meets, refused;
+- 62, `a_corner_over_a_top_facing_against_its_planes_record_is_refused`,
+  and 63, `a_notch_tip_over_a_top_sharing_its_plane_with_a_face_turned_down`:
+  the side (*Three faults of the built rule*);
+- 64, `a_notch_tip_whose_foot_lies_within_rho_inside_the_tops_edge`: the
+  foot's window, swept over d (*V's foot*);
+- 65, `a_notch_tip_over_a_round_hole_in_the_top_is_answered`: a curved
+  edge beside the test (*A curved edge beside the test*);
+- 66, `a_flap_is_excused_about_each_member_of_its_tips_cluster`: the
+  members' discs, in either order of the operands.
 
 In `tests/booleans.rs`: the generator of notches and spikes,
 `notches_and_spikes_across_the_line` (150 cases, run in CI at ten times
 with the other fuzzes), asserting no failure, validity, the identities,
-the origins and the oracle; its case 1376, a tip whose foot lies within
-ρ of the top's edge, passed by rule 3 and refused by the split as on
-main (`a_notch_tip_whose_foot_lies_within_rho_of_the_tops_edge`); and
-the contacts at G's boundary
+the origins and the oracle; its case 1376, a tip whose foot lies 0.63 ε
+inside the top's edge, refused by rule 3 at the tip, where main and the
+build that tested the foot at ρ refused it as a point within the
+tolerance of an edge
+(`a_notch_tip_whose_foot_lies_within_the_tolerance_inside_the_tops_edge`);
+contact 9 of the contact fuzz, whose flap's foot lies within the
+rounding margin of G's boundary, so its touch does not pinch
+(`a_flap_whose_foot_cannot_be_placed_is_unpinched`); and the contacts at
+G's boundary
 (`contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross`,
 `contacts_at_the_boundary_of_a_face_held_beyond_the_reach_of_its_places`,
 two of `contacts_whose_bridges_carry_no_edge`), whose outcomes the
@@ -4687,7 +4795,19 @@ other body's coplanar faces
 the flaps a strip leaves out
 (`the_flap_exclusion_takes_steps_in_proportion_to_the_flaps`), and the
 touch record found once for each face of a pair
-(`the_touch_record_is_found_once_for_each_face_of_a_pair`).
+(`the_touch_record_is_found_once_for_each_face_of_a_pair`). Unit tests
+that kill changes to the rule the goldens miss: the steps of the flaps
+a strip leaves out
+(`the_flaps_a_strip_leaves_out_take_a_step_for_each_span_and_part`,
+`the_flaps_a_strip_leaves_out_are_sorted_once_a_step_each`), which
+flaps those are (`the_flaps_a_strip_leaves_out_are_those_near_its_face`),
+the steps of the pinch's crossing test
+(`a_pinched_flaps_test_takes_a_step_for_each_edge_beside_its_strip`),
+the test set's parts held beyond ρ and a curved edge refused only where
+it may come within 2ρ
+(`a_tips_test_holds_points_beyond_rho_of_the_edges_and_refuses_beside_a_curve`),
+and the touch record holding every touch whatever order the loop takes
+(`the_touch_record_holds_every_touch_however_the_loop_runs`).
 
 References: C. M. Hoffmann, *Geometric and Solid Modeling*, 1989, ch.
 4; A. A. G. Requicha, "Representations for rigid solids", *ACM
