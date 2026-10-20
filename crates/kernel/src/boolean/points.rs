@@ -497,6 +497,13 @@ impl Points {
         first
     }
 
+    /// The places of cluster `c`'s points, before the clustering moved
+    /// them to its place: where each of the vertices, crossings and other
+    /// points the cluster merged lies.
+    pub fn member_places(&self, c: usize) -> impl Iterator<Item = DVec3> + '_ {
+        self.members[c].iter().map(|&i| self.pos[i])
+    }
+
     /// The cluster of vertex `v` of `op`.
     pub fn vertex_cluster(&self, op: Operand, v: usize) -> usize {
         self.cluster[self.offset[slot(op)] + v]

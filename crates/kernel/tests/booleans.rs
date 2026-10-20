@@ -1089,35 +1089,35 @@ fn edges_lying_on_a_face_for_a_few_tolerances() {
 
 /// Contacts at the boundary of a face, which the checks of design note 0012
 /// §21 leave to the settling of touched points and the corners within
-/// their reach; testing the points there too, each was refused in all four
-/// operations (found by the contact fuzz at a hundred times the default
+/// their reach (found by the contact fuzz at a hundred times the default
 /// run). B rests by a corner (contacts 548 and 2237 at 1 tolerance) or an
 /// edge (86 at 1) on A's face, with a corner of a face of B across the line
 /// where that face's plane meets A's face's, both its edges crossing the
 /// line (a flap), and the clustering puts the corner on the boundary of A's
-/// face. Or B rests by an edge passing a corner of A's face (4917 at −0.5
-/// tolerance and 2383 at −0.75), the edge lying on the face's plane as the
-/// whole interval of B's face on the line, which no interval of A's face
-/// meets, so that B's face lies within the tolerance of A's over a sliver
-/// at the corner.
-/// Each outcome is main's, and the answered results pass the identities,
-/// the checks of [`measured`] and the faces-crossing check.
+/// face. Main answered these, A − B touching along an edge or at a point;
+/// the flap's strip now leaves out only its points within the tolerance of
+/// a member of the corner's cluster, the same in either order of the
+/// operands (§21, rule E), A's face holds the flap beyond those, and each is
+/// refused in all four operations: the cost of that rule (with discs of
+/// three tolerances about the cluster's place, main's outcomes). Or B
+/// rests by an edge passing a corner of A's face (4917 at −0.5 tolerance
+/// and 2383 at −0.75), the edge lying on the face's plane as the whole
+/// interval of B's face on the line, which no interval of A's face meets,
+/// so that B's face lies within the tolerance of A's over a sliver at the
+/// corner, A's flap there, which its own rule decides and the run's strip
+/// leaves out (§21, rule D; tested as a part of the run's strip, each was
+/// refused in all four operations). Their outcomes are main's, and the
+/// answered results pass the identities, the checks of [`measured`] and
+/// the faces-crossing check.
 #[test]
 fn contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross() {
-    let along = "the result would be non-manifold: the bodies touch along an edge";
     let point = "the result would be non-manifold: the bodies touch at a point";
+    let band = "a face of one body runs within the tolerance of the other's surface without lying \
+                on one of its faces,";
     let cases = [
-        (
-            548,
-            1.0,
-            ["(12, 28, 18)", "(7, 14, 9)", along, "(9, 20, 13)"],
-        ),
-        (
-            2237,
-            1.0,
-            ["(14, 30, 19)", "(8, 17, 11)", along, "(11, 19, 12)"],
-        ),
-        (86, 1.0, ["(20, 45, 28)", "(7, 14, 9)", point, point]),
+        (548, 1.0, [band; 4]),
+        (2237, 1.0, [band; 4]),
+        (86, 1.0, [band; 4]),
         (4917, -0.5, [point, "empty", "(6, 12, 8)", "(5, 9, 6)"]),
         (2383, -0.75, [point, "empty", "(6, 12, 8)", "(5, 9, 6)"]),
     ];
@@ -1141,30 +1141,33 @@ fn contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross() {
 
 /// Contacts at the boundary of a face held beyond the reach of its places
 /// (design note 0012 §21), found by the contact fuzz at a hundred times the
-/// default run, refused with the strip's text where main answered. A flap
-/// held 3.2 tolerances from its corner's place (contact 3129 at 0.5
-/// tolerance), where main returned A − B with the flap's face and A's
-/// crossing 1.36 tolerances inside both, as the first build did, which
-/// left the whole flap out; a flap held 3.3 tolerances from its corner's
-/// place (5385 at 1), whose other operations main refuses too; and B
-/// resting by an edge that passes a corner of A's face as the whole
-/// interval of its face on the line, held 3.1 and 3.9 tolerances from the
+/// default run. A flap held 3.2 tolerances from its corner's place
+/// (contact 3129 at 0.5 tolerance), where main returned A − B with the
+/// flap's face and A's crossing 1.36 tolerances inside both, as the first
+/// build did, which left the whole flap out; and a flap held 3.3
+/// tolerances from its corner's place (5385 at 1), where main refused
+/// three operations as a point within the tolerance of an edge and B − A
+/// with the strip's text: each is refused with the strip's text in all
+/// four. And B resting by an edge that passes a corner of A's face as the
+/// whole interval of its face on the line, 3.1 and 3.9 tolerances from the
 /// corner (3613 and 3492 at −0.75) and, the edge 0.55° from the face's
-/// edge, 54 and 105 tolerances along it (4917 at −0.75 and −1). There main
-/// returned the operands as the differences, right within the tolerance,
-/// which the strip's refusal, the same in every operation, refuses too.
+/// edge, 54 and 105 tolerances along it (4917 at −0.75 and −1): what A's
+/// face holds of the run's strip there is A's flap at the corner, which
+/// its own rule decides and the run's strip leaves out (§21, rule D), and
+/// the outcomes are main's, A ∪ B touching at a point (tested as a part of
+/// the run's strip, the flap refused every operation).
 #[test]
 fn contacts_at_the_boundary_of_a_face_held_beyond_the_reach_of_its_places() {
     let band = "a face of one body runs within the tolerance of the other's surface without lying \
                 on one of its faces,";
-    let edge = "a point where the bodies meet lies within the tolerance of an edge it is not on,";
+    let point = "the result would be non-manifold: the bodies touch at a point";
     pinned_contacts(&[
         (3129, 0.5, [band; 4]),
-        (5385, 1.0, [edge, edge, edge, band]),
-        (3613, -0.75, [band; 4]),
-        (3492, -0.75, [band; 4]),
-        (4917, -0.75, [band; 4]),
-        (4917, -1.0, [band; 4]),
+        (5385, 1.0, [band; 4]),
+        (3613, -0.75, [point, "empty", "(5, 9, 6)", "(5, 9, 6)"]),
+        (3492, -0.75, [point, "empty", "(7, 15, 10)", "(5, 9, 6)"]),
+        (4917, -0.75, [point, "empty", "(6, 12, 8)", "(5, 9, 6)"]),
+        (4917, -1.0, [point, "empty", "(6, 12, 8)", "(5, 9, 6)"]),
     ]);
 }
 
@@ -1359,12 +1362,20 @@ fn contacts_swept_across_the_band() {
 /// curves run along an edge of the other body lying on the face, refused
 /// where the faces meet. 149, 661 and 1203 at −0.75 are now
 /// refused by the check of the faces' meeting's ends
-/// (`imprint::plane_meeting`) before a bridge forms, with the same text.
+/// (`imprint::plane_meeting`) before a bridge forms, with the same text;
+/// 161 and 5387 by the check of a flap of a face across the line where it
+/// crosses the other's (design note 0012 §21: each a flap whose layer lies
+/// in its own body and outside the other's, its touch unpinched, which its
+/// own rule now tests, 161's held beyond the tolerance of the members of
+/// its corner's cluster), where the face runs within the tolerance of the
+/// other's surface, in every operation.
 #[test]
 fn contacts_whose_bridges_carry_no_edge() {
     let leaves = "an edge of one body lies on a face of the other and leaves it at a point the \
                   tolerance cannot place";
     let sliver = "the bodies leave a sliver thinner than the tolerance";
+    let band = "a face of one body runs within the tolerance of the other's surface without lying \
+                on one of its faces,";
     pinned_contacts(&[
         (149, -1.0, [leaves; 4]),
         (4996, -4.0, [sliver; 4]),
@@ -1380,7 +1391,7 @@ fn contacts_whose_bridges_carry_no_edge() {
             ],
         ),
         (1203, -0.75, [leaves; 4]),
-        (161, 1.0, [leaves; 4]),
+        (161, 1.0, [band; 4]),
         (
             477,
             -1.0,
@@ -1392,7 +1403,7 @@ fn contacts_whose_bridges_carry_no_edge() {
             ],
         ),
         (2152, -1.0, [sliver, sliver, sliver, leaves]),
-        (5387, -4.0, [sliver; 4]),
+        (5387, -4.0, [band; 4]),
     ]);
 }
 
@@ -1688,6 +1699,39 @@ fn notches_and_spikes_across_the_line() {
         identities(&mut t, &a, &b, &label, 4.0 * (area(&a) + area(&b)) * eps);
     }
     report("notches and spikes across the line", &t);
+}
+
+/// A notch tip of the notch fuzz ([`notches_and_spikes_across_the_line`],
+/// case 1376, found at ten times its default run) whose foot on the box's
+/// top lies within ρ = ε (1 + 2⁻¹⁰) of the top's edge: a notch from the
+/// face's near side at 45°, its tip a tolerance across the line and 0.63
+/// tolerances inside the box's end x = −0.25, the prism below its face.
+/// Rule 3 of design note 0012 §21 tests V's foot as the end of V's edges,
+/// at ρ from the top's edges as the strip search tests its points, and
+/// passes it; the split refuses it as main did, as a point within the
+/// tolerance of an edge it is not on. Testing the foot to a rounding margin
+/// of the edges refused it at the tip, with the strip's text.
+#[test]
+fn a_notch_tip_whose_foot_lies_within_rho_of_the_tops_edge() {
+    let eps = k().tolerance().linear;
+    let a = cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(1.25, 1.0, 0.0));
+    let edge = "a point where the bodies meet lies within the tolerance of an edge it is not on,";
+    let mut r = Rng(0x0DA7_0021);
+    let mut t = Tally::default();
+    for case in 0..=1376 {
+        let (pts, angle, label) = notch_case(&mut r, eps);
+        let below = r.chance(0.3);
+        if case == 1376 {
+            assert!(
+                below && label.starts_with("near notch at -0.249999937"),
+                "{label}"
+            );
+            let b = tilted_prism(angle, &pts, below);
+            let slack = 4.0 * (area(&a) + area(&b)) * eps;
+            assert_eq!(identities_with(&mut t, &a, &b, &label, slack), [edge; 4]);
+        }
+    }
+    assert_eq!(t.bugs, Vec::<String>::new());
 }
 
 /// Copies of a body with a hole moved by three tolerances (motions 3449

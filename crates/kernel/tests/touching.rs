@@ -3082,12 +3082,17 @@ fn notch_at(t: f64, x: f64, v: f64) -> Body {
 /// face were refused so in every operation, in both orders). Each is now
 /// refused at V in every operation:
 /// at 10° with V 2, 3 and 5 tolerances across, at 1° with V 5, 30 and 50;
-/// the notch mirrored, from the face's near side, V above the top; V the
-/// tip of a triangular hole of the face; the notch's walls leaning, one
-/// meeting the line at 120°; the prism below its face; V 2 and 4
-/// tolerances inside the box's end x = 1.25; and two notches (a W), over
-/// the box's top or over the two faces of a box grooved between them,
-/// reported at the tip with the least coordinates in both orders.
+/// V the tip of a triangular hole of the face; the notch's walls leaning,
+/// one meeting the line at 120°; V 2 and 4 tolerances inside the box's end
+/// x = 1.25; and two notches (a W), over the box's top or over the two
+/// faces of a box grooved between them, reported at the tip with the least
+/// coordinates in both orders. The notch mirrored, from the face's near
+/// side with V above the top, and the prism below its face, V 3
+/// tolerances across at 10°, are no isolated touch of the top at V (the
+/// prism, and its edge at V out of the face, lie on the other side of the
+/// top from V's neighbours), so rule 3 leaves them to the split, which
+/// refuses V's edges' crossings of the line as passing within the
+/// tolerance of each other in every operation, in both orders, as on main.
 #[test]
 fn a_notch_tip_across_the_line_where_the_faces_cross() {
     let eps = k().tolerance().linear;
@@ -3118,7 +3123,13 @@ fn a_notch_tip_across_the_line_where_the_faces_cross() {
             (-0.5, 0.5, false),
         ],
     );
-    refused(&mirrored, "(500.000000, 0.000295, 0.000052) mm");
+    let split = |b: &Body, at: &str| {
+        let m = format!(
+            "refused: edges where the bodies meet pass within the tolerance of each other near {at}"
+        );
+        assert_eq!(six(&a, b, 1.0), [(); 6].map(|_| m.clone()), "{at}");
+    };
+    split(&mirrored, "(500.000000, 0.000295, 0.000052) mm");
     let plate = tilted(
         10.0,
         &[
@@ -3164,7 +3175,7 @@ fn a_notch_tip_across_the_line_where_the_faces_cross() {
         (0.4, 0.5, false),
         (-0.5, 0.5, false),
     ];
-    refused(&tilted_below(10.0, &below), at);
+    split(&tilted_below(10.0, &below), at);
     refused(
         &notch_at(10.0, 1.25 - 2.0 * eps, -3.0),
         "(1249.999800, -0.000295, -0.000052) mm",
@@ -3573,6 +3584,934 @@ fn a_run_no_meeting_covers_passing_a_corner_of_the_face_holding_it() {
                 "{t} {bump}"
             );
         }
+    }
+}
+
+/// [`tilted`]'s prism from a profile in metres (u along x, w up the
+/// plane), above its face or, `below`, under it ([`tilted_below`]).
+fn on_plane(t: f64, pts: &[DVec2], below: bool) -> Body {
+    let p: Vec<(f64, f64, bool)> = pts.iter().map(|q| (q.x, q.y, false)).collect();
+    if below {
+        tilted_below(t, &p)
+    } else {
+        tilted(t, &p)
+    }
+}
+
+/// The profile of a face from u = −`l` to `r` and w = −0.5 to 0.5 with a
+/// V-notch from its far side, its tip at (`x`, `w`) and its mouth from
+/// x − `b` to x + `a` at w = 0.5; `near`: from its near side, its mouth at
+/// w = −0.5.
+fn notch_profile((l, r): (f64, f64), x: f64, w: f64, (a, b): (f64, f64), near: bool) -> Vec<DVec2> {
+    let p = DVec2::new;
+    if near {
+        vec![
+            p(-l, -0.5),
+            p(x - b, -0.5),
+            p(x, w),
+            p(x + a, -0.5),
+            p(r, -0.5),
+            p(r, 0.5),
+            p(-l, 0.5),
+        ]
+    } else {
+        vec![
+            p(-l, -0.5),
+            p(r, -0.5),
+            p(r, 0.5),
+            p(x + a, 0.5),
+            p(x, w),
+            p(x - b, 0.5),
+            p(-l, 0.5),
+        ]
+    }
+}
+
+/// The profile of a face from u = −`l` to `r` with a spike, its tip at
+/// (`x`, `w`) and its root from x − `b` to x + `a`: rising from the strip
+/// from w = −0.5 to −`root` (`up`), or falling from the strip from w =
+/// `root` to 0.5.
+fn spiked_profile(
+    (l, r): (f64, f64),
+    x: f64,
+    w: f64,
+    (a, b): (f64, f64),
+    root: f64,
+    up: bool,
+) -> Vec<DVec2> {
+    let p = DVec2::new;
+    if up {
+        vec![
+            p(-l, -0.5),
+            p(r, -0.5),
+            p(r, -root),
+            p(x + a, -root),
+            p(x, w),
+            p(x - b, -root),
+            p(-l, -root),
+        ]
+    } else {
+        vec![
+            p(-l, root),
+            p(x - b, root),
+            p(x, w),
+            p(x + a, root),
+            p(r, root),
+            p(r, 0.5),
+            p(-l, 0.5),
+        ]
+    }
+}
+
+/// The convex polygon `poly` less what lies beyond the line through `o`
+/// square to `n`, keeping n · (q − o) ≤ 0 (Sutherland and Hodgman 1974).
+fn clip(poly: &[DVec2], o: DVec2, n: DVec2) -> Vec<DVec2> {
+    let f = |q: DVec2| n.dot(q - o);
+    let mut out = Vec::new();
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+        let (fa, fb) = (f(a), f(b));
+        if fa <= 0.0 {
+            out.push(a);
+        }
+        if (fa < 0.0 && fb > 0.0) || (fa > 0.0 && fb < 0.0) {
+            out.push(a + (b - a) * (fa / (fa - fb)));
+        }
+    }
+    out
+}
+
+/// The box's top: x from −0.25 to 1.25 and y from −1 to 1.
+fn top_rect() -> Vec<DVec2> {
+    [(-0.25, -1.0), (1.25, -1.0), (1.25, 1.0), (-0.25, 1.0)]
+        .map(|(x, y)| DVec2::new(x, y))
+        .to_vec()
+}
+
+/// `pts` turning counter-clockwise.
+fn ccw(mut pts: Vec<DVec2>) -> Vec<DVec2> {
+    let n = pts.len();
+    if (0..n)
+        .map(|i| pts[i].perp_dot(pts[(i + 1) % n]))
+        .sum::<f64>()
+        < 0.0
+    {
+        pts.reverse();
+    }
+    pts
+}
+
+/// The box from z = −1 to 0 with x from −0.25 to 1.25 and y from −1 to 1.
+fn the_box() -> Body {
+    cuboid(DVec3::new(-0.25, -1.0, -1.0), DVec3::new(1.25, 1.0, 0.0))
+}
+
+/// `a` less a column from z = −2 to 1 whose section is the polygon `hole`.
+fn pierced_by(a: &Body, hole: Vec<DVec2>) -> Body {
+    let frame = Frame {
+        origin: DVec3::new(0.0, 0.0, -2.0),
+        ..Frame::WORLD
+    };
+    op(a, &prism(frame, &ccw(hole), 3.0), BooleanOp::Subtract)
+}
+
+/// An oblique prism (the soundness review's): the profile `pts` of a face
+/// on golden 32's plane at `t` degrees, the prism above its face or,
+/// `below`, under it, swept along D, which leans `alpha` degrees from the
+/// face's inward normal toward the direction `phi` degrees from x in the
+/// face's plane, and cut to a slab 0.43 thick behind the face: its edge
+/// out of the face at each corner runs along D.
+fn oblique(t: f64, pts: &[DVec2], below: bool, alpha: f64, phi: f64) -> Body {
+    let thick = 0.43;
+    let tf = tilted_frame(t);
+    let inward = if below { -tf.z } else { tf.z };
+    let (al, ph) = (alpha.to_radians(), phi.to_radians());
+    let d = (inward * al.cos() + (tf.x * ph.cos() + tf.y * ph.sin()) * al.sin()).normalize();
+    let slab = k()
+        .make_box(
+            &Frame {
+                origin: tf.x * -6.0 + tf.y * -6.0 + if below { tf.z * -thick } else { DVec3::ZERO },
+                ..tf
+            },
+            DVec3::new(12.0, 12.0, thick),
+        )
+        .expect("a slab");
+    let len = thick / al.cos() + 1.0;
+    let seed = if d.cross(DVec3::X).length() > 0.3 {
+        DVec3::X
+    } else {
+        DVec3::Y
+    };
+    let fx = seed.reject_from_normalized(d).normalize();
+    let fy = d.cross(fx);
+    let o = -d * len;
+    let q: Vec<DVec2> = (pts.iter())
+        .map(|p| {
+            let x = tf.x * p.x + tf.y * p.y;
+            let x = x - d * (x - o).dot(d);
+            DVec2::new((x - o).dot(fx), (x - o).dot(fy))
+        })
+        .collect();
+    let frame = Frame {
+        origin: o,
+        x: fx,
+        y: fy,
+        z: d,
+    };
+    op(
+        &prism(frame, &ccw(q), 2.0 * len),
+        &slab,
+        BooleanOp::Intersect,
+    )
+}
+
+/// The refusal of edges where the bodies meet passing within the tolerance
+/// of each other, near `at`.
+fn crossing_refusal(at: &str) -> String {
+    format!(
+        "refused: edges where the bodies meet pass within the tolerance of each other near {at}"
+    )
+}
+
+/// The refusal of a point where the bodies meet within the tolerance of an
+/// edge it is not on, near `at`.
+fn near_edge_refusal(at: &str) -> String {
+    format!(
+        "refused: a point where the bodies meet lies within the tolerance of an edge it is not \
+         on, near {at}"
+    )
+}
+
+/// Six times `s`.
+fn all(s: String) -> [String; 6] {
+    [(); 6].map(|_| s.clone())
+}
+
+/// Asserts the six outcomes ([`six`]) of the case `what`.
+fn outcomes(what: &str, a: &Body, b: &Body, want: [String; 6]) {
+    assert_eq!(six(a, b, 1.0), want, "{what}");
+}
+
+/// Answered outcomes: A ∪ B and B ∪ A as `union`, A ∩ B and B ∩ A as
+/// `common`, then A − B and B − A.
+fn answered(union: &str, common: &str, a_less_b: String, b_less_a: &str) -> [String; 6] {
+    [
+        union.into(),
+        union.into(),
+        common.into(),
+        common.into(),
+        a_less_b,
+        b_less_a.into(),
+    ]
+}
+
+/// The outcomes of a touch the result would keep as a non-manifold point
+/// or edge (`refusal`): A ∪ B and B ∪ A refused, A ∩ B and B ∩ A empty,
+/// then A − B and B − A.
+fn touching(refusal: String, a_less_b: &str, b_less_a: &str) -> [String; 6] {
+    [
+        refusal.clone(),
+        refusal,
+        "empty".into(),
+        "empty".into(),
+        a_less_b.into(),
+        b_less_a.into(),
+    ]
+}
+
+/// Golden 48: notch tips of golden 32's prism's face across the line L
+/// where the face crosses the box's top, within the tolerance of the top,
+/// where the top holds part of rule 3's test set more than ρ from its
+/// edges (design note 0012 §21, rule 3; found by the synthesis families).
+/// Tilted 3° (1°), the tip 15 (30) tolerances across L in the face's
+/// plane, under the top, over a box pierced under it by a triangle whose
+/// apex lies half (0.49) of the way from the tip's foot to L: the foot
+/// lies in the hole, and the tip's edges leave it over the top. Tilted 1°,
+/// the tip 17.2 tolerances across L: under a top cut along a line from 6
+/// tolerances along L from the tip to a quarter of the way to its foot and
+/// pierced likewise (the hole's apex 0.3 of the way); and under a top cut
+/// by a line from 6 tolerances before the tip along L to half way to its
+/// foot and by a line at 70° (140°) to L beyond the foot, the tip from the
+/// near side above the top (from the far side under it). Main failed every
+/// operation of each but the 140° case, where it refused A ∪ B and B ∪ A,
+/// found A ∩ B and B ∩ A empty and answered A − B and B − A, though the
+/// faces lie within the tolerance of each other over the tip's edges'
+/// feet, which neither the meeting nor classification separates; every
+/// operation is now refused at the tip. Without rule 3, without its test
+/// of V's edges (V's foot alone), or passing a notch tip with no stretch
+/// in front of it as an apex is passed, an operation fails as on main.
+#[test]
+fn a_notch_tip_is_refused_where_the_top_holds_its_edges() {
+    let eps = k().tolerance().linear;
+    let p = DVec2::new;
+    for (what, t, v, k_apex, at) in [
+        (
+            "3°",
+            3.0f64,
+            -15.0,
+            0.5,
+            "(500.000000, -0.001498, -0.000079) mm",
+        ),
+        (
+            "1°",
+            1.0,
+            -30.0,
+            0.49,
+            "(500.000000, -0.003000, -0.000052) mm",
+        ),
+    ] {
+        let b = on_plane(
+            t,
+            &notch_profile((0.5, 2.0), 0.5, v * eps, (0.1, 0.1), false),
+            false,
+        );
+        let yv = v * eps * t.to_radians().cos();
+        let (s, apex) = (yv.signum(), yv * (1.0 - k_apex));
+        let hole = vec![p(0.5 - 0.2, s * 0.5), p(0.5 + 0.2, s * 0.5), p(0.5, apex)];
+        outcomes(
+            what,
+            &pierced_by(&the_box(), hole),
+            &b,
+            all(band_refusal(at)),
+        );
+    }
+    let t = 1.0f64;
+    {
+        let h = 0.3 / t.to_radians().sin();
+        let b = on_plane(
+            t,
+            &notch_profile((0.5, 2.0), 0.5, -h * eps, (0.1, 0.1), false),
+            false,
+        );
+        let yv = -h * eps * t.to_radians().cos();
+        let (sb, foot) = (yv.signum(), p(0.5, yv));
+        let o1 = p(0.5 + 6.0 * eps, 0.0);
+        let mut n1 = (p(0.5, yv * 0.25) - o1).normalize().perp();
+        if n1.dot(foot - o1) > 0.0 {
+            n1 = -n1;
+        }
+        let top = slab(&ccw(clip(&top_rect(), o1, n1)));
+        let apex = yv * (1.0 - 0.3);
+        let hole = vec![p(0.5 - 0.2, sb * 0.5), p(0.5 + 0.2, sb * 0.5), p(0.5, apex)];
+        let at = "(500.000000, -0.001719, -0.000030) mm";
+        outcomes(
+            "cut short",
+            &pierced_by(&top, hole),
+            &b,
+            all(band_refusal(at)),
+        );
+    }
+    for (what, z, near, phi, at) in [
+        (
+            "70°",
+            0.6f64,
+            true,
+            70.0f64,
+            "(500.000000, 0.003437, 0.000060) mm",
+        ),
+        (
+            "140°",
+            0.3,
+            false,
+            140.0,
+            "(500.000000, -0.001719, -0.000030) mm",
+        ),
+    ] {
+        let h = z / t.to_radians().sin();
+        let len = (1.0 - z) / t.to_radians().tan();
+        let w = if near { h } else { -h };
+        let b = on_plane(
+            t,
+            &notch_profile((0.5, 2.0), 0.5, w * eps, (0.1, 0.1), near),
+            near,
+        );
+        let yv = w * eps * t.to_radians().cos();
+        let (sb, foot) = (yv.signum(), p(0.5, yv));
+        let o1 = p(0.5 - 6.0 * eps, 0.0);
+        let mut n1 = (p(0.5, yv * 0.5) - o1).normalize().perp();
+        if n1.dot(foot - o1) > 0.0 {
+            n1 = -n1;
+        }
+        let o2 = p(0.5, yv + sb * 0.15 * len * eps);
+        let mut n2 = p(phi.to_radians().cos(), phi.to_radians().sin()).perp();
+        if n2.dot(foot - o2) > 0.0 {
+            n2 = -n2;
+        }
+        let a = slab(&ccw(clip(&clip(&top_rect(), o1, n1), o2, n2)));
+        outcomes(what, &a, &b, all(band_refusal(at)));
+    }
+}
+
+/// Golden 49: apexes of golden 32's prism's face across L within the
+/// tolerance of the top: reflex corners both of whose edges run away from
+/// the top (design note 0012 §21, rule 3 for apexes; the synthesis
+/// families and the soundness review's apex family). A notch from the far
+/// side, its apex 0.3 tolerances above the top at 1°, and from the near
+/// side, its apex 0.3 tolerances under the top with its prism below its
+/// face at 3° and 10°, each over a top ending 3 tolerances beyond the
+/// apex's foot; and a notch at x = 0.631703 with a lopsided mouth from the
+/// far side at 1°, its apex 0.05 (0.118) tolerances above a top ending
+/// 28.65 tolerances across L. Main failed every operation of each, a
+/// contact's pieces disagreeing on their side; every operation is now
+/// refused at the apex. Without rule 3's test of apexes, they fail as on
+/// main.
+#[test]
+fn an_apex_across_the_line_is_refused_where_the_top_holds_its_foot() {
+    let eps = k().tolerance().linear;
+    let p = DVec2::new;
+    for (t, near, at) in [
+        (1.0f64, false, "(500.000000, 0.001719, 0.000030) mm"),
+        (3.0, true, "(500.000000, -0.000572, -0.000030) mm"),
+        (10.0, true, "(500.000000, -0.000170, -0.000030) mm"),
+    ] {
+        let h = 0.3 * eps / t.to_radians().sin();
+        let w = if near { -h } else { h };
+        let b = on_plane(
+            t,
+            &notch_profile((1.2, 2.2), 0.5, w, (0.1, 0.1), near),
+            near,
+        );
+        let y = w * t.to_radians().cos();
+        let s = y.signum();
+        let a = slab(&ccw(clip(
+            &top_rect(),
+            p(0.5, y + s * 3.0 * eps),
+            p(0.0, s),
+        )));
+        outcomes(&format!("{t}°"), &a, &b, all(band_refusal(at)));
+    }
+    for (z, at) in [
+        (0.05f64, "(631.703000, 0.000286, 0.000005) mm"),
+        (0.118, "(631.703000, 0.000676, 0.000012) mm"),
+    ] {
+        let t = 1.0f64;
+        let st = t.to_radians().sin();
+        let (x, h) = (0.631703, z * eps / st);
+        let b = on_plane(
+            t,
+            &notch_profile((1.2, 2.2), x, h, (0.0129, 0.018), false),
+            false,
+        );
+        let e = 0.5 / st;
+        let a = if z < 0.1 {
+            cuboid(
+                DVec3::new(-0.25, -1.0, -1.0),
+                DVec3::new(1.25, e * eps, 0.0),
+            )
+        } else {
+            slab(&ccw(clip(&top_rect(), p(x, e * eps), p(0.0, 1.0))))
+        };
+        outcomes(&format!("lopsided {z}"), &a, &b, all(band_refusal(at)));
+    }
+}
+
+/// Golden 50: notch tips across L within the tolerance of the top that
+/// rule 3 does not refuse, every outcome as on main (design note 0012
+/// §21; found by the synthesis families and the notch fuzz). The tip from
+/// the near side 0.3 tolerances above the top at 1°, the top ending 1.05
+/// tolerances beyond the tip's foot: every operation answered. At 0.5°,
+/// the top's edge 2 tolerances across L on the side away from the tip: the
+/// tip is no isolated touch of the top (rule 3's isolation), and a touch
+/// along the top's edge refuses the unions. Two notches the fuzz found at 1° and
+/// 0.5°, their tips within the tolerance of a stretch of the meeting: the
+/// split refuses them, at the tip or (its stretch meeting the top's cut
+/// edge) 250 mm away. Without rule 3's isolation the tip over the top's
+/// edge is refused in every operation with the strip's text, and with V's
+/// foot tested a rounding margin from the top's edges rather than at ρ so
+/// is the fuzz's notch at 1°.
+#[test]
+fn a_notch_tip_left_to_the_meeting_or_the_split() {
+    let eps = k().tolerance().linear;
+    let p = DVec2::new;
+    {
+        let t = 1.0f64;
+        let h = 0.3 * eps / t.to_radians().sin();
+        let b = on_plane(
+            t,
+            &notch_profile((1.2, 2.2), 0.5, h, (0.1, 0.1), true),
+            false,
+        );
+        let foot = h * t.to_radians().cos();
+        let a = cuboid(
+            DVec3::new(-0.25, -1.0, -1.0),
+            DVec3::new(1.25, foot + 1.05 * eps, 0.0),
+        );
+        let want = [
+            "(15, 39, 26, 1) V=3.172020743 A=18.089640880",
+            "(15, 39, 26, 1) V=3.172020743 A=18.089640880",
+            "(8, 17, 11, 1) V=0.002981906 A=1.420271531",
+            "(8, 17, 11, 1) V=0.002981906 A=1.420271531",
+            "(11, 26, 17, 1) V=1.497020829 A=8.011334699",
+            "(12, 30, 20, 1) V=1.672018008 A=11.498577713",
+        ];
+        outcomes("beside", &a, &b, want.map(String::from));
+    }
+    {
+        let t = 0.5f64;
+        let h = 0.3 * eps / t.to_radians().sin();
+        let b = on_plane(
+            t,
+            &notch_profile((1.2, 2.2), 0.5, h, (0.1, 0.1), true),
+            false,
+        );
+        let a = cuboid(
+            DVec3::new(-0.25, -2.0 * eps, -1.0),
+            DVec3::new(1.25, 1.0, 0.0),
+        );
+        let want = touching(
+            edge_refusal("(124.999636, -0.000200, -0.000000) mm"),
+            "(6, 12, 8, 1) V=1.500000300 A=8.000001000",
+            "(9, 21, 14, 1) V=1.674999828 A=11.509904635",
+        );
+        outcomes("over the edge", &a, &b, want);
+    }
+    let b = on_plane(
+        1.0,
+        &[
+            p(-1.2, -0.5),
+            p(2.2, -0.5),
+            p(2.2, 0.5),
+            p(0.5585068932436936, 0.5),
+            p(0.47350998224935675, -5.414409039095355e-6),
+            p(0.296696907214841, 0.5),
+            p(-1.2, 0.5),
+        ],
+        true,
+    );
+    let a = cuboid(
+        DVec3::new(-0.25, -1.0, -1.0),
+        DVec3::new(1.25, -5.353927718941095e-6, 0.0),
+    );
+    let at = "(473.509982, -0.005414, -0.000094) mm";
+    let (near, cross) = (near_edge_refusal(at), crossing_refusal(at));
+    let want = [0, 1, 2, 3, 4, 5].map(|i| {
+        if i % 2 == 0 {
+            near.clone()
+        } else {
+            cross.clone()
+        }
+    });
+    outcomes("fuzz at 1°", &a, &b, want);
+    let b = on_plane(
+        0.5,
+        &[
+            p(-1.2, -0.5),
+            p(0.29894098938327757, -0.5),
+            p(0.4504511852793128, 5.729650674006515e-6),
+            p(0.4559764177328263, -0.5),
+            p(2.2, -0.5),
+            p(2.2, 0.5),
+            p(-1.2, 0.5),
+        ],
+        true,
+    );
+    let o = p(0.4504514275595844, 5.550401201270718e-6);
+    let n = p(-0.31746232165223376, -0.9482708865778668);
+    let a = slab(&ccw(clip(&top_rect(), o, n)));
+    let at = "(-250.000000, 234.502823, 0.000000) mm";
+    outcomes("fuzz at 0.5°", &a, &b, all(crossing_refusal(at)));
+}
+
+/// Golden 51: corners of oblique prisms' faces across L within the
+/// tolerance of the box's top, whose edges out of the face at the corner
+/// lean far from the face's normal (the soundness review's oblique family;
+/// design note 0012 §21, rule 3's isolation). Rule 3 lets a corner off as
+/// no isolated touch only where both of its tests say so: the face's
+/// normals (its body behind the corner lying across the corner's way to L)
+/// and the pair's touch record (the body's edges at the corner leaving P to
+/// one side only). A notch tip from the near side 0.7 tolerances above the
+/// top at 30°, its prism leaning 75° so its edge out of the face at the tip
+/// leaves the tip to its neighbours' side, a touch the record holds, though
+/// the normals call it isolated: main failed A ∪ B, A ∩ B and A − B as a
+/// contact's pieces that disagree on their side. A notch tip from the far
+/// side 0.3 tolerances under the top at 10°, its prism below its face
+/// leaning 85°: main failed the same three. An apex of a notch 0.3
+/// tolerances above a top ending 3 tolerances beyond its foot at 5°, its
+/// prism leaning 87.5° so its edge out of the face leaves the apex to P's
+/// other side, which the record does not count a touch while the normals
+/// do not call it isolated: main failed every operation as kept pieces
+/// that do not close. Every operation is now refused at the corner. With
+/// the normals' test alone the near tip fails as on main, and with the
+/// record's alone the apex does.
+#[test]
+fn an_oblique_corner_is_refused_unless_both_tests_call_it_isolated() {
+    let eps = k().tolerance().linear;
+    let p = DVec2::new;
+    {
+        let t = 30.0f64;
+        let h = 0.7 * eps / t.to_radians().sin();
+        let prof = notch_profile((0.5, 2.0), 0.5, h, (0.35, 0.35), true);
+        let b = oblique(t, &prof, false, 75.0, -90.0);
+        let at = "(500.000000, 0.000121, 0.000070) mm";
+        outcomes("near tip", &the_box(), &b, all(band_refusal(at)));
+    }
+    {
+        let t = 10.0f64;
+        let h = 0.3 * eps / t.to_radians().sin();
+        let prof = notch_profile((0.5, 2.0), 0.5, -h / eps * eps, (0.35, 0.35), false);
+        let b = oblique(t, &prof, true, 85.0, 90.0);
+        let at = "(500.000000, -0.000170, -0.000030) mm";
+        outcomes("far tip", &the_box(), &b, all(band_refusal(at)));
+    }
+    {
+        let t = 5.0f64;
+        let h = 0.3 * eps / t.to_radians().sin();
+        let prof = notch_profile((1.2, 2.2), 0.5, h, (0.1, 0.1), false);
+        let b = oblique(t, &prof, false, 87.5, -90.0);
+        let foot = p(0.5, h * t.to_radians().cos());
+        let a = slab(&ccw(clip(
+            &top_rect(),
+            p(foot.x, foot.y + 3.0 * eps),
+            p(0.0, 1.0),
+        )));
+        let at = "(500.000000, 0.000343, 0.000030) mm";
+        outcomes("apex", &a, &b, all(band_refusal(at)));
+    }
+}
+
+/// Golden 52: spike tips V across L within the tolerance of the top, whose
+/// flap (the face across L between V's edges) the flap rule's table
+/// decides (design note 0012 §21; found by the synthesis and oblique
+/// families). The flap's own side is tested where the layer between it
+/// and the top lies outside the face's body, where the touch record does
+/// not hold V, or where the layer lies outside the top's body and the
+/// touch at V is unpinched, and each of these is refused: a rising spike
+/// 50 tolerances across at 1°, its prism below its face, under a top cut
+/// along a line at 20° through V's foot (the layer in the face's body and
+/// outside the top's, V on the top's edge; main crossed the flap and the
+/// top 22.4 tolerances inside in A − B); spikes 0.9 tolerances from the
+/// top at 10° and 3°, their prisms leaning 85° and 88.5° so that the record
+/// does not hold V (main crossed them 4.5 tolerances inside in A − B, and
+/// answered every operation with the flap crossing the top 14.9 tolerances
+/// inside). Where the record holds V and the layer lies in both bodies, or
+/// outside the top's with the touch pinched and the top's edges out of the
+/// tolerance's reach of the flap, the touch at V decides it, every outcome
+/// as on main: a spike 0.3 tolerances above the top at 0.5° with a
+/// lopsided root, its prism below its face, the same 0.9 tolerances from the top at 10° unleaning,
+/// and 0.5 tolerances at 10° under a top ending 3 tolerances beyond V's
+/// foot (A − B touching at V, refused); a falling spike 3 tolerances
+/// across L at 10° under a top cut along L 0.75 of the way to V's foot, and the walls of a notch
+/// whose tip lies 0.3 tolerances above the top at 30° under a top ending
+/// at a corner 0.4 tolerances beyond its foot (the union touching at V,
+/// refused, or every operation answered). Letting the touch decide a flap
+/// the record does not hold answers the 85° spike as main did; testing
+/// only flaps outside the face's body answers the 50-tolerance spike as
+/// main did; testing every flap, or a pinched one's side whole, refuses
+/// the lopsided spike; and testing an unpinched flap in both bodies
+/// refuses the falling spike with the strip's text.
+#[test]
+fn a_spike_flap_is_tested_unless_the_touch_at_its_tip_decides_it() {
+    let eps = k().tolerance().linear;
+    let p = DVec2::new;
+    let zero = all(band_refusal("(500.000000, 0.000000, 0.000000) mm"));
+    {
+        let (t, d) = (1.0f64, 50.0);
+        let b = on_plane(
+            t,
+            &spiked_profile((0.5, 2.0), 0.5, d * eps, (0.1, 0.1), 0.2, true),
+            true,
+        );
+        let yv = d * eps * t.to_radians().cos();
+        let n = p(20f64.to_radians().cos(), 20f64.to_radians().sin()).perp();
+        let a = slab(&ccw(clip(&top_rect(), p(0.5, yv), n)));
+        outcomes("outside the face's body", &a, &b, zero.clone());
+    }
+    let up_10 = |alpha: f64, phi: f64| {
+        let h = 0.9 * eps / 10f64.to_radians().sin();
+        let prof = spiked_profile((0.5, 2.0), 0.5, h / eps * eps, (0.35, 0.35), 0.2, true);
+        (h, oblique(10.0, &prof, true, alpha, phi))
+    };
+    {
+        let (h, b) = up_10(85.0, 90.0);
+        let foot = p(0.5, h * 10f64.to_radians().cos());
+        let a = slab(&ccw(clip(
+            &top_rect(),
+            p(foot.x, foot.y + 3.0 * eps),
+            p(0.0, 1.0),
+        )));
+        outcomes("leaning 85°", &a, &b, zero.clone());
+    }
+    {
+        let t = 3.0f64;
+        let h = 0.9 * eps / t.to_radians().sin();
+        let prof = spiked_profile((0.5, 2.0), 0.5, -h / eps * eps, (0.35, 0.35), 0.2, false);
+        let b = oblique(t, &prof, false, 88.5, -90.0);
+        let at = "(500.000000, -0.000000, 0.000000) mm";
+        outcomes("leaning 88.5°", &the_box(), &b, all(band_refusal(at)));
+    }
+    {
+        let t = 0.5f64;
+        let h = 0.3 * eps / t.to_radians().sin();
+        let b = on_plane(
+            t,
+            &spiked_profile((1.2, 2.2), 0.5, h, (0.12, 0.02), 0.4, true),
+            true,
+        );
+        let want = answered(
+            "(16, 36, 24, 1) V=3.095000000 A=15.280000000",
+            "(9, 21, 14, 1) V=0.089000120 A=2.295059819",
+            point_refusal("(500.000000, 0.003438, 0.000030) mm"),
+            "(12, 24, 16, 2) V=0.095000000 A=2.480000000",
+        );
+        outcomes("lopsided", &the_box(), &b, want);
+    }
+    {
+        let (_, b) = up_10(0.0, 0.0);
+        let want = answered(
+            "(16, 36, 24, 1) V=3.129000000 A=14.460000000",
+            "(9, 21, 14, 1) V=0.223600078 A=2.633677667",
+            point_refusal("(500.000000, 0.000510, 0.000090) mm"),
+            "(12, 24, 16, 2) V=0.129000000 A=1.976000000",
+        );
+        outcomes("unleaning", &the_box(), &b, want);
+    }
+    {
+        let t = 10.0f64;
+        let d = 0.5 / t.to_radians().sin();
+        let b = on_plane(
+            t,
+            &spiked_profile((0.5, 2.0), 0.5, d * eps, (0.5, 0.5), 0.2, true),
+            true,
+        );
+        let yv = d * eps * t.to_radians().cos();
+        let a = slab(&ccw(clip(&top_rect(), p(0.5, yv + 3.0 * eps), p(0.0, 1.0))));
+        let want = answered(
+            "(19, 42, 28, 1) V=1.653239504 A=9.626224014",
+            "(10, 24, 16, 1) V=0.271761443 A=2.912295780",
+            point_refusal("(500.000000, 0.000284, 0.000050) mm"),
+            "(16, 30, 20, 3) V=0.153238629 A=2.450028113",
+        );
+        outcomes("short top", &a, &b, want);
+    }
+    {
+        let (t, d) = (10.0f64, 3.0);
+        let b = on_plane(
+            t,
+            &spiked_profile((0.5, 2.0), 0.5, -d * eps, (0.1, 0.1), 0.2, false),
+            false,
+        );
+        let yv = -d * eps * t.to_radians().cos();
+        let a = slab(&ccw(clip(&top_rect(), p(0.5, 0.75 * yv), p(0.0, -1.0))));
+        let want = touching(
+            point_refusal("(500.000000, -0.000295, -0.000052) mm"),
+            "(6, 12, 8, 1) V=1.500000332 A=8.000001108",
+            "(9, 21, 14, 1) V=0.385000015 A=4.463607126",
+        );
+        outcomes("falling", &a, &b, want);
+    }
+    {
+        let t = 30.0f64;
+        let h = 0.3 * eps / t.to_radians().sin();
+        let b = on_plane(
+            t,
+            &notch_profile((0.5, 2.0), 0.5, h, (0.1, 0.1), true),
+            true,
+        );
+        let foot = p(0.5, h * t.to_radians().cos());
+        let o = foot + p(1.0, 1.0) * (0.4 * eps / 2f64.sqrt());
+        let a = slab(&ccw(clip(
+            &clip(&top_rect(), o, p(0.0, 1.0)),
+            o,
+            p(1.0, 0.0),
+        )));
+        let want = [
+            "(15, 36, 23, 1) V=1.852737752 A=12.217545001",
+            "(15, 36, 23, 1) V=1.852737752 A=12.217544999",
+            "(6, 12, 8, 1) V=0.122262334 A=1.592357374",
+            "(6, 12, 8, 1) V=0.122262334 A=1.592357367",
+            "(10, 22, 14, 1) V=0.627737755 A=5.404003235",
+            "(11, 26, 17, 1) V=1.102737663 A=8.405899169",
+        ];
+        outcomes("corner", &a, &b, want.map(String::from));
+    }
+}
+
+/// Golden 53: spike tips V across L within the tolerance of the top, the
+/// layer between the flap and the top in the face's body and outside the
+/// top's, the record holding V, and the top holding V's foot (a pinched
+/// flap; design note 0012 §21, the flap rule's crossing test; found by the
+/// synthesis and oblique families). The touch at V decides the flap only
+/// where the top's boundary stays out of the tolerance's reach of the
+/// flap's strip; here an edge of the top passes within it, each prism
+/// below its face: at 1°, V 0.3 tolerances above the top, the top cut
+/// along a line at 150° 1.5 (3) tolerances beyond V's foot; at 3°, V 12
+/// tolerances across, the top cut at 110° half way from V's foot to L; at
+/// 30°, V 0.9 tolerances above the top, the top's edge along L a tolerance
+/// short of V's foot, the top on V's side of it. Main failed every
+/// operation, a contact's pieces disagreeing on their side; every
+/// operation is now refused at V. Without the crossing test (the flap left
+/// to the touch), or with the flap's own side tested instead, the first
+/// fails as on main.
+#[test]
+fn a_pinched_flap_is_refused_where_the_tops_edge_comes_within_its_strip() {
+    let eps = k().tolerance().linear;
+    let p = DVec2::new;
+    let spike = |t: f64, w: f64, (a, b): (f64, f64)| {
+        on_plane(
+            t,
+            &spiked_profile((0.5, 2.0), 0.5, w, (a, b), 0.2, true),
+            true,
+        )
+    };
+    let at = all(band_refusal("(500.000000, 0.001719, 0.000030) mm"));
+    for dl in [-1.5f64, -3.0] {
+        let t = 1.0f64;
+        let h = 0.3 * eps / t.to_radians().sin();
+        let b = spike(t, h / eps * eps, (0.3, 0.3));
+        let foot = p(0.5, h * t.to_radians().cos());
+        let mut n = p(150f64.to_radians().cos(), 150f64.to_radians().sin()).perp();
+        if n.dot(p(foot.x, 0.0) - foot) < 0.0 {
+            n = -n;
+        }
+        let a = slab(&ccw(clip(&top_rect(), foot - n * (dl * eps), n)));
+        outcomes(&format!("150° {dl}"), &a, &b, at.clone());
+    }
+    {
+        let (t, d) = (3.0f64, 12.0);
+        let b = spike(t, d * eps, (0.02, 0.3));
+        let yv = d * eps * t.to_radians().cos();
+        let n = p(110f64.to_radians().cos(), 110f64.to_radians().sin()).perp();
+        let a = slab(&ccw(clip(&top_rect(), p(0.5, 0.5 * yv), n)));
+        let at = "(500.000000, 0.001198, 0.000063) mm";
+        outcomes("110°", &a, &b, all(band_refusal(at)));
+    }
+    {
+        let t = 30.0f64;
+        let d = 0.9 / t.to_radians().sin();
+        let b = spike(t, d * eps, (0.2, 0.2));
+        let yv = d * eps * t.to_radians().cos();
+        let a = slab(&ccw(clip(&top_rect(), p(0.5, yv - eps), p(0.0, -1.0))));
+        let at = "(500.000000, 0.000156, 0.000090) mm";
+        outcomes("short", &a, &b, all(band_refusal(at)));
+    }
+}
+
+/// Golden 54: spike tips whose flap lies over the strip of a run of the
+/// other face (design note 0012 §21, the exclusion; found by the
+/// synthesis families and the fuzz). The run's strip leaves out the flap's
+/// triangle, which the flap's own rule decides by the touch at its tip: a
+/// falling spike 0.3 tolerances under the top at 0.5°, under a slab whose
+/// top has a notch from x = 0.3 to 0.7 ending 1.05 tolerances beyond the
+/// tip's foot; and a notch the fuzz found at 2°, under a box turned 12.7°
+/// whose corner lies at its tip. Main refused every operation, the run's
+/// strip held over the flap; now the touch at the tip refuses the unions,
+/// A ∩ B and B ∩ A are empty, and A − B and B − A are answered. Without the
+/// exclusion, or with only runs that are their face's whole interval
+/// leaving flaps out, the slab's case is refused in every operation as on
+/// main.
+#[test]
+fn a_strip_leaves_out_the_other_faces_flap() {
+    let eps = k().tolerance().linear;
+    let p = DVec2::new;
+    {
+        let t = 0.5f64;
+        let h = 0.3 * eps / t.to_radians().sin();
+        let b = on_plane(
+            t,
+            &spiked_profile((1.2, 2.2), 0.5, -h, (0.12, 0.02), 0.4, false),
+            false,
+        );
+        let y = -h * t.to_radians().cos() - 1.05 * eps;
+        let a = slab(&ccw(vec![
+            p(-0.25, 1.0),
+            p(1.25, 1.0),
+            p(1.25, -0.9),
+            p(0.7, -0.9),
+            p(0.7, y),
+            p(0.3, y),
+            p(0.3, -0.9),
+            p(-0.25, -0.9),
+        ]));
+        let want = touching(
+            point_refusal("(500.000000, -0.003438, -0.000030) mm"),
+            "(10, 24, 16, 1) V=2.490001417 A=13.579995749",
+            "(9, 21, 14, 1) V=0.184000120 A=4.575059819",
+        );
+        outcomes("slab", &a, &b, want);
+    }
+    let b = on_plane(
+        2.0,
+        &[
+            p(-1.2, -0.5),
+            p(0.5359088166745397, -0.5),
+            p(0.5804842176658804, -2.578833751305944e-6),
+            p(0.6103051633978451, -0.5),
+            p(2.2, -0.5),
+            p(2.2, 0.5),
+            p(-1.2, 0.5),
+        ],
+        false,
+    );
+    let frame = Frame {
+        origin: DVec3::new(0.5804844468118274, -2.612368254420224e-6, -1.0),
+        x: DVec3::new(0.9757129766956367, 0.21905293220530012, 0.0),
+        y: DVec3::new(-0.21905293220530012, 0.9757129766956367, 0.0),
+        z: DVec3::Z,
+    };
+    let a = k().make_box(&frame, DVec3::ONE).expect("a box");
+    let want = touching(
+        point_refusal("(580.484447, -0.002612, 0.000000) mm"),
+        "(6, 12, 8, 1) V=1.000000000 A=6.000000000",
+        "(9, 21, 14, 1) V=1.690700505 A=11.627037040",
+    );
+    outcomes("fuzz", &a, &b, want);
+}
+
+/// Golden 55: spike tips V across L within the tolerance of a slab's top
+/// whose cluster lies on the top's boundary, so the touch at V excuses
+/// the flap's points about it (design note 0012 §21, the member discs).
+/// The excused region is the union of discs of radius ε about the places
+/// of V's cluster's members, which the settling of touched points decides,
+/// the same in either order of the operands. At 3°, V 0.1 tolerances from
+/// the top, the top ending at a corner 0.6 tolerances beyond V's foot, the
+/// spike rising (falling); at 20° (5°), V 2.6 (1.6) tolerances across,
+/// the top ending along L at V's foot (half a tolerance short of it); at
+/// 10°, V 3 tolerances across, the top cut along a line at 20° through V's
+/// foot. Main answered A ∩ B and B ∩ A, or A − B, or B − A, with the flap
+/// crossing the top up to 2 tolerances inside; every operation is now
+/// refused at V. With a disc of three tolerances about the cluster's
+/// place, the rising spike at 3° is refused in one order of the operands
+/// and answered in the other, as main did.
+#[test]
+fn a_flap_is_excused_only_within_the_tolerance_of_its_tips_members() {
+    let eps = k().tolerance().linear;
+    let p = DVec2::new;
+    let spike = |t: f64, d: f64, wa: f64, up: bool, below: bool| {
+        on_plane(
+            t,
+            &spiked_profile((0.5, 2.0), 0.5, d * eps, (wa, wa), 0.2, up),
+            below,
+        )
+    };
+    for (up, at) in [
+        (true, "(499.999846, -0.000000, 0.000000) mm"),
+        (false, "(499.999846, 0.000000, 0.000000) mm"),
+    ] {
+        let t = 3.0f64;
+        let s = if up { 1.0 } else { -1.0 };
+        let d = s * 0.1 / t.to_radians().sin();
+        let b = spike(t, d, 0.5, up, !up);
+        let o = p(0.5, d * eps * t.to_radians().cos() + s * 0.6 * eps);
+        let a = slab(&ccw(clip(&clip(&top_rect(), o, p(0.0, s)), o, p(1.0, 0.0))));
+        outcomes(&format!("corner {up}"), &a, &b, all(band_refusal(at)));
+    }
+    let zero = all(band_refusal("(500.000000, 0.000000, 0.000000) mm"));
+    for (t, d, wa, below, dl) in [
+        (20.0f64, 2.6, 0.25, true, 0.0),
+        (5.0, 1.6, 0.2, false, -0.5),
+    ] {
+        let b = spike(t, d, wa, true, below);
+        let yv = d * eps * t.to_radians().cos();
+        let a = slab(&ccw(clip(&top_rect(), p(0.5, yv + dl * eps), p(0.0, 1.0))));
+        outcomes(&format!("along L at {t}°"), &a, &b, zero.clone());
+    }
+    {
+        let (t, d) = (10.0f64, 3.0);
+        let b = spike(t, d, 0.1, true, false);
+        let yv = d * eps * t.to_radians().cos();
+        let n = p(20f64.to_radians().cos(), 20f64.to_radians().sin()).perp();
+        let a = slab(&ccw(clip(&top_rect(), p(0.5, yv), n)));
+        outcomes("at 20°", &a, &b, zero);
     }
 }
 
