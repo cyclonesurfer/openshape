@@ -2823,6 +2823,161 @@ mod tests {
         }
     }
 
+    /// The fewest strip steps (`Limits::strip_steps`) within which `op`
+    /// on `a` and `b` is decided: answered, or refused where a face runs
+    /// within the tolerance of the other's surface; refused as too large
+    /// below them.
+    fn fewest_strip_steps(a: &Brep, b: &Brep, op: BooleanOp) -> usize {
+        let tol = Tolerance::default();
+        let within = |strip_steps: usize| {
+            let limits = Limits {
+                strip_steps,
+                ..LIMITS
+            };
+            match boolean_within(a, b, op, &tol, &limits) {
+                Ok(_) => true,
+                Err(KernelError::TooLarge(m)) if m.contains(imprint::STRIP_WORK) => false,
+                Err(KernelError::InvalidInput(m)) if m.contains(RUNS_WITHIN) => true,
+                Err(e) => panic!("{strip_steps} steps: {e:?}"),
+            }
+        };
+        let (mut lo, mut hi) = (0, LIMITS.strip_steps);
+        assert!(within(hi) && !within(lo));
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if within(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        hi
+    }
+
+    /// A block from x = −0.25 to 1.25 and y = −1 to 1 under z = 0, its top
+    /// `m` coplanar faces side by side along x (its profile has `m + 1`
+    /// points in a line there).
+    fn split_top(m: usize) -> Brep {
+        use crate::{ExtrudeSpec, Profile};
+        let frame = Frame {
+            origin: DVec3::new(0.0, 1.0, 0.0),
+            x: DVec3::X,
+            y: DVec3::Z,
+            z: DVec3::NEG_Y,
+        };
+        let mut pts = vec![DVec2::new(-0.25, -1.0), DVec2::new(1.25, -1.0)];
+        pts.extend(
+            (0..=m)
+                .rev()
+                .map(|j| DVec2::new(-0.25 + 1.5 * j as f64 / m as f64, 0.0)),
+        );
+        let body = BrepKernel::default()
+            .extrude(
+                &Profile::polygon(frame, &pts),
+                &ExtrudeSpec {
+                    distance: 2.0,
+                    symmetric: false,
+                },
+            )
+            .expect("a block with a split top");
+        (*body.brep).clone()
+    }
+
+    /// A unit cube on the origin whose side y = 0 is `m` coplanar faces
+    /// side by side along x, and a wedge resting by its bottom edge on the
+    /// cube's edge y = 0, z = 1, from x = −0.2 to 1.2: the edge lies on
+    /// each of the side's faces' planes, one of its faces' intervals on the
+    /// line whole, and passes their `m + 1` corners on the cube's edge.
+    fn rim(m: usize) -> (Brep, Brep) {
+        use crate::{ExtrudeSpec, Profile};
+        let kernel = BrepKernel::default();
+        let extrude = |frame: Frame, pts: Vec<DVec2>, distance: f64| {
+            let body = kernel
+                .extrude(
+                    &Profile::polygon(frame, &pts),
+                    &ExtrudeSpec {
+                        distance,
+                        symmetric: false,
+                    },
+                )
+                .expect("a prism");
+            (*body.brep).clone()
+        };
+        let mut side: Vec<DVec2> = (0..=m)
+            .map(|j| DVec2::new(j as f64 / m as f64, 0.0))
+            .collect();
+        side.extend([DVec2::new(1.0, 1.0), DVec2::new(0.0, 1.0)]);
+        let frame = Frame {
+            origin: DVec3::new(-0.2, 0.0, 0.0),
+            x: DVec3::Y,
+            y: DVec3::Z,
+            z: DVec3::X,
+        };
+        let wedge = [(0.0, 1.0), (0.5, 1.5), (-0.5, 1.5)].map(|(x, y)| DVec2::new(x, y));
+        (
+            extrude(Frame::WORLD, side, 1.0),
+            extrude(frame, wedge.to_vec(), 1.4),
+        )
+    }
+
+    /// The strip checks of one face against a face of the other body that
+    /// lies far from a chain, a notch tip or a spike take no steps for it
+    /// (design note 0012 §21): against a block whose top is 16 coplanar
+    /// faces side by side, the fewest steps within which the intersection
+    /// with a face whose edge has 128 runs lying on the top, each one of
+    /// the face's intervals on the line whole, 128 answered notch tips or
+    /// 128 spikes ([`leaning`]) is decided are at most twice those
+    /// against a top of one face (searching each run against every face of
+    /// the top took 58 times, found by review). And where such a run passes
+    /// the corners of `m` coplanar faces (`rim`), the steps within which the
+    /// cube less the wedge is answered grow in proportion to `m`, not to its
+    /// square: at most five times from 64 faces to 256 (14 times when every
+    /// cluster on the run was looked at in each pair).
+    #[test]
+    fn the_strip_checks_take_no_steps_for_faces_far_from_them() {
+        let eps = Tolerance::default().linear;
+        let n = 128;
+        let d = 1.0 / (4.0 * n as f64);
+        let mut runs = vec![(-0.5, -0.5), (2.0, -0.5), (2.0, 0.5), (1.0, 0.5), (1.0, -d)];
+        for i in (0..n).rev() {
+            let (x, w) = (i as f64 / n as f64, 1.0 / n as f64);
+            runs.extend([
+                (x + 0.75 * w, 3.0 * eps),
+                (x + 0.25 * w, 3.0 * eps),
+                (x, -d),
+            ]);
+        }
+        runs.extend([(0.0, 0.5), (-0.5, 0.5)]);
+        // As [`teeth`], with the face below the edge.
+        let hanging = |w: &dyn Fn(usize) -> f64| {
+            let mut pts = vec![(-0.5, -0.5), (2.0, -0.5), (2.0, 0.5), (1.0, 0.5)];
+            pts.extend((0..=n).rev().map(|i| (i as f64 / n as f64, w(i))));
+            pts.extend([(0.0, 0.5), (-0.5, 0.5)]);
+            leaning(pts)
+        };
+        let tips = hanging(&|i| {
+            if i % 2 == 0 {
+                1.0 / n as f64
+            } else {
+                -0.5 * eps
+            }
+        });
+        let spikes = hanging(&|i| if i % 2 == 0 { -1.0 / n as f64 } else { eps });
+        for (what, face) in [("runs", leaning(runs)), ("tips", tips), ("spikes", spikes)] {
+            let one = fewest_strip_steps(&split_top(1), &face, BooleanOp::Intersect);
+            let many = fewest_strip_steps(&split_top(16), &face, BooleanOp::Intersect);
+            println!("{what}: {one} steps against one face, {many} against 16");
+            assert!(one > 0 && many <= 2 * one, "{what}: {one} to {many}");
+        }
+        let fewest = |m: usize| {
+            let (cube, wedge) = rim(m);
+            fewest_strip_steps(&cube, &wedge, BooleanOp::Subtract)
+        };
+        let (small, large) = (fewest(64), fewest(256));
+        println!("rim: {small} steps at 64 faces, {large} at 256");
+        assert!(small > 0 && large <= 5 * small, "{small} to {large}");
+    }
+
     #[test]
     fn work_limits_refuse_rather_than_run_on() {
         let tol = Tolerance::default();

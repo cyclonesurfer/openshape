@@ -314,7 +314,8 @@ fn booleans() {
     // 512 notch tips across the line where a face crosses the block's top,
     // each within the tolerance of the top: each is sorted from the face's
     // corners and tested against the stretches along the line, and the
-    // boolean is refused at the first (design note 0012 §21).
+    // boolean is refused at the least of them by its coordinates, so every
+    // tip is tested (design note 0012 §21).
     let tips = notches(1024);
     let (r, t) = best(3, || k().boolean(&block, &tips, BooleanOp::Intersect));
     let refused = r.expect_err("refused").to_string();

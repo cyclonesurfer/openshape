@@ -80,7 +80,7 @@ their scaling rows (design note 0012 §21), were measured the same way on
 | Unite a box with a corner of a plate of 400 flush square pins (the result has 4,012 faces; each place of it checked against the faces near it) | 95–113 ms | 1,000 ms |
 | Intersect a notched block with a prism whose face's edge of 256 segments lies on the block's top beside the line where they cross (the strip check searches the whole strip) | 11.7–13.1 ms | 120 ms |
 | Intersect a block with a prism whose face crosses its top 1,024 times along one line (513 solids) | 65–71 ms | 700 ms |
-| Intersect a block with a prism whose face has 512 notch tips across the line where it crosses the block's top, each within the tolerance of the top (refused at the first; each tip sorted and tested against the stretches along the line) | 9.95–10.5 ms | 100 ms |
+| Intersect a block with a prism whose face has 512 notch tips across the line where it crosses the block's top, each within the tolerance of the top (refused at the least by its coordinates, so every tip is tested; each tip sorted and tested against the stretches along the line) | 9.95–10.5 ms | 100 ms |
 | The same with 512 spikes across the line, each one's flap built (the result has 1,031 faces) | 42.9–44.3 ms | 450 ms |
 | Dimple a plate with 16 balls, one boolean each | 73–89 ms | 900 ms |
 | Mesh it (173,680 triangles) | 382–406 ms | 4,000 ms |

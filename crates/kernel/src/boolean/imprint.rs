@@ -1020,6 +1020,13 @@ fn held_strips(
         let (chains, corners) = strip_runs(pair, pts, op, f, surface, ivs);
         tips.extend(corners.into_iter().map(|v| (op, v, them, g)));
         for chain in chains {
+            // A chain whose strip cannot come within the search's reach of
+            // g has no point g holds, and is passed before any step: the
+            // steps of a face's chains would otherwise grow with the
+            // coplanar faces of the other body (found by review).
+            if !strip_near(pair, [(op, f), (them, g)], dir, &chain.points, eps) {
+                continue;
+            }
             // Where the clustering put g's boundary on the chain: a flap's
             // corner that is a point of it, and the corners of g on a run
             // that is one of f's intervals whole. The settling of touched
@@ -1090,8 +1097,17 @@ fn held_strips(
     }
     let mut least: Option<DVec3> = None;
     for (op, v, them, g) in tips {
-        let along = sorted(&mut along, pts, dir, stretches, &mut strips.budget)?;
         let p = pair.get(op).points[v];
+        // A tip whose foot on P lies outside g's box, beyond the margins,
+        // is placed outside g ([`tip_refused`]'s third test), and is
+        // passed before any step, as a chain far from g is.
+        let gf = &pair.get(them).faces[g];
+        let foot = p - gf.normal() * (p - gf.frame.origin).dot(gf.normal());
+        let pad = DVec3::splat(4.0 * eps);
+        if !(foot.cmpge(gf.lo - pad).all() && foot.cmple(gf.hi + pad).all()) {
+            continue;
+        }
+        let along = sorted(&mut along, pts, dir, stretches, &mut strips.budget)?;
         if tip_refused(
             pair,
             pts,
@@ -1119,6 +1135,42 @@ fn held_strips(
         ))),
         None => Ok(()),
     }
+}
+
+/// Whether the strip of a chain of face `f` of `op` with `points`
+/// ([`held_strip`]) may come within the search's reach of face `g` of
+/// `them`: the strip lies in `f`'s plane between the points and their feet
+/// on L (along `f`'s plane, square to `dir`), so in the box of those, and
+/// its points lie no farther from P than the chain's farthest; the search
+/// looks within twice ρ of their feet on P. True also where the planes are
+/// too nearly parallel to find the feet, for [`held_strip`] to decide.
+fn strip_near(
+    pair: &Pair,
+    [(op, f), (them, g)]: [(Operand, usize); 2],
+    dir: DVec3,
+    points: &[DVec3],
+    eps: f64,
+) -> bool {
+    let (face, gf) = (&pair.get(op).faces[f], &pair.get(them).faces[g]);
+    let ng = gf.normal();
+    // Moving along `across` in f's plane changes the distance from P by
+    // `sin` a unit.
+    let across = face.normal().cross(dir);
+    let sin = across.dot(ng);
+    if sin.abs() <= 1e-10 {
+        return true;
+    }
+    let (mut lo, mut hi) = (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY));
+    let mut off = 0.0f64;
+    for &p in points {
+        let d = (p - gf.frame.origin).dot(ng);
+        let foot = p - across * (d / sin);
+        (lo, hi) = (lo.min(p).min(foot), hi.max(p).max(foot));
+        off = off.max(d.abs());
+    }
+    // Twice ρ, and as much again for rounding.
+    let pad = DVec3::splat(off + 4.0 * eps * (1.0 + DEEP));
+    (lo - pad).cmple(gf.hi).all() && gf.lo.cmple(hi + pad).all()
 }
 
 /// The pair's `stretches` sorted by their spans along `dir` ([`Spans`]),
@@ -1218,9 +1270,17 @@ fn holds_corner(pair: &Pair, pts: &Points, (them, g): (Operand, usize), c: usize
     })
 }
 
-/// The places of the clusters on `edges` of `op`, at their ends or
-/// between, that hold a corner of face `g` of `them` ([`holds_corner`]),
-/// each once, added to `spots`. A step for each cluster looked at.
+/// The places of the clusters on `edges` of `op` (straight), at their
+/// ends or between, that hold a corner of face `g` of `them`
+/// ([`holds_corner`]), each once, added to `spots`. Such a cluster's place
+/// lies within twice the tolerance of the corner, so of `g`'s box, and its
+/// foot on the edge's line within twice the tolerance more (an end's place
+/// within twice it of the end): only the clusters whose feet lie in `g`'s
+/// box grown by that are looked at, found by their order along the edge
+/// ([`Points::on_edge`]). A step for each edge and each cluster looked at
+/// (found by review: looking at every cluster on a run in each pair took
+/// steps growing with the square of the coplanar faces whose corners it
+/// passes).
 fn corners_on(
     pair: &Pair,
     pts: &Points,
@@ -1230,12 +1290,27 @@ fn corners_on(
     spots: &mut Vec<DVec3>,
     budget: &mut Budget,
 ) -> Result<(), KernelError> {
+    let (shape, gf) = (pair.get(op), &pair.get(them).faces[g]);
+    // Four times the tolerance, and one more for rounding.
+    let pad = DVec3::splat(5.0 * pts.eps);
+    let (lo, hi) = (gf.lo - pad, gf.hi + pad);
     let mut held = Vec::new();
     for &e in edges {
+        budget.spend(1)?;
+        let (a, b) = shape.edge_points(e);
+        let d = b - a;
+        let Some((t0, t1)) = clip_line(a, d, (lo, hi)) else {
+            continue;
+        };
         let on = pts.on_edge(op, e);
-        budget.spend(on.len())?;
+        let len2 = d.length_squared();
+        let at = |c: usize| (pts.rep[c] - a).dot(d) / len2;
+        let first = on.partition_point(|&c| at(c) < t0);
+        let end = first + on[first..].partition_point(|&c| at(c) <= t1);
+        budget.spend(end - first)?;
         held.extend(
-            on.iter()
+            on[first..end]
+                .iter()
                 .copied()
                 .filter(|&c| holds_corner(pair, pts, (them, g), c)),
         );
@@ -1244,6 +1319,23 @@ fn corners_on(
     held.dedup();
     spots.extend(held.into_iter().map(|c| pts.rep[c]));
     Ok(())
+}
+
+/// The parameters `t` of the points `a + t d` of a line within the closed
+/// box `lo`–`hi`, as an interval, if any (`d` not zero).
+fn clip_line(a: DVec3, d: DVec3, (lo, hi): (DVec3, DVec3)) -> Option<(f64, f64)> {
+    let (mut t0, mut t1) = (f64::NEG_INFINITY, f64::INFINITY);
+    for i in 0..3 {
+        if d[i] == 0.0 {
+            if a[i] < lo[i] || a[i] > hi[i] {
+                return None;
+            }
+        } else {
+            let (u, v) = ((lo[i] - a[i]) / d[i], (hi[i] - a[i]) / d[i]);
+            (t0, t1) = (t0.max(u.min(v)), t1.min(u.max(v)));
+        }
+    }
+    (t0 <= t1).then_some((t0, t1))
 }
 
 /// A chain of a face's boundary lying on the other operand's plane, whose
