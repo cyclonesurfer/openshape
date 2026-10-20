@@ -3875,13 +3875,13 @@ Jackson 1995 (§2).
 §20's fault on main, taken up next. Mapping it found three more.
 
 **The fault.** Golden 32's prism, whose bottom face F crosses the box's
-top P at a slight angle θ along the line L, with a notch cut into F
-from its far side whose tip V lies a distance a across L in F's plane
-(on the side of L away from the notch's mouth), so that V is a sin θ
-off P. Where a sin θ ≤ ε < a, every operation with the box first fails
-("a contact's pieces disagree on their side", an invalid result), and
-with the prism first every one is refused as edges passing within the
-tolerance of each other.
+top G, on the plane P, at a slight angle θ along the line L, with a
+notch cut into F from its far side whose tip V lies a distance a across
+L in F's plane (on the side of L away from the notch's mouth), so that
+V is a sin θ off P. Where a sin θ ≤ ε < a, every operation with the box
+first fails ("a contact's pieces disagree on their side", an invalid
+result), and with the prism first every one is refused as edges passing
+within the tolerance of each other.
 
 A probe, kept out of the tree, swept the family in 13 sweeps of about
 76,700 cases and 460,000 operations: V's depth below P and distance
@@ -4154,16 +4154,16 @@ its faces"), unless one of the following items passes it, in this order:
 0. *G is out of reach.* V's foot on P and the feet of V's edges from V
    up to where F's height over P (along s n_G) reaches the greatest
    height of F over the pair's stretches, at their clusters'
-   representatives, lie in a box that, grown by 4 ε, misses G's. Every
-   point the last test places lies in that box: the test set below
-   reaches no higher than a stretch's height or L's, 0. An apex where
-   the pair has no stretch, and a pair whose planes are square
-   (n_F · n_G = 0, so F has no height over P), are passed here where
-   V's foot alone, grown by 4 ε, misses G's box; otherwise they go on,
-   and the items below pass them all the same: a square pair right after
-   item 2, unless item 1 or 2 has passed it, and such an apex by item 5
-   at the latest. The greatest height is found once for each side of
-   each pair, when a tip first needs it.
+   representatives, lie in a box that, grown by 4 ε (item 0's pad),
+   misses G's. Every point the last test places lies in that box: the
+   test set below reaches no higher than a stretch's height or L's, 0.
+   An apex where the pair has no stretch, and a pair whose planes are
+   square (n_F · n_G = 0, so F has no height over P), are passed here
+   where V's foot alone, grown by 4 ε, misses G's box; otherwise they go
+   on, and the items below pass them all the same: a square pair right
+   after item 2, unless item 1 or 2 has passed it, and such an apex by
+   item 5 at the latest. The greatest height is found once for each side
+   of each pair, when a tip first needs it.
 1. *The meeting takes V* (as first built). A stretch of the pair whose
    span along L comes within ε of the place of V's cluster has the
    cluster as an end or as a cluster its split takes, by
@@ -4262,18 +4262,22 @@ review's families, this test turned the text of 30 contacts' refusals
 (175 operations, every one refused before and after) from main's (a
 point within the tolerance of an edge, 97 operations; edges passing
 within it, 75; the bodies meeting in points closer than it, 3) to
-§20's, and the three faults' fixes changed no other outcome: golden
-50's two notches and two more of that fuzz family; case 1376; 15 tips
-of the soundness judge's family over a top whose edge runs parallel to
-L (either side of V's foot) or square to it, 0.8 tolerances from the foot,
-or whose corner lies 1.2 tolerances from it; and 10 apexes over a top
-whose edge runs parallel to L a tolerance beyond the foot. One of them
-(the corner, at 30°) is refused with §20's text in one order of each
-operation and main's in the other. In the notch fuzz at a hundred times
-the change turned cases 1376 and 12882 (V's foot 0.63 and 0.91
-tolerances inside the box's ends) so, and nothing else. Golden 67 holds
-the margin's two sides: a foot 2⁻¹¹ tolerances either side of the top's
-edge is left to the split, and one 1.5 · 2⁻¹⁰ inside it is held.
+§20's: golden 50's two notches and two more of that fuzz family; case
+1376; 15 tips of the soundness judge's family over a top whose edge
+runs parallel to L (either side of V's foot) or square to it, 0.8
+tolerances from the foot, or whose corner lies 1.2 tolerances from it;
+and 10 apexes over a top whose edge runs parallel to L a tolerance
+beyond the foot. One of them (the corner, at 30°) is refused with §20's
+text in one order of each operation and main's in the other. The three
+faults' fixes changed no other outcome there. In the notch fuzz at a
+hundred times the change turned cases 1376 and 12882 (V's foot 0.63 and
+0.91 tolerances inside the box's ends) so, and nothing else. Over the
+map's sweeps it turned 5 contacts so (30 operations, which main and the
+build before the change refused as a point within the tolerance of an
+edge it is not on, 15, or as edges passing within it, 15; V's foot 0.27
+to 0.9 tolerances inside the box's end), and nothing else. Golden 67
+holds the margin's two sides: a foot 2⁻¹¹ tolerances either side of the
+top's edge is left to the split, and one 1.5 · 2⁻¹⁰ inside it is held.
 
 *A curved edge beside the test.* Each part of the edges' feet is a
 segment of P. A curved edge of G whose box meets the segment's, grown
@@ -4496,13 +4500,14 @@ without its fix:
   flag, the strips' own tests compare signs with each other, and item
   0's greatest height of F over the stretches is taken as a size.
   Measured after the change over the review's 33 families (*Measured*):
-  with every top on the plane z = 0 turned to face against its plane's
-  record (45,272 tops, each by a block whose underside lies on the
-  plane, joined beside it), no outcome differs, to rounding, from those
-  with the same block joined so that the top stays the record. (Against the plain
-  tops, 680 contacts differ, every one by the block's own geometry: B
-  reaching the block at extreme leans, or a refusal reported at another
-  place.)
+  with the tops on the plane z = 0 turned to face against its plane's
+  record (44,175 of the 45,272 tops in one run and 37,505 in another,
+  each by a block whose underside lies on the plane, joined beside it),
+  no outcome differs, to rounding, from those with the same block joined
+  so that the top stays the record. (Against the plain tops, 683 and 680
+  contacts differ, every one by the block's own geometry: B reaching the
+  block at extreme leans, or a refusal or failure reported at another
+  place or with another text.)
 - *The foot's window* between ε and ρ (*V's foot*).
 - *Curved edges beside the test*, refused wherever their boxes met the
   test's (*A curved edge beside the test*).
@@ -4512,18 +4517,19 @@ every test passed, each now caught by a golden or a unit test
 (*Tests*): the side taken twice in the isolation test and in item 0's
 heights (golden 62's oblique apex and wide tips), the foot's margin and
 its test for inside (golden 67), the reach ε sin θ short of the front
-(golden 68), item 0's pass of an apex, its greatest height and rule 1's
-window of ε along L (golden 69), item 0's pad (golden 70), the 2ρ reach
-of the curved test and the segment's sides, and the flaps' order and the
-places' merging and steps (unit tests).
+(golden 68), item 0's pass of an apex, its greatest height and the
+window of ε about V's place along L (items 1, 4 and 5; golden 69), item
+0's pad (golden 70), the 2ρ reach of the curved test and the segment's
+sides, and the flaps' order and the places' merging and steps (unit
+tests).
 
 The figures under *Measured* below were taken again after these
-changes, on the families, the fuzzes and the notch fuzz's crossings; the
-map's sweeps, the slab family and the instruction counts under *Cost*
+changes, on the families, the fuzzes, the notch fuzz's crossings and the
+map's sweeps; the slab family and the instruction counts under *Cost*
 were not.
 
 **Measured** (the built rule; taken again after the fixes of its three
-faults, below). Of the 37,712 contacts of the 27
+faults, above). Of the 37,712 contacts of the 27
 families, 69 are bad, against 4,552 on main and 1,368 in the first
 build: 294 operations fail (main 6,660) and 16 cross, the deepest 1.20 ε
 (main 4,063, up to 57 ε). Of the 9,016 of the soundness judge's six
@@ -4555,13 +4561,16 @@ face, where main refused one difference as touching at a point). Over
 the map's sweeps no operation main refuses or fails is answered, and of
 the 650 contacts refused in some operation main answers, 613 crossed
 more than ε on main, up to 76 ε, and 37 between 0.71 ε and ε (*Not
-decided*, the flap's test). The contact fuzz at a hundred times refuses
-259 operations of 76 contacts that main answers: in 41, main returned a
-result crossing 1.00 ε to 2.05 ε, mostly A − B, as the first build did;
-in 35, main's results were right (*Not decided*, the members' discs).
-The flat fuzz and the motions, at a hundred times, and the curved
-fuzzes, at twenty and fifty times, refuse exactly main's operations with
-main's texts (10,059, 8,290 and 20,522 refusals, none failing).
+decided*, the flap's test); taken again after the fixes of the three
+faults, every outcome there is the same but the text of 5 contacts'
+refusals (30 operations), now §20's (*V's foot*). The contact fuzz at a
+hundred times refuses 259 operations of 76 contacts that main answers:
+in 41, main returned a result crossing 1.00 ε to 2.05 ε, mostly A − B,
+as the first build did; in 35, main's results were right (*Not
+decided*, the members' discs). The flat fuzz and the motions, at a
+hundred times, and the curved fuzzes, at twenty and fifty times, refuse
+exactly main's operations with main's texts (10,059, 8,290 and 20,522
+refusals, none failing).
 
 The price is refusals. 4,566 contacts of the 27 families (21,753
 operations) are refused in some operation that main answered without
@@ -4676,20 +4685,23 @@ operations; none was made bad by this rule.
   a part of the run that no stretch covers is not settled; the members
   are kept there for the reason they are kept for flaps.
 - *Folds at the box's end.* Notch tips within ε of the box's end, which
-  rule 3's item 2 leaves to main's outcomes, and notch walls within a
-  few degrees of the end's plane. The faces-crossing check reports the
-  same results there on main and in this build: over the sweeps, 184
-  operations (mostly unions, V 0.1 ε to 0.7 ε either side of the end),
-  1.02 ε to 1.90 ε inside both faces; in the notch fuzz at a hundred
-  times, 11 results, 1.04 ε to 56 ε, the deepest where a wall leaves V
-  at 0.9° to 1.6° from the end's plane with V 0.15 ε to 0.9 ε off it.
-  Each is a fold within the check's bound: the faces meet along an edge,
-  here at a knife edge 1° thin whose edge stands V's offset off the
-  end's plane, and they lie within ε of each other over a band from it
-  as wide as V lies from their planes' common line. Where such a band
-  lies beside a line two faces cross along, §20 refuses it as a fin;
-  where it is the operands' own sharp edge, as here, nothing does, on
-  main or in this build. Whether to refuse a fold wider than ε
+  rule 3's item 2 leaves to main's outcomes, notch walls within a few
+  degrees of the end's plane, and notch tips up to 10 ε from the end
+  with an edge within a few degrees of L. The faces-crossing check
+  reports the same results there on main and in this build: over the
+  sweeps, 184 operations, mostly unions, 1.02 ε to 1.90 ε inside both
+  faces (V within 0.76 ε of the end, either side, in 118 of them, sweep
+  12's 100 among them; V 0.83 ε to 9.6 ε from it, and one of its edges
+  within 9.4° of L, in the random sweep's other 66); in the notch fuzz
+  at a hundred times, 11 results, 1.04 ε to 56 ε, the deepest where a
+  wall leaves V at 0.9° to 1.6° from the end's plane with V 0.15 ε to
+  0.9 ε off it. Each is a fold within the check's bound: the faces meet
+  along an edge, here at a knife edge 1° thin whose edge stands V's
+  offset off the end's plane, and they lie within ε of each other over
+  a band from it as wide as V lies from their planes' common line. Where
+  such a band lies beside a line two faces cross along, §20 refuses it
+  as a fin; where it is the operands' own sharp edge, as here, nothing
+  does, on main or in this build. Whether to refuse a fold wider than ε
   everywhere, or keep it as a tolerant solid's sharp edge, is open: the
   suites held 1,441 such results at 77a27b7, golden 39's A ∩ B among
   them (`faces_cross_measures_a_fold_and_finds_no_spike`).
@@ -4822,7 +4834,9 @@ needle flap's 213), refused as too large at 4,096; at a lean of a tenth
 of the run, 16,541 at 48 apexes and 120,029 at 96, about the cube. The
 first loop could take only the near edges that come within ρ of each
 line, by a finer search than their boxes; it does not yet. Two tests
-pin these counts (*Tests*).
+pin these costs on shapes of their own (*Tests*), which take 322,330
+steps at n = 256 leaning a tenth of the run and 55,892 and 113,310 at
+n = 128 and 256 with the lean fixed.
 
 All of it draws
 on §20's budget of steps, and the steps grow with the other body's
@@ -4833,8 +4847,9 @@ greatest height, found where a tip's foot leaves G's box); under 512
 tips, 3,073 and 3,500; under 64 spikes, 130 and 172. Placing a point
 (`place`) costs a step for each side of G its ray crosses, though, so
 tips whose feet lie in a channel of G that m slots cross beyond them
-take steps for each tip and slot: 11,401, 36,361 and 136,201 at 512
-tips and m = 16, 64 and 256, each refused as a sliver, and the first
+take steps for each tip and slot: 11,401, 36,361 and 136,201 at 256
+tips (a face of 512 segments) and m = 16, 64 and 256, each refused as a
+sliver, and the first
 build 512 fewer in each (measured in review). Measured
 (callgrind, one run each), `held_strips`, with §20's work and this
 rule's, takes 10.3 % of the instructions of an intersection refused at
@@ -4908,8 +4923,8 @@ each, each with main's outcomes in its doc comment; the doc comments of
 - 68, `a_notch_tip_whose_edge_crosses_the_top_only_within_reach_of_l_is_answered`:
   the parts' reach, ε sin θ short of the front;
 - 69, `an_apex_whose_edge_reaches_the_top_beyond_the_pad_is_tested`:
-  item 0's pass of an apex and its greatest height, and rule 1's window
-  of ε along L;
+  item 0's pass of an apex and its greatest height, and the window of ε
+  about V's place along L (items 1, 4 and 5);
 - 70, `a_notch_tip_beside_the_hull_of_a_round_tops_rim_is_unsupported`:
   item 0's pad, and the curved test's reach of 2ρ, with the hulls'
   conservative answer (*Not decided*, the control hulls).

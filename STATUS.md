@@ -1340,13 +1340,13 @@ name open unchanged.
   every operation as kept pieces that do not close. The rule is
   conservative, and its price is refusals (§21, "Measured" and "Not
   decided"): of the 37,712 contacts of the 27 families its review built
-  at each rule's edges, 1,274 that main answered right in all six
-  operations are refused (590 of them flaps held near a corner of the
-  other face, which the rule tests beyond a tolerance of each point
-  merged into that corner), and so are 37 contacts of the map's sweeps
-  whose results on main crossed 0.71 to 1 tolerance (the flap's band)
-  and 35 contacts of the contact fuzz at a hundred times that main
-  answered right. A round face's rim passing within a few tolerances of
+  at each rule's edges, 1,274 in which main got every operation right
+  (answering or refusing it) are refused (590 of them flaps held near a
+  corner of the other face, which the rule tests beyond a tolerance of
+  each point merged into that corner), and so are 37 contacts of the
+  map's sweeps whose results on main crossed 0.71 to 1 tolerance (the
+  flap's band) and 35 contacts of the contact fuzz at a hundred times
+  that main answered right. A round face's rim passing within a few tolerances of
   a tip is a contact with curved edges, with oracle reports on main and
   here alike, and so is a round hole's rim crossing that line at a
   fraction of a degree, so that it lies within the tolerance of the

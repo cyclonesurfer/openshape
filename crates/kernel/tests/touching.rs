@@ -4586,12 +4586,13 @@ fn a_notch_tip_whose_cluster_holds_the_tops_corner_is_left_to_the_touch() {
 /// operation over the boxes at a corner of the notch's mouth, where edges
 /// where the bodies meet pass within the tolerance of each other, and
 /// failed A ∪ B, A ∩ B and A − B over the cut tops, a contact's pieces
-/// disagreeing on their side, refusing the other three at the tip as such
-/// edges. Testing only the edge the box does not hold, every operation
-/// over the box is refused as on main; placing the edges' parts at twice
-/// the tolerance's depth, so is every operation over the box ending 3.9
-/// tolerances short (the cut tops, which hold V's foot, are refused at the
-/// tip all the same, the foot placed to a rounding margin).
+/// disagreeing on their side, refusing the other three at a corner of the
+/// notch's mouth as such edges. Testing only the edge the box does not
+/// hold, every operation over the box is refused as on main; placing the
+/// edges' parts at twice the tolerance's depth, so is every operation over
+/// the box ending 3.9 tolerances short (the cut tops, which hold V's foot,
+/// are refused at the tip all the same, the foot placed to a rounding
+/// margin).
 #[test]
 fn a_notch_tip_is_refused_where_the_top_holds_one_edges_feet() {
     let eps = k().tolerance().linear;
