@@ -1715,7 +1715,13 @@ fn notches_and_spikes_across_the_line() {
 /// is refused at the tip with the strip's text. Main refused each as a
 /// point within the tolerance of an edge it is not on, and so did the
 /// build that tested the foot at ρ = ε (1 + 2⁻¹⁰) from the top's edges, as
-/// the edges' parts are, which passed the tip and left it to the split.
+/// the edges' parts are, which passed the tip and left it to the split,
+/// reporting it at the box's edge. In the fuzz at a hundred times one more
+/// case alone changes so, 12882: a tip 0.91 tolerances inside the box's
+/// end x = 1.25, now refused at the tip with the strip's text, where main
+/// and that build refused it at the tip as a point within the tolerance of
+/// an edge it is not on, and B − A as edges passing within the tolerance of
+/// each other.
 #[test]
 fn a_notch_tip_whose_foot_lies_within_the_tolerance_inside_the_tops_edge() {
     let eps = k().tolerance().linear;

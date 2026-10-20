@@ -1326,7 +1326,7 @@ name open unchanged.
   curved); and a run on the side of that line where the thin layer lies
   outside the face's body is refused, where main failed every
   operation. A notch's tip and a spike's flap across that line, within
-  the tolerance of the plane, are refused (§21, goldens 42 to 55), and
+  the tolerance of the plane, are refused (§21, goldens 42 to 70), and
   so is a run lying on the plane that no meeting covers. Known, also on
   main (§21, "Not decided"): results whose faces fold at a knife edge
   within the tolerance of each other over a band wider than the
@@ -1348,10 +1348,14 @@ name open unchanged.
   and 35 contacts of the contact fuzz at a hundred times that main
   answered right. A round face's rim passing within a few tolerances of
   a tip is a contact with curved edges, with oracle reports on main and
-  here alike. Within three quarters of a tolerance of the exact contact, 704
-  of 83,065 results differ in their counts from the exact contact's
-  (mostly an edge left split), 673 of them as on main: results are not
-  yet canonical under motions within the tolerance. The oracle that
+  here alike, and so is a round hole's rim crossing that line at a
+  fraction of a degree, so that it lies within the tolerance of the
+  other face's plane over a long stretch: A ∩ B, B ∩ A or B − A touch
+  themselves, on main as here (§21, "Not decided"). Within three
+  quarters of a tolerance of the exact contact, 704 of 83,065 results
+  differ in their counts from the exact contact's (mostly an edge left
+  split), 673 of them as on main: results are not yet canonical under
+  motions within the tolerance. The oracle that
   finds contacts the booleans missed does not run on the curved fuzzes
   yet: its test of a point in a curved face is not exact.
 - Far from the origin: a boolean is refused as too far from the origin

@@ -3235,6 +3235,173 @@ mod tests {
         assert!(at <= 3 * beside, "{at} steps, {beside} beside");
     }
 
+    /// A prism 0.5 thick above its face on the plane through the x axis
+    /// tilted 0.5° from z = 0 (the cost review's probe), whose face's edge
+    /// from x = 0.2 to 0.8 is `n` teeth leaning toward +x by `lean`: in the
+    /// face's plane, valleys 1.2 tolerances (in height) beyond the axis at
+    /// x_j = 0.2 + j p, p = 0.6 / n, and tips 0.6 tolerances (in height)
+    /// across it at x_j + p / 2 + `lean`. Each tip is a spike whose flap, a
+    /// sliver from its base on the axis to its tip, leans along the axis,
+    /// and each tooth's edges run along it for about `lean`.
+    fn leaning_teeth(n: usize, lean: f64) -> Brep {
+        use crate::{ExtrudeSpec, Profile};
+        let eps = Tolerance::default().linear;
+        let t = 0.5f64.to_radians();
+        let (p, valley, tip) = (0.6 / n as f64, 1.2 * eps / t.sin(), -0.6 * eps / t.sin());
+        let right = 0.8 + lean + 0.3;
+        let mut pts = vec![(-0.6, -0.5), (-0.1, -0.5), (-0.1, valley)];
+        for j in 0..n {
+            let x = 0.2 + p * j as f64;
+            pts.extend([(x, valley), (x + 0.5 * p + lean, tip)]);
+        }
+        pts.extend([
+            (0.8, valley),
+            (right, valley),
+            (right, -0.5),
+            (right + 1.0, -0.5),
+            (right + 1.0, 0.5),
+            (-0.6, 0.5),
+        ]);
+        let frame = Frame {
+            origin: DVec3::ZERO,
+            x: DVec3::X,
+            y: DVec3::new(0.0, t.cos(), t.sin()),
+            z: DVec3::new(0.0, -t.sin(), t.cos()),
+        };
+        let pts: Vec<DVec2> = pts.into_iter().map(|(x, y)| DVec2::new(x, y)).collect();
+        let body = BrepKernel::default()
+            .extrude(
+                &Profile::polygon(frame, &pts),
+                &ExtrudeSpec {
+                    distance: 0.5,
+                    symmetric: false,
+                },
+            )
+            .expect("a prism");
+        (*body.brep).clone()
+    }
+
+    /// A block under z = 0 from x = 0.1 to 0.9 + `lean` and y up to 1,
+    /// whose top's −y edge runs at y = `y` (`spikes`: with a spike half 15
+    /// tolerances wide rising to 0.96 tolerances in height, at 0.5°, across
+    /// the axis at each of `spikes`, the edge between 1.22 across).
+    fn leaning_block(lean: f64, spikes: &[f64]) -> Brep {
+        use crate::{ExtrudeSpec, Profile};
+        let eps = Tolerance::default().linear;
+        let st = 0.5f64.to_radians().sin();
+        let (x0, x1) = (0.1, 0.9 + lean);
+        let (top, low) = (-0.96 * eps / st, -1.22 * eps / st);
+        if spikes.is_empty() {
+            let frame = Frame {
+                origin: DVec3::new(x0, top, -1.0),
+                ..Frame::WORLD
+            };
+            let body = BrepKernel::default()
+                .make_box(&frame, DVec3::new(x1 - x0, 1.0 - top, 1.0))
+                .expect("a block");
+            return (*body.brep).clone();
+        }
+        let mut pts = vec![DVec2::new(x0, low)];
+        for &x in spikes {
+            let d = 15.0 * eps;
+            pts.extend([
+                DVec2::new(x - d, low),
+                DVec2::new(x, top),
+                DVec2::new(x + d, low),
+            ]);
+        }
+        pts.extend([
+            DVec2::new(x1, low),
+            DVec2::new(x1, 1.0),
+            DVec2::new(x0, 1.0),
+        ]);
+        let frame = Frame {
+            origin: DVec3::new(0.0, 0.0, -1.0),
+            ..Frame::WORLD
+        };
+        let body = BrepKernel::default()
+            .extrude(
+                &Profile::polygon(frame, &pts),
+                &ExtrudeSpec {
+                    distance: 1.0,
+                    symmetric: false,
+                },
+            )
+            .expect("a block");
+        (*body.brep).clone()
+    }
+
+    /// Flaps leaning along the line cost the strip search of the run they
+    /// lie over the product of its lines and the near edges each line's
+    /// box meets (design note 0012 §21, *Cost*; found by the cost review):
+    /// [`leaning_teeth`] over [`leaning_block`] with a straight edge 0.96
+    /// tolerances (in height) across the axis, a run that is its face's
+    /// whole interval, whose strip the flaps leave in n + 1 pieces, the
+    /// intersection found empty. Leaning 8 periods, each line meets the
+    /// near edges of about 8 teeth, and the steps at 256 teeth are at most
+    /// 2.5 times those at 128 (113,310 and 55,892, measured in this
+    /// build). Leaning 0.06, a tenth of the run, each line meets those of
+    /// about n / 10 teeth and the steps grow with n²: 322,330 at 256 teeth
+    /// and 1,238,593 at 512 (refused as too large at 1,024, which the first
+    /// build, with no flaps left out of the strip, decided in 2,420,895,
+    /// measured in review); 512 are decided within 1,300,000, so that the
+    /// size refused does not fall below 1,024.
+    #[test]
+    fn leaning_flaps_take_steps_in_proportion_to_their_overlap() {
+        let p = |n: usize| 0.6 / n as f64;
+        let small = {
+            let lean = 8.0 * p(128);
+            fewest_strip_steps(
+                &leaning_block(lean, &[]),
+                &leaning_teeth(128, lean),
+                BooleanOp::Intersect,
+            )
+        };
+        let lean = 8.0 * p(256);
+        let (block, teeth) = (leaning_block(lean, &[]), leaning_teeth(256, lean));
+        let most = 5 * small / 2;
+        assert!(
+            decided_within(&block, &teeth, BooleanOp::Intersect, most),
+            "{small} steps at 128 teeth, more than {most} at 256"
+        );
+        let (block, teeth) = (leaning_block(0.06, &[]), leaning_teeth(512, 0.06));
+        assert!(decided_within(
+            &block,
+            &teeth,
+            BooleanOp::Intersect,
+            1_300_000
+        ));
+    }
+
+    /// Apexes of the other face under leaning flaps cost the strip search
+    /// about the square of the flaps over each (design note 0012 §21,
+    /// *Cost*; found by the cost review): [`leaning_teeth`] leaning 10
+    /// periods over [`leaning_block`] with a spike under the middle of each
+    /// flap's span along the axis, the intersection found empty. With the
+    /// overlap fixed, the steps grow with the apexes: at 256 at most five
+    /// times those at 64 (328,119 and 78,463, measured in this build, about
+    /// 1,300 an apex; 661,683, 1,329,839 and 2,668,203 at 512, 1,024 and
+    /// 2,048, and refused as too large at 4,096).
+    #[test]
+    fn apexes_under_leaning_flaps_take_steps_in_proportion_at_a_fixed_overlap() {
+        let case = |n: usize| {
+            let p = 0.6 / n as f64;
+            let lean = 10.0 * p;
+            // Under the middle of each flap's span along the axis.
+            let at = |j: usize| 0.2 + p * j as f64 + 0.5 * p + lean * (1.0 + 2.0 / 3.0) / 2.0;
+            let spikes: Vec<f64> = (0..n).map(at).collect();
+            (leaning_block(lean, &spikes), leaning_teeth(n, lean))
+        };
+        let (block, teeth) = case(64);
+        let small = fewest_strip_steps(&block, &teeth, BooleanOp::Intersect);
+        let (block, teeth) = case(256);
+        let most = 5 * small;
+        assert!(
+            decided_within(&block, &teeth, BooleanOp::Intersect, most),
+            "{small} steps at 64 apexes, more than {most} at 256"
+        );
+    }
+
     /// Each face of a pair on crossing planes whose boundary has a mark
     /// within the tolerance of the other's plane has its touches of it
     /// found once ([`imprint::TouchRecord`]; design note 0012 §21, the touch record),

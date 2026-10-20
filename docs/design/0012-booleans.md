@@ -4257,7 +4257,23 @@ overlaps the split's reach. Where both apply, rule 3 refuses first, with
 as a point within the tolerance of an edge it is not on or as edges
 passing within the tolerance of each other: golden 50's two notches of
 the fuzz, the fuzz's case 1376 and golden 64's tips at 0.5° and 3° with
-V's foot 1 and 1 + 2⁻⁴⁰ tolerances inside the cut.
+V's foot 1 and 1 + 2⁻⁴⁰ tolerances inside the cut. Measured over the
+review's families, this test turned the text of 30 contacts' refusals
+(175 operations, every one refused before and after) from main's (a
+point within the tolerance of an edge, 97 operations; edges passing
+within it, 75; the bodies meeting in points closer than it, 3) to
+§20's, and the three faults' fixes changed no other outcome: golden
+50's two notches and two more of that fuzz family; case 1376; 15 tips
+of the soundness judge's family over a top whose edge runs parallel to
+L (either side of V's foot) or square to it, 0.8 tolerances from the foot,
+or whose corner lies 1.2 tolerances from it; and 10 apexes over a top
+whose edge runs parallel to L a tolerance beyond the foot. One of them
+(the corner, at 30°) is refused with §20's text in one order of each
+operation and main's in the other. In the notch fuzz at a hundred times
+the change turned cases 1376 and 12882 (V's foot 0.63 and 0.91
+tolerances inside the box's ends) so, and nothing else. Golden 67 holds
+the margin's two sides: a foot 2⁻¹¹ tolerances either side of the top's
+edge is left to the split, and one 1.5 · 2⁻¹⁰ inside it is held.
 
 *A curved edge beside the test.* Each part of the edges' feet is a
 segment of P. A curved edge of G whose box meets the segment's, grown
@@ -4269,7 +4285,13 @@ it, decides each part. The foot needs no such test, since `place`
 follows curved edges by G's chart outline. As first built here, any
 curved edge whose box met the test's refused, so a round hole's rim
 refused tips whose test set lay deep inside the hole, which main
-answered right (golden 65).
+answered right (golden 65). The hulls are not subdivided, so the test
+still refuses some tips whose test set no curved edge comes near: a tip
+0.08 from a round top's rim, whose quarter's hull has a corner within 2ρ
+of the test (golden 70, where main answers; *Not decided*). Where the
+test passes a tip, a rim that itself lies within ε of F's plane along L
+is left to main's outcomes, which can be wrong (*Not decided*, a hole's
+rim grazing L).
 
 *A spike's flap.* An across V at a convex corner of F has a flap: the
 triangle of F's plane between V's two edges and L, F's part across L.
@@ -4473,14 +4495,35 @@ without its fix:
   normal, the touch record turns P's record by each face's outward
   flag, the strips' own tests compare signs with each other, and item
   0's greatest height of F over the stretches is taken as a size.
+  Measured after the change over the review's 33 families (*Measured*):
+  with every top on the plane z = 0 turned to face against its plane's
+  record (45,272 tops, each by a block whose underside lies on the
+  plane, joined beside it), no outcome differs, to rounding, from those
+  with the same block joined so that the top stays the record. (Against the plain
+  tops, 680 contacts differ, every one by the block's own geometry: B
+  reaching the block at extreme leans, or a refusal reported at another
+  place.)
 - *The foot's window* between ε and ρ (*V's foot*).
 - *Curved edges beside the test*, refused wherever their boxes met the
   test's (*A curved edge beside the test*).
 
-The figures under *Measured* below were taken before these three
-changes and have not been taken again.
+A mutation review of the fixed rule then found 17 changes to it that
+every test passed, each now caught by a golden or a unit test
+(*Tests*): the side taken twice in the isolation test and in item 0's
+heights (golden 62's oblique apex and wide tips), the foot's margin and
+its test for inside (golden 67), the reach ε sin θ short of the front
+(golden 68), item 0's pass of an apex, its greatest height and rule 1's
+window of ε along L (golden 69), item 0's pad (golden 70), the 2ρ reach
+of the curved test and the segment's sides, and the flaps' order and the
+places' merging and steps (unit tests).
 
-**Measured** (the built rule). Of the 37,712 contacts of the 27
+The figures under *Measured* below were taken again after these
+changes, on the families, the fuzzes and the notch fuzz's crossings; the
+map's sweeps, the slab family and the instruction counts under *Cost*
+were not.
+
+**Measured** (the built rule; taken again after the fixes of its three
+faults, below). Of the 37,712 contacts of the 27
 families, 69 are bad, against 4,552 on main and 1,368 in the first
 build: 294 operations fail (main 6,660) and 16 cross, the deepest 1.20 ε
 (main 4,063, up to 57 ε). Of the 9,016 of the soundness judge's six
@@ -4495,15 +4538,19 @@ whose edge passes under a spike's foot on a slant, re-run as a family of
 1,536 contacts (2° to 20°, V 2 ε to 10 ε across L, the edge crossing L
 away from the point of L nearest V by 0.1 to 2 times V's distance from
 L, G on either side of it): 102 bad on main, crossing up to 7.93 ε, 40
-in the first build, none here.
+in the first build, none here. Taken again on the 33 families after the
+fixes of the rule's three faults, every figure above is the same,
+contact for contact, but the text of 30 contacts' refusals (*V's foot*);
+the slab family was not run again.
 
 The notch fuzz at a hundred times (15,000 notches and spikes across L,
 four operations each) fails 3,140 operations of 1,046 cases on main and
 returns 311 crossing more than ε, up to 56 ε; here 4 fail, all of case
 7268, as on main (*Not decided*), and 11 cross, each a fold at the box's
 end that main returns too, and the refusals are the first build's line
-for line. Of its cases refused in some operation main answers, 300
-crossed on main and 3 did not (spikes at the box's end, below their
+for line but those of cases 1376 and 12882, which rule 3 now refuses at
+V with §20's text (*V's foot*). Of its cases refused in some operation
+main answers, 300 crossed on main and 3 did not (spikes at the box's end, below their
 face, where main refused one difference as touching at a point). Over
 the map's sweeps no operation main refuses or fails is answered, and of
 the 650 contacts refused in some operation main answers, 613 crossed
@@ -4663,6 +4710,32 @@ operations; none was made bad by this rule.
   meeting runs through them and V, and the case is a contact with
   curved edges, not a tip across L. Left to the contacts on curved
   faces.
+- *A hole's rim grazing L* (12 contacts of a review's probe, found
+  after the three faults' fixes): a round hole of radius 0.05 in G
+  holding a notch tip's foot or a point of its test set, its rim passing
+  3 to 10 tolerances from that point square to L on either side, so that
+  it crosses L at about 0.45° and lies within ε of F's plane along
+  stretches of L far longer than the tip's test set, the tip 0.95
+  tolerances from P at 10° and 30°. A ∩ B, B ∩ A or B − A return
+  results the oracle finds touching themselves on L, as on main in each.
+  The rule as built before the fixes refused them as not supported, by
+  accident: the box of the rim's arc met the test's (*A curved edge
+  beside the test*). With a plain prism in place of the notch, which has
+  no corner for the rule to test, that build failed so in three of the
+  four cases checked, and this one in the one checked. A curved
+  edge of G lying within ε of F's plane is no chain of §20, which takes
+  straight edges only; left to the contacts on curved faces.
+- *The control hulls beside a curved edge.* The test of a curved edge of
+  G beside a part of the test set, like §20's strips, compares the hulls
+  of the control points of its rational Bézier pieces, unsubdivided, and
+  a quarter circle's hull reaches about 0.41 of its radius beyond the
+  arc. So golden 70's round top, of radius 0.2 and its rim 0.08 from V,
+  is refused as not supported where its hull's corner comes within 2ρ of
+  a part of V's edge (d = 1), while main answers every operation, right,
+  the bodies being apart. Subdividing a piece whose hull comes within
+  the reach, down to a size under the tolerance, would answer it; done in
+  `Strip::reached` it would change §20's strips too, and item 0's pad
+  would need another witness (golden 70 is its only one).
 - *The flap's test is conservative.* It measures depth into G, not into
   G's part between the walls across V's edges, whose tolerant stretches
   are not at hand where the flap is built. So it refuses some flaps
@@ -4715,8 +4788,9 @@ square of the cluster's distinct places, from the pairs of their
 circles: under 32 spikes whose tips' clusters each hold a slab's corner
 (11 members at three places, *At G's boundary*), the intersection takes
 3,946 steps, 78 more for each flap than with the corners beside the tips
-(1,444), and 503,818 at 4,096 spikes. With a disc about every member,
-whose circles crossed at points their rounding placed, each crossing
+(1,444), and 503,818 at 4,096 spikes, 2.28 times the first build's
+221,194 (measured in review), both doubling with the spikes. With a disc
+about every member, whose circles crossed at points their rounding placed, each crossing
 looked at against every disc about it, it took 48,906 (1,483 more for
 each flap) and was refused as too large at 4,096 spikes; the first
 build's one disc of 3 ε about the cluster's place took 9 more for each
@@ -4724,13 +4798,44 @@ flap, at 256 spikes (measured in review). Over the goldens of `tests/touching.rs
 crossings of circles take 11,269 steps in all and at most 401 for one
 strip, against 53,196 and 1,727 with a disc about every member (16,289
 with the places merged and every disc looked at, 35,993 with the early
-stop alone). All of it draws
+stop alone).
+
+Flaps leaning along L cost the search the product of its lines (its
+first loop's: the pieces' sides and the lines at ρ from the near edges)
+and the near edges whose boxes each line's box meets, which the long
+edges of leaning teeth make many (found by review). Under n teeth of a
+face at 0.5° whose tips, each a spike within ε of P, lean a tenth of the
+run along L, over a block whose straight edge lies 0.96 ε from F's plane
+across L (a run that is its face's whole interval, which the flaps leave
+in n + 1 pieces), each line meets the near edges of about n / 10 teeth,
+and the intersection, found empty, took 6,697, 22,336, 84,128, 322,254
+and 1,238,593 steps at n = 32 to 512 (the review's probe), about four
+times for each doubling, and was refused as too large at 1,024. The
+first build refused n ≤ 256 with §20's text in a few thousand steps and
+found n = 512 and 1,024 empty in 721,167 and 2,420,895 (measured in
+review). With the lean fixed at 8 periods the steps are linear, 13,068
+to 460,052 from n = 32 to 1,024, about 450 for each tooth. An apex of
+the other face under each flap costs about the square of the overlap: at
+a lean of 10 periods, 78,463, 161,595, 328,119, 661,683, 1,329,839 and
+2,668,203 steps at n = 64 to 2,048, about 1,300 for each apex (the
+needle flap's 213), refused as too large at 4,096; at a lean of a tenth
+of the run, 16,541 at 48 apexes and 120,029 at 96, about the cube. The
+first loop could take only the near edges that come within ρ of each
+line, by a finer search than their boxes; it does not yet. Two tests
+pin these counts (*Tests*).
+
+All of it draws
 on §20's budget of steps, and the steps grow with the other body's
 coplanar faces by a step or two for each face, not for each tip and
 face: under 64 notch tips (a face of 128 segments), 385 steps against
 one face and 858 against 256 (one step of each face's 1.8 is the
 greatest height, found where a tip's foot leaves G's box); under 512
-tips, 3,073 and 3,500; under 64 spikes, 130 and 172. Measured
+tips, 3,073 and 3,500; under 64 spikes, 130 and 172. Placing a point
+(`place`) costs a step for each side of G its ray crosses, though, so
+tips whose feet lie in a channel of G that m slots cross beyond them
+take steps for each tip and slot: 11,401, 36,361 and 136,201 at 512
+tips and m = 16, 64 and 256, each refused as a sliver, and the first
+build 512 fewer in each (measured in review). Measured
 (callgrind, one run each), `held_strips`, with §20's work and this
 rule's, takes 10.3 % of the instructions of an intersection refused at
 512 notch tips across L, 10.6 thousand for each of its 1,030 pairs of
@@ -4743,7 +4848,7 @@ docs/PERFORMANCE.md: those two combs (`notches(1024)` and
 
 **Tests (as built).** Goldens in `tests/touching.rs`, all six operations
 each, each with main's outcomes in its doc comment; the doc comments of
-46 to 66 also name the change to the rule each catches, those of 42 to
+46 to 70 also name the change to the rule each catches, those of 42 to
 45 none:
 
 - 42, `a_notch_tip_across_the_line_where_the_faces_cross`, refused at the
@@ -4790,13 +4895,24 @@ each, each with main's outcomes in its doc comment; the doc comments of
   curved edge the test meets, refused;
 - 62, `a_corner_over_a_top_facing_against_its_planes_record_is_refused`,
   and 63, `a_notch_tip_over_a_top_sharing_its_plane_with_a_face_turned_down`:
-  the side (*Three faults of the built rule*);
+  the side (*Three faults of the built rule*), 62 also in the isolation
+  test and in item 0's heights alone (an oblique apex and wide tips);
 - 64, `a_notch_tip_whose_foot_lies_within_rho_inside_the_tops_edge`: the
   foot's window, swept over d (*V's foot*);
 - 65, `a_notch_tip_over_a_round_hole_in_the_top_is_answered`: a curved
   edge beside the test (*A curved edge beside the test*);
 - 66, `a_flap_is_excused_about_each_member_of_its_tips_cluster`: the
-  members' discs, in either order of the operands.
+  members' discs, in either order of the operands;
+- 67, `a_notch_tip_whose_foot_lies_within_the_margin_of_the_tops_edge`:
+  the foot's margin ε 2⁻¹⁰ and its test for inside (*V's foot*);
+- 68, `a_notch_tip_whose_edge_crosses_the_top_only_within_reach_of_l_is_answered`:
+  the parts' reach, ε sin θ short of the front;
+- 69, `an_apex_whose_edge_reaches_the_top_beyond_the_pad_is_tested`:
+  item 0's pass of an apex and its greatest height, and rule 1's window
+  of ε along L;
+- 70, `a_notch_tip_beside_the_hull_of_a_round_tops_rim_is_unsupported`:
+  item 0's pad, and the curved test's reach of 2ρ, with the hulls'
+  conservative answer (*Not decided*, the control hulls).
 
 In `tests/booleans.rs`: the generator of notches and spikes,
 `notches_and_spikes_across_the_line` (150 cases, run in CI at ten times
@@ -4860,7 +4976,37 @@ the test set's parts held beyond ρ and a curved edge refused only where
 it may come within 2ρ
 (`a_tips_test_holds_points_beyond_rho_of_the_edges_and_refuses_beside_a_curve`),
 and the touch record holding every touch whatever order the loop takes
-(`the_touch_record_holds_every_touch_however_the_loop_runs`).
+(`the_touch_record_holds_every_touch_however_the_loop_runs`); and, from
+the mutation review of the fixed rule, the curved test holding points
+beyond 2ρ of the hulls and a segment parted from them by its normal
+alone (in the test of ρ and curves above), the flaps taken in order of
+their starts
+(`the_flaps_a_strip_leaves_out_are_taken_in_order_of_their_starts`),
+places that coincide to rounding merged whatever their cells and those
+farther apart kept
+(`places_that_coincide_to_rounding_are_one_whatever_their_cells`,
+`places_apart_by_more_than_rounding_each_leave_out_their_disc`), and a
+step for each disc a crossing is looked at against
+(`a_crossing_takes_a_step_for_each_disc_looked_at`). The costs of
+leaning flaps are pinned
+(`leaning_flaps_take_steps_in_proportion_to_their_overlap`,
+`apexes_under_leaning_flaps_take_steps_in_proportion_at_a_fixed_overlap`):
+linear at a fixed overlap, and the case of 512 teeth leaning a tenth of
+the run decided within 1.3 million steps.
+
+Changes that no test kills (the mutation review; none changes an outcome
+of the 33 families). Four cannot change an outcome: the segment's caps
+along its own direction, which add no axis to the test of separation; a
+flap whose span only touches a piece's window, which leaves the parts
+whole either way; the order among flaps starting at one place; and the
+touch record where the planes are exactly parallel, whose touches are
+corners the coplanar pieces carry. Five have no case found: the band
+about F's plane in which the test of the parts looks for G's edges taken
+from V's height alone, item 0's greatest height taken with its sign,
+the front taken as the highest
+stretch in the window rather than the lowest, and the discs at a whole
+run's corners about the clusters' places, or of 3 ε, rather than about
+their members (*Not decided*).
 
 References: C. M. Hoffmann, *Geometric and Solid Modeling*, 1989, ch.
 4; A. A. G. Requicha, "Representations for rigid solids", *ACM

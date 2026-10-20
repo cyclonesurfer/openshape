@@ -1418,9 +1418,11 @@ struct Tip {
 ///    settling of touched points and the corners decide it;
 /// 3. where V is an isolated touch of P by neither of two tests: the
 ///    normals' (`f`'s body behind V lying on the side V's edges leave to,
-///    s (nf · ng) < 0, s that side along P's normal) and the pair's touch
-///    record (`record` holding V's cluster: the body's edges at V leave P
-///    to that side only). Each alone passed tips
+///    s (nf · ng) < 0, with nf and ng the outward normals of `f` and `g`
+///    and s that side taken along ng, [`Tip::side`], not along the normal
+///    `g`'s body records for P) and the pair's touch record (`record`
+///    holding V's cluster: the body's edges at V leave P to that side
+///    only). Each alone passed tips
 ///    that failed (the soundness review's oblique family, whose edge at V
 ///    out of `f` leans from `f`'s normal): by the normals alone, a notch tip
 ///    of a prism leaning 75° whose edge out of `f` leaves V to its
@@ -5161,6 +5163,23 @@ mod tests {
     /// ([`Chain`]'s points `frame.x x − frame.y 0.2`, x' first). The line
     /// where the planes cross runs along −x, and the strip is not held.
     fn strip_beside_flaps(test: impl FnOnce(&dyn Fn(&Chain, &[[DVec3; 3]]) -> usize, &Frame)) {
+        strip_over_block(true, |steps, frame| {
+            test(
+                &|chain, flaps| steps(chain, flaps).expect("the strip is not held"),
+                frame,
+            )
+        });
+    }
+
+    /// [`strip_beside_flaps`]'s test, the face holed over the block's top
+    /// (`holed`) or not: without the hole, the face and the top both hold
+    /// the part of the strip over the top, x from 0.3 to 0.7 and y from
+    /// −0.17 to −0.03, and the test refuses it.
+    #[allow(clippy::type_complexity)]
+    fn strip_over_block(
+        holed: bool,
+        test: impl FnOnce(&dyn Fn(&Chain, &[[DVec3; 3]]) -> Result<usize, KernelError>, &Frame),
+    ) {
         use crate::{BrepKernel, ExtrudeSpec, Kernel, Profile, Tolerance};
         let tol = Tolerance {
             linear: 1e-3,
@@ -5196,9 +5215,13 @@ mod tests {
                 DVec3::new(0.4, 0.14, 1.0),
             )
             .expect("a block");
+        let mut profile = Profile::polygon(tilted, &outer);
+        if holed {
+            profile = profile.with(Profile::polygon(tilted, &hole));
+        }
         let prism = kernel
             .extrude(
-                &Profile::polygon(tilted, &outer).with(Profile::polygon(tilted, &hole)),
+                &profile,
                 &ExtrudeSpec {
                     distance: 0.5,
                     symmetric: false,
@@ -5245,8 +5268,7 @@ mod tests {
                 },
                 Test::Held,
             )
-            .expect("the strip is not held");
-            STRIP_STEPS - strips.budget.left
+            .map(|()| STRIP_STEPS - strips.budget.left)
         };
         test(&steps, &tilted);
     }
@@ -5483,7 +5505,11 @@ mod tests {
     /// inside the top's edge, are refused as not supported; and a segment
     /// along L in a round notch of the top's edge, 0.13 from its rim and
     /// inside the box of the rim's arcs, is not held and not refused (by
-    /// the arcs' boxes alone, it was).
+    /// the arcs' boxes alone, it was). A point 3ρ beyond the hulls of the
+    /// rim's pieces, and a segment 2.5ρ from a hull's corner, parted from
+    /// it by more than 2ρ along the segment's normal alone, are held (found
+    /// by the mutation review: refusing within 4ρ, or testing the segment
+    /// without its sides' normals, passed every test).
     #[test]
     fn a_tips_test_holds_points_beyond_rho_of_the_edges_and_refuses_beside_a_curve() {
         use crate::math::Frame;
@@ -5594,5 +5620,150 @@ mod tests {
         }
         let deep = (DVec2::new(0.75, -eps), DVec2::new(0.85, -2.0 * eps));
         assert!(!held(&notched, deep).expect("no arc within 2ρ"));
+        // Farther than 2ρ from the hulls of the rim's pieces, nothing is
+        // refused: a point 3ρ beyond the rim's top (the hulls' sides along
+        // y = −5ε) is held, and so is a segment at 70° to them whose middle
+        // lies 2.5ρ from a hull's corner (1, −5ε), off the rim, along the
+        // segment's normal, the one direction that parts the two by more
+        // than 2ρ.
+        let rho = eps * (1.0 + DEEP);
+        let beyond = held(&holed, at(0.8, -5.0 * eps + 3.0 * rho));
+        assert!(beyond.expect("no arc within 2ρ"));
+        let (s, c) = 20f64.to_radians().sin_cos();
+        let mid = DVec2::new(1.0, -5.0 * eps) + DVec2::new(s, c) * (2.5 * rho);
+        let across = DVec2::new(c, -s) * (2.6 * rho);
+        let beside = held(&holed, (mid - across, mid + across));
+        assert!(beside.expect("no arc within 2ρ"));
+    }
+
+    /// The flaps a piece of a strip leaves out are taken in order of their
+    /// starts along L, so that a part is kept as ending before every later
+    /// flap only once the flaps starting before it have cut it (design
+    /// note 0012 §21, flaps under strips): over a block's top, which holds
+    /// the strip of a run ([`strip_over_block`], the face not holed), the
+    /// strip is refused, and a long flap over all of it leaves nothing to
+    /// test, with or without a short flap given before it that starts half
+    /// a tolerance beyond the strip's end along L (taken first, it kept the
+    /// pieces it meets whole; found by the mutation review).
+    #[test]
+    fn the_flaps_a_strip_leaves_out_are_taken_in_order_of_their_starts() {
+        let eps = 1e-3;
+        strip_over_block(false, |steps, frame| {
+            let chain = run_along(frame, 0.0, 1.0);
+            let held = steps(&chain, &[]);
+            assert!(
+                matches!(&held, Err(KernelError::InvalidInput(m)) if m.starts_with(super::super::RUNS_WITHIN)),
+                "{held:?}"
+            );
+            let long = [
+                DVec3::new(-3.0, -0.5, 0.0),
+                DVec3::new(1.5, -0.5, 0.0),
+                DVec3::new(-0.75, 2.5, 0.0),
+            ];
+            // The strip runs along L from x = 0 to 1 (`dir` is −x).
+            let short = flap_at(-0.6, -0.5 * eps, 5.0);
+            for flaps in [vec![long], vec![short, long], vec![long, short]] {
+                let left = steps(&chain, &flaps);
+                assert!(left.is_ok(), "{} flaps: {left:?}", flaps.len());
+            }
+        });
+    }
+
+    /// The steps of [`held_point`] over a strip that holds nothing, with
+    /// discs of radius 1 about `spots`.
+    fn search_steps(spots: &[DVec2]) -> usize {
+        let eps = 1.0;
+        let rho = eps * (1.0 + DEEP);
+        let mut pieces = Vec::new();
+        strip_pieces(
+            DVec2::new(10.0, 10.0),
+            DVec2::new(0.0, 10.0),
+            eps,
+            rho * DEEP,
+            &[1.0, -1.0],
+            &mut pieces,
+        );
+        let strip = Strip::new(pieces, rho * DEEP);
+        let mut budget = Budget::new(STRIP_STEPS);
+        let found = held_point(&strip, &[], &[], (spots, 1.0), rho, &mut budget, |_, _| {
+            Ok(false)
+        })
+        .unwrap();
+        assert!(found.is_none());
+        STRIP_STEPS - budget.left
+    }
+
+    /// Places within the reach times 2⁻²⁰ of a place kept are taken as it
+    /// ([`distinct_places`]), found among the kept places in the nine cells
+    /// of the grid about each place's own, a step for each place and one
+    /// for each kept place it looks at: four places within 2⁻²⁴ times the
+    /// reach of a corner of four cells, one in each cell, take two steps
+    /// each more than the first alone, and the search over the one place
+    /// kept takes no more (found by the mutation review: looking in each
+    /// place's own cell alone, or taking no step for the places looked at,
+    /// passed every test).
+    #[test]
+    fn places_that_coincide_to_rounding_are_one_whatever_their_cells() {
+        // The reach is 1 and the cells 2⁻²⁰ wide: (64, 64) is a corner of four.
+        let corner = DVec2::splat(64.0);
+        let d = 2f64.powi(-24);
+        let near = [
+            corner,
+            corner - DVec2::new(d, 0.0),
+            corner - DVec2::new(0.0, d),
+            corner - DVec2::splat(d),
+        ];
+        assert_eq!(search_steps(&near) - search_steps(&[corner]), 2 * 3);
+    }
+
+    /// Places farther apart than the reach times 2⁻²⁰ each leave out their
+    /// disc ([`distinct_places`]): a square piece from x = 0.9 to 1 + 2⁻¹³
+    /// lies in the disc of radius 1 about the place (2⁻¹², 0), but not in
+    /// the disc about the origin; the search finds a point of it with the
+    /// origin alone and none with both, given in either order (taken as one
+    /// at 2⁻¹⁰ times the reach apart, they found one).
+    #[test]
+    fn places_apart_by_more_than_rounding_each_leave_out_their_disc() {
+        let v = DVec2::new;
+        let (lo, hi) = (v(0.9, -0.01), v(1.0 + 2f64.powi(-13), 0.01));
+        let piece = Piece {
+            sides: vec![
+                (v(1.0, 0.0), lo.x),
+                (v(-1.0, 0.0), -hi.x),
+                (v(0.0, 1.0), lo.y),
+                (v(0.0, -1.0), -hi.y),
+            ],
+            corners: vec![lo, v(hi.x, lo.y), hi, v(lo.x, hi.y)],
+            along: (lo, v(hi.x, lo.y)),
+        };
+        let strip = Strip::new(vec![piece], 1e-9);
+        let found = |spots: &[DVec2]| {
+            let mut budget = Budget::new(STRIP_STEPS);
+            held_point(&strip, &[], &[], (spots, 1.0), 1e-3, &mut budget, |_, _| {
+                Ok(true)
+            })
+            .unwrap()
+        };
+        let (a, b) = (v(0.0, 0.0), v(2f64.powi(-12), 0.0));
+        assert!(found(&[a]).is_some_and(|m| m.length() > 1.0));
+        assert_eq!(found(&[a, b]), None);
+        assert_eq!(found(&[b, a]), None);
+    }
+
+    /// A crossing of two places' circles is looked at against the discs
+    /// whose boxes hold it, a step for each, until one holds it ([`held_point`]):
+    /// two places a reach apart, far from the strip, whose circles cross at
+    /// two points on both circles (held by neither disc), take eight steps
+    /// more than two places far apart: for each circle's walk of the
+    /// circles' tree, a step for the circle it meets; and for each
+    /// crossing, a step for each of the two discs and one for the strip's
+    /// test of it (found by the mutation review: taking no step for the
+    /// discs passed every test).
+    #[test]
+    fn a_crossing_takes_a_step_for_each_disc_looked_at() {
+        let v = DVec2::new;
+        let crossing = search_steps(&[v(100.0, 100.0), v(101.0, 100.0)]);
+        let apart = search_steps(&[v(100.0, 100.0), v(200.0, 100.0)]);
+        assert_eq!(crossing - apart, 8);
     }
 }
