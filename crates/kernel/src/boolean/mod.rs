@@ -2744,10 +2744,12 @@ mod tests {
     /// note 0012 §21; `tests/timing.rs`' notches and spikes, here with the
     /// face above its edge): sorting the face's corners, testing each tip
     /// against the stretches sorted along the line, and building each
-    /// spike's flap take strip steps in proportion to the corners. The
-    /// fewest steps within which the intersection is decided (refused at a
-    /// tip, or answered), at 1,024 segments, are at most five times those
-    /// at 256 (about four times).
+    /// spike's flap take strip steps in proportion to the corners, also
+    /// where the tips lie among teeth crossing the line, so that the
+    /// meeting has as many stretches as tips. The fewest steps within which
+    /// the intersection is decided (refused at a tip, or answered), at
+    /// 1,024 segments, are at most five times those at 256 (about four
+    /// times; testing each tip against every stretch made it 14 times).
     #[test]
     fn the_corners_across_the_line_take_steps_in_proportion() {
         let tol = Tolerance::default();
@@ -2800,9 +2802,20 @@ mod tests {
             })
         };
         let spikes = |n: usize| teeth(n, |i| if i % 2 == 0 { 1.0 / n as f64 } else { -eps });
+        // Notch tips among teeth that cross the line, so that the meeting
+        // has a stretch for each tip: each tip is tested against the
+        // stretches near it along the line, not against all of them.
+        let mixed = |n: usize| {
+            teeth(n, |i| match i % 4 {
+                1 => 3.0 * eps,
+                3 => 1.0 / n as f64,
+                _ => -1.0 / n as f64,
+            })
+        };
         for (what, small, large) in [
             ("notches", notches(256), notches(1024)),
             ("spikes", spikes(256), spikes(1024)),
+            ("notches among crossings", mixed(256), mixed(1024)),
         ] {
             let (s, l) = (fewest(&small), fewest(&large));
             println!("{what}: {s} steps at 256, {l} at 1,024");

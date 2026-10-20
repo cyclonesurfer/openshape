@@ -1139,6 +1139,35 @@ fn contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross() {
     }
 }
 
+/// Contacts at the boundary of a face held beyond the reach of its places
+/// (design note 0012 §21), found by the contact fuzz at a hundred times the
+/// default run, refused with the strip's text where main answered. A flap
+/// held 3.2 tolerances from its corner's place (contact 3129 at 0.5
+/// tolerance), where main returned A − B with the flap's face and A's
+/// crossing 1.36 tolerances inside both, as the first build did, which
+/// left the whole flap out; a flap held 3.3 tolerances from its corner's
+/// place (5385 at 1), whose other operations main refuses too; and B
+/// resting by an edge that passes a corner of A's face as the whole
+/// interval of its face on the line, held 3.1 and 3.9 tolerances from the
+/// corner (3613 and 3492 at −0.75) and, the edge 0.55° from the face's
+/// edge, 54 and 105 tolerances along it (4917 at −0.75 and −1). There main
+/// returned the operands as the differences, right within the tolerance,
+/// which the strip's refusal, the same in every operation, refuses too.
+#[test]
+fn contacts_at_the_boundary_of_a_face_held_beyond_the_reach_of_its_places() {
+    let band = "a face of one body runs within the tolerance of the other's surface without lying \
+                on one of its faces,";
+    let edge = "a point where the bodies meet lies within the tolerance of an edge it is not on,";
+    pinned_contacts(&[
+        (3129, 0.5, [band; 4]),
+        (5385, 1.0, [edge, edge, edge, band]),
+        (3613, -0.75, [band; 4]),
+        (3492, -0.75, [band; 4]),
+        (4917, -0.75, [band; 4]),
+        (4917, -1.0, [band; 4]),
+    ]);
+}
+
 /// Sharp corners that the check of a result's places lets off (design note
 /// 0012 §19, `check_apart`), each found by disabling its rules over longer
 /// runs of the contact fuzz: a piece of an edge shorter than four

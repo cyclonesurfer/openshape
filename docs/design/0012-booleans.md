@@ -4037,7 +4037,9 @@ once and cannot disagree:
   across L from its edges' other ends, both edges cross L, and by the
   signs F's boundary meets P at V alone;
 - neither: d = 0 (V is on L, and every meeting along L passes through
-  it); a neighbour on P (V is on a run, a chain of §20); neighbours on
+  it); a neighbour on P no farther from P than V (V is on a run, a
+  chain of §20; a neighbour on P farther than V on V's side still runs
+  away, and V may then be an apex too); neighbours on
   two sides (F's boundary crosses P at V, and both half-open rules end
   an interval there); or both on V's side at a convex corner (a tip
   pointing at L, answered: golden 40). Neighbours on V's side with sign
@@ -4060,8 +4062,11 @@ where:
    lies on no edge of G, as the clustering decided it
    (`Points::incidences`). Where it does, main's outcomes stand: the
    settling of touched points and the corners decide it, refusing every
-   operation in the cases a reviewer probed from 0.2 ε to 2 ε inside the
-   box's end (but see *Not decided*). The prototype decided this a
+   operation in the cases a reviewer probed from 0.2 ε to 0.8 ε inside
+   the box's end (but see *Not decided*); from about 0.9 ε inside, at 10°
+   with V 3 ε across, V's cluster is no point of the end's edge, and the
+   tip is refused by this rule (golden 42 at 2 ε and 4 ε), where main
+   failed. The prototype decided this a
    second time by geometry, from V's distance to P; reviewers asked for
    the clustering's decision.
 3. *G is under V.* V's foot on P is not placed outside G, against G's
@@ -4160,12 +4165,7 @@ are the points within the tolerance of it. The places are:
   operands unchanged.
 
 In these five, the points the search found held, with nothing left
-out, lay 1.5 ε to 2.5 ε from the place. Leaving nothing out, the
-contact fuzz at a hundred times refused 55 operations that main answers
-(these five cases among them), every result of main passing the oracle
-and the faces-crossing check; with the places' discs left out it
-refuses exactly main's operations, in 45 of them with §20's text where
-main gave another refusal's
+out, lay 1.5 ε to 2.5 ε from the place
 (`contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross`
 in `tests/booleans.rs`, which fails without either place). The first
 build left out the whole flap or the whole run instead, which review
@@ -4175,7 +4175,38 @@ holding the rest of the flap, returned A ∩ B with the faces crossing
 12.5 ε inside both (golden 46); and a tongue of a slab's top holding a
 whole run's strip 0.4 m from a corner of the top on the run failed
 three operations as kept pieces that do not close (golden 47). Both are
-refused now. The search leaves out a place's disc exactly: each line it
+refused now.
+
+Leaving nothing out, the contact fuzz at a hundred times refused 55
+operations that main answers, in 21 pairs (these five among them).
+Main's results there pass the oracle, and the faces-crossing check but
+for two: A − B of contact 3129 at 0.5 tolerance, where a flap's face
+and A's cross 1.36 ε inside both at a vertex they share (planes at
+16.4°), and A ∪ B of 792 at 0.75, a fold (1.2 ε, the faces sharing an
+edge; *Not decided*). With the places' discs left out it refuses 17 of
+the 55, in six pairs, and otherwise exactly main's operations, 25 of
+them with §20's text where main gave another refusal's. The 17, each
+held beyond the reach of its place
+(`contacts_at_the_boundary_of_a_face_held_beyond_the_reach_of_its_places`):
+
+- all four of 3129 at 0.5, the flap held 3.2 ε from its corner's place,
+  among them the crossing A − B, which the first build returned as main
+  does;
+- B − A of 5385 at 1, a flap held 3.3 ε from its corner's place, whose
+  other operations main refuses too;
+- A ∩ B (empty) and the differences of 3613 and 3492 at −0.75, B
+  resting by an edge that passes a corner of A's face as the whole
+  interval of its face, held 3.1 ε and 3.9 ε from the corner; and of
+  4917 at −0.75 and −1, held 54 ε and 105 ε from the corner along A's
+  face's edge, which the run follows 0.55° from it. Main returned the
+  contact's outcomes there, the differences right within the tolerance,
+  and refused the unions, as touching at a point (*Not decided*).
+
+So no reach about a place separates the results main got right from
+those it got wrong: 3129's flap, held 3.2 ε from its place, is a
+defect, and the runs held 3.1 ε and 3.9 ε are not. The reach is the
+tolerance about the cluster's spread, where the clustering decided the
+contact. The search leaves out a place's disc exactly: each line it
 clips loses the disc's chord, and the crossings of the disc's circle
 with the circles about the ends of G's edges and with the other discs'
 are tested as corners of what is left (`held_point`).
@@ -4280,6 +4311,15 @@ are tested as corners of what is left (`held_point`).
   clustering decided V and G's boundary to be one point; refusing it
   would mean deciding that point a second time by geometry, which rule
   2 declines for a notch tip.
+- *A run passing a corner of G, held beyond its reach.* Where G holds a
+  whole run's strip more than 3 ε from the corner, every operation is
+  refused, though the differences main returns there are right within
+  the tolerance: B rests by an edge pushed no more than ε into A, so
+  the bodies overlap in a sliver no thicker than ε, and A − B and B − A
+  are the operands (contacts 3492, 3613 and 4917 above; A ∩ B is empty,
+  and the unions are refused as touching at a point on main too). The refusal is §20's, which does not depend on the operation
+  (*Options for the tip*, 5); keeping the differences would need a
+  refusal that depends on it.
 
 **Cost.** The pass over F's vertices is §20's, and sorting a vertex
 costs a few tests. A notch tip costs two searches of the pair's
@@ -4338,7 +4378,9 @@ In `tests/booleans.rs`: the generator of notches and spikes,
 times with the other fuzzes), asserting no failure, validity, the
 identities, the origins and the oracle; and
 `contacts_at_the_boundary_of_a_face_across_the_line_where_the_faces_cross`
-(*At G's boundary*), which asserts the faces-crossing check. The fuzz
+(*At G's boundary*), which asserts the faces-crossing check, and
+`contacts_at_the_boundary_of_a_face_held_beyond_the_reach_of_its_places`,
+the six pairs refused beyond the places' reach. The fuzz
 does not assert it: it holds main's folds at the box's end (*Not
 decided*), which the check cannot tell from a flap; the check was run
 over it at a hundred times instead (above). The oracle's tests in

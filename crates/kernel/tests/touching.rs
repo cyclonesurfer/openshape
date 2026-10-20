@@ -3078,7 +3078,9 @@ fn notch_at(t: f64, x: f64, v: f64) -> Body {
 /// far from it, and the two disagree. On main, with the box first, every
 /// operation failed (a contact's pieces disagreeing on their side), and
 /// with the prism first each was refused as edges passing within the
-/// tolerance of each other. Each is now refused at V in every operation:
+/// tolerance of each other (the notch mirrored and the prism below its
+/// face were refused so in every operation, in both orders). Each is now
+/// refused at V in every operation:
 /// at 10° with V 2, 3 and 5 tolerances across, at 1° with V 5, 30 and 50;
 /// the notch mirrored, from the face's near side, V above the top; V the
 /// tip of a triangular hole of the face; the notch's walls leaning, one
@@ -3232,18 +3234,25 @@ fn a_notch_tip_across_the_line_that_is_answered() {
             [union, union, common, common, less, rest].map(String::from)
         );
     }
-    assert_eq!(
-        six(&a, &notch_at(1.0, 0.5, -1.0), 1.0),
-        [
+    let common = "(5, 9, 6, 1) V=0.003272825 A=1.517569311";
+    let less = "(9, 21, 14, 1) V=2.996727175 A=13.008613286";
+    for (v, union, rest) in [
+        (
+            -0.5,
+            "(17, 43, 28, 1) V=4.221727173 A=20.292332754",
+            "(13, 31, 20, 1) V=1.221727173 A=8.801288704",
+        ),
+        (
+            -1.0,
             "(17, 43, 28, 1) V=4.221727170 A=20.292332868",
-            "(17, 43, 28, 1) V=4.221727170 A=20.292332868",
-            "(5, 9, 6, 1) V=0.003272825 A=1.517569311",
-            "(5, 9, 6, 1) V=0.003272825 A=1.517569311",
-            "(9, 21, 14, 1) V=2.996727175 A=13.008613286",
             "(13, 31, 20, 1) V=1.221727170 A=8.801288743",
-        ]
-        .map(String::from)
-    );
+        ),
+    ] {
+        assert_eq!(
+            six(&a, &notch_at(1.0, 0.5, v), 1.0),
+            [union, union, common, common, less, rest].map(String::from)
+        );
+    }
     for (x, at) in [
         (1.25 - 0.5 * eps, "(1250.000001, -0.000026, -0.000001) mm"),
         (1.25 + 0.5 * eps, "(1249.999999, -0.000026, -0.000001) mm"),
@@ -3412,7 +3421,7 @@ fn a_spike_tip_across_the_line_where_the_faces_cross() {
 /// §21). The notch's root, the prism's edge from the tip square to its
 /// face, lies on the box's side as the whole interval of a wall of the
 /// notch on the line where their planes meet, but no part of the side's
-/// interval runs along it: the wall leans 6° from the side and lies within
+/// interval runs along it: the wall leans 11.3° from the side and lies within
 /// the tolerance of it over a triangle between the root, the box's top
 /// edge and the notch's edge, which neither face's imprint cut out, and
 /// every operation failed in both orders as kept pieces that do not close.
@@ -3651,7 +3660,7 @@ fn the_oracle_measures_straight_edges_whole() {
 }
 
 /// The oracle lets off the acute tip of a notch split by a meeting (design
-/// note 0012 §20, the notch-tip probes): B's bottom face, on the plane
+/// note 0012 §21, the notch-tip probes): B's bottom face, on the plane
 /// tilted 40° about the x axis, has two notches 0.1 wide at their mouths
 /// from its far side, their tips 2 tolerances before and 10 after x = 0.5,
 /// half a tolerance above and below the top z = 0 of the box A, and
@@ -3782,7 +3791,8 @@ fn the_oracle_finds_an_edge_running_along_a_faces_edge_from_their_corner() {
 /// The check for faces crossing ([`self_contact::faces_cross`]) passes
 /// solids whose flat faces meet only along their edges: a box, an L-shaped
 /// prism (whose bottom's plane meets the inner wall's along a line through
-/// the bottom only), boxes stacked into a step, and the plate with a hole.
+/// the bottom only), boxes stacked into a step, the plate with a hole, and
+/// a cube standing on its corner.
 #[test]
 fn faces_cross_passes_faces_meeting_at_their_edges() {
     let l_prism = prism(
