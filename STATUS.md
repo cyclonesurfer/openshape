@@ -960,6 +960,61 @@ name open unchanged.
   it, and the marking of lying runs that are whole intervals), both
   fixed, the first with a test of its work. Classification stays
   quadratic in the crossings along one line (known slow spot).
+- Corners across the line where two faces cross (design note 0012 §21),
+  2026-10-20, on Mesa lavapipe: fmt, clippy with `-D warnings`, 1,161
+  tests and `cargo deny` pass, and the release time guards pass as CI
+  runs them. A notch's tip lying a few tolerances across that line,
+  within the tolerance of the other face's plane, made every operation
+  fail on main, and a spike's flap there was returned with the two faces
+  crossing each other, up to 57 tolerances inside both; both are now
+  refused where the other face holds them beyond the tolerance. The
+  first build passed its goldens and fuzz; a review in breadth then
+  built 33 families of cases aimed at each rule's edges (46,728
+  contacts, each run as all six operations), traced each fault on main
+  and on the first build, and measured five designs as switches of one
+  prototype. The built rule leaves 84 of those contacts bad (an
+  operation failing, or faces crossing more than a tolerance, the
+  deepest 1.83 tolerances), against 5,089 on main and 1,445 in the first
+  build, each bad on main too; it answers 680 operations main refused,
+  and refuses 1,274 contacts in which main got every operation right
+  (known limits). Built with every top second on its plane, so that it
+  faces against its plane's record, the families give the same outcomes.
+  Three reviews of the built rule (its tests and docs, its logic, its
+  cost) found three faults (§21, *Three faults of the built rule*), each
+  fixed with a golden that fails without its fix: the side of the other
+  face's plane read from the plane's record rather than the face's own
+  normal (goldens 62 and 63), a window between the tolerance and its
+  rounding margin about a tip's foot (golden 64), and curved edges
+  refused wherever their boxes met the test's (golden 65); and two
+  searches whose steps grew with the square of their input (the flaps
+  under a strip, and the discs about a corner's members), both fixed,
+  each with a test of its work. Goldens 42 to 70 (`tests/touching.rs`)
+  assert all six operations on the cases that decided each rule, with
+  main's outcomes in their docs. Of 107 changes to the rule, the tests
+  catch 98; of the nine left, four change no outcome and five have no
+  case found that tells them apart (§21, *Tests*). The notch fuzz at a
+  hundred times fails only case 7268, as main does (main fails 3,140
+  operations of 1,046 cases), and returns 11 results whose faces cross
+  more than a tolerance, each a fold main returns too (main 311). The
+  map's sweeps (457,968 operations) return 184 results crossing more
+  than a tolerance, each crossing on main too (main 1,338), and answer
+  nothing main refuses. The contact fuzz at a hundred times refuses 259
+  operations of 76 contacts that main answers: 41 where main's result
+  crossed 1.00 to 2.05 tolerances, 35 where it was right. The flat
+  fuzz's other parts and the motions at a hundred times and the curved
+  fuzzes at twenty and fifty refuse exactly what main refuses. A fourth
+  review, of the fixes, found a round hole's rim crossing the line at a
+  fraction of a degree near a tip answered touching itself, as on main,
+  where the built rule had refused it by accident (known limits). The
+  touch record is found once for each marked face of a pair (`touches`
+  was called once for each tip in a prototype, 73% of the instructions
+  at 2,048 tips); the strip checks take 10.3% of an intersection refused
+  at 512 notch tips and 2.2% of one answered with 512 spikes, steps flat
+  in the other body's coplanar faces; flaps leaning along the line are
+  left quadratic in their overlap (known slow spot). Time guards hold
+  512 notch tips (9.9–11.0 ms, limit 100 ms) and 512 spikes (39.8–45.3
+  ms, limit 450 ms) with scaling checks (docs/PERFORMANCE.md, ninth
+  pass).
 - Geometry for booleans of curved solids (design note 0012 §10.7, item
   1), 2026-10-13, on Mesa lavapipe: fmt, clippy with `-D warnings`,
   915 tests and `cargo deny` pass. Tested on its own; the boolean stages
@@ -1473,7 +1528,8 @@ name open unchanged.
    index of the surfaces, not a linear search (on main too, §19's
    "Cost"); classification carried from piece to piece across edges
    where the bodies do not meet, with a design note first (quadratic in
-   the crossings along one line, PERFORMANCE.md eighth pass); booleans
-   that work near
+   the crossings along one line, PERFORMANCE.md eighth pass); the strip
+   search under flaps leaning along that line, quadratic in their
+   overlap (§21, "Cost"); booleans that work near
    where the bodies meet (validation and classification of untouched
    faces carried over); then lower the budgets to match.
