@@ -1064,9 +1064,10 @@ impl StripSearch {
 /// a part of the strip that the other face holds, a flap under a run was
 /// refused in every operation where its rule answers the contact (found by
 /// review). Only the flaps whose strips can come within the search's reach
-/// of this face are taken, sorted by their spans along L when a strip
-/// first leaves them out (a step for each), and each piece of a strip
-/// leaves out those over its span ([`held_strip`]).
+/// of this face are taken, put in a tree over their spans along L when a
+/// strip first leaves them out (a step for each, [`Flaps`]), and each
+/// piece of a strip leaves out those over its span, found by a walk of the
+/// tree ([`held_strip`]).
 ///
 /// Then the notch tips and apexes of either face ([`strip_runs`], rule 3
 /// of §21, [`tip_refused`]): a vertex V of the face within the tolerance
@@ -1135,7 +1136,7 @@ fn held_strips(
             .map(|(c, _)| [c.points[0], c.points[1], c.points[2]])
             .collect()
     });
-    let mut flap_spans: [Option<Spans>; 2] = [None, None];
+    let mut under: [Option<Flaps>; 2] = [None, None];
     for (k, &(op, f, _, _)) in sides.iter().enumerate() {
         let (them, g, _, _) = sides[1 - k];
         for (chain, _) in (chains[k].iter().zip(&near[k])).filter(|&(_, &near)| near) {
@@ -1222,16 +1223,10 @@ fn held_strips(
             let excluded = if chain.kind == Kind::Flap || theirs.is_empty() {
                 None
             } else {
-                if flap_spans[1 - k].is_none() {
+                if under[1 - k].is_none() {
                     strips.budget.spend(theirs.len())?;
                 }
-                let spans = flap_spans[1 - k].get_or_insert_with(|| {
-                    Spans::new(theirs.iter().map(|t| {
-                        let x = t.map(|p| p.dot(dir));
-                        (x[0].min(x[1]).min(x[2]), x[0].max(x[1]).max(x[2]))
-                    }))
-                });
-                Some((&theirs[..], &*spans))
+                Some(&*under[1 - k].get_or_insert_with(|| Flaps::new(theirs, dir)))
             };
             held_strip(
                 pair,
@@ -1848,10 +1843,75 @@ struct Excused<'s> {
     /// tolerance about each.
     spots: &'s [DVec3],
     /// The other face's flaps, each the triangle of its corner and its
-    /// edges' crossings of the line, with their spans along the line
-    /// ([`Spans`]), which their own rule decides: the strip leaves them
-    /// out.
-    flaps: Option<(&'s [[DVec3; 3]], &'s Spans)>,
+    /// edges' crossings of the line, with a tree over their spans along
+    /// the line ([`Flaps`]), which their own rule decides: the strip leaves
+    /// them out.
+    flaps: Option<&'s Flaps<'s>>,
+}
+
+/// The other face's flaps that strips leave out ([`held_strips`]): their
+/// triangles, each of its corner and its edges' crossings of the line L,
+/// and a tree over their spans along L, each a box of space along x, so
+/// that the flaps whose spans meet a stretch of L are found by a walk of
+/// the tree that enters only nodes whose boxes meet it. The tree splits
+/// the spans at the median of their middles, so each node it enters
+/// holds a flap that the stretch meets, or has the stretch's start or end
+/// between its spans' middles, and the walk tests a few boxes for each
+/// level of the tree, for each flap it finds and for each end of the
+/// stretch, however the spans nest.
+/// (Found by review: a search of the spans sorted by their starts, with
+/// the greatest end of those up to each, passed every span starting
+/// before the stretch's end where one long span covered the others, so a
+/// flap whose span along L covered n others made the strips' pieces
+/// beside them take steps growing with n².)
+struct Flaps<'f> {
+    triangles: &'f [[DVec3; 3]],
+    /// Each flap's least and greatest positions along L.
+    spans: Vec<(f64, f64)>,
+    tree: Bvh,
+}
+
+impl<'f> Flaps<'f> {
+    fn new(triangles: &'f [[DVec3; 3]], dir: DVec3) -> Flaps<'f> {
+        let spans: Vec<(f64, f64)> = (triangles.iter())
+            .map(|t| {
+                let x = t.map(|p| p.dot(dir));
+                (x[0].min(x[1]).min(x[2]), x[0].max(x[1]).max(x[2]))
+            })
+            .collect();
+        let tree = Bvh::new(
+            (spans.iter())
+                .map(|&(s, t)| (DVec3::new(s, 0.0, 0.0), DVec3::new(t, 0.0, 0.0)))
+                .collect(),
+        );
+        Flaps {
+            triangles,
+            spans,
+            tree,
+        }
+    }
+
+    /// The flaps whose spans meet `lo`..`hi`, into `out` (cleared first) in
+    /// order of their starts, those starting at one place in the order
+    /// given; and how many boxes the walk tested (each node it came to,
+    /// and each flap of a leaf it entered).
+    fn meeting(&self, lo: f64, hi: f64, out: &mut Vec<usize>) -> usize {
+        out.clear();
+        let mut tested = 0;
+        self.tree.visit(
+            |a, b| {
+                tested += 1;
+                a.x <= hi && lo <= b.x
+            },
+            |k| {
+                out.push(k);
+                true
+            },
+        );
+        let spans = &self.spans;
+        out.sort_unstable_by(|&p, &q| spans[p].0.total_cmp(&spans[q].0).then(p.cmp(&q)));
+        tested
+    }
 }
 
 /// How [`held_strip`] tests a strip.
@@ -2166,24 +2226,25 @@ fn held_strip(
         }
         pieces = kept;
     }
-    if let Some((flaps, spans)) = excused.flaps {
+    if let Some(flaps) = excused.flaps {
         // Each piece less the flaps of g whose spans along L meet its own,
-        // found by a search of their sorted spans (a step, and one for each
-        // span the pass takes), in order of their starts. A part ending
-        // before a flap's start ends before every later one's and is kept;
-        // each part looked at is a step, and a flap meeting a part leaves
-        // at most three ([`without`]). (Found by review: subtracting every
-        // later flap from parts already passed took steps growing with the
+        // found by a walk of their tree (a step, and one for each box the
+        // walk tests), in order of their starts. A part ending before a
+        // flap's start ends before every later one's and is kept; each part
+        // looked at is a step, and a flap meeting a part leaves at most
+        // three ([`without`]). (Found by review: subtracting every later
+        // flap from parts already passed took steps growing with the
         // product of the parts and the flaps.)
         let base = o.dot(dir);
         let mut kept = Vec::new();
+        let mut over = Vec::new();
         for piece in pieces {
             let (x0, x1) = piece.span();
-            let (over, passed) = spans.meeting(x0 + base - eps, x1 + base + eps);
-            budget.spend(1 + passed)?;
+            let tested = flaps.meeting(x0 + base - eps, x1 + base + eps, &mut over);
+            budget.spend(1 + tested)?;
             let mut parts = vec![piece];
-            for j in over {
-                let tri = flaps[j].map(&in_p);
+            for &j in &over {
+                let tri = flaps.triangles[j].map(&in_p);
                 let (t0, t1) = (tri.iter())
                     .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| {
                         (l.min(v.x), h.max(v.x))
@@ -2320,7 +2381,8 @@ fn held_strip(
     // clustering put g's boundary on the chain are the contact's there,
     // measured in P as the search measures: the union of those discs is
     // what the clustering merged into one point, the same in either order
-    // of the operands (found by review: a disc of three times the
+    // of the operands to rounding (places that coincide to rounding are
+    // taken as one, [`held_point`]; found by review: a disc of three times the
     // tolerance about the cluster's place, the reach of its spread, let a
     // flap's corner on g's edge answer a flap held 1.3 tolerances deep in
     // one order of the operands and refuse it in the other).
@@ -3836,6 +3898,40 @@ fn merge(mut list: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
     out
 }
 
+/// The places of `places` farther than `eta` from every place kept before
+/// them, in their order: a place within `eta` of one kept is taken as it.
+/// The kept places lie in a grid of cells `eta` wide, so each place looks
+/// only at those kept in the nine cells about its own, which are farther
+/// than `eta` apart and so few: a step for each place, and one for each
+/// kept place it looks at.
+fn distinct_places(
+    places: &[DVec2],
+    eta: f64,
+    budget: &mut Budget,
+) -> Result<Vec<DVec2>, KernelError> {
+    let cell = |v: DVec2| ((v.x / eta).floor() as i64, (v.y / eta).floor() as i64);
+    let mut grid: FxHashMap<(i64, i64), Vec<usize>> = FxHashMap::default();
+    let mut kept: Vec<DVec2> = Vec::with_capacity(places.len());
+    for &v in places {
+        let (x, y) = cell(v);
+        let mut looked = 0;
+        let near = (x.saturating_sub(1)..=x.saturating_add(1))
+            .flat_map(|i| (y.saturating_sub(1)..=y.saturating_add(1)).map(move |j| (i, j)))
+            .filter_map(|c| grid.get(&c))
+            .flatten()
+            .any(|&k| {
+                looked += 1;
+                (v - kept[k]).length() <= eta
+            });
+        budget.spend(1 + looked)?;
+        if !near {
+            grid.entry((x, y)).or_default().push(kept.len());
+            kept.push(v);
+        }
+    }
+    Ok(kept)
+}
+
 /// A point of a strip ([`Strip`]) that `holds` accepts, found among the
 /// points where a region of the strip held deeper than `rho` must reach
 /// (design note 0012 §20, *Finding a held point*), in the plane of the
@@ -3862,6 +3958,15 @@ fn merge(mut list: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
 /// (to the margin): a corner of K is one, and lies in K's closure, at
 /// least `rho` from every edge of the other face. So it finds a point of
 /// every such K (to the strip's `tau`).
+///
+/// Places that coincide to rounding, within the reach times 2⁻²⁰ of one
+/// another, are taken as one ([`distinct_places`]), the first given: their
+/// discs' union moves by no more than that, a thousandth of the margin the
+/// search keeps for rounding (`DEEP`). (Found by review: the members of a
+/// cluster at a corner, most of them one point reached by different
+/// formulas, gave circles crossing each other at points their rounding
+/// placed, and the loop over the circles' crossings took steps growing
+/// with the cube of their number.)
 fn held_point(
     strip: &Strip,
     cuts: &[(DVec2, DVec2)],
@@ -3872,6 +3977,7 @@ fn held_point(
     mut holds: impl FnMut(DVec2, &mut Budget) -> Result<bool, KernelError>,
 ) -> Result<Option<DVec2>, KernelError> {
     let tau = strip.tau;
+    let spots = &distinct_places(spots, reach * DEEP * DEEP, budget)?[..];
     let segment_box = |(a, b): (DVec2, DVec2), pad: f64| {
         flat(a.min(b) - DVec2::splat(pad), a.max(b) + DVec2::splat(pad))
     };
@@ -3973,7 +4079,6 @@ fn held_point(
             .map(|&(v, r)| segment_box((v, v), r))
             .collect(),
     );
-    let mut inside = Vec::new();
     for (i, &(v, r)) in circles.iter().enumerate() {
         // Boxes padded by each radius meet where the centres are within
         // the two radii in each coordinate.
@@ -3993,12 +4098,19 @@ fn held_point(
             let h = (r * r - a * a).max(0.0).sqrt();
             for side in [1.0, -1.0] {
                 let m = v + e * a + u * (side * h);
-                // A crossing in a place's disc is no corner of D.
-                let (lo, hi) = flat(m, m);
-                spot_tree.overlapping(lo, hi, &mut inside);
-                budget.spend(inside.len())?;
-                let clear =
-                    (inside.iter()).all(|&k| (m - spots[k]).length() >= reach * (1.0 - DEEP));
+                // A crossing in a place's disc is no corner of D: the
+                // places' tree is walked until one's disc holds it, a step
+                // for each place looked at.
+                let at = m.extend(0.0);
+                let mut looked = 0;
+                let clear = spot_tree.visit(
+                    |lo, hi| lo.cmple(at).all() && at.cmple(hi).all(),
+                    |k| {
+                        looked += 1;
+                        (m - spots[k]).length() >= reach * (1.0 - DEEP)
+                    },
+                );
+                budget.spend(looked)?;
                 if clear && strip.contains(m, budget)? && holds(m, budget)? {
                     return Ok(Some(m));
                 }
@@ -4011,6 +4123,7 @@ fn held_point(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::Frame;
     use std::f64::consts::PI;
 
     /// A deterministic pseudo-random sequence in [0, 1).
@@ -4261,6 +4374,49 @@ mod tests {
         .unwrap();
         let v = got.expect("the region bounded by arcs is found");
         assert!((v - centre).length() < 0.3 * rho, "{v}");
+    }
+
+    /// The search looks at each crossing of two places' circles against
+    /// the discs about it only until one holds it (design note 0012 §21,
+    /// *At G's boundary*): k places a quarter of their reach from a point
+    /// of a strip, every two of whose circles cross, in a strip nothing
+    /// holds. Most crossings lie in a third disc, and cost a step or two
+    /// each, so the search's steps grow with k², by four times and a little
+    /// from 16 places to 32 (938 and 4,319 steps, measured in this build).
+    /// (Found by review: each crossing was looked at against every disc
+    /// about it, and the steps grew with k³: 3,017 and 22,673.)
+    #[test]
+    fn a_crossing_is_looked_at_against_the_discs_until_one_holds_it() {
+        let eps = 1.0;
+        let rho = eps * (1.0 + DEEP);
+        let mut pieces = Vec::new();
+        strip_pieces(
+            DVec2::new(10.0, 10.0),
+            DVec2::new(0.0, 10.0),
+            eps,
+            rho * DEEP,
+            &[1.0, -1.0],
+            &mut pieces,
+        );
+        let strip = Strip::new(pieces, rho * DEEP);
+        let steps = |k: usize| {
+            let spots: Vec<DVec2> = (0..k)
+                .map(|i| {
+                    let a = 2.0 * PI * i as f64 / k as f64;
+                    DVec2::new(5.0, 5.0) + DVec2::new(a.cos(), a.sin()) * 0.25
+                })
+                .collect();
+            let mut budget = Budget::new(STRIP_STEPS);
+            let found = held_point(&strip, &[], &[], (&spots, eps), rho, &mut budget, |_, _| {
+                Ok(false)
+            })
+            .unwrap();
+            assert!(found.is_none());
+            STRIP_STEPS - budget.left
+        };
+        let (few, many) = (steps(16), steps(32));
+        println!("places: {few} steps at 16, {many} at 32");
+        assert!(many <= 5 * few, "{few} steps at 16 places, {many} at 32");
     }
 
     /// The region of [`the_strip_search_finds_a_region_bounded_by_arcs`]
@@ -4996,19 +5152,15 @@ mod tests {
         );
     }
 
-    /// The other face's flaps a strip leaves out cost, for each piece, a
-    /// step for the search of their sorted spans and one for each span it
-    /// passes, and a step for each part of the piece looked at against
-    /// each flap over its span: k flaps over the span of every piece of a
-    /// strip, beside none of them (so each piece stays one part), take
-    /// 1 + 2k steps a piece more than none; k flaps ending half a
-    /// tolerance short of the strip's span along L are taken by the search
-    /// of its first piece, which reaches the tolerance beyond its span, and
-    /// cost two steps each there and none elsewhere (design note 0012 §21,
-    /// flaps under strips).
-    #[test]
-    fn the_flaps_a_strip_leaves_out_take_a_step_for_each_span_and_part() {
-        use crate::math::Frame;
+    /// Calls `test` with the steps of the test of a run's strip
+    /// ([`held_strip`]) leaving out the flaps given, and the frame of the
+    /// run's face. The face, of a prism, is tilted 0.25° from a block's
+    /// top, which lies in a hole of it, at a tolerance of 10⁻³; its edge
+    /// from x = 0 to 1 at y = −0.2 in the frame lies within the tolerance
+    /// of the top's plane, and so does a run along it, from x to x'
+    /// ([`Chain`]'s points `frame.x x − frame.y 0.2`, x' first). The line
+    /// where the planes cross runs along −x, and the strip is not held.
+    fn strip_beside_flaps(test: impl FnOnce(&dyn Fn(&Chain, &[[DVec3; 3]]) -> usize, &Frame)) {
         use crate::{BrepKernel, ExtrudeSpec, Kernel, Profile, Tolerance};
         let tol = Tolerance {
             linear: 1e-3,
@@ -5074,29 +5226,8 @@ mod tests {
         let dir = (pair.first.faces[g].normal())
             .cross(pair.second.faces[f].normal())
             .normalize();
-        let chain = Chain {
-            points: [1.0, 0.0].map(|x| tilted.x * x - tilted.y * 0.2).to_vec(),
-            kind: Kind::Run,
-            edges: Vec::new(),
-            corner: None,
-        };
-        // The steps of the strip's test leaving out `k` flaps on the top's
-        // plane from x = `x0` to `x1`, far beside the strip.
-        let steps = |k: usize, (x0, x1): (f64, f64)| {
-            let flaps: Vec<[DVec3; 3]> = (0..k)
-                .map(|i| {
-                    let y = 5.0 + i as f64;
-                    [
-                        DVec3::new(x0, y, 0.0),
-                        DVec3::new(x1, y, 0.0),
-                        DVec3::new(0.5 * (x0 + x1), y + 0.5, 0.0),
-                    ]
-                })
-                .collect();
-            let spans = Spans::new(flaps.iter().map(|t| {
-                let x = t.map(|p| p.dot(dir));
-                (x[0].min(x[1]).min(x[2]), x[0].max(x[1]).max(x[2]))
-            }));
+        let steps = |chain: &Chain, flaps: &[[DVec3; 3]]| {
+            let under = Flaps::new(flaps, dir);
             let mut strips = StripSearch::new(STRIP_STEPS);
             held_strip(
                 &pair,
@@ -5105,31 +5236,113 @@ mod tests {
                 &mut strips,
                 dir,
                 [(Operand::Second, f), (Operand::First, g)],
-                &chain,
+                chain,
                 &[],
                 None,
                 Excused {
                     spots: &[],
-                    flaps: (k > 0).then_some((&flaps[..], &spans)),
+                    flaps: (!flaps.is_empty()).then_some(&under),
                 },
                 Test::Held,
             )
             .expect("the strip is not held");
             STRIP_STEPS - strips.budget.left
         };
-        let over = (-0.1, 1.1);
-        let none = steps(0, over);
-        let one = steps(1, over) - none;
-        assert!(one > 0 && one % 3 == 0, "{one}");
-        let pieces = one / 3;
-        for k in 2..6 {
-            assert_eq!(steps(k, over) - none, pieces * (1 + 2 * k), "{k} flaps");
+        test(&steps, &tilted);
+    }
+
+    /// The run from x = `x0` to `x1` of [`strip_beside_flaps`].
+    fn run_along(frame: &Frame, x0: f64, x1: f64) -> Chain {
+        Chain {
+            points: [x1, x0].map(|x| frame.x * x - frame.y * 0.2).to_vec(),
+            kind: Kind::Run,
+            edges: Vec::new(),
+            corner: None,
         }
-        // The strip runs along L from x = 0 to 1 (`dir` is −x).
-        let short = (1.0 + 0.5 * tol.linear, 1.6);
-        for k in 1..4 {
-            assert_eq!(steps(k, short) - none, pieces + 2 * k, "{k} flaps short");
-        }
+    }
+
+    /// A flap on the plane z = 0 from x = `x0` to `x1`, at y = `y` and
+    /// above it, far beside the strip of [`strip_beside_flaps`].
+    fn flap_at(x0: f64, x1: f64, y: f64) -> [DVec3; 3] {
+        [
+            DVec3::new(x0, y, 0.0),
+            DVec3::new(x1, y, 0.0),
+            DVec3::new(0.5 * (x0 + x1), y + 0.5, 0.0),
+        ]
+    }
+
+    /// The other face's flaps a strip leaves out cost, for each piece, a
+    /// step for the walk of their tree and one for each box it tests, and a
+    /// step for each part of the piece looked at against each flap over its
+    /// span: k flaps, four at most (one leaf of the tree), over the span of
+    /// every piece of a strip, beside none of them (so each piece stays one
+    /// part), take 2 + 2k steps a piece more than none (the leaf, its k
+    /// flaps, and the part for each); k flaps ending half a tolerance short
+    /// of the strip's span along L are taken by the walk of its first
+    /// piece, which reaches the tolerance beyond its span, and cost two
+    /// steps each there, while the walk of every other piece tests the
+    /// leaf alone (design note 0012 §21, flaps under strips).
+    #[test]
+    fn the_flaps_a_strip_leaves_out_take_a_step_for_each_box_and_part() {
+        let eps = 1e-3;
+        strip_beside_flaps(|steps, frame| {
+            let chain = run_along(frame, 0.0, 1.0);
+            let flaps = |k: usize, (x0, x1): (f64, f64)| -> Vec<[DVec3; 3]> {
+                (0..k).map(|i| flap_at(x0, x1, 5.0 + i as f64)).collect()
+            };
+            let over = (-0.1, 1.1);
+            let none = steps(&chain, &[]);
+            let one = steps(&chain, &flaps(1, over)) - none;
+            assert!(one > 0 && one % 4 == 0, "{one}");
+            let pieces = one / 4;
+            for k in 2..=4 {
+                let more = steps(&chain, &flaps(k, over)) - none;
+                assert_eq!(more, pieces * (2 + 2 * k), "{k} flaps");
+            }
+            // The strip runs along L from x = 0 to 1 (`dir` is −x).
+            let short = (1.0 + 0.5 * eps, 1.6);
+            for k in 1..=4 {
+                let more = steps(&chain, &flaps(k, short)) - none;
+                assert_eq!(more, 2 * pieces + 2 * k, "{k} flaps short");
+            }
+        });
+    }
+
+    /// The flaps a strip's pieces leave out are found by a walk of their
+    /// tree that tests boxes in proportion to the flaps it finds and the
+    /// tree's depth, however their spans along L nest (design note 0012
+    /// §21, flaps under strips): `n` runs side by side along the edge of
+    /// [`strip_beside_flaps`], each over the span of one of `n` short flaps
+    /// (the middle half of its own span, so more than the tolerance from
+    /// the next run's) and of one long flap over them all, take at most two
+    /// and a half times the steps more than none at 2n runs as at n, from
+    /// 32 runs to 64 and from 64 to 128 (twice, and a few steps more for
+    /// each run as the tree grows a level deeper). (Found by review: a
+    /// search of the spans sorted by their starts, with the greatest end of
+    /// those up to each, passed every flap starting before a piece's end
+    /// where the long flap covered them, and its steps grew with n².)
+    #[test]
+    fn a_long_flap_over_the_others_costs_each_strip_a_walk_of_the_tree() {
+        strip_beside_flaps(|steps, frame| {
+            let more = |n: usize| -> usize {
+                let w = 1.0 / n as f64;
+                let mut flaps = vec![flap_at(-0.1, 1.1, 5.0)];
+                flaps.extend((0..n).map(|i| {
+                    let x = i as f64 * w;
+                    flap_at(x + 0.25 * w, x + 0.75 * w, 6.0 + i as f64 * w)
+                }));
+                (0..n)
+                    .map(|i| {
+                        let chain = run_along(frame, i as f64 * w, (i + 1) as f64 * w);
+                        steps(&chain, &flaps) - steps(&chain, &[])
+                    })
+                    .sum()
+            };
+            let (s32, s64, s128) = (more(32), more(64), more(128));
+            println!("long flap: {s32}, {s64} and {s128} steps more at 32, 64 and 128 runs");
+            assert!(2 * s64 <= 5 * s32, "{s32} steps at 32 runs, {s64} at 64");
+            assert!(2 * s128 <= 5 * s64, "{s64} steps at 64 runs, {s128} at 128");
+        });
     }
 
     /// The test of a pinched flap's strip ([`Test::Crossing`]) refuses it

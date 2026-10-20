@@ -3128,10 +3128,12 @@ mod tests {
     /// tolerance of a face with `n` / 2 spikes a tolerance across the line
     /// ([`teeth`] of `n` segments), whose strip holds each spike's flap,
     /// the intersection found empty. The fewest steps within which it is
-    /// decided at 512 spikes are at most five times those at 128 (8,833
-    /// and 35,501, measured in this build; keeping every part of the strip's
-    /// pieces met so far and looking at each for each flap, it took 13,883
-    /// and 118,937, and the judges' prototype 16,337 and 128,783).
+    /// decided at 512 spikes are at most five times those at 128 (8,896
+    /// and 35,756, measured in this build; 8,833 and 35,501 with the flaps'
+    /// spans sorted rather than in a tree; keeping every part of the
+    /// strip's pieces met so far and looking at each for each flap, with
+    /// sorted spans, 13,883 and 118,937, and the judges' prototype 16,337
+    /// and 128,783).
     #[test]
     fn the_flap_exclusion_takes_steps_in_proportion_to_the_flaps() {
         let eps = Tolerance::default().linear;
@@ -3152,6 +3154,85 @@ mod tests {
             decided_within(&block, &comb(1024), BooleanOp::Intersect, most),
             "{small} steps at 128 spikes, more than {most} at 512"
         );
+    }
+
+    /// `n` spikes rising across the x axis on a face tilted 3° from z = 0
+    /// (a prism 0.5 thick above it), their tips 0.1 tolerances above the
+    /// plane at x = (i + 1/2) / n, their roots 25 tolerances below the axis;
+    /// and a slab under z = 0 whose top's edge on the −y side zigzags with a
+    /// corner 0.6 tolerances beyond each tip's foot (`shifted`, half a
+    /// period along x from it), rising a fifth of a period between (the
+    /// efficiency review's probe).
+    fn corner_spikes(n: usize, shifted: bool) -> (Brep, Brep) {
+        use crate::{ExtrudeSpec, Profile};
+        let eps = Tolerance::default().linear;
+        let t = 3f64.to_radians();
+        let kernel = BrepKernel::default();
+        let prism = |frame: Frame, pts: &[(f64, f64)], distance: f64| {
+            let pts: Vec<DVec2> = pts.iter().map(|&(x, y)| DVec2::new(x, y)).collect();
+            let body = kernel
+                .extrude(
+                    &Profile::polygon(frame, &pts),
+                    &ExtrudeSpec {
+                        distance,
+                        symmetric: false,
+                    },
+                )
+                .expect("a prism");
+            (*body.brep).clone()
+        };
+        let p = 1.0 / n as f64;
+        let tip = 0.1 * eps / t.sin();
+        let x = |i: usize| (i as f64 + 0.5) * p;
+        let mut pts = vec![(-0.5, -0.5), (2.0, -0.5), (2.0, -25.0 * eps)];
+        for i in (0..n).rev() {
+            pts.extend([(x(i) + 0.5 * p, -25.0 * eps), (x(i), tip)]);
+        }
+        pts.extend([(x(0) - 0.5 * p, -25.0 * eps), (-0.5, -25.0 * eps)]);
+        let tilted = Frame {
+            origin: DVec3::ZERO,
+            x: DVec3::X,
+            y: DVec3::new(0.0, t.cos(), t.sin()),
+            z: DVec3::new(0.0, -t.sin(), t.cos()),
+        };
+        let comb = prism(tilted, &pts, 0.5);
+        let (y, rise) = (tip * t.cos() + 0.6 * eps, 0.2 * p);
+        let along = if shifted { 0.5 * p } else { 0.0 };
+        let mut top = vec![(-0.25, 1.0), (-0.25, y + rise), (along - 0.5 * p, y + rise)];
+        for i in 0..n {
+            top.extend([(x(i) + along, y), (x(i) + along + 0.5 * p, y + rise)]);
+        }
+        top.extend([(1.25, y + rise), (1.25, 1.0)]);
+        let frame = Frame {
+            origin: DVec3::new(0.0, 0.0, -1.0),
+            ..Frame::WORLD
+        };
+        (prism(frame, &top, 1.0), comb)
+    }
+
+    /// A flap whose tip's cluster holds a corner of the other face takes a
+    /// few dozen steps more than one whose cluster holds none (design note
+    /// 0012 §21, *At G's boundary*): of [`corner_spikes`]' 32 spikes, each
+    /// tip's cluster holds the slab's corner and 11 members at three places,
+    /// nine of them one point to rounding, and each flap is tested less the
+    /// discs about them; the intersection, found empty, is decided within
+    /// three times the steps of the slab whose corners lie half a period
+    /// from the tips (3,946 and 1,444, measured in this build: 78 steps
+    /// more a flap; the first build, with one disc of three tolerances
+    /// about each cluster's place, took 9 more a flap at 256 spikes,
+    /// measured in review). With a disc about every member, the circles of
+    /// those that coincide to rounding crossed at points their rounding
+    /// placed, each crossing was looked at against every disc, and it took
+    /// 48,906 (1,483 more a flap, found by review).
+    #[test]
+    fn a_flap_at_a_corner_of_the_other_face_takes_a_few_dozen_steps_more() {
+        let fewest = |shifted: bool| {
+            let (slab, comb) = corner_spikes(32, shifted);
+            fewest_strip_steps(&slab, &comb, BooleanOp::Intersect)
+        };
+        let (at, beside) = (fewest(false), fewest(true));
+        println!("corner spikes: {at} steps, {beside} with the corners beside the tips");
+        assert!(at <= 3 * beside, "{at} steps, {beside} beside");
     }
 
     /// Each face of a pair on crossing planes whose boundary has a mark
@@ -3229,8 +3310,8 @@ mod tests {
         }
     }
 
-    /// The other face's flaps a strip leaves out are sorted by their spans
-    /// along the line once for each pair, a step for each (design note
+    /// The other face's flaps a strip leaves out are put in a tree over their
+    /// spans along the line once for each pair, a step for each (design note
     /// 0012 §21, flaps under strips): a block whose top's edge lies 3
     /// tolerances across the line from x = 1.1 to 1.8, a run within the
     /// tolerance of a face of `n` segments between x = 0 and 1 whose
@@ -3239,12 +3320,13 @@ mod tests {
     /// takes more steps than a block whose top's edge there lies far from
     /// the line: the run's strip, its placing against the face's outline,
     /// built then (a step for each of the face's `n` + 11 edges), and the
-    /// sort of the face's `n` / 2 flaps (a step each). The run lies beyond
-    /// the spikes along the line, so its strip passes no flap's span. From
+    /// tree of the face's `n` / 2 flaps (a step each). The run lies beyond
+    /// the spikes along the line, so the walk of the tree for each piece of
+    /// its strip tests the tree's root alone, however many flaps. From
     /// 32 to 64 segments (64 to 128) that difference grows by 32 + 16 steps
     /// (64 + 32).
     #[test]
-    fn the_flaps_a_strip_leaves_out_are_sorted_once_a_step_each() {
+    fn the_flaps_a_strip_leaves_out_are_put_in_a_tree_once_a_step_each() {
         use crate::{ExtrudeSpec, Profile};
         let eps = Tolerance::default().linear;
         let block = |y: f64| {
@@ -3351,13 +3433,13 @@ mod tests {
     /// The flaps a strip leaves out are those of the other face's chains whose
     /// own strips can come within the search's reach of the strip's face
     /// (design note 0012 §21, flaps under strips): the run and the comb of
-    /// [`the_flaps_a_strip_leaves_out_are_sorted_once_a_step_each`] of 32
-    /// segments (16 spikes), the comb's face carrying `m` segments more from x
-    /// = 2.2 to 2.8, beyond the block's top, whose corners a tolerance across
-    /// the line are flaps far from the top. From 32 to 64 such segments the
-    /// run's strip takes 32 steps more, its placing against the face's 32 more
-    /// edges, and none for the far flaps, which are not sorted with those it
-    /// leaves out.
+    /// [`the_flaps_a_strip_leaves_out_are_put_in_a_tree_once_a_step_each`]
+    /// of 32 segments (16 spikes), the comb's face carrying `m` segments more
+    /// from x = 2.2 to 2.8, beyond the block's top, whose corners a tolerance
+    /// across the line are flaps far from the top. From 32 to 64 such
+    /// segments the run's strip takes 32 steps more, its placing against the
+    /// face's 32 more edges, and none for the far flaps, which are not put in
+    /// the tree with those it leaves out.
     #[test]
     fn the_flaps_a_strip_leaves_out_are_those_near_its_face() {
         use crate::{ExtrudeSpec, Profile};

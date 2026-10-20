@@ -4359,11 +4359,22 @@ L, taken in the chain's own face's plane square to L, grown by the
 points' greatest distance from F's plane and by 4ρ, the search's reach
 of 2ρ and as much again for rounding, meets F's box; the same test, made
 once for each chain of either face before any step, passes every chain
-whose strip cannot reach the other face). They are sorted by their spans
-along L when a strip first needs them, and each strip piece takes only
-those whose spans meet its own, in order of their starts; a part of the
-piece that ends before a triangle starts is final, since later triangles
-start later.
+whose strip cannot reach the other face). They are put in a tree over
+their spans along L when a strip first needs them (the kernel's
+bounding-volume tree, each span a box along one axis), and each strip
+piece takes only those whose spans meet its own, found by a walk of the
+tree and taken in order of their starts; a part of the piece that ends
+before a triangle starts is final, since later triangles start later.
+The tree splits the spans at the median of their middles, so a node
+the walk enters holds a flap that meets the piece or has an end of the
+piece's span between its spans' middles, however the spans nest. As
+first built, the spans were sorted by their starts, each with the
+greatest end of those up to it, and a piece passed every span from the
+first whose end could reach it to the last starting before its end:
+where one flap's span covered the others (V far along L, its edges
+crossing L at a shallow angle), each piece passed every flap starting
+before it, and the steps grew with the square of the flaps (found by
+review; *Cost*).
 
 *A run no meeting covers* (as first built). A run R of F lying on P that
 is one of F's whole intervals on L is skipped by §20 only where the
@@ -4383,7 +4394,16 @@ clustering decided that its members are one point, and these are the
 points within the tolerance of one of them. The first build left out 3 ε
 about the cluster's representative (a cluster spreads at most 2 ε about
 it), which depends on which operand's vertex is the representative and
-reaches past every member (*The first build*). The places are:
+reaches past every member (*The first build*). Places that coincide to
+rounding are one place: a member's place within ε 2⁻²⁰ of one kept
+before it, measured in P, is left out (`distinct_places`), which moves
+the union of the discs by at most that, a thousandth of the search's
+margin for rounding (ε 2⁻¹⁰). Many of a corner's members are one point
+reached by different formulas: at a slab's corner 0.6 ε beyond a spike's
+tip (the review's probe), the tip's cluster held 11 members at three
+places, nine of them within 3·10⁻¹⁹ m of one another, and the circles of
+those nine crossed each other at points that only their rounding placed
+(found by review; *Cost*). The places are:
 
 - *the corner V of a flap that is a point of G's boundary*, by the test
   of rule 3's item 2 (`on_boundary`, shared);
@@ -4393,7 +4413,8 @@ reaches past every member (*The first build*). The places are:
 The search leaves out a place's discs exactly: each line it clips loses
 each disc's chord, and the crossings of the discs' circles with the
 circles about the ends of G's edges and with each other are tested as
-corners of what is left (`held_point`).
+corners of what is left (`held_point`), each looked at against the discs
+about it until one holds it.
 
 *The oracle* (`tests/self_contact`).
 
@@ -4670,14 +4691,40 @@ side of a pair, when a tip first needs it. A flap is one convex piece
 searched as a vertex chain's strip is, and the pinch's crossing test a
 step for each edge of G that G's tree finds near the flap. Leaving flaps
 out of strips costs a step for each flap, collected only from the other
-face's chains near F and sorted when a strip first needs them, a search
-of their spans for each strip piece, and a step for each live part of
-the piece looked at for each triangle; a part is retired once it ends
-before a triangle starts, so the work is in proportion to the parts and
-the triangles, not to their product (on a comb of n segments, whose
-n / 2 spikes reach a tolerance across L, about 0.4 n of them under one
-strip, 8,833, 35,501 and 140,285 steps at n = 256, 1,024 and 4,096,
-against 13,883, 118,937 and 1,479,351 without retiring). All of it draws
+face's chains near F and put in a tree when a strip first needs them, a
+walk of the tree for each strip piece, a step for each box it tests,
+and a step for each live part of the piece looked at for each triangle;
+a part is retired once it ends before a triangle starts, so the work is
+in proportion to the parts and the triangles, not to their product (on
+a comb of n segments, whose n / 2 spikes reach a tolerance across L,
+about 0.4 n of them under one strip, 8,896, 35,756 and 141,308 steps at
+n = 256, 1,024 and 4,096; with the spans sorted rather than in a tree,
+8,833, 35,501 and 140,285, and without retiring as well, 13,883, 118,937
+and 1,479,351). A walk tests a few boxes for each level of the tree, for
+each flap it finds and for each end of the piece's span, however the
+spans nest. Under a needle flap whose span along L covers those of n
+teeth, each tooth with an apex of the other face within ε of P (the
+review's probe), the intersection takes 103,035, 210,299, 428,923 and
+874,363 steps at n = 512, 1,024, 2,048 and 4,096, twice for each
+doubling, and 52,420 to 436,166 without the needle; with the spans
+sorted, it took 217,720, 697,720 and 2,444,152 and was refused as too
+large at 4,096 (43,459 to 339,909 without the needle, the difference
+being the walks' boxes), and the first build (c91e454, measured in
+review) 77,704 to 622,472. The discs about a cluster's members cost the search about the
+square of the cluster's distinct places, from the pairs of their
+circles: under 32 spikes whose tips' clusters each hold a slab's corner
+(11 members at three places, *At G's boundary*), the intersection takes
+3,946 steps, 78 more for each flap than with the corners beside the tips
+(1,444), and 503,818 at 4,096 spikes. With a disc about every member,
+whose circles crossed at points their rounding placed, each crossing
+looked at against every disc about it, it took 48,906 (1,483 more for
+each flap) and was refused as too large at 4,096 spikes; the first
+build's one disc of 3 ε about the cluster's place took 9 more for each
+flap, at 256 spikes (measured in review). Over the goldens of `tests/touching.rs`, the
+crossings of circles take 11,269 steps in all and at most 401 for one
+strip, against 53,196 and 1,727 with a disc about every member (16,289
+with the places merged and every disc looked at, 35,993 with the early
+stop alone). All of it draws
 on §20's budget of steps, and the steps grow with the other body's
 coplanar faces by a step or two for each face, not for each tip and
 face: under 64 notch tips (a face of 128 segments), 385 steps against
@@ -4786,20 +4833,26 @@ triangle (`a_piece_less_a_triangle_is_its_parts_outside_it`); the
 covering of runs by stretches
 (`a_whole_run_is_tested_where_no_stretch_covers_it`); the strip search
 with places left out (`the_strip_search_finds_every_deeply_held_region`,
-`the_strip_search_finds_a_region_bounded_by_the_arcs_of_places`); and the
+`the_strip_search_finds_a_region_bounded_by_the_arcs_of_places`), each
+crossing of circles looked at until a disc holds it
+(`a_crossing_is_looked_at_against_the_discs_until_one_holds_it`); and the
 work: the steps in proportion to the corners
 (`the_corners_across_the_line_take_steps_in_proportion`), flat in the
 other body's coplanar faces
 (`the_strip_checks_take_no_steps_for_faces_far_from_them`,
 `the_strip_checks_take_steps_flat_in_coplanar_faces`), in proportion to
 the flaps a strip leaves out
-(`the_flap_exclusion_takes_steps_in_proportion_to_the_flaps`), and the
-touch record found once for each face of a pair
+(`the_flap_exclusion_takes_steps_in_proportion_to_the_flaps`), however
+their spans nest
+(`a_long_flap_over_the_others_costs_each_strip_a_walk_of_the_tree`), a
+few dozen for a flap whose cluster holds a corner of G and many members
+(`a_flap_at_a_corner_of_the_other_face_takes_a_few_dozen_steps_more`),
+and the touch record found once for each face of a pair
 (`the_touch_record_is_found_once_for_each_face_of_a_pair`). Unit tests
 that kill changes to the rule the goldens miss: the steps of the flaps
 a strip leaves out
-(`the_flaps_a_strip_leaves_out_take_a_step_for_each_span_and_part`,
-`the_flaps_a_strip_leaves_out_are_sorted_once_a_step_each`), which
+(`the_flaps_a_strip_leaves_out_take_a_step_for_each_box_and_part`,
+`the_flaps_a_strip_leaves_out_are_put_in_a_tree_once_a_step_each`), which
 flaps those are (`the_flaps_a_strip_leaves_out_are_those_near_its_face`),
 the steps of the pinch's crossing test
 (`a_pinched_flaps_test_takes_a_step_for_each_edge_beside_its_strip`),
